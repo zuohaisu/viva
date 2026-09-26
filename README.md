@@ -88,3 +88,14 @@ Run artifacts 和 disposable Worktree 均位于被开发仓库的 `.ticket-autop
 ```
 
 测试采用 fake Agent 与临时仓库；它们证明本地控制流和边界，不等同于一次真实 Plane、真实 Agent CLI 或 GitHub 远端交付。
+
+## License
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+This project is released under the [MIT License](LICENSE). You may use,
+modify, redistribute, and use it commercially, provided you retain the
+copyright and permission notice. Third-party code and assets retain their
+own licenses and notices.
+
+Copyright (c) 2026 zuohaisu
