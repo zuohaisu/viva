@@ -1,6 +1,13 @@
-# Contributing to Ticket Autopilot
+# Contributing to Viva
 
-This repository follows the ticket-driven delivery loop defined in [AGENTS.md](AGENTS.md), [IDEA.md](IDEA.md), and the operational [closed-loop workflow](docs/closed-loop-workflow.md). Use the [agent-ready ticket template](specs/agent-ready-ticket-template.md) to make the ticket contract complete before work begins.
+Viva is a persistent habitat for AI agents to live, work, remember, and grow.
+Repository-wide rules live in [AGENTS.md](AGENTS.md), the product charter in
+[IDEA.md](IDEA.md), and the architecture transition record in
+[docs/architecture/viva-transition.md](docs/architecture/viva-transition.md).
+
+The ticket-driven delivery loop below applies to work on the **Ticket
+Autopilot delivery subsystem** (the automated software-delivery capability and
+its legacy Web surface). Use the [agent-ready ticket template](specs/agent-ready-ticket-template.md) to make the ticket contract complete before subsystem work begins. Viva-shell work (`src/viva/`) follows the Viva goal check in [AGENTS.md](AGENTS.md) instead of a ticket key.
 
 ## Before starting
 

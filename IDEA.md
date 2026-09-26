@@ -1,76 +1,89 @@
-# AI Operations — Project Charter
+# Viva — Project Charter
 
 ## North Star
 
-Build a system in which one Linear or Plane ticket is the minimum closed-loop unit of
-software delivery.
-
-For one structured ticket, the system should move from requirements through
-development, deterministic verification, independent QA, a bounded repair loop,
-Pull Request creation, and ticket status update—with evidence retained at every gate
-and explicit repository-owner authorization before merge.
-
-## Actor-Aware Human Authority
-
-Safety limits apply to autonomous Agents, not to the repository owner. An Agent
-must never push a protected branch, authorize its own override, or merge a Pull
-Request. The Controller may push an isolated feature branch, create a Draft PR,
-or merge only for the exact action explicitly authorized by the repository owner
-and recorded as audit evidence.
-
-Pending QA or visual review remains visible as `QA_PENDING` or
-`HUMAN_VISUAL_REVIEW_PENDING`; it does not block a Draft PR. The owner may accept
-the visual gate or override a quality gate with a recorded reason. Such an
-override preserves the failed/pending evidence and must never be reported as QA
-PASS. Only an actual credential, network, branch-conflict, or remote rejection is
-`TECHNICAL_BLOCKED`.
-
-## Preferred Approach: Reuse First
-
-The first design question is not “what platform should we build?” It is:
-
-> Which parts of this loop can already be closed by Linear or Plane automation,
-> agent hooks, MCP, GitHub Actions, and native GitHub integrations?
-
-Use the following decision order:
-
-1. Configure and compose existing capabilities.
-2. Add thin, deterministic glue for verified gaps.
-3. Build a small custom controller only if the existing tools cannot close the loop.
-
-A custom system is a fallback, not the default starting point.
-
-## Product Boundary
-
-Core work must directly advance at least one stage of this loop:
-
 ```text
-Ticket intake and contract
-  -> Development invocation
-  -> Deterministic verification
-  -> Independent QA
-  -> Bounded fix loop
-  -> Pull Request and CI evidence
-  -> Ticket status and result
+A persistent agent should be able to live on the user's computer,
+work across tools and projects,
+retain its own history,
+and remain continuous even when its workers or models change.
 ```
 
-General AI-agent research, universal Start Prompt design, and prompt-comparison
-infrastructure are supporting work. They are not the product and must not displace a
-core milestone unless explicitly reprioritized.
+Viva is a persistent habitat for AI agents to live, work, remember, and grow.
+Viva is not an agent, not a Claude Code wrapper, not a worktree manager, and
+not a memory database. It is the place in which a persistent agent lives.
 
-## Current Correction — 2026-07-22
+## Core invariant
 
-Work drifted from the ticket-driven delivery loop into building and studying a Start
-Prompt comparison system. Those artifacts are preserved under `tooling/start-prompt/`
-and `research/`, but that track is now parked.
+```text
+Resident ≠ Worker ≠ Cognitive Engine ≠ Workspace ≠ Session
+```
 
-Before implementing the existing Ticket Autopilot specification as written, perform a
-reuse-first capability audit. The next implementation milestone is one real, low-risk
-ticket vertical slice using the maximum practical amount of existing infrastructure.
+A **Resident** is a long-lived AI identity (e.g. Samuel). A **Worker** is a
+replaceable agent CLI a resident delegates work to (e.g. Codex, Claude Code).
+A **Cognitive Engine** is the model that happens to provide cognition now
+(e.g. GPT, Claude, GLM). A **Workspace** is a long-term working context; a
+**Worktree** is a git execution environment inside one; a **Session** is one
+transient runtime interval.
 
-## Definition of Progress
+```text
+Session dies. Resident persists.
+```
 
-Progress is not the number of prompts, documents, agents, or framework components
-created. Progress is demonstrated by evidence that one more stage of a real ticket
-can run automatically and safely, or that a specific blocker to that loop has been
-removed.
+> **Deeper product model:** `docs/product/` (vision, product model, customer
+> zero, workflows, Phase-1 scope) and `docs/research/` carry the extended,
+> canonical product thinking. This charter is the repository-level summary.
+
+A resident's experiences are recorded as events. Experiences are not memory:
+memory formation is a future capability and must never be faked. Unknown and
+not-implemented stay honest.
+
+## Customer Zero
+
+```text
+Haisu / Samuel
+```
+
+Haisu is Customer Zero; Samuel is the first real resident. Samuel is data — a
+record a user creates — never Viva's default persona or hard-coded identity.
+Other users will have their own residents (Alice, Maya, Alfred, …), so
+`Viva ≠ Samuel` must always hold in code.
+
+## Architecture principle
+
+```text
+Samuel must exist before Samuel thinks.
+```
+
+Generally: a Resident's persistent state (identity, history, experiences) must
+exist independently of the cognitive engine currently expressing it, and of
+the worker currently acting for it. Workers and engines are replaceable;
+replacing them must not erase the resident.
+
+## Product shape
+
+```text
+Viva Core  →  surfaces: CLI · TUI (Phase 1 primary) · Desktop (future)
+Viva Core  →  capabilities: delivery (Ticket Autopilot) · memory (future) · …
+```
+
+Ticket Autopilot was this project's original product focus (ticket-driven
+automated software delivery) and now survives as an existing
+software-delivery subsystem inside the broader Viva direction. Its workflow
+definition remains `docs/closed-loop-workflow.md`; its history is retained and
+is not rewritten as a mistake — it is evolution.
+
+## Reuse first
+
+The first design question is not "what should we build?" It is: which proven
+capability — in this repository or outside it — already does this? Compose
+existing capabilities, add thin deterministic glue for verified gaps, and
+build new components only for documented gaps. Every custom component names
+the capability it was weighed against (`docs/architecture/viva-transition.md`).
+
+## Definition of progress
+
+Progress is not the number of features, agents, or documents. Progress is
+evidence that a resident's continuity survives one more boundary — another
+session, another workspace, another worker, another engine — safely and
+honestly, or that a specific blocker to that continuity has been removed.

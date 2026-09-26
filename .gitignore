@@ -43,10 +43,11 @@ scratch/
 .qa-tmp/
 
 
-# Ticket Autopilot runtime artifacts (spec §12.4)
+# Ticket Autopilot runtime artifacts (spec §12.4) — root-anchored so the
+# src/viva/worktrees/ package is never caught by these rules.
 .ticket-autopilot/
-runs/
-worktrees/
+/runs/
+/worktrees/
 
 # Secrets / credentials (never commit)
 .env

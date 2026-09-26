@@ -3,22 +3,26 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ticket-autopilot"
+name = "viva"
 version = "0.1.0"
-description = "Lightweight local controller that turns a structured ticket into a verified, independently QA'd GitHub PR."
+description = "A persistent habitat for AI agents to live, work, remember, and grow."
 readme = "README.md"
-# SPDX license metadata requires setuptools>=77.
+# PEP 639 SPDX expression; the string form requires setuptools>=77 (see build-system).
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
-# Runtime uses only the Python standard library; keeping this explicit makes a
-# clean product install independent of a developer's globally installed tools.
-dependencies = []
+# The Viva shell depends on Textual for the Phase 1 TUI product surface (the
+# rationale, alternatives, and stdlib-gap analysis live in
+# docs/architecture/viva-transition.md §5). The legacy Ticket Autopilot
+# subsystem itself remains standard-library-only.
+dependencies = ["textual>=8.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4"]
 
 [project.scripts]
+viva = "viva.cli:main"
+# Legacy delivery-subsystem entry point (kept until an explicit migration).
 ticket-controller = "ticket_autopilot.cli:main"
 
 [tool.setuptools.packages.find]

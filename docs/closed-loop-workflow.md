@@ -1,5 +1,12 @@
 # Closed-Loop Workflow Definition
 
+> **Status (2026-09-27):** this is the authoritative operational definition of
+> the **Ticket Autopilot delivery subsystem** — now a capability inside the
+> Viva product, not the repository-wide product definition. For the product
+> North Star see `IDEA.md` and `docs/architecture/viva-transition.md`. This
+> document remains the source of truth for the ticket loop; it is a legacy
+> product surface with active, reusable capabilities.
+
 This is the authoritative operational definition for the implemented **Phase 1
 Plane-first local Web workflow**. `IDEA.md` remains the product charter and
 `AGENTS.md` remains the working charter. Historical Engine, CLI and reference

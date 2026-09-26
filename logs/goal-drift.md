@@ -443,3 +443,47 @@ Engine 存在真实门禁缺陷：所有节点初始 stale=True，导致 `close`
 
 到达 close 的充要条件由引擎结构性保证（条件门控节点不再初始就绪），不再依赖 QA 输出
 的自觉；qa-verdict 未过 schema 校验绝不映射为 accept。
+
+---
+
+## 2026-09-27 — North Star 由 ticket-driven delivery 显式变更为 Viva（Accepted reprioritization）
+
+**Status:** Accepted reprioritization（repository owner 显式决策，非漂移）
+
+### Intended outcome
+
+原 North Star：ticket-driven automated software delivery（一张 ticket 为最小闭环单元，IDEA.md 2026-07 版）。
+
+### Observed divergence
+
+无越轨行为——这是 owner 主动的产品边界变更：Viva 成为产品框架（"Haisu 与常驻 Agent Samuel 跨 Workspace/Worktree/Worker/模型协作、连续积累的本地开发环境"），Ticket Autopilot 降级为其中的 Delivery Automation 子系统。本条目按模板记录这次显式 reprioritization，防止未来的 agent 会话把两个 North Star 混淆。
+
+### Evidence
+
+- 2026-09-27 产品定义轮产出：`docs/product/`（vision / customer-zero / product-model / workflows / phase-1）、`docs/architecture/`（conceptual / domain-model / temporal-model / viva-transition）、`docs/decisions/`（ADR 0001–0005）、`docs/research/`（vscode-workspace / orca / hermes / self-model）。
+- 先行实现轮（本轮之前，未提交）：`src/viva/`（~2.7k 行）+ `tests/viva/`、pyproject 更名 `viva`（Textual 为唯一运行时依赖）、README/AGENTS/IDEA 已改写为 Viva 框架——树中未提交改动在本次记录时点可见。
+- Ticket Autopilot 资产原样保留：`src/ticket_autopilot/` 未改名，`docs/closed-loop-workflow.md` 仍为其操作定义。
+
+### Facts versus inference
+
+**Facts**：以上文件与改动均在树中存在；`src/ticket_autopilot/` 无包名变更；goal check 机制在 AGENTS.md 中已改为 Viva 能力导向并保留子系统内 ticket-loop 变体。
+**Inferences**：本次变更消除了"IDEA.md 旧 North Star 与实际工作方向"之间的持续张力；若不记录，后续会话存在把 Ticket Autopilot 当作仍居首位的误判风险。
+
+### Impact
+
+- 交付闭环不再是产品终点，而是 Viva Delivery Automation 子系统的能力；其 bounded-automation 与 evidence-first 纪律晋升为全局不变量。
+- Start Prompt 轨维持 parked 不变。
+
+### Correction or explicit reprioritization
+
+Reprioritization 本身：North Star 变更为 Viva（ADR 0001、0004）；Ticket Autopilot 边界冻结在新定位内（ADR 0004）。
+
+### Guard added
+
+- ADR 目录（docs/decisions/）承载边界级决策；AGENTS.md 指向它。
+- 两个 goal check 变体各管其区：Viva 能力导向（全仓默认）与 ticket-loop（Delivery Automation 子系统内）。
+- "为 hypothetical users 增加复杂度默认不做"写入 ADR 0001。
+
+### Recovery milestone
+
+Phase 1 验收（docs/product/phase-1.md §5）：north-star loop（进入 workspace → 续上下文 → worktree → worker → 工作 → 换人 → 留记录 → 回归继续）在 ≥1 个真实 workspace 上跑通 ≥3 个工作日，S1/S4/S8 场景可真实发生。
