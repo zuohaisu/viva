@@ -52,3 +52,15 @@ AIO-3 add project scaffolding documentation
 ```
 
 Do not modify product code, dependencies, or unrelated files unless the ticket explicitly includes them.
+
+## Contribution licensing
+
+Unless explicitly agreed otherwise, contributions submitted for inclusion in
+this project are licensed under the [MIT License](LICENSE). Contributors
+retain copyright in their contributions and must have the right to submit
+them under these terms.
+
+When reusing third-party code or assets, identify their source and license,
+preserve required copyright and license notices, and confirm that their terms
+permit the proposed inclusion. The project's MIT License does not replace
+third-party licenses.
