@@ -12,6 +12,7 @@ Desktop.ini
 # Python
 __pycache__/
 *.py[cod]
+*.so
 *.egg-info/
 .venv/
 venv/
@@ -19,6 +20,11 @@ env/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# Coverage
+.coverage
+coverage.xml
+htmlcov/
 
 # Node
 node_modules/
@@ -44,10 +50,16 @@ worktrees/
 
 # Secrets / credentials (never commit)
 .env
+.env.*
+!.env.example
+!.env.*.example
 *.local
 
 # Engine sandbox (strict cwd for the cli executor) — keep .gitkeep
 sandbox/*
 !sandbox/.gitkeep
+# Agent tool caches / scratch
+.firecrawl/
+.workbuddy/
+.zcode/
 .qoder/settings.local.json
-.firecrawl/github-token-docs.json
