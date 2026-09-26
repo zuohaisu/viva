@@ -1,7 +1,7 @@
-"""Read-only worktree discovery, reusing the legacy worktree service.
+"""Read-only worktree discovery.
 
-The deliberate import of ``ticket_autopilot`` here is the seam documented in
-docs/architecture/viva-transition.md §3: one edge, in one direction.
+Thin reader over :mod:`viva.worktrees.service` — the single worktree
+implementation Viva owns after the delivery subsystem was retired.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from ticket_autopilot.services.git_worktree import GitWorktreeError, GitWorktreeService
+from viva.worktrees.service import GitWorktreeError, GitWorktreeService
 
 
 class GitWorktreeUnavailable(RuntimeError):
@@ -18,7 +18,7 @@ class GitWorktreeUnavailable(RuntimeError):
 
 
 def repository_service(path: str | Path) -> GitWorktreeService:
-    """Return the legacy worktree service for *path*, or raise a clear error."""
+    """Return the worktree service for *path*, or raise a clear error."""
     try:
         return GitWorktreeService(path)
     except GitWorktreeError as exc:

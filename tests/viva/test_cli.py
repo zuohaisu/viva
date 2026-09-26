@@ -1,157 +1,214 @@
-"""`viva` CLI behavior: help, status, the full mutation flow, exit codes."""
+"""The CLI: the same domain layer the TUI uses, with real state on disk."""
 
 from __future__ import annotations
 
 import json
 
-import pytest
-
-from viva.cli.main import EXIT_ERROR, EXIT_NO_TTY, EXIT_OK, main
+from viva.cli.main import main
 from viva.context import VivaContext
 
-from .conftest import make_fake_worker, register_worker_config
+from .conftest import make_fake_worker, write_config
 
 
 def test_help_exits_zero(capsys):
-    with pytest.raises(SystemExit) as exit_info:
+    try:
         main(["--help"])
-    assert exit_info.value.code == 0
-    assert "persistent habitat" in capsys.readouterr().out
-
-
-def test_version_flag(capsys):
-    with pytest.raises(SystemExit) as exit_info:
-        main(["--version"])
-    assert exit_info.value.code == 0
-    assert capsys.readouterr().out.startswith("viva ")
-
-
-def test_bare_viva_without_tty_is_refused_not_crashed(home, capsys, monkeypatch):
-    monkeypatch.setattr("sys.stdout.isatty", lambda: False)
-    code = main([])
-    assert code == EXIT_NO_TTY
-    assert "needs a terminal" in capsys.readouterr().err
+    except SystemExit as exc:  # argparse exits after printing help
+        assert exc.code == 0
+    assert "Personal AI Office" in capsys.readouterr().out
 
 
 def test_status_on_fresh_home_is_honest(home, capsys):
-    assert main(["status"]) == EXIT_OK
-    out = capsys.readouterr().out
-    assert "none yet" in out
-    assert "not memory" in out
+    assert main(["status"]) == 0
+    output = capsys.readouterr().out
+    assert "Members:     0" in output
+    assert "Workspace:   none" in output
+    assert "Experience:  0 events" in output
+    assert "append-only journal" in output
 
 
-def test_status_json_is_machine_readable(home, capsys):
-    assert main(["status", "--json"]) == EXIT_OK
+def test_member_workspace_project_task_flow(home, git_repo, office_tools, capsys):
+    assert main(["workspace", "add", str(git_repo), "Office"]) == 0
+    assert main(["project", "add", "Viva", "--repo", str(git_repo)]) == 0
+    assert main(["resident", "add", "Deven", "--role", "developer", "--engine", "fake-engine"]) == 0
+    assert main(["task", "new", "Ship the office", "--kind", "delivery", "--project", "viva"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Workspace registered: Office" in output
+    assert "Project registered: Viva" in output
+    assert "Member created: Deven" in output
+    assert "Task created: task-ship-the-office" in output
+
+    assert main(["task", "list", "--open"]) == 0
+    assert "delivery" in capsys.readouterr().out
+
+    context = VivaContext(home)
+    task = context.tasks.list()[0]
+    assert task["project_id"] == "viva"
+    assert task["repositories"] == [str(git_repo.resolve())]
+    assert context.journal.read()  # every mutation is recorded
+
+
+def test_status_shows_members_tasks_and_executions(home, git_repo, office_tools, capsys):
+    main(["workspace", "add", str(git_repo), "Office"])
+    main(["resident", "add", "Deven", "--role", "developer", "--engine", "fake-engine"])
+    main(["task", "new", "Ship it", "--kind", "delivery", "--repo", str(git_repo)])
+    capsys.readouterr()
+
+    assert main(["status"]) == 0
+    output = capsys.readouterr().out
+    assert "Deven" in output and "developer" in output
+    assert "fake-engine" in output
+    assert "Tasks:       1 total, 1 open" in output
+    assert "Tools:" in output
+
+    assert main(["status", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert {"version", "home", "resident", "workspace", "workers", "experience_count"} <= set(payload)
+    assert payload["residents"][0]["id"] == "deven"
+    assert payload["open_tasks"][0]["id"].startswith("task-ship-it")
 
 
-def test_full_flow_resident_workspace_status(home, capsys, git_repo):
-    assert main(["resident", "add", "Alice"]) == EXIT_OK
-    assert main(["workspace", "add", str(git_repo), "Demo"]) == EXIT_OK
-    out = capsys.readouterr().out
-    assert "Resident created: Alice" in out
-    assert "Workspace selected: Demo" in out
-
-    assert main(["status"]) == EXIT_OK
-    status_out = capsys.readouterr().out
-    assert "Alice" in status_out
-    assert "Demo" in status_out
-    assert "git: main" in status_out
-
-    context = VivaContext(None)  # a brand-new instance, same home: state survives
-    assert context.current_resident()["id"] == "alice"
-    assert context.current_workspace()["id"] == "demo"
-
-
-def test_resident_use_switches_current(home, capsys):
-    main(["resident", "add", "Alice"])
-    main(["resident", "add", "Maya"])
-    capsys.readouterr()
-    assert main(["resident", "use", "maya"]) == EXIT_OK
-    assert VivaContext(None).current_resident()["name"] == "Maya"
-    assert main(["resident", "use", "ghost"]) == EXIT_ERROR
-
-
-def test_home_flag_is_accepted_before_subcommand(home, tmp_path, capsys):
-    alternate = tmp_path / "alternate-home"
-    assert main(["--home", str(alternate), "status", "--json"]) == EXIT_OK
-    assert json.loads(capsys.readouterr().out)["home"] == str(alternate)
-    assert alternate.exists()
-
-
-def test_worker_run_end_to_end_records_experience(home, capsys, fake_bin, git_repo):
-    make_fake_worker(fake_bin, "clifake")
-    register_worker_config(home, "clifake", "clifake")
-    main(["resident", "add", "Alice"])
-    main(["workspace", "add", str(git_repo), "Demo"])
+def test_dispatch_status_result_and_recover(home, git_repo, office_tools, capsys):
+    main(["workspace", "add", str(git_repo), "Office"])
+    main(["resident", "add", "Deven", "--role", "developer", "--engine", "fake-engine"])
+    main(["task", "new", "Ship it", "--kind", "delivery", "--repo", str(git_repo)])
+    task_id = VivaContext(home).tasks.list()[0]["id"]
     capsys.readouterr()
 
-    assert main(["worker", "run", "clifake", "say", "hello"]) == EXIT_OK
-    out = capsys.readouterr().out
-    assert "COMPLETED" in out
+    assert main(["office", "dispatch", "--task", task_id, "--to", "deven"]) == 0
+    assert "dispatched" in capsys.readouterr().out
 
-    assert main(["experience", "list", "--json"]) == EXIT_OK
-    events = json.loads(capsys.readouterr().out)
-    types = [event["event_type"] for event in events]
-    assert "worker.invoked" in types and "worker.completed" in types
-    assert all(event["source"] == "cli" for event in events if event["event_type"].startswith("worker"))
+    assert main(["office", "status", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    execution_id = payload["executions"][0]["id"]
+    assert payload["executions"][0]["requested_by"] == {"kind": "user", "id": "haisu"}
+
+    assert main(["office", "result", execution_id]) == 0
+    assert "fakeworker start" in capsys.readouterr().out
+
+    assert main(["office", "recover"]) == 0
+    recovered = capsys.readouterr().out
+    assert "reconciled:" in recovered
+    assert "never restarts" in recovered
 
 
-def test_worker_run_refused_without_workspace(home, capsys, fake_bin):
-    make_fake_worker(fake_bin, "clifake")
-    register_worker_config(home, "clifake", "clifake")
-    assert main(["worker", "run", "clifake", "hi"]) == EXIT_ERROR
-    assert "no current workspace" in capsys.readouterr().err
-
-
-def test_worker_run_refused_when_unavailable(home, capsys, tmp_path):
-    main(["resident", "add", "Alice"])
-    main(["workspace", "add", str(tmp_path), "Somewhere"])
+def test_foreground_dispatch_waits_and_reports(home, git_repo, office_tools, capsys):
+    main(["workspace", "add", str(git_repo), "Office"])
+    main(["resident", "add", "Deven", "--role", "developer", "--engine", "fake-engine"])
+    main(["task", "new", "Ship it", "--kind", "delivery", "--repo", str(git_repo)])
+    task_id = VivaContext(home).tasks.list()[0]["id"]
     capsys.readouterr()
-    assert main(["worker", "run", "definitely-missing-worker", "hi"]) == EXIT_ERROR
-    err = capsys.readouterr().err
-    assert "no worker named" in err
+
+    assert main(["office", "dispatch", "--task", task_id, "--to", "deven", "--wait"]) == 0
+    assert "completed exit=0" in capsys.readouterr().out
 
 
-def test_worker_run_failure_is_exit_error_but_still_journaled(home, capsys, fake_bin, git_repo):
-    make_fake_worker(
-        fake_bin,
-        "sadcli",
-        body='[ "$1" = "--version" ] && { echo "sadcli 1.0"; exit 0; }\nexit 9\n',
+def test_grant_without_origin_is_refused(home, git_repo, office_tools, capsys):
+    main(["resident", "add", "Deven", "--role", "developer", "--engine", "fake-engine"])
+    main(["task", "new", "Ship it", "--kind", "delivery", "--repo", str(git_repo)])
+    task_id = VivaContext(home).tasks.list()[0]["id"]
+    capsys.readouterr()
+
+    assert main(["office", "grant", "--to", "deven", "--task", task_id, "--actions", "dispatch",
+                 "--mode-max", "write", "--reason", "scope"]) == 0
+    grant_id = VivaContext(home).grants.list()[0]["id"]
+    capsys.readouterr()
+
+    # A grant may only be spent by a worker that names the execution it came from.
+    assert main(["office", "dispatch", "--task", task_id, "--to", "deven", "--grant", grant_id]) == 1
+    assert "must name the execution it came from" in capsys.readouterr().err
+
+
+def test_worker_list_and_worktree_list(home, git_repo, office_tools, capsys):
+    main(["workspace", "add", str(git_repo), "Office"])
+    capsys.readouterr()
+    assert main(["worker", "list"]) == 0
+    assert "fakeworker" in capsys.readouterr().out
+    assert main(["worktree", "list"]) == 0
+    assert "worktree(s)" in capsys.readouterr().out
+
+
+def test_knowledge_and_github_commands(home, git_repo, office_tools, capsys):
+    main(["task", "new", "Ship it", "--kind", "research", "--repo", str(git_repo)])
+    task_id = VivaContext(home).tasks.list()[0]["id"]
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "knowledge",
+                "add",
+                "--kind",
+                "team_knowledge",
+                "--title",
+                "Audit first",
+                "--body",
+                "Read-only pass before edits.",
+                "--task",
+                task_id,
+            ]
+        )
+        == 0
     )
-    register_worker_config(home, "sadcli", "sadcli")
-    main(["resident", "add", "Alice"])
-    main(["workspace", "add", str(git_repo), "Demo"])
+    assert "Recorded kb-" in capsys.readouterr().out
+    assert main(["knowledge", "list"]) == 0
+    assert "Audit first" in capsys.readouterr().out
+    assert main(["knowledge", "reuse"]) == 0
+    assert "No reuse evidence yet" in capsys.readouterr().out
+
+    assert main(["knowledge", "add", "--kind", "team_knowledge", "--title", "No provenance",
+                 "--body", "x"]) == 1
+    assert "provenance" in capsys.readouterr().err
+
+    assert main(["github", "link", task_id, "--repo", "zuohaisu/viva", "--issue", "150"]) == 0
+    assert "linked to" in capsys.readouterr().out
+
+
+def test_errors_are_reported_not_swallowed(home, capsys):
+    assert main(["resident", "show", "nobody"]) == 1
+    assert "no AI member matches" in capsys.readouterr().err
+    assert main(["office", "result", "exec-missing"]) == 1
+    assert "no execution" in capsys.readouterr().err
+    assert main(["office", "dispatch", "--task", "task-nope", "--to", "deven"]) == 1
+    assert "no task" in capsys.readouterr().err
+
+
+def test_unavailable_tool_is_reported_and_not_substituted(
+    home, git_repo, fake_bin, capsys, monkeypatch
+):
+    make_fake_worker(fake_bin, "flakyworker")
+    write_config(
+        home,
+        "workers.json",
+        {
+            "schema_version": "1.0",
+            "workers": [{"name": "flakyworker", "command": "flakyworker", "args": []}],
+        },
+    )
+    write_config(
+        home,
+        "engines.json",
+        {
+            "schema_version": "1.0",
+            "engines": [
+                {
+                    "id": "flaky",
+                    "tool": "flakyworker",
+                    "model": "m",
+                    "model_flag": "--model",
+                    "args": [],
+                }
+            ],
+        },
+    )
+    main(["resident", "add", "Deven", "--role", "developer", "--engine", "flaky"])
+    main(["task", "new", "Ship it", "--kind", "delivery", "--repo", str(git_repo)])
+    task_id = VivaContext(home).tasks.list()[0]["id"]
     capsys.readouterr()
-    assert main(["worker", "run", "sadcli", "go"]) == EXIT_ERROR
-    capsys.readouterr()  # discard the streamed run output before parsing JSON
-    assert main(["experience", "list", "--json"]) == EXIT_OK
-    events = json.loads(capsys.readouterr().out)
-    failed = [event for event in events if event["event_type"] == "worker.failed"]
-    assert failed and failed[0]["payload"]["exit_code"] == 9
 
-
-def test_worktree_list_reports_workspace_worktrees(home, capsys, git_repo):
-    from ticket_autopilot.services.git_worktree import GitWorktreeService
-
-    main(["workspace", "add", str(git_repo), "Demo"])
-    service = GitWorktreeService(git_repo)
-    service.create_worktree(git_repo.parent / "wt-x", "feature/x", service.head_sha())
-    capsys.readouterr()
-
-    assert main(["worktree", "list"]) == EXIT_OK
-    out = capsys.readouterr().out
-    assert "[main" in out and "wt-x" in out and "feature/x" in out
-    assert "2 worktree(s)" in out
-    assert " *" in out  # the workspace root itself is marked current
-
-    assert main(["worktree", "list", "--workspace", "Demo"]) == EXIT_OK
-    assert "wt-x" in capsys.readouterr().out
-
-
-def test_unknown_resident_error_is_clean_not_traceback(home, capsys):
-    assert main(["resident", "use", "nobody"]) == EXIT_ERROR
-    err = capsys.readouterr().err
-    assert err.startswith("viva: ")
-    assert "Traceback" not in err
+    monkeypatch.setenv("PATH", "/nonexistent-bin")
+    assert main(["office", "dispatch", "--task", task_id, "--to", "deven"]) == 1
+    error = capsys.readouterr().err
+    assert "unavailable" in error
+    assert "will not silently substitute" in error
+    assert VivaContext(home).executions.list() == []

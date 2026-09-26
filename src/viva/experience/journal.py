@@ -8,8 +8,12 @@ Event types used by Viva (open set; readers must tolerate unknown types):
     user.command, runtime.state_changed
 
 Every event carries: id, sequence, timestamp, schema_version, resident_id,
-session_id, event_type, workspace, source, payload. Writes reuse the delivery
-subsystem's proven ``redact`` so secrets never enter the journal.
+session_id, event_type, workspace, source, payload. Writes reuse Viva's proven
+redaction so secrets never enter the journal.
+
+Execution attribution is recorded as event fields as well: an event emitted by
+an execution always carries that execution's ``execution_id``/``task_id`` in the
+payload, never "whatever the UI currently shows".
 """
 
 from __future__ import annotations
@@ -19,10 +23,10 @@ import threading
 from pathlib import Path
 from typing import Any, Iterable
 
-from ticket_autopilot.services.run_events import redact
 from viva.core.errors import VivaError
 from viva.core.ids import new_event_id, utc_now
 from viva.core.paths import ensure_private_dir, viva_home
+from viva.core.redaction import redact
 
 SCHEMA_VERSION = "1.0"
 JOURNAL_FILENAME = "journal.jsonl"

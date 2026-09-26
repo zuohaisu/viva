@@ -77,11 +77,10 @@ class WorkspaceRegistry:
                 raise WorkspaceError(f"path is already registered as workspace {existing.get('id')!r}: {resolved}")
         is_git = True
         try:
-            from ticket_autopilot.services.git_worktree import GitWorktreeError
-            from viva.worktrees.discovery import repository_service
+            from viva.worktrees.discovery import GitWorktreeUnavailable, repository_service
 
             repository_service(resolved)
-        except (GitWorktreeError, GitWorktreeUnavailable):
+        except GitWorktreeUnavailable:
             is_git = False
         workspace = {
             "id": wid,

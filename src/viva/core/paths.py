@@ -1,8 +1,11 @@
 """Resolve the Viva persistent state root.
 
 All Viva state lives under one private per-user directory (``~/.viva`` by
-default, overridable via ``VIVA_HOME`` for tests and exotic setups). The
-legacy Ticket Autopilot directory ``~/.ticket-autopilot`` is never touched.
+default, overridable via ``VIVA_HOME`` for tests and exotic setups).
+
+The historical ``~/.ticket-autopilot`` directory belongs to a retired product
+(ADR 0008). Viva never reads, writes, migrates or deletes it: old run data is
+evidence, not something to clean up.
 """
 
 from __future__ import annotations

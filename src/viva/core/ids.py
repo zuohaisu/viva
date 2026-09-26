@@ -20,6 +20,27 @@ def new_event_id() -> str:
     return uuid.uuid4().hex
 
 
+def new_task_id(title: str) -> str:
+    """A readable, unique task id: ``task-<slug>-<4 hex>``."""
+    try:
+        slug = slugify(title, what="task title")[:32].strip("-")
+    except ValueError:
+        slug = "task"
+    return f"task-{slug}-{uuid.uuid4().hex[:4]}"
+
+
+def new_execution_id() -> str:
+    return f"exec-{uuid.uuid4().hex[:12]}"
+
+
+def new_grant_id() -> str:
+    return f"grant-{uuid.uuid4().hex[:12]}"
+
+
+def new_knowledge_id() -> str:
+    return f"kb-{uuid.uuid4().hex[:10]}"
+
+
 _SLUG_PATTERN = re.compile(r"[^a-z0-9-]+")
 
 

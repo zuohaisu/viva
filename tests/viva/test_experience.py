@@ -96,3 +96,31 @@ def test_append_refuses_empty_event_type(home):
     journal = ExperienceJournal(home)
     with pytest.raises(ExperienceError):
         journal.append(event_type="   ")
+
+
+def test_experience_is_not_memory(home):
+    """The journal is an event stream: nothing is promoted, summarised or recalled."""
+    journal = ExperienceJournal(home)
+    journal.append(event_type="user.command", resident_id="deven", payload={"command": "status"})
+    event = journal.read()[0]
+    assert "memory" not in event and "self_model" not in event
+    assert set(event) == set(REQUIRED_FIELDS)
+
+
+def test_execution_events_carry_their_own_attribution(office, git_repo):
+    """Experience records what happened, under the attribution of the run itself."""
+    from .conftest import dispatch, make_member, make_task
+
+    task = make_task(office, "Recorded work", kind="delivery", repository=git_repo)
+    member = make_member(office, "Deven")
+    record = dispatch(office, task["id"], member["id"], message="quick")
+    office.executions_runner.wait(office.executions_handles[record["id"]])
+
+    started = [
+        event for event in office.journal.read() if event["event_type"] == "execution.started"
+    ][-1]
+    assert started["resident_id"] == "deven"
+    assert started["payload"]["execution_id"] == record["id"]
+    assert started["payload"]["task_id"] == task["id"]
+    assert started["payload"]["work_location"] == record["work_location"]["path"]
+    assert started["payload"]["requested_by"] == {"kind": "user", "id": "haisu"}

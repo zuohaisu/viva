@@ -43,8 +43,9 @@ scratch/
 .qa-tmp/
 
 
-# Ticket Autopilot runtime artifacts (spec §12.4) — root-anchored so the
-# src/viva/worktrees/ package is never caught by these rules.
+# Retired Ticket Autopilot artifacts and Viva worktrees. The historical
+# ~/.ticket-autopilot state directory is never read or written by Viva, and the
+# root anchors keep src/viva/worktrees/ from being caught by these rules.
 .ticket-autopilot/
 /runs/
 /worktrees/
