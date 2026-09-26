@@ -1,6 +1,8 @@
 # ADR 0004 — Ticket Autopilot 的边界：从 North Star 到 Delivery Automation 子系统
 
-Status: Accepted · Date: 2026-09-27 · Decider: Haisu（owner 显式指令）· 详表：`docs/architecture/viva-transition.md` §2/§13
+Status: **Superseded by ADR 0008**（2026-09-27；保留作历史出处）· Date: 2026-09-27 · Decider: Haisu（owner 显式指令）· 详表：`docs/architecture/viva-transition.md` §2/§13
+
+> **取代记录（2026-09-27，ADR 0008）**：Haisu 已明确"Ticket Autopilot 不再是需要保留的产品能力，只复用当前目标真正需要的成熟代码"。本文"整体保留子系统、冻结其边界"的决定作废：worktree 服务、脱敏、owner 授权语义被搬进 `src/viva/` 的小模块（测试一并保留），其余代码路径与旧产品文档已退役。**旧运行数据没有被删除。**
 
 > 效力说明："Ticket Autopilot 降级为 Delivery Automation 子系统、能力保留、不再是 North Star、不做大重构"是 Haisu 任务书中的**显式指令**；§3 的"思想晋升清单"与 §6 的目标态形态是产品定义轮的提案，随本 ADR 的边界生效但细节可议。
 

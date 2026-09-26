@@ -487,3 +487,48 @@ Reprioritization 本身：North Star 变更为 Viva（ADR 0001、0004）；Ticke
 ### Recovery milestone
 
 Phase 1 验收（docs/product/phase-1.md §5）：north-star loop（进入 workspace → 续上下文 → worktree → worker → 工作 → 换人 → 留记录 → 回归继续）在 ≥1 个真实 workspace 上跑通 ≥3 个工作日，S1/S4/S8 场景可真实发生。
+
+---
+
+## 2026-09-27 — Reprioritization: 从"单 Resident 持续性层"到"多成员 AI Office"（accepted）
+
+### Trigger
+
+Haisu 的任务书明确取代了上一轮产品定义的六条约束：只围绕 Samuel 一个 Resident 设计；把 multi-resident UX 与 AI 团队协作排除在范围外；用"单人类用户"推出"没有 AI Team/Member"；强制用 Workspace 取代所有 Project 概念；禁止所有 Worker 发起的委派；整体保留 Ticket Autopilot 作为 Viva 子系统。
+
+### Scope
+
+产品模型、对象关系、权限模型、执行模型、旧子系统处置、文档与 ADR 体系。不是新增功能轮，而是**纠正方向 + 交付最小可验证闭环**。
+
+### Evidence
+
+- 新决策：`docs/decisions/0006`（多成员 AI Office）、`0007`（委派授权）、`0008`（Ticket Autopilot 退役）、`0009`（Workspace≠Project≠Repository≠Worktree≠Task）、`0010`（知识归属与复用证据）。
+- 被取代的旧决策保留并标注：ADR 0001（部分）、0002、0003、0004 头部均有 Superseded + 原因；0005 保持 Proposed 且不受影响。
+- 实现：`src/viva/` 新增 `residents/{roles,engines}`、`projects/`、`tasks/`、`executions/`、`office/`、`knowledge/`、`github/`、`permissions/grants.py`；TUI 的全局 `_worker_running` 与完成事件归属 bug 一并修复。
+- 复用与退役：`worktrees/service.py`、`core/redaction.py`、`permissions/authority.py` 三个能力从 `src/ticket_autopilot/` 原地搬迁并保留验证；其余代码路径、固定流水线、Web 控制器、Plane 连接器与旧产品文档退役（`viva-transition.md` §4）。
+- 验收：`tests/viva/test_acceptance.py` 覆盖九个场景（真实子进程）；`tests/viva/test_office.py` 含一次真实协调 Worker 调用真实执行 Worker 的验证。
+
+### Facts versus inference
+
+**Facts**：上述文件、测试与删除清单在树中可见；`src/ticket_autopilot/` 已不存在；`pyproject.toml` 只剩 `viva` 一个入口点。
+**Inferences**：不一致的旧文档若继续作为权威，会把后续会话引回"单 Resident + Ticket Autopilot 保留"的旧边界；本次纠正消除了这一张力。
+
+### Impact
+
+- 交付自动化的具体实现不再是产品的一部分；它作为**能力来源**的三项被吸收，其余按 ADR 0008 退役。
+- 协调 Worker 从"禁止委派"变为"在用户授予范围内委派并留痕"。
+- Workspace 不再是 Project 的替身；成员与语境成为两个正交维度。
+
+### Correction or explicit reprioritization
+
+Explicit reprioritization（Haisu 决定）。ADR 0006–0010 是记录；被取代的决策保留历史出处。
+
+### Guard added
+
+- AGENTS.md 新增 **Retired Subsystem Rule**：不得重新引入 ticket/Plane/run/QA-verdict 对象，不得把固定流水线改名为动态调度。
+- 委派边界有代码级强制（`require_invocation_authority`、grant 的父子不放大）并有测试；越权必须留下 `authority.refused`。
+- 诚实约束加固：成员记录字段集合被测试锁定；`self_model_candidate` 无自动晋升；"复用证据"以 usage 记录为唯一门槛。
+
+### Recovery milestone
+
+九场景验收（`docs/product/phase-1.md` §0）全部有测试证据；下一步是让这套闭环在 Haisu 的真实仓库（非测试夹具）上连续使用多个工作日，并据此校正知识策展与工作位置策略。

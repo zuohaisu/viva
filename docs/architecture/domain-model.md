@@ -1,83 +1,109 @@
 # Viva — Domain Model
 
-Status: canonical（词汇表结构）· **Proposed（关系裁决与不变量细节，待 Haisu 接受）** · Date: 2026-09-27 · 裁决出处：`docs/product/product-model.md` · 本文是概念对象的唯一定义处（不含实现 schema）
+Status: canonical（对象与关系）· 记录版本：2026-09-27（AI Office 修订）· 裁决出处：`docs/decisions/0006`–`0010` · 本文是概念对象的唯一定义处（不含实现 schema；实现字段见 `docs/architecture/viva-transition.md` §7）
 
-## 1. 对象图
+## 1. 对象图（最小架构）
 
 ```text
-                        ┌─────────────────────────────┐
-                        │ Resident (Samuel)           │
-                        │  identity · memory · skills │
-                        │  self-model · user-model    │
-                        │  relationship               │
-                        └──────┬──────────────┬───────┘
-               observes/coor-  │              │  owns (continuity)
-               dinates (非所有) │              ▼
-                               │        ResidentSession
-                               │        (Haisu↔Samuel 对话线程)
- ┌─────────────────────────────▼───────────────────────────┐
- │ Workspace (VicTrader / Viva / self-model / …)           │
- │  project memory · workspace skills · intentions         │
- │                                                          │
- │  ┌─ Repository (~/Projects/VicTrader)                    │
- │  │                                                       │
- │  ├─ Task ("处理 #812") ── may own ──┐                     │
- │  │                                  ▼                    │
- │  ├─ Worktree (issue-812) ◄─ anchored by ── WorkerSession │
- │  │    branch · status · dirty · purpose     (Codex @…)   │
- │  │                                            │          │
- │  └─ Episode ◄─ records ── Events ◄────────────┘          │
- │       (task · participants · outcome)                    │
- └──────────────────────────────────────────────────────────┘
+                          ┌───────────────────────────────────────────────┐
+                          │ Resident（一个 AI 成员）                       │
+                          │  identity · role · history · knowledge        │
+                          │  self-model candidates（本轮只记录，不演化）    │
+                          └───────┬──────────────┬────────────────────────┘
+              binds（可替换）     │              │ assigned to（1..n）
+        ┌─────────────────────────▼──┐           │
+        │ Role     职责（配置数据）    │           │
+        │ Engine   认知模型绑定        │           │
+        │ Worker   执行工具（CLI）      │           │
+        └─────────────────────────────┘           │
+                                                  ▼
+ ┌──────────────────────────── Workspace（长期语境）────────────────────────────┐
+ │  ┌─ Project（一摊有名字的工作）                                              │
+ │  │     └─ Repository（git 仓库；多对多，显式绑定）                            │
+ │  │            └─ Worktree（按任务分配的可写 checkout；只读任务不需要）         │
+ │  ├─ Task（意图：为什么做；跨执行存活；可被多个执行服务）                        │
+ │  │     ├─ assignees ────────────────────────────────────────────────────────┤
+ │  │     ├─ work_location（worktree 或只读仓库路径）                            │
+ │  │     ├─ github 关联（repo · issue · branch · PR）                          │
+ │  │     └─ outputs / unfinished                                             │
+ │  └─ Episode（叙事单元）◄── Events（append-only experience journal）           │
+ └────────────────────────────────────────────────────────────────────────────┘
+                       ▲
+                       │ records（每次执行固定自己的归属）
+                 Execution（成员 × 任务 × 模型 × 工具 × 位置 × 授权）
+                       ▲
+                       │ authorized by
+                    Grant（来源 = user | worker；范围 = task + actions + mode）
 ```
 
 ## 2. 对象定义
 
-### 空间/工作对象
+### 2.1 成员侧
 
-| 对象 | 定义 | 关键属性 | 归属/生命周期 |
+| 对象 | 定义 | 关键属性 | 生命周期 |
 | --- | --- | --- | --- |
-| **Resident** | 长期存在的 AI 协作者；Viva 中即 Samuel | identity（跨模型可迁移的开放格式状态）、memory 分区、skills、self/user-model 假设、relationship | Viva 全局；不随 session/workspace/模型消亡 |
-| **Workspace** | 项目的长期容器 | name、repositories[]、project memory 指针、workspace skills、tasks、worktree 注册表、历史索引 | 长期；手工或半自动创建 |
-| **Repository** | 一个 git 仓库的注册 | path、default branch、remotes | Workspace 拥有；一个 repo 原则上可被多个 workspace 引用（默认一对一，多引是例外需显式） |
-| **Worktree** | 一个可独立工作的 checkout 执行环境 | path、branch、base、purpose、status（`active/archived/dirty/merged`）、linked task | Repository 派生；Task 可拥有；知情清理 |
-| **Task** | 意图单元：一件要做的事 | intent、status（`todo/in-progress/in-review/blocked/done`）、linked worktree(s)、linked ticket(可选 Plane issue)、episodes[] | **Workspace 拥有**；可与 Delivery Automation Run 关联 |
-| **Worker** | 一类可驱动的编码工具能力 | name（codex/claude-code/qoder/pi/hermes…）、invocation profile（CLI、permission modes、read-only 语义） | catalog 条目；可插拔、可探测 |
-| **WorkerSession** | Worker 的一次执行 | worker、worktree（空间锚）、task（意图锚）、started_at、status（`running/exited/resumable`）、transcript 位置 | **隶属 Worktree、服务 Task**；短命可弃 |
-| **ResidentSession** | Haisu ↔ Samuel 的对话线程 | workspace 语境属性、时间跨度、关联 episodes | Resident 拥有；跨 workspace 存续 |
+| **Resident（AI 成员）** | 一个持续存在的 AI 成员；Haisu 可以拥有多个 | id、name、role、engine 绑定、tools、created_at、notes | 持久；换模型/换工具不改记录、不清历史、不删知识 |
+| **Role** | 该成员用来做什么（PM/协调、开发、QA/review、运维、研究…） | id、title、purpose、allowed_modes、default_mode | 配置数据（`roles.json`），可编辑 |
+| **Cognitive Engine** | 当前为该成员提供认知的模型绑定 | id、tool、model、model_flag、args | 配置数据（`engines.json`）；可替换 |
+| **Worker（执行工具）** | 具体驱动执行的 agent CLI | name、command、args、capabilities、probe | 配置数据（`workers.json`）；可探测可用性 |
+| **Execution** | 一次真实执行 | 见 §2.3 | 短命进程；记录持久 |
+| **Knowledge entry** | 四类知识之一（个人记忆 / Self-Model 候选 / 项目知识 / 团队知识与技能） | kind、owner、title、body、provenance、used_in | 只追加；可撤回 |
 
-### 时间/成长对象
+### 2.2 空间侧
 
 | 对象 | 定义 | 关键属性 | 归属 |
 | --- | --- | --- | --- |
-| **Event** | 原子事实，append-only，secret-safe | type、时间、payload、来源（哪个 session/human） | Episode 关联 |
-| **Episode** | 有边界的叙事工作单元（journal 的阅读/检索单位） | task、worktree、参与者（workers+Haisu）、outcome、event 引用 | 发生在 Workspace，由 Resident 记录 |
-| **Reflection** | 对 episode 组的反刍记录 | 输入 episodes、输出（候选 distillate 或"无新证据"） | Resident |
-| **Memory** | 策展过的长期事实 | content、scope（resident-global / resident-per-workspace / workspace-project）、provenance、使用信号 | 测试分流（见 Q3） |
-| **Skill** | 可复用程序（SKILL.md 格式） | scope（resident / workspace）、verification、使用记录 | scope 分流（见 Q5） |
-| **UserModel entry** | 关于 Haisu 的假设 | proposition、status、confidence、evidence、provenance | Resident |
-| **SelfModel entry** | 关于 Samuel 自身的假设 | 同上 + supersedes | Resident；理论归 `self-model` 仓库 |
-| **Run（Delivery Automation）** | Ticket Autopilot 的受管运行 | ticket、worktree、QA attempts、verdicts、owner actions | Task 的特化关联；evidence 并入 Episode |
+| **Workspace** | 长期工作语境，注册单位 | id、name、path、is_git、last_opened_at | 用户注册；长期 |
+| **Project** | Workspace 里的一摊工作 | id、name、workspace_id、repositories[] | Workspace 拥有 |
+| **Repository** | 一个真实 git 仓库 | 路径（解析后）；可被多个 Project 引用 | Project 引用；显式绑定 |
+| **Worktree** | 一个可独立写入的 checkout 执行环境 | path、branch、base、repository、mode | 按 Task 分配；Viva 拥有（`~/.viva/worktrees/`） |
+| **Task** | 意图单元（"处理 #150"） | id、title、intent、kind、status、assignees[]、work_location、repositories[]、github、outputs[]、unfinished[] | **Workspace 拥有**；可先于 worktree 存在 |
+
+### 2.3 执行与授权
+
+| 对象 | 定义 | 关键属性 |
+| --- | --- | --- |
+| **Execution** | 一次执行：谁、在哪个任务、用什么模型与工具、在哪、凭什么、结果如何 | id、task_id、member_id、role、engine{id,model}、tool、work_location{kind,path,branch,mode}、request{kind,id,grant_id}、authority{grant_id,actions,mode_max,delegated_from}、status、pid/pgid、started_at/finished_at、exit_code、output_path、summary、failure_reason、recoverable |
+| **Grant** | 让成员（而非 Haisu 本人）能够动作的凭据 | id、source{kind,id}、grantee、task_id、actions[]、mode_max、delegated_from、reason、revoked_at |
+
+Execution 的状态语义（如实区分，禁止含糊）：
+
+```text
+running     进程存活（pid + 启动时间双重校验，防止 pid 复用误判）
+completed   由启动它的进程观察到 exit_code == 0
+failed      由启动它的进程观察到 exit_code != 0
+stopped     被显式停止（停止先写记录，再发信号，避免与观察线程竞态）
+exited      进程已消失但没有记录到结果（Viva 当时不在运行/被中断）
+unknown     连进程是否存活都无法判断（没有 pid 记录）
+recoverable 非成功结束且任务仍未关闭 → 可以由新的执行继续（但绝不自动重跑）
+```
 
 ## 3. 关系裁决（易混点集中回答）
 
-1. **Resident 不拥有 Workspace、Workspace 不隶属于 Resident**。两者是多对多的"工作关系"：Samuel 在任何 workspace 里都是同一个 Samuel；workspace 的 project memory 不因 Samuel 消失（Q3 测试）。
-2. **Task 是 Workspace 的孩子，不是 Worktree 的属性**（product-model Part I 修正 1）。Worktree 可以没有 Task（探索性）；Task 可以没有 Worktree（规划中）或多个 Worktree（方案对比）。
-3. **WorkerSession 双锚**：Worktree（硬锚，决定副作用）+ Task（软锚，决定目的）（Q2）。
-4. **两种 Session 严格分开**：WorkerSession 是工具的执行记录；ResidentSession 是协作的对话记录。绝不合用一张"session"概念（Q2）。
-5. **Episode ≠ Session**：一个 episode 可跨多个 session（换 worker、跨天）；一个 session 可贡献多个 episode。Episode 以**目的**为界，Session 以**进程**为界。
-6. **Memory/Skill/SelfModel 的归属由测试分流，不由层划分**：Q3（删掉 Samuel 仍为真？）、Q5（离开此项目仍成立？）。
-7. **Run 不是 Viva core 对象**：它是 Delivery Automation 的领域对象，通过 Task 关联挂载（ADR 0004）。ticket/Plane 相关抽象不进入 core 词汇表。
+1. **Resident ≠ Role**：成员是持久身份，角色是配置属性；改角色不改变成员的身份、历史与知识。
+2. **Role ≠ Engine ≠ Worker**：角色说"做什么"，模型说"用哪个大脑"，工具说"用哪个 CLI"。三者都可替换，替换任一个都不删除成员状态与历史。
+3. **Execution ≠ Worker ≠ Session**：Worker 是工具类目，Execution 是一次真实运行（固定归属与授权），Session 是某个界面的运行期。**一个成员可同时拥有多个 Execution**（Deven 同时做 #150 和 #151）。
+4. **Task 不被 Worktree 拥有**：Task 可以有 0 个 worktree（研究/规划），也可以有多个（方案对比）。
+5. **拒绝是证据**：越权委派被拒绝时写 `authority.refused`（含原因与尝试内容），不是静默失败。
+6. **知识归属由 owner 决定，不由层级**：personal → 成员；project → Project；team/skill → 团队（ADR 0010）。
+7. **Workspace ≠ Project ≠ Repository ≠ Worktree ≠ Task**（ADR 0009）：多对多关系必须显式声明。
+8. **每个执行固定自己的归属**：完成事件与产出按 execution 记录里的 member/task/workspace 记录，**不按界面当前选择**（不变量 I6）。
 
-## 4. 不变量（invariants，产品级）
+## 4. 不变量（产品级）
 
-- I1 Resident 状态永远可导出为开放格式，模型更换不改变状态语义。
-- I2 Event/Episode 只追加；修正以新记录 + supersede 表达。
-- I3 Memory 条目无 provenance 不成立（没有出处的"记忆"不准入）。
-- I4 Worker/automation 无交付权：不 push 保护分支、不 merge、不自授权（actor-aware authority，沿用本仓 delivery_policy 语义）。
-- I5 Worktree 清理必须知情：有未合并产出或未关闭 Task 的 worktree 不可被静默清理。
-- I6 Self/User-model 的更新可见：候选 → 证据 → 晋升全程留痕，无静默身份改写。
+- **I1** 成员状态永远可导出为开放格式；换模型不改变状态语义。
+- **I2** Event / Experience / Grant / Knowledge 只追加；修正以新记录 + 撤回/supersede 表达。
+- **I3** Knowledge 条目无 provenance 不成立。
+- **I4** 成员与自动化无交付权：不 push 保护分支、不 merge、不 approve、不自授权（actor-aware authority）。
+- **I5** Worktree 清理必须知情：有未合并产出或未关闭 Task 的 worktree 不被静默清理。
+- **I6** 执行的归属在启动时固定：切换成员/Workspace 只影响导航，不影响历史记录。
+- **I7** 委派不得放大：子 grant 的 actions/mode/task 只能是父 grant 的子集。
+- **I8** 恢复只读：对账可以改状态，永远不重启进程；已完成的执行永远不会被重新启动。
 
 ## 5. 显式非对象（防止范围蔓延）
 
-- **没有** "Project"（用 Workspace）；**没有** "Board/Backlog"（Task 列表足矣，票务归 Plane）；**没有** "Team/Member"（单用户）；**没有** "Plugin"（Worker/Skill catalog 是仅有的扩展面）；**没有** "Chat" 对象（ResidentSession 承载）；**没有**第五层。
+- 没有多人类用户/团队账号/权限体系（多成员 ≠ 多用户）；
+- 没有 ticket / Plane / run / QA verdict（随旧产品退役，ADR 0008）；
+- 没有 Chat 对象（会话作为执行或界面状态承载）；
+- 没有自动记忆/反思/Self-Model 演化对象（本轮只记录候选与证据）；
+- 没有 daemon / 常驻调度器（执行由真实进程 + 注册表管理）。

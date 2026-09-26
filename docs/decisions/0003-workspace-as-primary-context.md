@@ -1,6 +1,8 @@
 # ADR 0003 — Workspace 是第一语境与项目知识的家
 
-Status: **Proposed**（待 Haisu 接受）· Date: 2026-09-27 · 上游：`docs/product/product-model.md` Q1/Q3、`docs/research/vscode-workspace.md`
+Status: **Superseded by ADR 0009**（2026-09-27；保留作历史出处）· Date: 2026-09-27 · 上游：`docs/product/product-model.md` Q1/Q3、`docs/research/vscode-workspace.md`
+
+> **取代记录（2026-09-27，ADR 0009）**：本文的"Workspace 是长期语境""项目知识尽量进 repo 文件"继续有效，但 §Decision 中把 Project 并入 Workspace 的做法（"没有 Project，用 Workspace"）被 Haisu 明确取代：**Workspace ≠ Project ≠ Repository ≠ Worktree ≠ Task**。多成员办公室需要一个能表达"一个 workspace 下有多个项目、一个项目跨多个仓库"的对象层。
 
 > 效力说明："primary object 选谁"与"project knowledge 属于谁"是 Haisu 任务书**提出的问题**（Q1/Q3）；本文给出的答案是产品定义轮的**提案**（含两层分储的归属测试），尚未经 Haisu 接受。
 

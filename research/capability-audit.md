@@ -1,5 +1,8 @@
 # AIO-1：复用优先能力审计
 
+> **状态说明（2026-09-27）**：本审计针对的代码（`src/ticket_autopilot/` 的 Engine 与 Plane client）已于 ADR 0008 退役并从仓库删除；本文保留为历史证据，其中的复用建议不再适用。
+
+
 **范围：** AIO-1 / R0；仅审计，不实现 Connector、QA、PR、CLI 接线或任何生产代码。  
 **结论状态：** 已有 Engine 能解释一个声明式 Plan → Execute → Verify → Close 循环，但尚不能安全地把真实 AIO ticket 变成「有确定性证据、独立 QA、等待人工合并的 PR」。应复用 Engine、Plane REST client 和本机 `gh`，以薄 Connector / 确定性服务补齐缺口，而不是另建平台。
 

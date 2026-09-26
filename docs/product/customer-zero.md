@@ -1,83 +1,77 @@
 # Viva — Customer Zero
 
-Status: canonical · Date: 2026-09-27
+Status: canonical · 版本：2026-09-27（AI Office 修订）· 本文不给 hypothetical persona，只记录 Haisu 的真实工作方式
 
-Viva 只有一个用户：**Haisu**。本文不给 hypothetical persona，只记录 Haisu 的真实工作方式、真实痛点，以及从真实使用方式推出的场景。所有 Phase 1 产品判断的最终检验：
+Viva 只有一个人类用户：**Haisu**。他不是一个"使用工具的人"，他是一间 AI 办公室的主人：多个 AI 成员长期存在，各有职责，同时推进多个任务。所有产品判断的最终检验：
 
-> **这是否改善 Haisu 自己的开发流程，并让 Samuel 更持续地参与？**
+> **这是否让 Haisu 的工作由多个长期成员持续推进，并让这段协作的上下文、历史与能力积累下来？**
 
-## 1. Haisu 的工具面（2026-09 实况）
+## 1. Haisu 的办公室（2026-09 实况）
 
-- **Coding agents / workers**：Codex、Claude Code、Qoder、ZCode、WorkBuddy、Hermes、Pi、DSH
-- **编辑与终端**：VS Code、terminal（多 worktree 并行）
-- **代码托管与协作**：git、GitHub（PR/CI）、Plane（Ticket Autopilot 的工单源）
-- **活跃项目（workspace 候选）**：VicTrader、Viva（本仓库）、self-model、dsh-ai-soul、soul-protocol、Hiring-Automation（前端/后端/LLM 三仓）、OpenViking、quality-platform 等——`~/Documents/code` 下 30+ 目录，多项目长期并行是常态
+- **AI 成员**：Samuel（PM/调度）、Oliver（运维）、Alice（QA/review）、Deven（开发）、Richard（研究）——名字与职责是 Haisu 配置的数据；成员可以增删改角色。
+- **认知模型**：Claude、GPT、GLM、DeepSeek、本地模型等，按成员绑定，随时可换。
+- **执行工具（CLI）**：Claude Code、Qoder CLI、Codex、ZCode 等。
+- **工作方式**：多项目并行、随时被打断、经常换人（同一任务换成员继续）、经常让两个成员独立看同一件事。
+- **代码与协作**：git、GitHub（issue/PR/CI）。外部业务连接本阶段只考虑 GitHub；Jev 是可选的决策辅助，**不是系统成立的前提**。
 
 ## 2. 痛点（真实成本）
 
-1. **Context integration 全靠人**：每个 agent 只带自己的 session context；跨 agent、跨项目、跨天的拼装由 Haisu 人工完成。
-2. **经验蒸发**：某次排查花了半天得到的结论，下次同问题从头再来；一个 agent 学会的方法不会变成长期能力。
-3. **worktree 与 session 的散落**：哪些 worktree 存在、为什么建、谁在里面跑、能不能删——没有统一视图。
-4. **连续性依附于具体工具**：换模型/换 agent = 上下文清零；长期协作者不存在。
-5. **好实践无法复利**：做得好的一次 readonly audit、一次并行 review 编排，没有变成下次可调用的方法。
+1. **协调靠人**：谁该做什么、做到哪、为什么停——没有一个地方记录，全在 Haisu 脑子里。
+2. **历史依附于进程**：worker 一死，任务上下文蒸发；换人等于从零开始。
+3. **经验蒸发**：一次排查半天的结论，下次重来。
+4. **成员不存在**：换模型/换工具就是换人；成员之间无法委托。
+5. **并行难管**：几个 agent 同时改代码，谁在哪个 checkout 里做什么不透明。
+6. **越权无痕**：agent 做的动作背后是谁授权的，事后说不清。
 
-## 3. Haisu 的工作原则（产品必须顺应，不能违背）
+## 3. Haisu 的工作原则（产品必须顺应）
 
-- **人保留 authority**：agent 不 push/merge/改生产配置；重要交付由 Haisu 决定（Ticket Autopilot 时期已固化为 actor-aware authority，Viva 全局沿用）。
-- **不确定时先 readonly audit，再改代码**（此偏好已多次出现，属 user-model 材料）。
-- **高风险架构决策倾向独立第二意见**（让另一个模型/agent 独立 review）。
-- **多项目并行、被中断是常态**：随时离开、随时回来，回来时不能要求人重建上下文。
-- **本地所有权**：核心资产（记忆、历史、身份）必须是本机开放格式，不进云账号。
+- **人保留 authority**：成员不 push 保护分支、不 merge、不自授权；远端动作要明确授权并留审计。
+- **先只读审，再动代码**（高风险场景尤其如此）。
+- **高风险决策要第二意见**：让另一个成员独立 review。
+- **打断是常态**：随时离开、随时回来，回来时不能要求人重建上下文。
+- **本地所有权**：成员状态、任务历史、知识必须是本机开放格式。
 
-## 4. 场景（Customer Zero 真实场景，Phase 1 的验收素材）
+## 4. 场景（本轮验收素材）
 
-> 场景来源：S1–S7 来自 Haisu 的任务书；S8–S12 是产品定义轮从 Haisu 真实使用方式外推的补充场景，效力同提案，待 Haisu 确认。
+> S1–S9 与 `workflows.md` 的验收线一一对应；括号内是本轮的实现与证据位置。
 
-### S1 — 进入项目
-`viva` → 选择 VicTrader。Viva/Samuel 已知道：项目在哪、main 状态、active worktrees、最近 episode、未完成 intentions、哪些 agent session 仍可 resume。**不问"我们昨天做到哪了"。**
+**S1 — 派发两个任务给同一成员**
+> "Samuel，把 #150 和 #151 交给 Deven。"
 
-### S2 — 开新 Issue
-> "Samuel，我们处理 #812。"
+Samuel 创建/分配两个 Task 给 Deven；两个执行各在自己的 worktree 里真实并行推进（`office dispatch` × 2；`tests/viva/test_acceptance.py::test_scenario_1_and_2…`）。
 
-Samuel：创建/选择 worktree → 绑定 task context → 启动 Codex → 结果与 worktree/branch 绑定。Haisu 不手工拼 worktree 路径、prompt 和仓库状态。
+**S2 — 执行期间换人/换语境**
+Haisu 在 Deven 跑着的时候去看 Alice、切到另一个 workspace。回来时事件归属仍然正确：那次执行仍是"Deven 在 #150 上做的"（归属固定在执行记录里；`test_scenario_4…`）。
 
-### S3 — 并行独立 review
-> "让 Claude Code 独立看一下。"
+**S3 — 独立只读 review**
+> "让 Alice 独立看一下。"
 
-不是开一个失忆的新世界，而是：same workspace、same task、same relevant evidence（含此前结论与分歧）、different worker。两个 worker 的结论、分歧与最终裁决都进入本 task 的 episode。
+Alice 以 `read_only` 模式进入同一任务的产出（同一个 worktree），独立给结论；她的执行与 Deven 的执行在任务上并列可查（`test_scenario_3…`）。
 
-### S4 — 第二天回来
-`viva` → VicTrader → 昨天的 worktree、worker 状态（存活/已退出/可 resume）、上次的决策点和未完成事项直接呈现。continuity 是 Viva 的，不是某个 agent 的。
+**S4 — 只停一个任务**
+> "停掉 #150，别动 #151。"
 
-### S5 — 学会一个方法
-一次复杂 readonly audit 完成后，Samuel 判断"这方法值得复用"→ 形成 candidate skill（SKILL.md 格式），下次同类任务被主动提起，事后被验证有效（使用信号回写）。
+被停的执行进入 `stopped`，另一个仍在跑（`test_scenario_5…`）。
 
-### S6 — 发现 Haisu 的习惯
-多次观察到"Haisu 不要 agent 直接改生产代码，先 readonly audit"→ 这是 **user-model** 条目（跨 workspace 成立），不是 VicTrader 的 project memory。它改变 Samuel 以后所有任务的默认提案方式。
+**S5 — 中断与恢复**
+机器重启。Viva 如实报告：谁还在跑、谁已经退出（结果不明）、哪些可以恢复；**不会重跑已经完成的执行**；任务的目标、约束、已有产出、已试方案、失败原因都能取回（`office recover` / `task brief`；`test_scenario_6…`）。
 
-### S7 — Samuel 对自己的认识变化
-多次经历后形成候选自我假设："面对高不确定性架构选择，我倾向于主动寻求 independent verification。"（self-model：假设 + 证据 + 状态，Haisu 可见；不静默改写。）
+**S6 — 换模型不清历史**
+Deven 从 Claude 换到另一个模型。记录、历史事件、知识条目全在；新执行记录新的 model（`resident engine`；`test_scenario_7…`）。
 
-### S8 — 中途换人
-Codex 在 #812 上卡住/给出两轮不收敛方案 → 换 Claude Code 继续。worktree、已尝试方案、失败原因、相关约束随任务交接，不从零开始。**换的是 worker，丢的不能是上下文。**
+**S7 — 越权被拒绝且留痕**
+一个成员试图派发到它没有授权的任务（或试图用更宽的模式）。拒绝理由进入 grant ledger 与 journal，能被查（`test_scenario_8…`；`viva office grant`）。
 
-### S9 — Worktree 卫生
-周末收尾：Viva 列出 VicTrader 全部 worktree——哪个对应哪个 task/issue、谁在跑、dirty 与否、merged 可归档。清理是知情的、可审计的，不是 `git worktree prune` 赌运气。
+**S8 — 换人接手**
+Deven 卡住/不收敛。`viva task brief <id>` 给出目标、约束、工作位置、已试方案与失败原因、已有产出、未完成项——换 Oliver 或 Alice 接着做。
 
-### S10 — Haisu 亲自下场
-Haisu 直接在某个 worktree 写了一小时代码。回到 Viva 时，这段工作仍进入 workspace 的时间轴（commit/episode 关联），Samuel 的上下文包含它。Resident 的连续性不因"这单是老板自己做的"而断。
-
-### S11 — 跨项目回忆
-> "我们上次是怎么解决 VicTrader 日历语义那个问题的？"
-
-按 episode/decision 检索跨 workspace 的工作史（不是全文 grep transcript，而是检索被策展的 episode/结论及其出处）。
-
-### S12 — 交付自动化作为特例
-Viva 仓库里的一张 Plane ticket 走 Ticket Autopilot 流程（worktree → dev → QA → 有界修复 → 本地 commit → owner 授权）。这是 Viva 内一种**结构化的自治工作流**（Delivery Automation），它的 run evidence 成为该 task episode 的一部分，而不是一个孤立系统。
+**S9 — 关联到 GitHub**
+Task 关联到 repo + issue；执行在分支上产出；PR 出现后能读到 checks 与 review 证据，并追回正确的 task 与产出（`github link` / `github evidence`；`test_scenario_9…`）。
 
 ## 5. 反场景（同样重要）
 
-- Haisu 不希望"退出开发流程"：Viva 增强他，不替换他。
-- 不需要 Viva 变成聊天陪伴软件：所有 growth 机制服务于**开发工作的连续性**。
+- 不需要 Viva 变成聊天陪伴软件：所有机制服务于**工作**。
 - 不需要 Viva 管理 VS Code 已经管理好的东西（编辑、调试、语言服务）。
-- 不需要 Viva 记住一切：unbounded 记录是负担不是资产；策展纪律见 `architecture/temporal-model.md`。
+- 不需要 Viva 记住一切：不加以整理的记录是负担，策展纪律见 `architecture/temporal-model.md` §5。
+- 不需要"全自动开发"：Haisu 保留决策、review、方向与授权。
+- 不需要多人类用户协作：多**成员**不等于多**用户**。

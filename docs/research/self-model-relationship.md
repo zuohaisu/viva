@@ -2,6 +2,9 @@
 
 Status: research note · Date: 2026-09-27 · 来源：`~/Documents/code/self-model`（README + docs/，全量阅读）
 
+> **状态说明（2026-09-27 修订后）**：本文是上一轮（单 Resident 框架）的研究笔记，其中的 Q 编号与对象命名已被 `docs/decisions/0006`–`0010` 修正；研究结论本身仍然有效，与当前产品模型冲突处以后者为准。
+
+
 本文回答：**self-model 仓库里有什么理论；Viva 与它的分工是什么；Viva 里 Self-Model / User-Model 的实现纪律。**
 
 ## 1. self-model 仓库是什么

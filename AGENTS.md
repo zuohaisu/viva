@@ -1,32 +1,30 @@
 # Viva — Agent Working Charter
 
-Viva is a persistent habitat for AI agents to live, work, remember, and grow.
-Viva is **not** the agent: Viva is the place in which a persistent agent can
-live and work.
+Viva is Haisu's local-first **Personal AI Office**. Several persistent AI
+members work here; Viva is **not** an AI member — it is the office they work in.
 
 # Project North Star and Drift Guard
 
 This repository's North Star is:
 
-> Build Viva into a local-first persistent habitat where an AI resident can
-> maintain continuity across sessions while working through multiple
-> workspaces, worktrees, workers, and cognitive engines.
+> Build Viva into the office where Haisu's AI members keep their continuity
+> while working through tasks, worktrees, workers and cognitive engines — and
+> where the history of that work outlives every worker session.
 
 Core ontology invariants — every design must preserve them:
 
 ```text
-Resident ≠ Worker ≠ Cognitive Engine ≠ Workspace ≠ Session
+Resident ≠ Role ≠ Cognitive Engine ≠ Worker ≠ Execution Session
+Workspace ≠ Project ≠ Repository ≠ Worktree ≠ Task
 raw event ≠ experience ≠ memory ≠ self-model ≠ identity
 Session dies. Resident persists.
 ```
 
-The authoritative product charter is `IDEA.md`; the canonical product
-definition and Customer Zero model live in `docs/product/` (vision.md first).
-Boundary-level decisions are codified as ADRs in `docs/decisions/`. The
-authoritative architecture transition record is
-`docs/architecture/viva-transition.md`. The Ticket Autopilot subsystem
-(automated software delivery) keeps `docs/closed-loop-workflow.md` as its
-operational definition. Goal-drift incidents are recorded in
+The product charter is `IDEA.md`; the canonical product definition lives in
+`docs/product/` (vision.md first). Boundary-level decisions are `docs/decisions/`
+(ADR 0001–0010; several early ADRs are explicitly superseded — read the status
+line before relying on one). The architecture and migration record is
+`docs/architecture/viva-transition.md`. Goal-drift incidents are recorded in
 `logs/goal-drift.md`.
 
 ## Mandatory Alignment Check
@@ -35,38 +33,37 @@ Before starting research, planning, or implementation, emit one concise line in
 the working update:
 
 ```text
-[Goal check] This work advances Viva's <resident/workspace/worktree/worker/experience/runtime> capability by <measurable evidence>.
+[Goal check] This work advances Viva's <member/task/execution/office/knowledge/runtime> capability by <measurable evidence>.
 ```
 
 If that sentence cannot be completed concretely, do not start the work.
 Classify it as a side track and ask the user whether to change priorities.
-Work inside the Ticket Autopilot subsystem may instead use that subsystem's
-ticket-loop goal check (`docs/closed-loop-workflow.md`). Repeat the check
-whenever the deliverable type changes, a new subsystem is proposed, or the work
-expands beyond the active scope. At completion, report which capability
-advanced and what evidence now exists.
+Repeat the check whenever the deliverable type changes, a new subsystem is
+proposed, or the work expands beyond the active scope. At completion, report
+which capability advanced and what evidence now exists.
 
 ## Architecture Order
 
-Use this order and do not skip directly to a custom platform:
+Do not skip directly to a custom platform:
 
 1. Reuse existing proven capabilities — inside this repo (worktree service,
-   redaction, authorization policy, agent catalog, engine) and outside
-   (CLIs, MCP, GitHub integrations).
+   redaction, authority policy, worker registry) and outside (CLIs, `gh`, MCP).
 2. Add the smallest deterministic glue needed to connect proven gaps.
 3. Build a minimal new component only where a documented capability gap
    prevents the product from working.
 
 Every custom component must name the existing capability that was checked and
-the gap it fills (see `docs/architecture/viva-transition.md` §6 for the
-pattern).
+the gap it fills (pattern and the current table: `docs/architecture/viva-transition.md` §6).
 
-## Incremental Migration Rule
+## Retired Subsystem Rule
 
-`src/ticket_autopilot/` is the legacy delivery subsystem and stays working.
-Viva lives in `src/viva/` and absorbs capabilities through explicit interfaces.
-No big-bang rewrite, no mass rename, no silent destruction of
-`~/.ticket-autopilot/` state.
+`src/ticket_autopilot/` was **retired** on 2026-09-27 (ADR 0008). Do not
+reintroduce it, do not re-add ticket/Plane/run/QA-verdict objects, and do not
+recreate a fixed delivery pipeline and call it dynamic scheduling. The three
+capabilities that were still useful were moved into `src/viva/`
+(`worktrees/service.py`, `core/redaction.py`, `permissions/authority.py`) —
+change them there. Historical run data (`~/.ticket-autopilot/`, `qa-verdict.json`,
+`tasks/` archives) is preserved and must not be deleted or rewritten.
 
 ## Concurrent Development: Worktree → Branch → PR → Merge
 
@@ -99,10 +96,10 @@ merge into the remote default branch.
   target in the current request. A merged PR, passing tests, a stale branch,
   or task completion never implies that authorization.
 - Before committing, run the closest checks in the worktree:
-  `uv run pytest` (or the subset covering the change), `git diff --check`, and
-  an inspection of the final diff for secrets and generated artifacts. Report
-  blocked or unrun checks honestly; never weaken or skip tests to make them
-  pass.
+  `python -m pytest tests/ -q` (or the subset covering the change),
+  `git diff --check`, and an inspection of the final diff for secrets and
+  generated artifacts. Report blocked or unrun checks honestly; never weaken
+  or skip tests to make them pass.
 - Stage paths explicitly; do not use `git add .` or `git add -A`. Use concise
   imperative commits describing the delivered behavior. Push the task branch
   to `origin` with upstream tracking. Never force-push, delete remote
@@ -128,7 +125,7 @@ merge into the remote default branch.
 ```text
 self-model     research on persistent Self  — Viva depends on nothing from it
 dsh-ai-soul    generic Soul/DSH reference   — Viva depends on nothing from it
-Viva           the local habitat/product
+Viva           the local office/product
 ```
 
 Viva implements only contracts the product needs now; extract shared cores only
@@ -138,10 +135,11 @@ under real pressure.
 
 Safety restrictions apply to autonomous Agents, not to the repository owner.
 Developer and QA Agents may never push a protected branch, authorize their own
-override, or merge a Pull Request. The Controller may push an isolated feature
-branch or merge only when the repository owner explicitly authorizes that exact
-action and the audit record includes actor, action, timestamp, and reason.
-Workers invoked by Viva inherit this rule: they never gain owner authority.
+override, approve their own work, or merge a Pull Request. The Controller may
+push an isolated feature branch or merge only when the repository owner
+explicitly authorizes that exact action and the audit record includes actor,
+action, timestamp, and reason. Workers and AI members invoked by Viva inherit
+this rule: they never gain owner authority.
 
 `QA_PENDING` and `HUMAN_VISUAL_REVIEW_PENDING` are evidence states, not
 `BLOCKED_REQUIREMENTS`; they may accompany a Draft PR. A user override must
@@ -150,22 +148,31 @@ Mixed commits or files are `DIFF_SPLIT_REQUIRED` and should be mechanically
 isolated. Use `TECHNICAL_BLOCKED` only for an operation that actually fails
 because of credentials, network, conflict, or remote rejection.
 
-Viva's Phase-1 permission vocabulary (READ / PROPOSE / ACT_WITH_APPROVAL /
-ACT_AUTONOMOUSLY / FORBIDDEN) is defined in `src/viva/permissions/` and the
-transition document; new worker/workspace/worktree actions must not bypass
-these principles.
+The permission vocabulary (READ / PROPOSE / ACT_WITH_APPROVAL /
+ACT_AUTONOMOUSLY / FORBIDDEN) lives in `src/viva/permissions/`. Member-initiated
+dispatch and stopping are allowed **only** through a live grant (ADR 0007); a
+worker request must never be recorded as if Haisu had issued it, and a child
+grant may never widen its parent. New member/task/execution actions must not
+bypass these rules.
 
 ## Honesty Constraints
 
 No persona theater. If memory formation, self-model evolution, or any
 capability does not exist, the product must say so — never display "remembers",
-"learned", or "evolved" without the capability behind it. Samuel (Customer
-Zero's resident) is configuration data, never hard-coded identity:
+"learned", or "evolved" without the capability behind it. Member records prove
+that configuration, history and knowledge were kept; they do not claim a proven
+continuous Self. Member names are configuration data, never hard-coded identity:
 `Viva ≠ Samuel`.
+
+A second honesty rule applies to work you do here: an execution record, a task
+output or a "reused knowledge" claim is evidence only when the record exists.
+Report what the tests and the real runs show, and name what was not run.
 
 ## Current Focus
 
-The Start Prompt research and comparison tooling remains a parked supporting
-track. The next Viva milestones grow the resident/workspace/worker/experience
-runtime and the delivery subsystem's evolution into a Viva capability — one
-coherent milestone at a time, each with measurable evidence.
+The office's minimal loop (members → tasks → executions → delegation →
+recovery → knowledge/GitHub linkage) is implemented and tested. The next
+milestones grow it one coherent step at a time — structured workflows on top of
+Tasks, knowledge curation loops, and execution-driver integrations — each with
+measurable evidence. The Start Prompt research and comparison tooling remains a
+parked supporting track.

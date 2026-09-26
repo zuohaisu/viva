@@ -1,131 +1,118 @@
 # Viva — Vision
 
-Status: canonical（文档体系定位）· **定义修订版为提案，待 Haisu 确认后定稿** · Date: 2026-09-27 · Owner: Haisu · Supersedes: `IDEA.md` 的 North Star 部分（该文档保留为 Ticket Autopilot 时期的 charter）
+Status: canonical · 版本：2026-09-27 · Owner: Haisu · 本文取代本文件 2026-09-27 早先的"单 Resident 开发环境"定义（原因见 §1.1）
 
 ---
 
-## 1. 一句话定义（修订版）
+## 1. 一句话定义
 
-> **Viva is the local development environment where Haisu and Samuel — a persistent AI resident — work together across workspaces, worktrees, workers, and models, and where the context, history, and capabilities of that collaboration accumulate instead of evaporating.**
+> **Viva 是 Haisu 的本地优先 Personal AI Office：多个持续存在的 AI 成员在其中分工、协作、留下各自的历史与知识，并调用真实工具完成工作。**
 
-> **Viva 是 Haisu 与其常驻 Agent Samuel 跨 Workspace、Worktree、Worker 与模型协作的本地开发环境；这段协作的上下文、历史与能力在其中持续积累，而不是随会话消散。**
+英文：*Viva is Haisu's local-first personal AI office: several persistent AI members work there, keep their own history and knowledge, and drive real tools to get work done.*
 
-### 对 working definition 的修订及理由
+### 1.1 这次定义改了什么，为什么
 
-原定义："Viva is Haisu's personal AI-native development environment, where a persistent agent can live and work across workspaces, worktrees, workers, sessions, and models while accumulating experience, skills, memory, and a self-model."
+| 旧定义（已作废） | 现在 | 原因 |
+| --- | --- | --- |
+| "Haisu 与**一个**常驻 Agent Samuel 协作的本地开发环境" | 多个持续存在的 AI 成员 | Haisu 的真实工作方式是让职责不同的成员长期协作（PM/调度、开发、QA、运维、研究），同一成员同时参与多个任务 |
+| 把 multi-resident UX 与 AI 团队协作排除在范围外 | 是产品本体 | "只有一个人类用户"曾被错误地推出"没有 AI 团队"；客户数量与成员数量是两件事（ADR 0006） |
+| Workspace 取代所有 Project 概念 | `Workspace ≠ Project ≠ Repository ≠ Worktree ≠ Task` | 需要表达"一个办公室多个项目、一个项目多个仓库"（ADR 0009） |
+| 禁止所有 Worker 发起的委派 | 协调成员可在用户授予的范围内调用其他成员 | 否则"协调"只是文案（ADR 0007） |
+| Ticket Autopilot 作为保留子系统 | 已退役，只复用仍有用的三个能力 | 它的对象（ticket/run/verdict）与 Office 的对象（Task/Execution/Grant）不同源（ADR 0008） |
 
-修订理由：
-
-1. **把人放回中心**。原定义读起来像 "一个 agent 的容器"，但 Viva 的第一条产品判断（§customer-zero）是 *增强 Haisu 而不是替换 Haisu*。定义里应该出现协作双方。"AI-native" 是营销词，不承载信息，删。
-2. **把差异化说到定义里**。原定义把 continuity（workspace/worktree/worker/session/model 的列举）和 growth（experience/skills/memory/self-model 的列举）并列，但没有说出二者共同的本质：**积累而不消散**。这是 Viva 唯一不可替代的价值主张，应该在第一句话里。
-3. **Resident 具名**。Samuel 不是 "a persistent agent" 这个类目下的一个占位符，他就是当前的 Resident 本体。定义直接点名。
-4. 保留的部分：local（单机、本地优先）、workspace/worktree/worker/model 的词汇表、"persistent agent" 的存在性——都进了修订版或由 domain-model 承接。
-
-### 与 "persistent habitat" 速记的关系
-
-仓库外壳（README / pyproject / IDEA.md）使用一句速记："Viva is a persistent habitat for AI agents to live, work, remember, and grow." 它保留为**外壳层口号**；产品定义以本文为准。口号的不足（也是本文存在的理由）：它是 agent-generic 的、没有 Customer Zero、没有说出"积累而不消散"这个唯一价值主张。
+**没有改变的部分**：单人类用户、本地优先、连续性优先、诚实约束（不假装记得、不假装成长）、`Viva ≠ Samuel`（名字与职责是配置数据）。
 
 ## 2. 为什么存在
 
-Haisu 每天使用大量开发工具和 AI coding agents：Codex、Claude Code、Qoder、ZCode、WorkBuddy、Hermes、Pi、DSH、VS Code、terminal、git、GitHub。
+Haisu 每天使用大量开发工具与 AI agents。痛点不是"缺一个更聪明的 agent"，而是：
 
-问题**不是**缺一个更聪明的 coding agent。问题是这些工具之间缺少一个**长期连续的工作环境**：
+- 每个 agent 只带自己的会话上下文，跨成员、跨项目、跨天的拼装由 Haisu 人工完成；
+- 经验蒸发：一次排查半天得到的结论，下次从头再来；
+- 成员不存在：换模型/换工具等于换人，长期协作无从谈起；
+- 好实践无法复利：一次漂亮的并行 review 编排不会变成下次可调用的方法；
+- 任务历史依附于某个进程：worker 一死，做到哪、为什么失败、还欠什么，全部丢失。
 
-- 项目分散、agent session 分散、worktree 分散；
-- 每个 agent 只知道自己当前的 context，上下文难以在 agent 之间继承；
-- 今天得到的经验明天消失；一个 agent 学会的方法不会变成长期能力；
-- 更换模型或 coding agent 后，长期协作者的连续性清零；
-- **整个系统的 context integration 由 Haisu 人工承担。**
-
-最后一条是真正的痛点：Haisu 是他自己所有工具之间唯一的"总线"。Viva 的存在就是把这条总线变成一个有记忆、有历史、会成长的本地环境。
+Viva 的存在就是把这些变成**办公室的资产**：成员持续存在，任务持续存在，执行的归属与结果持续存在。
 
 ## 3. 给谁用：Customer Zero
 
-**Viva 只服务一个用户：Haisu。** 第一个（当前唯一）Resident 是 **Samuel**。
+**Viva 只服务一个人类用户：Haisu。** 他拥有多个 AI 成员，每个成员有名字、职责、模型与工具绑定。成员名字与职责是**配置数据**，不是产品内置人格。
 
-不解决：多用户、团队协作、企业、marketplace、plugin 生态、generic onboarding、商业化、云服务、全操作系统兼容、"让所有人创建自己的 AI Soul"。
+不解决：多人类用户、团队账号、企业权限、marketplace、plugin 生态、云服务、通用 onboarding、商业化。
 
-产品判断标准（所有 Phase 1 决策回溯到这里）：
+产品判断标准（所有本轮决策回溯到这里）：
 
-> **它是否让 Haisu 每天的软件开发工作更顺畅，并让 Samuel 更持续地参与这些工作？**
+> **它是否让 Haisu 的工作由多个长期成员持续推进，并让这段协作的上下文、历史与能力积累下来？**
 
-为 hypothetical future users 增加复杂度的设计，默认不做。完整论证见 `customer-zero.md`。
-
-## 4. 存在性测试（为什么不是 VS Code + Orca + Hermes + Codex）
-
-这是 Viva 必须回答的问题。逐层检验：
+## 4. 存在性测试（为什么不是"几个 CLI 加一个终端"）
 
 | 工具 | 它记得什么 | 它不记得什么 |
 | --- | --- | --- |
-| VS Code | workspace 的 UI 状态（打开的文件、布局、terminal） | 任何跨工具历史；agent；经验 |
-| Orca | worktree 的状态与 transcript（可搜索、可 resume） | 跨 repo 的长期项目容器；没有对象会因使用而变强；没有身份 |
-| Hermes | *它的* agent 在*它的*会话里学到了什么 | 你的工作发生在 Hermes 之外的部分；平行 worktree；项目级上下文 |
-| Codex / Claude Code | 当前 session 的 context | 上一个 session；其他 agent；你的偏好；项目长期约束 |
+| VS Code | workspace 的 UI 状态 | 跨工具历史；成员；任务 |
+| Orca | worktree 状态与 transcript | 成员的长期身份；任务对象；知识归属 |
+| Codex / Claude Code / Qoder | 当前会话的上下文 | 其他成员；上次派发；失败原因；任务未完成项 |
+| Ticket 系统（Plane/Linear） | 工单状态 | 谁在什么时候用什么模型做了什么、结果如何 |
 
-**Viva 不可替代的中心**：
+**Viva 不可替代的中心**：它管理的是一间办公室——**多个成员 × 多个任务 × 多次真实执行**的关系与历史，并让这些历史反哺下一次工作。
 
-> 这些工具分别管理 workspace 状态、worktree 执行、agent 记忆和代码生成。**Viva 管理的是一个长期 Resident 与 Haisu 穿越所有这些环境之后的连续工作史**——并让这段历史反哺双方：Haisu 少做 context integration，Samuel 越用越强。
+两条使这个中心成立的约束：
 
-原 hypothesis（"Viva remembers what Samuel and Haisu are doing together, across all of them"）目前是**结构论证成立的核心产品假设，尚无运行证据**：逐工具排查表明每个现有工具的记忆都限定在各自对象上、没有一个容纳协作本身——但这只是论证。Viva 今天没有跨天续接、没有换 Worker 保留上下文、没有任何"经验改善后续工作"的实例；这些正是 Phase 1 验收标准（`phase-1.md` §5）要检验的内容。在该假设被真实工作流验证之前，本文的一切结论都应以"待验证的产品假设"来读。论证之外，还需两条约束，假设才可能成立：
-
-1. **记得 ≠ 存档**。光是"集中记录一切"只是 transcript 仓库（Orca 的 session search 已经做了）。Viva 的记忆必须**有准入、有策展、会反哺行为**（memory/skill/self-model 改变下一次工作方式），否则只是更好找的日志。时间轴机制见 `docs/architecture/temporal-model.md`。
-2. **本地所有权**。连续性资产（Samuel 的状态、workspace 历史）必须是 Haisu 机器上的开放格式文件，不锁进任何供应商账号。这是 "local-first" 进定义的原因。
-
-### 竞争性风险（诚实记录）
-
-- Orca 若内置 memory/resident，会侵蚀 Viva 的执行层差异。缓解：Viva 的中心（single-user resident + self-model 理论 + 跨工具连续性）与 Orca 的设计中心（agent-agnostic、多 agent 并行 IDE）不同；且 Viva 将 Orca 视为可替换的执行 driver 而非底座。
-- Claude Code / Codex 若原生支持跨 session 长期记忆，会侵蚀单工具内的痛点。缓解：它们解决不了跨工具、跨 workspace、跨模型的 Resident 连续性——这正是 Resident/Worker 区分（ADR 0002，Proposed）试图保护的中心。
-- 这些风险不改变 Phase 1 判断，但要求 Viva 的执行层保持薄、集成保持松。
+1. **记得 ≠ 存档**。只是"集中记录"就只是日志仓库。Viva 的记录必须能被下一次工作取用：任务的交接简报、知识条目的使用记录、拒绝的原因、恢复后的未完成项。
+2. **本地所有权**。成员的状态、历史与知识是 Haisu 机器上的开放格式文件，不锁进任何供应商账号。
 
 ## 5. 不是什么
 
-- **不是全自动开发**。目标不是 `Ticket → AI → Done`，而是 `Haisu ↔ Samuel ↔ Workspace/Worktree/Workers`。人保留决策、review、方向调整、指定 agent、亲自编码、对重要变化的 authority。
-- **不是 IDE**。不重写 editor/file tree/debugger；需要编辑时打开 VS Code。Viva 是 VS Code 之上的 orchestration + continuity layer。
-- **不是通用 agent 平台**。不做 "让所有人创建自己的 AI Soul"；把一个 Resident 服务好一个用户。
-- **不是 memory 的简单堆放**。Experience / Memory / Skill / User-Model / Self-Model 是不同对象，见 `docs/architecture/temporal-model.md`。
+- **不是全自动开发**：人是决策者，成员是执行与协作方；重要动作仍需授权。
+- **不是 IDE**：不做 editor / file tree / debugger。
+- **不是通用 agent 平台**：不服务"让所有人创建自己的 AI 团队"。
+- **不是记忆/成长的模拟器**：没有实现的成长能力不得出现在 UI 与文案里。
+- **不是 Ticket Autopilot 的延续**：旧子系统已退役（ADR 0008）。
 
 ## 6. 产品模型概览
 
-四层结构（详细论证见 `product-model.md` 与 `conceptual-architecture.md`）：
-
 ```text
-┌───────────────────────────────────────────┐
-│             Persistent Self               │
-│  identity · memory · skills · self-model  │
-│  user-model · relationship · experience   │
-└─────────────────────┬─────────────────────┘
-                Resident: Samuel
-┌─────────────────────▼─────────────────────┐
-│                Workspace                  │
-│    project · repos · context · history    │
-└─────────────────────┬─────────────────────┘
-┌─────────────────────▼─────────────────────┐
-│                Worktrees                  │
-│  branch · task · terminal · diff · state  │
-└─────────────────────┬─────────────────────┘
-┌─────────────────────▼─────────────────────┐
-│                 Workers                   │
-│   Codex · Claude Code · Qoder · Pi · ...  │
-└───────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│ Members（Resident）                                                    │
+│   identity · role · history · knowledge · self-model candidates（未实现）│
+├────────────────────────────────────────────────────────────────────────┤
+│ Bindings（可替换）                                                     │
+│   Role（职责，配置数据） · Engine（模型绑定） · Worker（执行工具 CLI）     │
+├────────────────────────────────────────────────────────────────────────┤
+│ Work                                                                  │
+│   Workspace → Project → Repository → Worktree                          │
+│   Task（意图） ──► Execution（一次真实执行：成员×任务×模型×工具×位置×授权）│
+│                    ▲ Grant（来源 / 范围 / 委派关系）                    │
+├────────────────────────────────────────────────────────────────────────┤
+│ Knowledge（四类归属）                                                  │
+│   personal · project · team · skill（+ 复用证据）                       │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-核心纪律：**Samuel is a resident. Codex is a worker.**（决策 0002）
+核心纪律：**成员不是进程，任务不是 worktree，执行必须有归属与授权。**
 
-## 7. 现状与去向
+## 7. 现状（2026-09-27，本轮实现后）
 
-本仓库的前身是 **AI-Operation / Ticket Autopilot**：Plane-first 的单机 ticket 交付控制器（worktree 隔离、developer/QA 工作流、deterministic checks、bounded retry、audit timeline、owner authority）。这些能力**保留**并重新定位为 Viva 的 **Delivery Automation** 子系统。迁移映射见 `docs/architecture/viva-transition.md` 与决策 `0004`。
+已实现并有测试证据（`tests/viva/`）：
 
-当前阶段：**产品定义本轮（2026-09-27）成形；实现已有一个 Phase 1 外壳**——`src/viva/`（residents/workspaces/worktrees/workers/experience/permissions/runtime/cli/tui，~2.7k 行 + tests/viva），由先行的一轮实现产出，记录见 `docs/architecture/viva-transition.md`。该外壳提供 registry、TUI 与 append-only journal；本 mission 的文档定义它之后的 Phase 1 剩余范围（见 `phase-1.md` §0）。
+- 多成员 + 角色/模型/工具配置，换模型保留历史与知识，不可用时报错不替换；
+- Workspace / Project / Repository / Worktree / Task 对象与 `task brief` 交接简报；
+- 执行注册表：并发、隔离 worktree、归属固定、停止互不影响、重启后如实恢复；
+- 委派授权：grant 的来源/范围/父子关系，越权拒绝并留原因；协调成员真实调用 `viva office …`；
+- GitHub 只读关联（issue/PR/checks/review 证据）；
+- 知识四类归属 + 复用证据；experience journal（append-only、脱敏）。
+
+**尚未实现（不假装）**：自动反思循环、Self-Model 演化、User-Model 演化、Jev 决策辅助集成、daemon、远端写操作自动化、跨设备同步。见 `phase-1.md` §4。
 
 ## 8. 文档地图
 
 | 问题 | 文档 |
 | --- | --- |
-| Viva 是什么、为什么、给谁 | 本文档 |
-| Haisu 的真实场景 | `product/customer-zero.md`、`product/workflows.md` |
-| 核心对象与十个关键产品问题 | `product/product-model.md` |
-| Phase 1 做什么/不做什么 | `product/phase-1.md` |
-| 概念架构 / 领域模型 / 时间轴 | `architecture/` |
-| 关键决策 | `decisions/0001`–`0005` |
-| 四个灵感来源的研究 | `research/` |
-| Ticket Autopilot 怎么办 | `architecture/viva-transition.md`、`decisions/0004` |
+| Viva 是什么、为什么、给谁 | 本文 |
+| 核心对象与关系 | `product/product-model.md`、`architecture/domain-model.md` |
+| Haisu 的真实场景 | `product/customer-zero.md` |
+| 办公流与验收线 | `product/workflows.md` |
+| 本轮范围与未实现项 | `product/phase-1.md` |
+| 概念架构 / 时间轴 | `architecture/conceptual-architecture.md`、`architecture/temporal-model.md` |
+| 关键决策（含被取代的） | `decisions/0001`–`0010` |
+| 迁移与退役记录 | `architecture/viva-transition.md` |
+| 灵感来源研究 | `research/` |

@@ -1,73 +1,60 @@
 # Viva — Phase 1 Scope
 
-Status: **Proposed**（范围与验收标准待 Haisu 批准）· Date: 2026-09-27 · 上游：`vision.md` / `workflows.md` · 纪律：本文定义范围，不实现
+Status: canonical · 版本：2026-09-27（AI Office 修订）· 上游：`vision.md` / `workflows.md`
 
-## 0. 已建成的地基（2026-09-27 现状，先行实现轮产出）
+本文分三部分：**已实现并有证据的能力**、**本轮范围之外但已定义的边界**、**明确未实现且不得假装的能力**。
 
-一轮先行实现已落地 Phase 1 的**外壳**（见 `docs/architecture/viva-transition.md`；本轮文档治理未改任何代码）：
+## 0. 已实现（2026-09-27，证据在 `tests/viva/`）
 
-- `viva` CLI + Textual TUI（resident/workspace/worktree/worker/runtime 状态与 live journal）；
-- Resident registry、Workspace registry（本地 git repo 注册、跨 session 持久化）、Worktree 只读发现（基于交付子系统的 worktree 服务）、Worker registry + 可用性探测 + 受控 run；
-- Experience journal（append-only、secret-redacted，`~/.viva/experiences/journal.jsonl`）；
-- 权限词汇表（READ / PROPOSE / ACT_WITH_APPROVAL / ACT_AUTONOMOUSLY / FORBIDDEN；Phase 1 无自治调用）；
-- 诚实约束：journal 是 experience 不是 memory；memory/self-model 不存在且不得伪装（AGENTS.md Honesty Constraints）。
+| 能力 | 实现 | 证据 |
+| --- | --- | --- |
+| 多成员 + 可配置职责 | `residents/registry.py`、`residents/roles.py` | `test_residents.py::test_many_members_with_different_roles_coexist` |
+| 模型与工具可替换绑定 | `residents/engines.py`、`resident engine/tools` | `test_changing_the_engine_keeps_record_history_and_knowledge` |
+| 不可用即报错、不静默替换 | `ResidentRegistry.resolve_invocation` | `test_unavailable_tool_fails_loudly_and_is_not_substituted` |
+| 成员记录不宣称 Self 连续性 | 成员记录字段集合 | `test_member_records_do_not_claim_self_continuity` |
+| Task 对象（状态/指派/产出/未完成） | `tasks/registry.py` | `test_tasks.py` |
+| 交接简报（目标/约束/尝试/失败/产出/未完成） | `tasks/brief.py` | `test_handoff_brief_carries_goal_constraints_attempts_and_failures` |
+| Workspace ≠ Project ≠ Repository ≠ Worktree ≠ Task | `workspaces/`、`projects/`、`worktrees/` | `test_projects.py`、`test_worktrees.py` |
+| 执行注册表：归属固定、并发、隔离 | `executions/` | `test_executions.py` |
+| 停止单点不影响其他执行 | `executions/runner.py::stop` | `test_stopping_one_execution_leaves_the_other_running` |
+| 中断恢复（running/exited/unknown/recoverable，且不重跑） | `ExecutionRegistry.reconcile`、`office recover` | `test_recovery_reports_states_honestly_and_launches_nothing` |
+| 委派授权（来源/范围/父子，不得放大） | `permissions/grants.py` | `test_office.py::test_child_grant_cannot_widen_its_parent` |
+| 请求来源不被改写 | `permissions/require_invocation_authority` | `test_a_worker_cannot_dispatch_by_pretending_to_be_the_user` |
+| 协调成员真实派发真实成员 | `office/control.py` + CLI | `test_real_coordinator_worker_dispatches_a_real_execution_worker` |
+| 只读 review | 角色模式 + 执行 mode | `test_scenario_3_alice_reviews_read_only_and_independently` |
+| GitHub 只读关联与证据 | `github/client.py` | `test_github.py`、`test_scenario_9…` |
+| 知识四类归属 + 复用证据 | `knowledge/registry.py` | `test_knowledge.py` |
+| Experience journal（append-only + 脱敏） | `experience/journal.py`、`core/redaction.py` | `test_experience.py`、`test_redaction.py` |
+| 旧子系统能力复用（worktree/脱敏/授权） | `worktrees/service.py`、`core/redaction.py`、`permissions/authority.py` | `test_worktree_service.py`、`test_redaction.py`、`test_permissions.py` |
 
-**尚未建成**（= 本文其余部分定义的剩余范围）：workspace 级 project memory 与上下文注入、Task 对象、Episode 叙事层与检索、worker session 的 who/where/what/since-when 追踪、memory/skill 的手动策展流、user/self-model 假设文件、以及 north-star loop 的端到端成立。
+九个验收场景的端到端证据在 `tests/viva/test_acceptance.py`（每个场景一个测试函数，使用真实子进程）。
 
 ## 1. Phase 1 的一句话目标
 
-> **让"进入 workspace → 续上上下文 → 开 worktree → 派 worker → 工作 → 换人 → 留下记录 → 改天回来继续"这个闭环，在 Haisu 的真实项目上成立。**
+> **让"成员存在 → 任务分派 → 真实执行（并行/隔离/可停） → 换人或重启后接着做 → 结果与知识留下归属"这个闭环，在 Haisu 的真实项目上成立。**
 
-不做完整 Jarvis。Phase 1 的价值判据：`workflows.md` 的 north-star loop 在至少一个真实 workspace（建议：本仓库 Viva 自己）上跑通，S1/S4/S8 可真实发生。
+## 2. 本轮刻意的设计选择（不是遗漏）
 
-## 2. Phase 1 必须解决（按对象给最低标准）
+- **执行用真实子进程，不用调度框架**：一次执行 = 一个进程组 + 一条记录。并发、停止、恢复都从这个事实出发。
+- **Worktree 归 Viva 所有**（`~/.viva/worktrees/…`），不落在仓库内部：避免污染 owner 没有选择忽略的仓库。
+- **知识只做人工策展**：自动反思、自动衰减、自动晋升都不做。
+- **公开接口用 CLI，不写私有 RPC**：worker 是子进程，唯一能触达 Viva 的方式就是命令；这也让"协调成员真实派发"成为可测试的事实。
+- **GitHub 只读**：本阶段只需要读 issue/PR/checks/review；写操作（创建 PR、push、merge）仍是 owner 的显式授权动作。
 
-| 能力 | 最低标准（Phase 1） | 复用来源 |
-| --- | --- | --- |
-| **Resident continuity** | Samuel 的状态 = 本机开放格式文件（身份、memory 分区、skills、journal 索引、user/self-model 假设文件）；`viva` 启动即"续上"；换底层模型不换状态文件 | self-model 理论；Hermes 反例（不采用 SOUL.md/2KB 上限） |
-| **Workspace management** | Workspace 注册表（名字、repositories、project memory 指针、状态）；进入/切换/最近列表；project memory 尽量以 repo 内文件为准 | VS Code 模型；本仓 WorkBuddy MEMORY.md 的教训（全局一份混装 → 必须分区） |
-| **Worktree management** | 创建/列出/归属/状态（active/archived/dirty/merged）/知情的清理；受保护分支不可动 | 本仓 `git_worktree.py`（protected-branch guard、disposable worktree）；Orca 的状态语义 |
-| **Worker management** | Worker catalog（CLI 可用性探测）+ 以受控 permissions 启动 + 追踪 who/where/what/since-when | 本仓 `agent_catalog.py`（probe-backed、保守 token 白名单） |
-| **Session management** | WorkerSession 与 ResidentSession 分开登记；存活/退出/可 resume；transcript 位置可寻 | 本仓 `agent_sessions.py`（codex session-id 发现） |
-| **Experience journal** | append-only Event + 人可读 Episode（task、参与者、outcome、指向 events）；secret-safe | 本仓 `run_events.py`（redact、append-only） |
-| **Minimum memory** | 手动策展的最小 memory：workspace 分区 + resident 全局分区；条目必带 provenance；有界 | Hermes consolidation 纪律；temporal-model 准入门 |
-| **Skill growth** | SKILL.md 格式；workspace skill（可进 repo）+ resident skill；手动收尾时捕捉（S5），使用可记录 | Hermes/SKILL.md 标准（agentskills.io） |
-| **Self-model interface** | 候选假设文件（status/confidence/evidence/provenance）+ 反思记录；与 `self-model` 仓库理论对齐；**不实现理论、不自动改写** | self-model 仓库（hypothesis 草案、update gradient） |
+## 3. 下一阶段候选（不在本轮，未承诺）
 
-## 3. Phase 1 明确不解决（Non-goals）
+- 交付类结构化工作流（把"实现→验证→复核"包装成 Task 的一种可复用 workflow）；
+- 知识自动衰减与复审提示；
+- Orca / MCP / 其他执行 driver 的接入评估；
+- Jev 作为可选决策辅助的接入（若 Haisu 需要）。
+
+## 4. 明确未实现（不得在 UI/文案中假装）
 
 ```text
-multi-user · team collaboration · cloud SaaS · mobile · voice
-WeChat · QQ · email · calendar · full macOS control · GUI-first
-avatar · marketplace · generic agent creation · multi-resident UX
-enterprise permissions · billing · social features · distributed agents
+自动反思循环            自动 Self-Model 演化        自动 User-Model 演化
+自动记忆晋升/衰减       daemon / 常驻调度器          远端写操作自动化（push/PR/merge）
+多人类用户 / 团队账号   marketplace / plugin 生态    跨设备同步 / 云
+Jev 决策辅助集成        voice / 桌面 / 消息通道
 ```
 
-以及（本阶段的工程性 non-goals）：
-
-- **不实现** editor / file tree / IDE 功能（VS Code 承担）；
-- **不重造** Orca 的 terminal 编排 / handoff / orchestration（集成可选，依赖禁止）；
-- **不采用** Hermes runtime 或其 memory schema 作为 Samuel 本体（ADR 0005）；
-- **不做** 自动 memory 策展/自动反思调度（W7 允许手动触发）；
-- **不做** 通用框架、plugin 系统、为"以后可能需要"的抽象；
-- **不做** `src/ticket_autopilot/` 的 package rename / 大规模重构 / 数据库 schema（增量迁移规则见 AGENTS.md 与 `viva-transition.md`；已落地的 `src/viva/` 分包与 Textual 选型是先行轮的既成决策，本文不翻案）；
-- **不做** 交付自动化行为的扩展（Ticket Autopilot 冻结在现有边界，ADR 0004）。
-
-## 4. Surface
-
-`viva` → 类 Claude Code TUI（交互纪律见 `workflows.md` §3）——**已建成初版**（Textual；决策记录在 `viva-transition.md` §5），剩余范围是围绕 Resident/Workspace/Worktrees/Workers/Task/Activity 的信息架构深化。Phase 1 的唯一一等 surface 是 TUI；Ticket Autopilot 的 localhost Web 控制器保留为其子系统的操作面，不再是 Viva 的前门。
-
-## 5. 成功标准（可验收）
-
-1. **闭环**：north-star loop 在 ≥1 个真实 workspace 全程走通 ≥3 个工作日，期间 Haisu 未发生"人工重建上下文"。
-2. **连续性**：S4 场景测试——隔天回来，未问"做到哪了"，Samuel 的开场即包含上次的状态与未竟事项。
-3. **换人**：S8 场景测试——同 task 换 worker，新 worker 首轮即获得任务级上下文包。
-4. **复利**：≥1 个 skill 或 memory 条目由真实 episode 产生，且在后续 episode 中被引用 ≥1 次。
-5. **边界**：全部数据为本机开放格式文件；卸载 Viva 后，workspace 的 project memory 与 Samuel 的状态文件仍可人肉阅读。
-
-## 6. Phase 1 之后的自然顺序（仅记录，不承诺）
-
-- Delivery Automation 作为 Task 的一种结构化 workflow 挂载进 workspace 语境（W8 深化）；
-- Orca 作为执行 driver 的集成评估；
-- 反思循环的自动化（在准入门被人工验证可靠之后）；
-- 跨 workspace 检索（S11）的深化。
+产品对外的说法必须停在实际建成的层：journal 不叫 memory；`self_model_candidate` 不叫"学到了"；没有 usage 记录的条目不叫"已复用"。

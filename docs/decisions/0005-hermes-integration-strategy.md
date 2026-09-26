@@ -1,6 +1,6 @@
 # ADR 0005 — Hermes 集成策略（Proposed，待 Haisu 裁决）
 
-Status: **Proposed** · Date: 2026-09-27 · 研究依据：`docs/research/hermes.md`
+Status: **Proposed** · Date: 2026-09-27 · 研究依据：`docs/research/hermes.md` · 本轮状态：**不受 2026-09-27 产品方向变更影响**（未实现，也未被取代；Hermes 既不是本轮依赖，也不是本轮范围）
 
 > 来源与效力说明：Haisu 在任务书中明确要求"研究并讨论 Hermes 是 Worker 还是能力来源，不要预先假设答案，形成 ADR-style decision note，不要现在集成"。本文遵循该要求给出**选项分析与当前倾向**；倾向本身是产品定义轮的提案，**未经 Haisu 接受，不构成决定**。
 

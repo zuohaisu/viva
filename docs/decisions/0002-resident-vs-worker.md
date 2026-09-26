@@ -1,6 +1,13 @@
 # ADR 0002 — Resident 与 Worker 严格区分
 
-Status: **Proposed**（待 Haisu 接受）· Date: 2026-09-27 · 上游：`docs/product/product-model.md` Part II
+Status: **Superseded by ADR 0006**（2026-09-27；保留作历史出处）· Date: 2026-09-27 · 上游：`docs/product/product-model.md` Part II
+
+> **取代记录（2026-09-27，ADR 0006）**：本文的**核心区分（Resident 长期存在、Worker 可替换、成长只附着 Resident 侧、worker 无交付权）继续有效**，但框架有三处不足，由 ADR 0006 取代：
+> 1. 只有单一 Resident（Samuel），无法表达多成员办公室；
+> 2. 缺少 **Role** 与 **Engine** 两层（本文把"认知模型"直接当 substrate 讨论，却没有把它作为可配置绑定对象）；
+> 3. 用"WorkerSession"承担执行记录，无法区分"一次真实执行的归属"与"工具进程"，也无法表达同一成员并行的多个执行。
+>
+> ADR 0006 的新关系：`Resident ≠ Role ≠ Cognitive Engine ≠ Worker ≠ Execution Session`。
 
 > 效力说明：**"Resident 与 Worker 必须严格区分、真正持续积累历史的是 Samuel"是 Haisu 任务书中的显式要求**，不是本文的发明。本文把该要求展开为具体的关系模型（WorkerSession 双锚、两种 Session 分开、成长只附着 Resident 侧）——**展开的细节是产品定义轮的提案**，其中的具体门槛与映射未经 Haisu 逐项接受。
 
