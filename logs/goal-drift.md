@@ -443,3 +443,92 @@ Engine 存在真实门禁缺陷：所有节点初始 stale=True，导致 `close`
 
 到达 close 的充要条件由引擎结构性保证（条件门控节点不再初始就绪），不再依赖 QA 输出
 的自觉；qa-verdict 未过 schema 校验绝不映射为 accept。
+
+---
+
+## 2026-09-27 — North Star 由 ticket-driven delivery 显式变更为 Viva（Accepted reprioritization）
+
+**Status:** Accepted reprioritization（repository owner 显式决策，非漂移）
+
+### Intended outcome
+
+原 North Star：ticket-driven automated software delivery（一张 ticket 为最小闭环单元，IDEA.md 2026-07 版）。
+
+### Observed divergence
+
+无越轨行为——这是 owner 主动的产品边界变更：Viva 成为产品框架（"Haisu 与常驻 Agent Samuel 跨 Workspace/Worktree/Worker/模型协作、连续积累的本地开发环境"），Ticket Autopilot 降级为其中的 Delivery Automation 子系统。本条目按模板记录这次显式 reprioritization，防止未来的 agent 会话把两个 North Star 混淆。
+
+### Evidence
+
+- 2026-09-27 产品定义轮产出：`docs/product/`（vision / customer-zero / product-model / workflows / phase-1）、`docs/architecture/`（conceptual / domain-model / temporal-model / viva-transition）、`docs/decisions/`（ADR 0001–0005）、`docs/research/`（vscode-workspace / orca / hermes / self-model）。
+- 先行实现轮（本轮之前，未提交）：`src/viva/`（~2.7k 行）+ `tests/viva/`、pyproject 更名 `viva`（Textual 为唯一运行时依赖）、README/AGENTS/IDEA 已改写为 Viva 框架——树中未提交改动在本次记录时点可见。
+- Ticket Autopilot 资产原样保留：`src/ticket_autopilot/` 未改名，`docs/closed-loop-workflow.md` 仍为其操作定义。
+
+### Facts versus inference
+
+**Facts**：以上文件与改动均在树中存在；`src/ticket_autopilot/` 无包名变更；goal check 机制在 AGENTS.md 中已改为 Viva 能力导向并保留子系统内 ticket-loop 变体。
+**Inferences**：本次变更消除了"IDEA.md 旧 North Star 与实际工作方向"之间的持续张力；若不记录，后续会话存在把 Ticket Autopilot 当作仍居首位的误判风险。
+
+### Impact
+
+- 交付闭环不再是产品终点，而是 Viva Delivery Automation 子系统的能力；其 bounded-automation 与 evidence-first 纪律晋升为全局不变量。
+- Start Prompt 轨维持 parked 不变。
+
+### Correction or explicit reprioritization
+
+Reprioritization 本身：North Star 变更为 Viva（ADR 0001、0004）；Ticket Autopilot 边界冻结在新定位内（ADR 0004）。
+
+### Guard added
+
+- ADR 目录（docs/decisions/）承载边界级决策；AGENTS.md 指向它。
+- 两个 goal check 变体各管其区：Viva 能力导向（全仓默认）与 ticket-loop（Delivery Automation 子系统内）。
+- "为 hypothetical users 增加复杂度默认不做"写入 ADR 0001。
+
+### Recovery milestone
+
+Phase 1 验收（docs/product/phase-1.md §5）：north-star loop（进入 workspace → 续上下文 → worktree → worker → 工作 → 换人 → 留记录 → 回归继续）在 ≥1 个真实 workspace 上跑通 ≥3 个工作日，S1/S4/S8 场景可真实发生。
+
+---
+
+## 2026-09-27 — Reprioritization: 从"单 Resident 持续性层"到"多成员 AI Office"（accepted）
+
+### Trigger
+
+Haisu 的任务书明确取代了上一轮产品定义的六条约束：只围绕 Samuel 一个 Resident 设计；把 multi-resident UX 与 AI 团队协作排除在范围外；用"单人类用户"推出"没有 AI Team/Member"；强制用 Workspace 取代所有 Project 概念；禁止所有 Worker 发起的委派；整体保留 Ticket Autopilot 作为 Viva 子系统。
+
+### Scope
+
+产品模型、对象关系、权限模型、执行模型、旧子系统处置、文档与 ADR 体系。不是新增功能轮，而是**纠正方向 + 交付最小可验证闭环**。
+
+### Evidence
+
+- 新决策：`docs/decisions/0006`（多成员 AI Office）、`0007`（委派授权）、`0008`（Ticket Autopilot 退役）、`0009`（Workspace≠Project≠Repository≠Worktree≠Task）、`0010`（知识归属与复用证据）。
+- 被取代的旧决策保留并标注：ADR 0001（部分）、0002、0003、0004 头部均有 Superseded + 原因；0005 保持 Proposed 且不受影响。
+- 实现：`src/viva/` 新增 `residents/{roles,engines}`、`projects/`、`tasks/`、`executions/`、`office/`、`knowledge/`、`github/`、`permissions/grants.py`；TUI 的全局 `_worker_running` 与完成事件归属 bug 一并修复。
+- 复用与退役：`worktrees/service.py`、`core/redaction.py`、`permissions/authority.py` 三个能力从 `src/ticket_autopilot/` 原地搬迁并保留验证；其余代码路径、固定流水线、Web 控制器、Plane 连接器与旧产品文档退役（`viva-transition.md` §4）。
+- 验收：`tests/viva/test_acceptance.py` 覆盖九个场景（真实子进程）；`tests/viva/test_office.py` 含一次真实协调 Worker 调用真实执行 Worker 的验证。
+
+### Facts versus inference
+
+**Facts**：上述文件、测试与删除清单在树中可见；`src/ticket_autopilot/` 已不存在；`pyproject.toml` 只剩 `viva` 一个入口点。
+**Inferences**：不一致的旧文档若继续作为权威，会把后续会话引回"单 Resident + Ticket Autopilot 保留"的旧边界；本次纠正消除了这一张力。
+
+### Impact
+
+- 交付自动化的具体实现不再是产品的一部分；它作为**能力来源**的三项被吸收，其余按 ADR 0008 退役。
+- 协调 Worker 从"禁止委派"变为"在用户授予范围内委派并留痕"。
+- Workspace 不再是 Project 的替身；成员与语境成为两个正交维度。
+
+### Correction or explicit reprioritization
+
+Explicit reprioritization（Haisu 决定）。ADR 0006–0010 是记录；被取代的决策保留历史出处。
+
+### Guard added
+
+- AGENTS.md 新增 **Retired Subsystem Rule**：不得重新引入 ticket/Plane/run/QA-verdict 对象，不得把固定流水线改名为动态调度。
+- 委派边界有代码级强制（`require_invocation_authority`、grant 的父子不放大）并有测试；越权必须留下 `authority.refused`。
+- 诚实约束加固：成员记录字段集合被测试锁定；`self_model_candidate` 无自动晋升；"复用证据"以 usage 记录为唯一门槛。
+
+### Recovery milestone
+
+九场景验收（`docs/product/phase-1.md` §0）全部有测试证据；下一步是让这套闭环在 Haisu 的真实仓库（非测试夹具）上连续使用多个工作日，并据此校正知识策展与工作位置策略。
