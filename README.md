@@ -90,8 +90,9 @@ The runnable implementation remains **Python 3.11+ / Textual**; the Rust
 migration has not shipped. Pi is approved as the first default conversation
 host, using its own interactive UI inside a Viva terminal plus a small extension.
 Member identity and long-term assets remain independent of the harness.
-Pi/PTY integration is not implemented; Office storage and the concrete external
-memory integration remain undecided.
+SQLite plus ordinary files is approved for Office state storage, separate from
+external memory. Rust/Pi/PTY and SQLite integration are not implemented; the
+concrete external memory integration remains unconfirmed.
 
 ## Quickstart
 
