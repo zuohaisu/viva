@@ -87,7 +87,11 @@ The approved target is **Rust + Tokio + Ratatui + Crossterm** for the Office
 host and terminal surface. [ADR 0011](docs/decisions/0011-rust-host-and-tui.md)
 is the authoritative selection, including reuse boundaries and validation.
 The runnable implementation remains **Python 3.11+ / Textual**; the Rust
-migration has not shipped. Pi integration and storage are separate decisions.
+migration has not shipped. Pi is approved as the first default conversation
+host, using its own interactive UI inside a Viva terminal plus a small extension.
+Member identity and long-term assets remain independent of the harness.
+Pi/PTY integration is not implemented; Office storage and the concrete external
+memory integration remain undecided.
 
 ## Quickstart
 

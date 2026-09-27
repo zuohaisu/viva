@@ -1,8 +1,8 @@
-# ADR 0011 — Rust 宿主与终端 TUI
+# ADR 0011 — Rust 办公室宿主、终端 TUI 与 Pi 对话宿主
 
 Status: **Accepted**（Haisu 显式裁决，2026-09-27）· Implementation: **Not implemented**
 
-> 效力说明：宿主采用 Rust 是用户裁决；Tokio + Ratatui + Crossterm 是随此方向记录的实施默认组合。本文是技术选型的唯一权威结论，历史研究只保留来源与讨论过程。当前可运行版本仍是 Python 3.11+ / Textual，本次只更新文档。
+> 效力说明：办公室宿主采用 Rust，以及 Pi 作为 Samuel 的首个默认对话宿主、以交互终端与小型扩展接入，均为用户裁决；Tokio + Ratatui + Crossterm 是随 Rust 方向记录的实施默认组合。本文是技术选型的唯一权威结论，历史研究只保留来源与讨论过程。当前可运行版本仍是 Python 3.11+ / Textual，本次只更新文档。
 
 ## Context
 
@@ -10,7 +10,7 @@ Viva 是本地优先 Personal AI Office。成员身份、任务、授权与工�
 
 首版以终端 TUI 为主。常态为一个或少量执行，偶尔在同一台机器上并发约 16 个 Agent；目标还包括内存较小的 Intel Mac。这是应用运行时负载，不是每轮开发或 CI 必须启动 16 个编译实例。未来桌面与 Windows 客户端只影响接口边界，本次不选择桌面框架。
 
-用户明确：迁移成本、实现复杂度不作为否决条件；资源占用、交互速度、真实任务完成速度和构建反馈时间需要考虑。关闭 TUI 后，任务与定期维护应暂停。随后进一步裁决：Python 实现可直接替换，既有实现不构成历史负担或兼容义务。
+用户明确：迁移成本、实现复杂度不作为否决条件；资源占用、交互速度、真实任务完成速度和构建反馈时间需要考虑。关闭 TUI 后，任务与定期维护应暂停。随后进一步裁决：Python 实现可直接替换，既有实现不构成历史负担或兼容义务；Samuel 可在不同 harness 中表达，首个默认宿主选 Pi，Viva 提供终端而不接管 Agent 循环。
 
 ## Decision
 
@@ -21,7 +21,9 @@ Viva 是本地优先 Personal AI Office。成员身份、任务、授权与工�
 | Office 宿主、CLI、执行监督 | **Rust** | 拥有成员/任务/执行/授权关系、恢复与资源生命周期 |
 | 异步 I/O 与监督 | **Tokio** | 等待模型、工具和进程；阻塞工作与绘制分离，队列有界 |
 | 终端界面 | **Ratatui + Crossterm** | 一个终端渲染者，CLI/TUI 共用 Office 能力接口 |
-| 认知与 Agent 工具 | **复用现有实现；具体接入待定** | Pi SDK/RPC、现有 CLI/MCP 是候选，不自建通用 Agent harness |
+| 首个默认对话宿主 | **Pi 交互终端 + 小型扩展** | 首版在 Viva 的终端中使用 Pi 自己的聊天界面；其他 harness 可替换，不自建 Agent 循环 |
+| Pi RPC/SDK | **未来可选，不是首版前提** | 只有统一聊天界面或更深集成的真实需求出现时再评估 |
+| 外部记忆 | **独立于 harness 接入** | 用户现用 Holographic；具体项目/API 尚未核对，接入未实施，与办公室状态存储分开 |
 | 存储 | **另行裁决** | 当前 JSON/JSONL/Markdown 是基线；SQLite 是候选，不随语言裁决自动通过 |
 | 浏览器/原生应用操作 | **复用成熟能力，按 driver 接入** | Playwright、系统 API/小型 helper 是候选；具体方案待验证 |
 | Desktop / Windows | **未选型** | 保持 domain 与 surface、平台 driver 分离，无首版实现承诺 |
@@ -62,8 +64,9 @@ Python 实现只提供可参考的能力审计与行为证据，不约束 Rust �
 | 拟建/调整的部分 | 已检查的能力 | 需要填补的缺口 / 最小动作 |
 | --- | --- | --- |
 | Rust Office 宿主 | `src/viva/` 成员、Task、Execution、grant、恢复、知识注册表 | 按有效产品契约实现 Office；成员、任务、授权和历史独立于 Worker，内部结构可重设 |
-| Rust 执行监督 | `executions/runner.py`、Worker registry、CLI/MCP、Tokio process | 适配外部工具并落实有界输出、取消、进程组退出与回收；不重写模型循环 |
-| Rust TUI | 当前 Textual surface、Ratatui/Crossterm、Pi TUI | 需要 Rust 宿主上的终端交互；复用渲染库，聊天/导航/日志与领域状态分离 |
+| Rust 执行监督 | `executions/runner.py`、Worker registry、外部 Agent CLI、Tokio process | 监督按需启动的进程，落实输出预算、取消、进程组退出与回收；不重写模型循环 |
+| Rust TUI / 终端承载 | 当前 Textual surface、Ratatui/Crossterm、Pi 交互 TUI、成熟 PTY/终端仿真能力 | Viva 做办公室导航与终端承载，Pi 做自己的聊天界面；先复用 PTY/终端仿真库，具体库待实现验证 |
+| Pi 小型扩展 | Pi 扩展事件/工具接口、现有 `viva office …` CLI、成员记录与 task brief | 注入成员与任务上下文，按 grant 调用办公室动作，保存交接引用；不重建 harness、存储或记忆系统 |
 | Git/worktree | `worktrees/service.py`、Git、`gh`、现有 authority | 满足隔离与受保护动作的规则；复用 Git/gh 能力，Python 服务可直接替换 |
 | 脱敏与授权 | `core/redaction.py`、`permissions/authority.py`、grant ledger | Rust 路径覆盖有效授权与脱敏需求；可重写实现与测试，不能扩大权限 |
 | 计算机操作 driver | 浏览器自动化能力、macOS Accessibility/系统 API、现成 helper | 按实际任务验证后补最小适配；前台焦点/鼠标/键盘的动作序列须协调 |
@@ -73,9 +76,35 @@ Python 实现只提供可参考的能力审计与行为证据，不约束 Rust �
 
 Viva 拥有成员身份、Task、Execution 归属与状态、grant、workspace/project 关系及知识归属。模型与 Worker 可替换。外部工具可以拥有原始 transcript、模型消息格式及工具内部状态；Viva 保存稳定引用和必要交接记录，不同时维护两套互相竞争的会话事实。
 
-Pi SDK/RPC 的选择尚未完成。采用 RPC 子进程时，Pi 内部会话事实属于 Pi；Viva 的 Office 事实仍属于 Viva。具体事件、取消、分叉、重连与持久化映射必须在接入前验证。[Pi RPC](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md)、[Pi SDK](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/sdk.md)
+#### 5.1 成员在哪里：身份、长期资产、当前表达分开
 
-一个 Office/TUI 可以监督多个按需启动的执行；16 个 Agent 不等于 16 个 Viva、16 个 TUI，也不保证可以共享为一个 Worker 进程。进程数量由各工具能力决定。
+Samuel 的身份、职责与工作关系属于 Viva 的成员记录；长期记忆可以由独立的外部记忆系统承载；当下的对话、模型上下文与工具循环由当前 harness 承载。Pi、Codex 或其他 harness 是可替换的表达/执行工具，换工具不删除成员或其资产，也不承诺不同模型有完全相同的行为。名字与默认工具仍为配置数据，不能在代码中硬编码 Samuel 或要求所有成员使用 Pi。
+
+用户表示在 Hermes 中使用 Holographic。本文确认外部记忆与办公室状态存储分离，未确认 Holographic 的具体仓库、协议、命名空间或数据格式，不能声称已集成。Viva 保存知识归属、来源、有效性及使用证据，并可关联外部记忆引用；不因引入外部服务就假装自动形成记忆。SQLite 是否用于办公室状态仍待单独裁决。
+
+#### 5.2 首版 Pi 接入：交互终端与最小扩展
+
+**首版默认在 Viva 提供的交互终端中运行 Pi，使用 Pi 自己的聊天界面。** Viva 管成员/任务/workspace/worktree 导航、工作位置及终端进程生命周期；Pi 管模型调用、工具循环、压缩与当前内部会话。不额外构建一套 Viva 聊天界面，不以 RPC/SDK 接管 Pi 循环。
+
+开源有利于检查与修复，但选择 Pi 的直接依据是可复用的交互界面、会话分支及明确扩展接口。Pi 已提供扩展事件、工具注册和上下文修改能力；会话结构已有分支记录。是否完整满足 Viva 的谈话树 UX，仍需验收，不能把库能力视为产品已经交付。[Pi 扩展](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md)、[Pi 会话格式](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/session-format.md)
+
+小型 Pi 扩展只补已记录的 Office 接入缺口：开始会话时读取所绑定成员的资料、当前任务简报及授权范围内的相关记忆；工作中通过现有 Viva CLI 或经核实的受控接口查询/派发/跟进任务；在明确交接节点记录结果、未完成事项与原始记录引用。记忆写入按外部记忆系统及策展规则执行，不默认把每次退出或完整 transcript 自动晋升成长期记忆。该扩展可用 TypeScript 实现，不改变 Rust 宿主裁决。
+
+成员发起的办公室动作由 Viva 校验真实请求来源和 live grant；扩展不能把 worker 请求冒充用户、不能自行扩大权限。Pi 内部的文件/命令等工具仍需对应权限策略，扩展钩子与提示词都不能被宣称为 OS 沙箱或完整安全边界。
+
+提供终端并不足以判定任务完成：退出码不是开发完成、QA 通过或交付成功的证明。要支持自动跟进，必须由受控接口提交明确结果与证据，Office 根据其语义记录状态；终端输出只作为原始工作记录，不能靠 ANSI 屏幕文本猜出权威结论。
+
+#### 5.3 PTY 与界面边界
+
+嵌入交互式 Agent 需要 PTY、终端状态解析/仿真、输入路由与尺寸更新，不能把 stdout 当普通文本面板直接显示。先检查成熟终端库，最小适配处理焦点、快捷键、粘贴、滚动、Unicode、resize 与关闭；具体库尚未选择。Pi 的终端输出进入其独立 PTY/仿真状态，再由 Viva 渲染所选终端视图；不能让父子 TUI 同时无协调地写入同一个物理终端。后台终端的缓存/scrollback 仍受资源预算约束。
+
+#### 5.4 跨 harness 连续性与未来接口
+
+切换 harness 时传递成员资料、授权范围内的相关记忆、任务交接简报与必要历史，原始记录另行保留并关联。无需把 Pi 原生会话格式机械转换成另一工具的原生格式；当前模型上下文重建能力按各工具实际接口验证，不承诺所有分支可无损续跑。
+
+RPC/SDK 留作未来可选路径：出现统一自有聊天界面或更深自动化的真实需求时，才重新评估事件、取消、分叉、重连及持久化映射。本次批准交互终端接入，不同时批准 RPC 首版架构或共享 SDK 服务。[Pi RPC](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md)、[Pi SDK](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/sdk.md)
+
+一个 Office/TUI 可以监督多个按需启动的执行；16 个 Agent 不要求启动 16 个 Viva 办公室界面。交互 Worker 可以各有独立 PTY 与内部 TUI，其进程数量由工具能力决定，不保证共享一个运行时；后台终端状态与缓存同样需要预算。
 
 ### 6. 关闭界面的语义
 
@@ -108,7 +137,8 @@ Rust 实现的首个真实任务垂直切片，同时承担技术验收。先记
 | 交互与速度 | 冷启动、输入到绘制延迟 p50/p95、模型首输出、任务完成时间、CPU；区分本地与网络/模型耗时 |
 | 输出与背压 | 高频输出下界面可响应、完整持久记录与可见截断策略、队列/日志不无限增长 |
 | 生命周期 | 单独 Stop 不影响邻居；正常关闭停止所拥有执行；重启不丢归属、不重跑完成任务、不误杀其他进程 |
-| 领域与授权 | 换模型保留成员历史；workspace/Task 独立；worker 请求不冒充用户；子 grant 不扩大；脱敏语义保留 |
+| 领域与授权 | 换模型/harness 保留成员资产并提供交接；workspace/Task 独立；worker 请求不冒充用户；子 grant 不扩大；脱敏语义保留 |
+| Pi / 终端接入 | 真正交互 Pi：输入、流式显示、Unicode、粘贴、resize、分叉、切换/停止邻居互不影响；扩展绑定正确成员/任务，原始记录可追溯；退出码不冒充验收结果 |
 | 工程反馈 | 冷构建、增量构建、检查/测试时间与缓存命中；记录 CI 总耗时，不把语言名当编译成本数据 |
 
 量化预算需在实现切片前根据目标机器可用资源和用户响应要求确定，写进该切片的验收记录；本 ADR 不编造内存或毫秒门槛。语义验收要求零越权、零误杀、零归属丢失与零完成任务重放。性能预算未设或目标机器未测，不能报告“16 路低内存 Intel Mac 验收通过”。
@@ -119,4 +149,4 @@ Rust 实现的首个真实任务垂直切片，同时承担技术验收。先记
 
 Rust PR 需要检查/测试及必要构建，但不必每次丢弃缓存重编所有依赖。Cargo 支持构建缓存，`cargo check` 可提供不生成最终可执行文件的编译检查；两者都不替代测试。发布、平台/工具链或依赖变化可能需要额外构建，缓存也不能保证每次有效。[Cargo build cache](https://doc.rust-lang.org/cargo/reference/build-cache.html)、[cargo check](https://doc.rust-lang.org/cargo/commands/cargo-check.html)
 
-本次不添加 Cargo 项目、不移植代码、不改变 Python 安装入口或 CI。后续实施可直接用 Rust 替换 Python，并单独交付可运行切片、产品行为证据、按实际数据需要制定的保全方案与目标平台验收；不要求维持旧 Python 入口、格式、兼容层或双版本回退。历史 Ticket Autopilot 数据保持原样。研究文档存档仅表示决策已收敛，不构成运行能力进度。
+本次仅更新决策文档：不添加 Cargo 项目、Pi 扩展或 PTY 实现，不移植代码、不改变 Python 安装入口或 CI。后续实施可直接用 Rust 替换 Python，并单独交付可运行切片、产品行为证据、按实际数据需要制定的保全方案与目标平台验收；不要求维持旧 Python 入口、格式、兼容层或双版本回退。历史 Ticket Autopilot 数据保持原样。研究文档存档仅表示决策已收敛，不构成运行能力进度。

@@ -55,7 +55,7 @@ Viva Core  →  surfaces: CLI · TUI（本轮主界面）· Desktop（未来）
 Viva Core  →  capabilities: dispatch/execution · knowledge · recovery · github(只读)
 ```
 
-宿主与终端界面的批准方向是 **Rust + Tokio + Ratatui + Crossterm**（[ADR 0011](docs/decisions/0011-rust-host-and-tui.md)）；当前实现仍是 Python + Textual，迁移尚未实施。技术选择不改变上述产品与复用边界。
+宿主与终端界面的批准方向是 **Rust + Tokio + Ratatui + Crossterm**（[ADR 0011](docs/decisions/0011-rust-host-and-tui.md)）；当前实现仍是 Python + Textual，迁移尚未实施。Pi 是首个默认对话宿主，以交互终端与小型扩展接入；成员身份与长期资产独立于 harness。上述接入尚未实现，技术选择不改变产品与复用边界。
 
 Ticket Autopilot 曾是本仓库的产品主体，2026-09-27 已**退役**（ADR 0008）：其中被证明仍有用的三个能力（worktree 隔离、secret redaction、owner 授权）被搬进 `src/viva/` 的小模块并保留原有验证；其余代码路径、固定流水线与旧产品文档被删除。历史运行数据未被删除。
 

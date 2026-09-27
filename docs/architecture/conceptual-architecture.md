@@ -91,7 +91,7 @@ Workspace/Project/Repository/Worktree/Task 的对象关系
 - **两个存储区**：`~/.viva/`（成员、任务、执行、授权、知识、experience、worktrees）与仓库内文件（项目知识如需随仓库走，可由 owner 放在 repo 内；Viva 只要求归属正确）。
 - **没有云依赖**：GitHub 是可选的只读连接器，不是运行前提；没有网络时一切本地能力照常工作。
 - **当前实现基线**：Python 3.11+ / Textual；执行用真实子进程 + 进程组（可并发、可停止、可恢复）。
-- **批准的目标**：Rust + Tokio + Ratatui + Crossterm，尚未实施迁移。范围、状态所有权、关闭界面语义和性能验收统一以 [ADR 0011](../decisions/0011-rust-host-and-tui.md) 为准；Pi、存储与 desktop 框架另行裁决。
+- **批准的目标**：Rust + Tokio + Ratatui + Crossterm，尚未实施迁移。范围、状态所有权、关闭界面语义和性能验收统一以 [ADR 0011](../decisions/0011-rust-host-and-tui.md) 为准。Pi 已批准为首个默认对话宿主，以交互终端与小型扩展接入，尚未实现；具体外部记忆接入、办公室状态存储与 desktop 框架另行裁决。
 
 ## 5. 与旧产品路径的关系
 

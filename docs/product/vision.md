@@ -114,6 +114,6 @@ Viva 的存在就是把这些变成**办公室的资产**：成员持续存在�
 | 本轮范围与未实现项 | `product/phase-1.md` |
 | 概念架构 / 时间轴 | `architecture/conceptual-architecture.md`、`architecture/temporal-model.md` |
 | 关键决策（含被取代的） | `decisions/0001`–`0011` |
-| 宿主与 TUI 技术裁决（目标与现状） | [ADR 0011](../decisions/0011-rust-host-and-tui.md) |
+| 办公室宿主、TUI 与 Pi 对话宿主裁决（目标与现状） | [ADR 0011](../decisions/0011-rust-host-and-tui.md) |
 | 迁移与退役记录 | `architecture/viva-transition.md` |
 | 灵感来源研究 | `research/` |
