@@ -81,6 +81,19 @@ Not implemented, and never faked: automatic reflection, self-model evolution,
 automatic memory promotion, a daemon, automatic remote writes, multi-user
 support, Jev integration. See [docs/product/phase-1.md](docs/product/phase-1.md) §4.
 
+## Technology decision
+
+The approved target is **Rust + Tokio + Ratatui + Crossterm** for the Office
+host and terminal surface. [ADR 0011](docs/decisions/0011-rust-host-and-tui.md)
+is the authoritative selection, including reuse boundaries and validation.
+The runnable implementation remains **Python 3.11+ / Textual**; the Rust
+migration has not shipped. Pi is approved as the first default conversation
+host, using its own interactive UI inside a Viva terminal plus a small extension.
+Member identity and long-term assets remain independent of the harness.
+SQLite plus ordinary files is approved for Office state storage, separate from
+external memory. Rust/Pi/PTY and SQLite integration are not implemented; the
+concrete external memory integration remains unconfirmed.
+
 ## Quickstart
 
 Requires Python 3.11+ and Git.
@@ -115,7 +128,7 @@ selection persists in `~/.viva/`; the selection is navigation only.
 - [docs/architecture/](docs/architecture/) — conceptual architecture (the seven
   relations), domain model (objects, states, invariants), temporal model
   (event → experience → knowledge), and the migration/retirement record.
-- [docs/decisions/](docs/decisions/) — ADRs 0001–0010, including the decisions
+- [docs/decisions/](docs/decisions/) — ADRs 0001–0011, including the decisions
   this round superseded and why.
 
 ```text

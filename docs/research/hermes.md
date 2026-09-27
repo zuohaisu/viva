@@ -7,6 +7,8 @@ Status: research note · Date: 2026-09-27 · 来源：本机安装（Hermes.app,
 
 本文回答：**Hermes 的 "agent 越用越强" 是怎么实现的；Viva 对 Hermes 采取什么策略（Q8）。** 决策本体在 `docs/decisions/0005-hermes-integration-strategy.md`。
 
+> **后续核查（2026-09-28）**：Holographic 的公开源码、检索/反馈机制与接入缺口见 [专项研究](hermes-holographic-memory-2026-09-28.md)。本文的本机观察未在本轮重验，关于 Samuel 宿主的阶段性倾向以 [ADR 0011](../decisions/0011-rust-host-and-tui.md) 已批准的 Pi 方向为准；ADR 0005 仍是 Hermes 集成选项提案，不是批准结论。
+
 ## 1. 产品定位
 
 Hermes 是 Nous Research 的开源（MIT）本地个人 agent，口号 "The Agent That Grows With You"——"one agent, one memory, every surface"：同一 agent 经 Telegram/Discord/Slack/Email/CLI 可达，跨会话记得你、从协作中学技能、可执行计划任务。Electron 壳 + 本地 Python 后端（`~/.hermes/`），可选付费云托管。
