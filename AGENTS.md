@@ -69,12 +69,12 @@ capabilities that were still useful were moved into `src/viva/`
 change them there. Historical run data (`~/.ticket-autopilot/`, `qa-verdict.json`,
 `tasks/` archives) is preserved and must not be deleted or rewritten.
 
-## Concurrent Development: Worktree → Branch → PR → Merge
+## Concurrent Development: Worktree(+Branch) → Commits → PR → Merge
 
 Multiple agents and the repository owner develop this repo in parallel. The
 main checkout is shared state: never do task work directly in it. Every change
-is delivered from an isolated worktree through a branch, a pull request, and a
-merge into the remote default branch.
+is delivered from an isolated worktree as one or more commits on its branch,
+then through a pull request and a merge into the remote default branch.
 
 - Treat any user request to implement, fix, refactor, or otherwise change the
   repository as authorization to deliver through the full workflow below. The
