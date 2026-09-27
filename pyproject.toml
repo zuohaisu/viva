@@ -3,26 +3,24 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ticket-autopilot"
+name = "viva"
 version = "0.1.0"
-description = "Lightweight local controller that turns a structured ticket into a verified, independently QA'd GitHub PR."
+description = "A local-first Personal AI Office: persistent AI members, tasks, executions, and the history that outlives any worker session."
 readme = "README.md"
-# SPDX license metadata requires setuptools>=77.
+# PEP 639 SPDX expression; the string form requires setuptools>=77 (see build-system).
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
-# Runtime uses only the Python standard library; keeping this explicit makes a
-# clean product install independent of a developer's globally installed tools.
-dependencies = []
+# Textual is the only runtime dependency: it is the office's interactive surface
+# (rationale, alternatives and the stdlib-gap analysis live in
+# docs/architecture/conceptual-architecture.md). Everything else is stdlib.
+dependencies = ["textual>=8.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4"]
 
 [project.scripts]
-ticket-controller = "ticket_autopilot.cli:main"
+viva = "viva.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-ticket_autopilot = ["schemas/*.json", "workflows/*.yaml", "static/*.html", "static/*.css", "static/*.js"]

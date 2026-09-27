@@ -1,76 +1,66 @@
-# AI Operations — Project Charter
+# Viva — Project Charter
+
+Status: canonical · 版本：2026-09-27（AI Office 修订）· 取代 `IDEA.md` 早先的 "persistent habitat for a single resident" 表述（原因见 `docs/decisions/0006`）
 
 ## North Star
 
-Build a system in which one Linear or Plane ticket is the minimum closed-loop unit of
-software delivery.
-
-For one structured ticket, the system should move from requirements through
-development, deterministic verification, independent QA, a bounded repair loop,
-Pull Request creation, and ticket status update—with evidence retained at every gate
-and explicit repository-owner authorization before merge.
-
-## Actor-Aware Human Authority
-
-Safety limits apply to autonomous Agents, not to the repository owner. An Agent
-must never push a protected branch, authorize its own override, or merge a Pull
-Request. The Controller may push an isolated feature branch, create a Draft PR,
-or merge only for the exact action explicitly authorized by the repository owner
-and recorded as audit evidence.
-
-Pending QA or visual review remains visible as `QA_PENDING` or
-`HUMAN_VISUAL_REVIEW_PENDING`; it does not block a Draft PR. The owner may accept
-the visual gate or override a quality gate with a recorded reason. Such an
-override preserves the failed/pending evidence and must never be reported as QA
-PASS. Only an actual credential, network, branch-conflict, or remote rejection is
-`TECHNICAL_BLOCKED`.
-
-## Preferred Approach: Reuse First
-
-The first design question is not “what platform should we build?” It is:
-
-> Which parts of this loop can already be closed by Linear or Plane automation,
-> agent hooks, MCP, GitHub Actions, and native GitHub integrations?
-
-Use the following decision order:
-
-1. Configure and compose existing capabilities.
-2. Add thin, deterministic glue for verified gaps.
-3. Build a small custom controller only if the existing tools cannot close the loop.
-
-A custom system is a fallback, not the default starting point.
-
-## Product Boundary
-
-Core work must directly advance at least one stage of this loop:
-
 ```text
-Ticket intake and contract
-  -> Development invocation
-  -> Deterministic verification
-  -> Independent QA
-  -> Bounded fix loop
-  -> Pull Request and CI evidence
-  -> Ticket status and result
+Haisu's AI office should stay real over time:
+several AI members, each with its own role, history and knowledge;
+tasks that outlive any single worker session;
+executions whose attribution and authority are always recoverable;
+work that actually gets done through real tools.
 ```
 
-General AI-agent research, universal Start Prompt design, and prompt-comparison
-infrastructure are supporting work. They are not the product and must not displace a
-core milestone unless explicitly reprioritized.
+Viva 是 **Haisu 的本地优先 Personal AI Office**。Viva 不是 AI 成员，不是 Claude Code wrapper，不是 worktree 管理器，也不是记忆数据库——它是成员在其中生活、工作、协作的地方。
 
-## Current Correction — 2026-07-22
+## 核心不变量
 
-Work drifted from the ticket-driven delivery loop into building and studying a Start
-Prompt comparison system. Those artifacts are preserved under `tooling/start-prompt/`
-and `research/`, but that track is now parked.
+```text
+Resident ≠ Role ≠ Cognitive Engine ≠ Worker ≠ Execution Session
+Workspace ≠ Project ≠ Repository ≠ Worktree ≠ Task
+raw event ≠ experience ≠ memory ≠ self-model ≠ identity
+Session dies. Resident persists.
+```
 
-Before implementing the existing Ticket Autopilot specification as written, perform a
-reuse-first capability audit. The next implementation milestone is one real, low-risk
-ticket vertical slice using the maximum practical amount of existing infrastructure.
+- **Resident（成员）**：长期存在的 AI 身份（Samuel、Deven、Alice…）。名字与职责是配置数据。
+- **Role**：这个成员用来做什么（协调/开发/QA/运维/研究）。配置数据。
+- **Cognitive Engine**：此刻为它提供认知的模型。可替换器官。
+- **Worker**：具体执行的 agent CLI。可替换工具。
+- **Execution**：一次真实运行，固定记录成员、任务、模型、工具、位置、来源与授权。
+- **Task**：意图；跨执行、跨成员、跨重启存活。
 
-## Definition of Progress
+## Customer Zero
 
-Progress is not the number of prompts, documents, agents, or framework components
-created. Progress is demonstrated by evidence that one more stage of a real ticket
-can run automatically and safely, or that a specific blocker to that loop has been
-removed.
+```text
+Haisu — 一个人类用户，多个 AI 成员
+```
+
+Haisu 是唯一的用户；成员是他创建的记录。产品里没有任何内置人格；`Viva ≠ Samuel`（成员名不是代码）。
+
+## 架构原则
+
+```text
+The member must exist before the member thinks.
+```
+
+成员的状态（身份、角色、历史、知识）必须独立于当前表达它的模型和当前替它执行的工具存在。换模型、换工具、换角色都不删除成员——这是可检验的（`tests/viva/test_residents.py`、`test_acceptance.py` 场景 7）。
+
+一般化：**复用优先**。先查仓库内外已有的成熟能力，只补真实缺口；每个自建组件都要说明它对照过什么、缺什么（`docs/architecture/viva-transition.md` §6）。
+
+## 产品形状
+
+```text
+Viva Core  →  surfaces: CLI · TUI（本轮主界面）· Desktop（未来）
+Viva Core  →  capabilities: dispatch/execution · knowledge · recovery · github(只读)
+```
+
+Ticket Autopilot 曾是本仓库的产品主体，2026-09-27 已**退役**（ADR 0008）：其中被证明仍有用的三个能力（worktree 隔离、secret redaction、owner 授权）被搬进 `src/viva/` 的小模块并保留原有验证；其余代码路径、固定流水线与旧产品文档被删除。历史运行数据未被删除。
+
+## 进度定义
+
+进度不是功能数量、成员数量或文档数量。进度是**证据**：一间 AI 办公室能否再多撑住一个边界——多一个成员、多一个并行任务、一次重启、一次换模型、一次越权尝试——并且如实报告结果。
+
+## 诚实约束（不可协商）
+
+没有实现的成长能力不得出现在产品里：journal 不叫 memory，`self_model_candidate` 不叫"学到了"，没有使用记录的条目不叫"已复用"。未知与未实现始终保持可见。
