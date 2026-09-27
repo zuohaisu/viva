@@ -34,19 +34,19 @@ G0 完成条件：可运行 Rust binary + 一条真实 SQLite 事件重载/回�
 
 | Code / issue | 可验收交付 | 建议 lane | 合入依赖 |
 | --- | --- | --- | --- |
-| V01 | Rust 可运行基础、SQLite 事务底座与并行接口门槛 | A：基础/集成 | 技术裁决 PR #7 |
-| V02 | 成员、模型工具绑定与多项目工作语境 | B：成员/语境 | V01 |
-| V03 | 任务、执行记录与可恢复的交接历史 | C：任务/状态 | V01 |
-| V04 | 委派授权、调用来源与流式脱敏 | D：授权/安全 | V01 |
-| V05 | 交互 PTY、终端状态与进程树生命周期 | E：终端运行时 | V01 |
-| V06 | 办公室 TUI 与内嵌终端的键盘交互 | F：界面 | V01 |
-| V07 | 活跃 Office 控制面、CLI 回调与退出恢复闭环 | A：基础/集成 | V02, V03, V04, V05, V08 |
-| V08 | Git/worktree 隔离与 GitHub 证据关联 | G：Git 集成 | V01 |
-| V09 | Pi 默认对话宿主与成员办公室扩展 | B：成员/Pi | V02, V04, V07, V06 |
-| V10 | 会话分叉、重命名与跨 harness 交接 | C：任务/会话 | V03, V09, V06 |
-| V11 | 知识与技能的来源、取用和退出机制 | G：知识 | V01 |
-| V12 | 资源、响应与故障恢复的基准和最终验收 | H：验收 | V01 |
-| V13 | Rust 安装发行与 Python 入口退役 | A：交付/集成 | V06, V07, V09, V10, V11 |
+| [V01 / #10](https://github.com/zuohaisu/viva/issues/10) | Rust 可运行基础、SQLite 事务底座与并行接口门槛 | A：基础/集成 | 技术裁决 PR #7 |
+| [V02 / #11](https://github.com/zuohaisu/viva/issues/11) | 成员、模型工具绑定与多项目工作语境 | B：成员/语境 | [V01 / #10](https://github.com/zuohaisu/viva/issues/10) |
+| [V03 / #12](https://github.com/zuohaisu/viva/issues/12) | 任务、执行记录与可恢复的交接历史 | C：任务/状态 | [V01 / #10](https://github.com/zuohaisu/viva/issues/10) |
+| [V04 / #13](https://github.com/zuohaisu/viva/issues/13) | 委派授权、调用来源与流式脱敏 | D：授权/安全 | [V01 / #10](https://github.com/zuohaisu/viva/issues/10) |
+| [V05 / #14](https://github.com/zuohaisu/viva/issues/14) | 交互 PTY、终端状态与进程树生命周期 | E：终端运行时 | [V01 / #10](https://github.com/zuohaisu/viva/issues/10) |
+| [V06 / #15](https://github.com/zuohaisu/viva/issues/15) | 办公室 TUI 与内嵌终端的键盘交互 | F：界面 | [V01 / #10](https://github.com/zuohaisu/viva/issues/10) |
+| [V07 / #16](https://github.com/zuohaisu/viva/issues/16) | 活跃 Office 控制面、CLI 回调与退出恢复闭环 | A：基础/集成 | V02, V03, V04, V05, V08 |
+| [V08 / #17](https://github.com/zuohaisu/viva/issues/17) | Git/worktree 隔离与 GitHub 证据关联 | G：Git 集成 | [V01 / #10](https://github.com/zuohaisu/viva/issues/10) |
+| [V09 / #18](https://github.com/zuohaisu/viva/issues/18) | Pi 默认对话宿主与成员办公室扩展 | B：成员/Pi | V02, V04, V07, V06 |
+| [V10 / #19](https://github.com/zuohaisu/viva/issues/19) | 会话分叉、重命名与跨 harness 交接 | C：任务/会话 | V03, V09, V06 |
+| [V11 / #20](https://github.com/zuohaisu/viva/issues/20) | 知识与技能的来源、取用和退出机制 | G：知识 | [V01 / #10](https://github.com/zuohaisu/viva/issues/10) |
+| [V12 / #21](https://github.com/zuohaisu/viva/issues/21) | 资源、响应与故障恢复的基准和最终验收 | H：验收 | [V01 / #10](https://github.com/zuohaisu/viva/issues/10) |
+| [V13 / #22](https://github.com/zuohaisu/viva/issues/22) | Rust 安装发行与 Python 入口退役 | A：交付/集成 | V06, V07, V09, V10, V11 |
 
 ## 4. 并行安排与依赖
 
@@ -111,10 +111,10 @@ V06 的独立合入证明 shell/键盘/终端快照行为；真实 Office/Pi 组
 
 | Code / issue | 可验收交付 | 建议 lane | 合入依赖 |
 | --- | --- | --- | --- |
-| F01 | 交付类 Task 的可复用工作流与授权交付 | A：工作流 | V03, V04, V07, V08, V09 |
-| F02 | 运行期间的知识复审与仓库维护建议 | G：维护 | V04, V07, V08, V11 |
-| F03 | 复用现成工具完成浏览器与原生应用操作 | E：工具集成 | V04, V07, V09 |
-| F04 | 核对并接入现用 Holographic 外部记忆 | B：记忆接入 | V04, V09, V11 |
+| [F01 / #23](https://github.com/zuohaisu/viva/issues/23) | 交付类 Task 的可复用工作流与授权交付 | A：工作流 | V03, V04, V07, V08, V09 |
+| [F02 / #24](https://github.com/zuohaisu/viva/issues/24) | 运行期间的知识复审与仓库维护建议 | G：维护 | V04, V07, V08, V11 |
+| [F03 / #25](https://github.com/zuohaisu/viva/issues/25) | 复用现成工具完成浏览器与原生应用操作 | E：工具集成 | V04, V07, V09 |
+| [F04 / #26](https://github.com/zuohaisu/viva/issues/26) | 核对并接入现用 Holographic 外部记忆 | B：记忆接入 | V04, V09, V11 |
 
 | 用户故事 | 首版覆盖 / 明确后续 |
 | --- | --- |
@@ -141,4 +141,4 @@ Holographic 适配应复用 PR #7 的[固定源码研究](https://github.com/zuo
 
 ## 8. GitHub 执行入口
 
-建单后回写 Epic 与各 issue 链接；issue 本文记录验收/范围/依赖，本文记录共享协调规则。
+统筹 [Epic #8](https://github.com/zuohaisu/viva/issues/8)；首版 V01–V13 与后续 F01–F04 均已建单（见上表）。issue 正文记录验收/范围/依赖，本文记录共享协调规则。规划审阅入口：[PR #9](https://github.com/zuohaisu/viva/pull/9)。尚未派发开发 Agent。
