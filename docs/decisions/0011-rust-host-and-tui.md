@@ -10,7 +10,7 @@ Viva 是本地优先 Personal AI Office。成员身份、任务、授权与工�
 
 首版以终端 TUI 为主。常态为一个或少量执行，偶尔在同一台机器上并发约 16 个 Agent；目标还包括内存较小的 Intel Mac。这是应用运行时负载，不是每轮开发或 CI 必须启动 16 个编译实例。未来桌面与 Windows 客户端只影响接口边界，本次不选择桌面框架。
 
-用户明确：迁移成本、实现复杂度不作为否决条件；资源占用、交互速度、真实任务完成速度和构建反馈时间需要考虑。关闭 TUI 后，任务与定期维护应暂停。
+用户明确：迁移成本、实现复杂度不作为否决条件；资源占用、交互速度、真实任务完成速度和构建反馈时间需要考虑。关闭 TUI 后，任务与定期维护应暂停。随后进一步裁决：Python 实现可直接替换，既有实现不构成历史负担或兼容义务。
 
 ## Decision
 
@@ -49,21 +49,25 @@ Pi 的轻量体验与可复用核心支持“复用 Agent 能力”，并不要�
 | **Python + Textual** | 当前能力已实现并有测试；CLI/MCP/自动化生态成熟；可并发等待多个子进程 | 解释器与对象开销、原生分发需要考虑；不以迁移成本保留，不以 GIL 否定 I/O 并发 |
 | **Swift 原生宿主** | macOS API 接入直接，未来原生桌面便利 | 首版终端与跨平台收益不足以成为本次首选；可保留为 macOS helper 候选 |
 
-不再因“已有 Python”否决 Rust，也不把现有实现当作无价值：它是能力、语义和验证的复用基线。
+Python 实现只提供可参考的能力审计与行为证据，不约束 Rust 的结构或交付路线。需要替换时直接替换，不为保留已有代码而增加架构层。
 
-### 4. 先复用，再补缺口
+### 4. 能力复用与直接替换
 
-下表是实施约束，不代表 Rust 组件已经建成。迁移须保留已验证语义与测试场景；跨语言不能直接复用源码时，先检查薄适配能否满足需求，再决定移植范围。
+**默认按 Rust 目标直接实现与替换，不要求延续 Python 实现。** 旧源码、模块划分、CLI 参数、安装入口、内部 schema、数据格式和测试实现均可调整或退役；不要求逐模块翻译、不要求维护 Python 兼容层，也不把双运行时或渐进桥接作为前置条件。是否使用过渡适配，仅由当下产品需求与实测收益决定。
+
+复用优先指复用成熟能力，不指永久保留旧代码。先检查 Git、`gh`、CLI/MCP、Agent 与界面库；已有 Python 能力可作为参考，无法直接复用或复用反而阻碍目标时，以最小 Rust 实现补足已记录缺口。验收依据是有效的产品契约、授权边界与真实使用场景，旧测试可据此重写，不能为“保持旧测试全绿”固化旧设计。
+
+用户数据与成员/任务历史是用户资产，不是实现包袱：需要变更存储时先确认实际存在的数据，按需要提供导入、导出或归档，不要求旧格式继续作为运行时接口。历史数据的保留规则继续有效。下表记录已检查能力与目标缺口，不代表要求保留这些 Python 模块。
 
 | 拟建/调整的部分 | 已检查的能力 | 需要填补的缺口 / 最小动作 |
 | --- | --- | --- |
-| Rust Office 宿主 | `src/viva/` 成员、Task、Execution、grant、恢复、知识注册表 | 新宿主承载现有 Office 契约；保留身份、归属、授权、历史，不能用 Worker 会话替代它们 |
+| Rust Office 宿主 | `src/viva/` 成员、Task、Execution、grant、恢复、知识注册表 | 按有效产品契约实现 Office；成员、任务、授权和历史独立于 Worker，内部结构可重设 |
 | Rust 执行监督 | `executions/runner.py`、Worker registry、CLI/MCP、Tokio process | 适配外部工具并落实有界输出、取消、进程组退出与回收；不重写模型循环 |
 | Rust TUI | 当前 Textual surface、Ratatui/Crossterm、Pi TUI | 需要 Rust 宿主上的终端交互；复用渲染库，聊天/导航/日志与领域状态分离 |
-| Git/worktree | `worktrees/service.py`、Git、`gh`、现有 authority | 保留隔离与受保护动作的规则；先复用命令与服务，不写 Git 引擎或 GitHub HTTP client |
-| 脱敏与授权 | `core/redaction.py`、`permissions/authority.py`、grant ledger | Rust 路径必须覆盖原有拒绝、来源与脱敏行为；迁移不能扩大权限 |
+| Git/worktree | `worktrees/service.py`、Git、`gh`、现有 authority | 满足隔离与受保护动作的规则；复用 Git/gh 能力，Python 服务可直接替换 |
+| 脱敏与授权 | `core/redaction.py`、`permissions/authority.py`、grant ledger | Rust 路径覆盖有效授权与脱敏需求；可重写实现与测试，不能扩大权限 |
 | 计算机操作 driver | 浏览器自动化能力、macOS Accessibility/系统 API、现成 helper | 按实际任务验证后补最小适配；前台焦点/鼠标/键盘的动作序列须协调 |
-| 存储演进 | 原子 JSON、append-only JSONL、Markdown | 只有事务/查询等实证缺口才触发新存储 ADR；先保留格式与导出能力 |
+| 存储演进 | 原子 JSON、append-only JSONL、Markdown | 按当前产品的事务/查询等需求另行裁决；旧格式无运行时兼容义务，数据需可保全/导出 |
 
 ### 5. 状态与进程的所有权
 
@@ -115,4 +119,4 @@ Rust 实现的首个真实任务垂直切片，同时承担技术验收。先记
 
 Rust PR 需要检查/测试及必要构建，但不必每次丢弃缓存重编所有依赖。Cargo 支持构建缓存，`cargo check` 可提供不生成最终可执行文件的编译检查；两者都不替代测试。发布、平台/工具链或依赖变化可能需要额外构建，缓存也不能保证每次有效。[Cargo build cache](https://doc.rust-lang.org/cargo/reference/build-cache.html)、[cargo check](https://doc.rust-lang.org/cargo/commands/cargo-check.html)
 
-本次不添加 Cargo 项目、不移植代码、不改变 Python 安装入口或 CI。实际迁移须单独交付可运行切片、行为证据、数据兼容/回退路径与目标平台验收；历史 Ticket Autopilot 数据保持原样。研究文档存档仅表示决策已收敛，不构成运行能力进度。
+本次不添加 Cargo 项目、不移植代码、不改变 Python 安装入口或 CI。后续实施可直接用 Rust 替换 Python，并单独交付可运行切片、产品行为证据、按实际数据需要制定的保全方案与目标平台验收；不要求维持旧 Python 入口、格式、兼容层或双版本回退。历史 Ticket Autopilot 数据保持原样。研究文档存档仅表示决策已收敛，不构成运行能力进度。

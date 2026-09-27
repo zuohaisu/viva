@@ -165,4 +165,4 @@ core       →  stdlib only
 
 2026-09-27，Haisu 批准 Rust 技术方向。唯一权威结论为 [ADR 0011](../decisions/0011-rust-host-and-tui.md)，其中记录实施默认组合 Tokio / Ratatui / Crossterm、已有能力与缺口、所有权、退出与恢复、资源/速度/构建验证。
 
-§5–§9 仍是当前 Python 实现及历史改造记录，不是 Rust 已落地的证明。此次文档裁决没有替换 `src/viva/`、数据格式、安装入口或 CI；实际迁移另行提供可运行切片与兼容证据。之前的多轮技术研究进入 [历史存档](../research/archive/technology-selection/2026-09-27/README.md)，其中阶段性推荐不再作为现行决策。
+§5–§9 仍是当前 Python 实现及历史改造记录，不是 Rust 已落地的证明。此次文档裁决没有替换 `src/viva/`、数据格式、安装入口或 CI；后续实施可直接替换 Python；旧源码、内部结构与接口没有延续或兼容义务，验收以有效产品需求、用户数据保全及授权边界为准，具体规则只见 ADR 0011 §4。之前的多轮技术研究进入 [历史存档](../research/archive/technology-selection/2026-09-27/README.md)，其中阶段性推荐不再作为现行决策。
