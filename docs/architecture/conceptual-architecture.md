@@ -90,7 +90,8 @@ Workspace/Project/Repository/Worktree/Task 的对象关系
 - **单机、本地优先**：所有状态在 Haisu 机器上，开放格式（JSON / JSONL / Markdown），人可读、可备份、可迁移。
 - **两个存储区**：`~/.viva/`（成员、任务、执行、授权、知识、experience、worktrees）与仓库内文件（项目知识如需随仓库走，可由 owner 放在 repo 内；Viva 只要求归属正确）。
 - **没有云依赖**：GitHub 是可选的只读连接器，不是运行前提；没有网络时一切本地能力照常工作。
-- **实现基线**：TUI 选型 Textual（唯一新运行时依赖）；执行用真实子进程 + 进程组（可并发、可停止、可恢复）。
+- **当前实现基线**：Python 3.11+ / Textual；执行用真实子进程 + 进程组（可并发、可停止、可恢复）。
+- **批准的目标**：Rust + Tokio + Ratatui + Crossterm，尚未实施迁移。范围、状态所有权、关闭界面语义和性能验收统一以 [ADR 0011](../decisions/0011-rust-host-and-tui.md) 为准；Pi、存储与 desktop 框架另行裁决。
 
 ## 5. 与旧产品路径的关系
 

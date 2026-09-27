@@ -22,8 +22,10 @@ Session dies. Resident persists.
 
 The product charter is `IDEA.md`; the canonical product definition lives in
 `docs/product/` (vision.md first). Boundary-level decisions are `docs/decisions/`
-(ADR 0001–0010; several early ADRs are explicitly superseded — read the status
-line before relying on one). The architecture and migration record is
+(ADR 0001–0011; several early ADRs are explicitly superseded — read the status
+line before relying on one). For host-language, TUI, or Rust migration work,
+read the accepted target and implementation status in `docs/decisions/0011-rust-host-and-tui.md`.
+The architecture and migration record is
 `docs/architecture/viva-transition.md`. Goal-drift incidents are recorded in
 `logs/goal-drift.md`.
 
