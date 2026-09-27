@@ -81,7 +81,7 @@ def test_every_execution_records_its_own_attribution_at_launch(office, git_repo)
     assert record["role"] == "developer"
     assert record["engine"] == {"id": "fake-engine", "model": "fake-1"}
     assert record["tool"] == "fakeworker"
-    assert record["request"] == {"kind": "user", "id": "haisu"}
+    assert record["request"] == {"kind": "user", "id": "user"}
     assert record["work_location"]["mode"] == "write"
     assert record["workspace_id"] == task["workspace_id"]
 

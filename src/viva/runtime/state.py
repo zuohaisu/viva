@@ -19,6 +19,7 @@ def _empty() -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "current_resident": None,
         "current_workspace": None,
+        "operator": None,
         "last_session_id": None,
         "last_session_started_at": None,
         "updated_at": None,
@@ -73,4 +74,9 @@ class RuntimeState:
     def set_current_workspace(self, workspace_id: str | None) -> None:
         state = self.load()
         state["current_workspace"] = workspace_id
+        self.save(state)
+
+    def set_operator(self, name: str | None) -> None:
+        state = self.load()
+        state["operator"] = name
         self.save(state)

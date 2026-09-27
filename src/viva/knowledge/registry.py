@@ -222,7 +222,7 @@ class KnowledgeRegistry:
                 "title": title,
                 "body": body,
                 "provenance": dict(provenance),
-                "created_by": created_by or {"kind": "user", "id": "haisu"},
+                "created_by": created_by or {"kind": "user", "id": "user"},
             }
         )
         if kind == "skill":

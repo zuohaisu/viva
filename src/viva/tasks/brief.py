@@ -26,10 +26,10 @@ PROTOCOL_LINES = (
     "  viva office result <execution-id> [--json]",
     "  viva office stop <execution-id> --reason <text>",
     "",
-    "Every dispatch you make must spend the grant Haisu gave this execution "
-    "(read it from $VIVA_GRANT_ID). A dispatch without a grant is refused and "
-    "recorded; you may not widen the scope of your grant, and your requests are "
-    "recorded as coming from this execution, not from Haisu.",
+    "Every dispatch you make must spend the grant the operator gave this "
+    "execution (read it from $VIVA_GRANT_ID). A dispatch without a grant is "
+    "refused and recorded; you may not widen the scope of your grant, and your "
+    "requests are recorded as coming from this execution, not from the operator.",
 )
 
 

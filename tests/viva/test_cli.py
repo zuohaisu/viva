@@ -27,6 +27,27 @@ def test_status_on_fresh_home_is_honest(home, capsys):
     assert "append-only journal" in output
 
 
+def test_operator_command_shows_sets_and_clears_the_principal(home, capsys):
+    assert main(["status"]) == 0
+    assert "Operator:    unset" in capsys.readouterr().out
+
+    assert main(["operator"]) == 0
+    output = capsys.readouterr().out
+    assert "Operator:    unset" in output
+    assert "Attribution: user/user" in output
+
+    assert main(["operator", "Haisu", "Zuo"]) == 0
+    assert "Operator set: Haisu Zuo" in capsys.readouterr().out
+    assert main(["operator"]) == 0
+    output = capsys.readouterr().out
+    assert "Operator:    Haisu Zuo" in output
+    assert "Attribution: user/haisu-zuo" in output
+
+    assert main(["operator", "--clear"]) == 0
+    assert "Operator cleared" in capsys.readouterr().out
+    assert VivaContext(home).operator() is None
+
+
 def test_member_workspace_project_task_flow(home, git_repo, office_tools, capsys):
     assert main(["workspace", "add", str(git_repo), "Office"]) == 0
     assert main(["project", "add", "Viva", "--repo", str(git_repo)]) == 0
@@ -81,7 +102,7 @@ def test_dispatch_status_result_and_recover(home, git_repo, office_tools, capsys
     assert main(["office", "status", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     execution_id = payload["executions"][0]["id"]
-    assert payload["executions"][0]["requested_by"] == {"kind": "user", "id": "haisu"}
+    assert payload["executions"][0]["requested_by"] == {"kind": "user", "id": "user"}
 
     assert main(["office", "result", execution_id]) == 0
     assert "fakeworker start" in capsys.readouterr().out

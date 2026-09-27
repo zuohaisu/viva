@@ -65,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="viva",
         description=(
-            "Viva — Haisu's local-first Personal AI Office: persistent AI members, "
+            "Viva — a local-first Personal AI Office: persistent AI members, "
             "tasks, executions and the history that outlives any worker session."
         ),
     )
@@ -75,6 +75,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("status", help="members, workspace, tasks, executions, tools")
     status.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+
+    operator = sub.add_parser(
+        "operator",
+        help="show or set the human this office is displayed and attributed under",
+    )
+    operator.add_argument("name", nargs="*", help="the operator's display name")
+    operator.add_argument("--clear", action="store_true", help="unset it and go back to neutral")
 
     # -- members -------------------------------------------------------------
     resident = sub.add_parser("resident", help="AI members (persistent identities)")
@@ -303,6 +310,12 @@ def _worker_line(entry: dict[str, Any]) -> str:
 
 def _render_status(status: dict[str, Any]) -> str:
     lines = [f"Viva {status['version']} — Personal AI Office", f"Home:        {status['home']}"]
+    operator = status.get("operator")
+    lines.append(
+        f"Operator:    {operator}"
+        if operator
+        else "Operator:    unset — viva operator <name>, or $VIVA_OPERATOR"
+    )
     members = status.get("residents") or []
     current = status.get("resident")
     lines.append(
@@ -378,6 +391,24 @@ def _cmd_status(context: VivaContext, args: argparse.Namespace) -> int:
         _print_json(status)
     else:
         print(_render_status(status))
+    return EXIT_OK
+
+
+def _cmd_operator(context: VivaContext, args: argparse.Namespace) -> int:
+    if args.clear:
+        context.set_operator(None)
+        print("Operator cleared: the office shows 'you' and attributes to a generic user.")
+    elif args.name:
+        print(f"Operator set: {context.set_operator(' '.join(args.name))}")
+    else:
+        current = context.operator()
+        print(
+            f"Operator:    {current}"
+            if current
+            else "Operator:    unset — viva operator <name>, or $VIVA_OPERATOR"
+        )
+    source = context.user_source()
+    print(f"Attribution: {source['kind']}/{source['id']}")
     return EXIT_OK
 
 
@@ -1001,6 +1032,7 @@ def _launch_tui(context: VivaContext) -> int:
 
 COMMANDS = {
     "status": _cmd_status,
+    "operator": _cmd_operator,
     "resident": _cmd_resident,
     "role": _cmd_catalogue,
     "engine": _cmd_catalogue,
