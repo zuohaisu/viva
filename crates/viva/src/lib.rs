@@ -4,5 +4,12 @@
 //! per-domain migration registry, the append-only office event log, the
 //! control-request envelope, and the reference records (sessions, executions,
 //! launch specs, terminal events, workbench contracts).
+//!
+//! Domain modules own their own migration namespaces and register them via
+//! `<domain>::register_migrations`; composition into the binary lands with
+//! V07 (lane A).
 
 pub mod foundation;
+pub mod members;
+pub mod projects;
+pub mod workspaces;
