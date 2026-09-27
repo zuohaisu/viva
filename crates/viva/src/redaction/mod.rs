@@ -140,6 +140,75 @@ pub struct RedactingWriter<W: std::io::Write> {
     redactor: Redactor,
 }
 
+/// Byte-level streaming redactor for raw terminal byte streams.
+///
+/// The terminal disk log must keep the byte-exact ANSI stream (dropping
+/// escape bytes would fake the transcript), so redaction there happens at
+/// the byte level: configured secrets are matched as byte patterns with a
+/// carry buffer, so a secret split across read chunks is still replaced.
+/// Everything else — including all escape sequences — passes through
+/// byte-for-byte.
+#[derive(Debug, Clone)]
+pub struct ByteRedactor {
+    secrets: Vec<Vec<u8>>,
+    replacement: Vec<u8>,
+    carry: Vec<u8>,
+}
+
+impl ByteRedactor {
+    pub fn new<I, S>(secrets: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<Vec<u8>>,
+    {
+        let secrets: Vec<Vec<u8>> = secrets
+            .into_iter()
+            .map(Into::into)
+            .filter(|s| !s.is_empty())
+            .collect();
+        Self {
+            secrets,
+            replacement: b"[REDACTED]".to_vec(),
+            carry: Vec::new(),
+        }
+    }
+
+    /// Longest secret length; the carry bound for split-pattern safety.
+    fn max_secret_len(&self) -> usize {
+        self.secrets.iter().map(Vec::len).max().unwrap_or(0)
+    }
+
+    /// Push raw bytes; returns bytes safe to append to the log.
+    pub fn push(&mut self, chunk: &[u8]) -> Vec<u8> {
+        let mut working = std::mem::take(&mut self.carry);
+        working.extend_from_slice(chunk);
+        let mut out = Vec::with_capacity(working.len());
+        let mut pos = 0;
+        'scan: while pos < working.len() {
+            for secret in &self.secrets {
+                if working[pos..].starts_with(secret) {
+                    out.extend_from_slice(&self.replacement);
+                    pos += secret.len();
+                    continue 'scan;
+                }
+            }
+            out.push(working[pos]);
+            pos += 1;
+        }
+        // Hold back a tail that could be the start of a split secret.
+        let max = self.max_secret_len().saturating_sub(1).min(out.len());
+        let keep = max;
+        self.carry = out[out.len().saturating_sub(keep)..].to_vec();
+        out.truncate(out.len() - keep);
+        out
+    }
+
+    /// End of stream: emit everything still carried.
+    pub fn flush(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.carry)
+    }
+}
+
 impl<W: std::io::Write> RedactingWriter<W> {
     pub fn new(inner: W, redactor: Redactor) -> Self {
         Self { inner, redactor }

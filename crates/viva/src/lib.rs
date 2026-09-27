@@ -15,4 +15,5 @@ pub mod members;
 pub mod projects;
 pub mod redaction;
 pub mod tasks;
+pub mod terminal;
 pub mod workspaces;
