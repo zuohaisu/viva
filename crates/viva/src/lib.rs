@@ -11,6 +11,7 @@
 
 pub mod authority;
 pub mod foundation;
+pub mod git;
 pub mod members;
 pub mod projects;
 pub mod redaction;
