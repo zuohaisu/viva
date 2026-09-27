@@ -23,7 +23,7 @@ Viva 是本地优先 Personal AI Office。成员身份、任务、授权与工�
 | 终端界面 | **Ratatui + Crossterm** | 一个终端渲染者，CLI/TUI 共用 Office 能力接口 |
 | 首个默认对话宿主 | **Pi 交互终端 + 小型扩展** | 首版在 Viva 的终端中使用 Pi 自己的聊天界面；其他 harness 可替换，不自建 Agent 循环 |
 | Pi RPC/SDK | **未来可选，不是首版前提** | 只有统一聊天界面或更深集成的真实需求出现时再评估 |
-| 外部记忆 | **独立于 harness 接入** | 用户现用 Holographic；具体项目/API 尚未核对，接入未实施，与办公室状态存储分开 |
+| 外部记忆 | **独立于 harness 接入** | Hermes Holographic 的公开实现已定位；用户实际版本与跨 harness 接入未验收，与办公室状态存储分开 |
 | 办公室状态存储 | **SQLite + 普通文件** | SQLite 保存结构化状态与关系/索引；文件保存技能、文档、原始会话与大型日志；尚未实施 |
 | 浏览器/原生应用操作 | **复用成熟能力，按 driver 接入** | Playwright、系统 API/小型 helper 是候选；具体方案待验证 |
 | Desktop / Windows | **未选型** | 保持 domain 与 surface、平台 driver 分离，无首版实现承诺 |
@@ -80,7 +80,7 @@ Viva 拥有成员身份、Task、Execution 归属与状态、grant、workspace/p
 
 Samuel 的身份、职责与工作关系属于 Viva 的成员记录；长期记忆可以由独立的外部记忆系统承载；当下的对话、模型上下文与工具循环由当前 harness 承载。Pi、Codex 或其他 harness 是可替换的表达/执行工具，换工具不删除成员或其资产，也不承诺不同模型有完全相同的行为。名字与默认工具仍为配置数据，不能在代码中硬编码 Samuel 或要求所有成员使用 Pi。
 
-用户表示在 Hermes 中使用 Holographic。本文确认外部记忆与办公室状态存储分离，未确认 Holographic 的具体仓库、协议、命名空间或数据格式，不能声称已集成。Viva 保存知识归属、来源、有效性及使用证据，并可关联外部记忆引用；不因引入外部服务就假装自动形成记忆。2026-09-28，用户批准 SQLite + 文件用于办公室状态；该决定不替代外部记忆系统，也不证明 Holographic 已接入。
+用户表示在 Hermes 中使用 Holographic。本文确认外部记忆与办公室状态存储分离。2026-09-28 的[源码研究](../research/hermes-holographic-memory-2026-09-28.md)已定位 Hermes bundled Holographic：本地 SQLite + FTS5 + Jaccard/HRR + 使用反馈；另有独立 handoff 和社区增强版，不能混用其能力声明。用户实际安装的版本和跨 harness 接入尚未验证，不能声称已集成。Viva 保存知识归属、来源、有效性及使用证据，并可关联外部记忆引用；不因引入外部服务就假装自动形成记忆。2026-09-28，用户批准 SQLite + 文件用于办公室状态；该决定不替代外部记忆系统，也不证明 Holographic 已接入。Bundled 实现的信任反馈不是事实真伪判断，硬删除不满足可恢复归档；成员/项目作用域、来源及退出活跃状态仍需受控适配。研究结果不新增后端或接口裁决。
 
 #### 5.2 首版 Pi 接入：交互终端与最小扩展
 

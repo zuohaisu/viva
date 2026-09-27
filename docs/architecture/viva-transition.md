@@ -163,6 +163,6 @@ core       →  stdlib only
 
 ## 12. Rust 宿主裁决（批准目标，未实施迁移）
 
-2026-09-27，Haisu 批准 Rust 技术方向。唯一权威结论为 [ADR 0011](../decisions/0011-rust-host-and-tui.md)，其中记录实施默认组合 Tokio / Ratatui / Crossterm、已有能力与缺口、所有权、退出与恢复、资源/速度/构建验证。后续批准 Pi 作为首个默认对话宿主，以交互终端与小型扩展接入；身份与长期资产独立于 harness，RPC/SDK 仅为未来可选路径。2026-09-28，用户另批准 SQLite + 普通文件保存办公室状态，与外部记忆分开。Rust、PTY、Pi 扩展与 SQLite 状态层均尚未实施；Holographic 的具体项目/API 尚待核对。
+2026-09-27，Haisu 批准 Rust 技术方向。唯一权威结论为 [ADR 0011](../decisions/0011-rust-host-and-tui.md)，其中记录实施默认组合 Tokio / Ratatui / Crossterm、已有能力与缺口、所有权、退出与恢复、资源/速度/构建验证。后续批准 Pi 作为首个默认对话宿主，以交互终端与小型扩展接入；身份与长期资产独立于 harness，RPC/SDK 仅为未来可选路径。2026-09-28，用户另批准 SQLite + 普通文件保存办公室状态，与外部记忆分开。Rust、PTY、Pi 扩展与 SQLite 状态层均尚未实施；Holographic 的公开 Hermes 实现已通过[专项研究](../research/hermes-holographic-memory-2026-09-28.md)定位；用户实际版本与 Pi/其他 harness 接入尚未验收，研究不构成后端接入批准。
 
 §5–§9 仍是当前 Python 实现及历史改造记录，不是 Rust 已落地的证明。此次文档裁决没有替换 `src/viva/`、数据格式、安装入口或 CI；后续实施可直接替换 Python；旧源码、内部结构与接口没有延续或兼容义务，验收以有效产品需求、用户数据保全及授权边界为准，具体规则只见 ADR 0011 §4。之前的多轮技术研究进入 [历史存档](../research/archive/technology-selection/2026-09-27/README.md)，其中阶段性推荐不再作为现行决策。
