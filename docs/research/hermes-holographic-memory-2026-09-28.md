@@ -2,6 +2,8 @@
 
 研究日期：2026-09-28。状态：研究证据，不新增选型裁决，不表示 Viva 已接入记忆。推进 knowledge 能力的证据：定位同名项目、核对固定源码、指出接入缺口与验证方法。主技术决策仍是 [ADR 0011](../decisions/0011-rust-host-and-tui.md)。
 
+后续比较见[统一记忆架构研究](agent-memory-architecture-2026-09-28.md)。本专项保留 Holographic 的机制证据；下文的复用建议不意味着它优先于后续核查的成品候选，也不因用户已使用而免于同负载比较。所有记忆后端建议仍未裁决。
+
 ## 结论
 
 Hermes 里的 Holographic 是本地结构化事实记忆 provider：SQLite 持久化 + FTS5 关键词召回 + Jaccard/HRR 重排 + 信任反馈。它不是云服务，也不是必须常驻的向量数据库；“external”指 Hermes 内置 MEMORY.md / USER.md 之外的 provider。它可以作为跨会话记忆的复用对象，但不自动提供 Samuel 身份连续性、成员隔离、完整记忆生命周期或跨 harness 接口。[官方 provider 文档](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers)

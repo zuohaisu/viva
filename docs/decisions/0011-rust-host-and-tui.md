@@ -82,6 +82,8 @@ Samuel 的身份、职责与工作关系属于 Viva 的成员记录；长期记�
 
 用户表示在 Hermes 中使用 Holographic。本文确认外部记忆与办公室状态存储分离。2026-09-28 的[源码研究](../research/hermes-holographic-memory-2026-09-28.md)已定位 Hermes bundled Holographic：本地 SQLite + FTS5 + Jaccard/HRR + 使用反馈；另有独立 handoff 和社区增强版，不能混用其能力声明。用户实际安装的版本和跨 harness 接入尚未验证，不能声称已集成。Viva 保存知识归属、来源、有效性及使用证据，并可关联外部记忆引用；不因引入外部服务就假装自动形成记忆。2026-09-28，用户批准 SQLite + 文件用于办公室状态；该决定不替代外部记忆系统，也不证明 Holographic 已接入。Bundled 实现的信任反馈不是事实真伪判断，硬删除不满足可恢复归档；成员/项目作用域、来源及退出活跃状态仍需受控适配。研究结果不新增后端或接口裁决。
 
+2026-09-28 的[记忆架构比较](../research/agent-memory-architecture-2026-09-28.md)进一步核查 OpenViking、Claude Code 与 MemGPT / 当前 Letta：提出有界工作上下文、分层导航、策展/有效性及混合检索，建议优先验证 OpenViking 成品。该建议不是记忆后端或插件默认行为的批准；尤其 Pi context takeover、自动写回、成员/项目映射及失效归档仍需受控验证。Rust / Pi / SQLite 已批准边界不变。
+
 #### 5.2 首版 Pi 接入：交互终端与最小扩展
 
 **首版默认在 Viva 提供的交互终端中运行 Pi，使用 Pi 自己的聊天界面。** Viva 管成员/任务/workspace/worktree 导航、工作位置及终端进程生命周期；Pi 管模型调用、工具循环、压缩与当前内部会话。不额外构建一套 Viva 聊天界面，不以 RPC/SDK 接管 Pi 循环。
