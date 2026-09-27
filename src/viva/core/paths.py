@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 
 VIVA_HOME_ENV = "VIVA_HOME"
+VIVA_OPERATOR_ENV = "VIVA_OPERATOR"
 DEFAULT_HOME_NAME = ".viva"
 
 

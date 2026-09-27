@@ -29,6 +29,8 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """An isolated VIVA_HOME so tests never touch the developer's ~/.viva."""
     state = tmp_path / "viva-home"
     monkeypatch.setenv("VIVA_HOME", str(state))
+    # A developer's own shell must not decide who the tests attribute to.
+    monkeypatch.delenv("VIVA_OPERATOR", raising=False)
     return state
 
 

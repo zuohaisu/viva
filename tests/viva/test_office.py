@@ -36,7 +36,9 @@ def test_user_grant_is_the_source_a_worker_spends(office, git_repo):
         mode_max="write",
         reason="Haisu asked Samuel to coordinate this task",
     )
-    assert grant["source"] == {"kind": "user", "id": "haisu"}
+    # No operator configured: the office attributes to a generic user principal
+    # rather than to a name hard-coded in Viva's source.
+    assert grant["source"] == {"kind": "user", "id": "user"}
     assert grant["delegated_from"] is None
 
     record = dispatch(

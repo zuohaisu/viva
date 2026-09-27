@@ -26,8 +26,6 @@ from viva.executions.registry import ExecutionError, ExecutionRegistry
 from viva.executions.runner import ExecutionRunner
 from viva.permissions import require_invocation_authority
 
-USER_SOURCE = {"kind": "user", "id": "haisu"}
-
 
 class OfficeError(VivaError):
     """An office operation could not be completed safely."""
@@ -53,10 +51,10 @@ class Office:
         delegated_from: str | None = None,
         source: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Create a grant. Only Haisu or a worker delegating from a parent."""
+        """Create a grant. Only the operator, or a worker delegating from a parent."""
         member_record = self.context.residents.require(member)
         task_record = self.context.tasks.require(task)
-        resolved_source = dict(source or USER_SOURCE)
+        resolved_source = dict(source or self.context.user_source())
         return self.context.grants.create(
             source=resolved_source,
             grantee=str(member_record["id"]),
@@ -83,12 +81,12 @@ class Office:
                 raise OfficeError(
                     f"a granted {action} must name the execution it came from "
                     "(set VIVA_EXECUTION_ID or pass --origin-execution); Viva will not "
-                    "record a worker request as if it were Haisu's"
+                    "record a worker request as if the operator had issued it"
                 )
             grant = self.context.grants.check(
                 grant_id, action=action, task_id=task_id, mode=mode
             )
-        source = {"kind": "worker", "id": origin_execution} if origin_execution else dict(USER_SOURCE)
+        source = {"kind": "worker", "id": origin_execution} if origin_execution else dict(self.context.user_source())
         return require_invocation_authority(source, action=f"{action}_delegated", grant=grant)
 
     # -- dispatch ------------------------------------------------------------

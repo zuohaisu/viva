@@ -165,3 +165,47 @@ def test_tui_quit_via_input(home):
             await pilot.pause()
 
     _run(scenario())  # returning cleanly proves the app exited without hanging
+
+
+def test_tui_prompt_label_follows_the_configured_operator(home):
+    async def scenario():
+        context = VivaContext(home)
+        context.set_operator("Haisu Zuo")
+        app = VivaTui(context=context)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.query_one("#prompt", Input).placeholder.startswith("Haisu Zuo >")
+            assert app.sub_title == "Haisu Zuo's local-first office"
+            assert "Operator   Haisu Zuo" in app._status_text
+
+            prompt = app.query_one("#prompt", Input)
+            prompt.value = "status"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert any(line == "Haisu Zuo > status" for line in app._log_lines)
+
+    _run(scenario())
+
+
+def test_tui_operator_command_relabels_without_a_restart(home):
+    async def scenario():
+        context = VivaContext(home)
+        app = VivaTui(context=context)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            # Unconfigured: nothing on screen claims a person's identity.
+            assert app.query_one("#prompt", Input).placeholder.startswith("you >")
+            assert "Operator   unset" in app._status_text
+
+            app.handle_command("operator Haisu Zuo")
+            await pilot.pause()
+            assert app.query_one("#prompt", Input).placeholder.startswith("Haisu Zuo >")
+            assert app.sub_title == "Haisu Zuo's local-first office"
+            assert context.user_source() == {"kind": "user", "id": "haisu-zuo"}
+
+            app.handle_command("operator clear")
+            await pilot.pause()
+            assert app.query_one("#prompt", Input).placeholder.startswith("you >")
+            assert context.user_source() == {"kind": "user", "id": "user"}
+
+    _run(scenario())

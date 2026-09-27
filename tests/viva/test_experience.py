@@ -123,4 +123,4 @@ def test_execution_events_carry_their_own_attribution(office, git_repo):
     assert started["payload"]["execution_id"] == record["id"]
     assert started["payload"]["task_id"] == task["id"]
     assert started["payload"]["work_location"] == record["work_location"]["path"]
-    assert started["payload"]["requested_by"] == {"kind": "user", "id": "haisu"}
+    assert started["payload"]["requested_by"] == {"kind": "user", "id": "user"}

@@ -15,11 +15,14 @@ Object map (see docs/architecture/domain-model.md):
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
 import viva
-from viva.core.paths import viva_home
+from viva.core.errors import VivaError
+from viva.core.ids import slugify
+from viva.core.paths import VIVA_OPERATOR_ENV, viva_home
 from viva.executions import ExecutionHandle, ExecutionRegistry, ExecutionRunner
 from viva.experience import ExperienceJournal
 from viva.github import GitHubClient
@@ -33,6 +36,11 @@ from viva.tasks import TaskRegistry
 from viva.workers import WorkerRegistry
 from viva.workspaces import WorkspaceRegistry
 from viva.worktrees import worktree_summary
+
+# Viva never hard-codes a person's name: an unconfigured office stays neutral on
+# screen and attributes actions to a generic user principal.
+UNLABELED_OPERATOR = "you"
+UNLABELED_USER_ID = "user"
 
 
 class VivaContext:
@@ -81,6 +89,52 @@ class VivaContext:
     def current_workspace(self) -> dict[str, Any] | None:
         return self.workspaces.current()
 
+    def operator(self) -> str | None:
+        """The human operator's display name: runtime state > ``VIVA_OPERATOR`` > unset."""
+        stored = self.runtime.load().get("operator")
+        if stored:
+            return str(stored)
+        from_env = os.environ.get(VIVA_OPERATOR_ENV)
+        return from_env.strip() if from_env and from_env.strip() else None
+
+    def operator_label(self) -> str:
+        return self.operator() or UNLABELED_OPERATOR
+
+    def user_source(self) -> dict[str, str]:
+        """The principal a human-issued action is attributed to.
+
+        Derived from the same configuration the UI displays, so a command can
+        never be shown under one name and audited under another.
+        """
+        name = self.operator()
+        if not name:
+            return {"kind": "user", "id": UNLABELED_USER_ID}
+        try:
+            return {"kind": "user", "id": slugify(name, what="operator name")}
+        except ValueError as exc:  # a hand-edited state file must fail loudly
+            raise VivaError(f"operator {name!r} cannot form a principal id: {exc}") from exc
+
+    def set_operator(self, name: str | None) -> str | None:
+        """Record who operates this office, and journal the change."""
+        cleaned = name.strip() if name else None
+        if name is not None:
+            if not cleaned:
+                raise VivaError("an operator name needs at least one letter or digit")
+            try:
+                slugify(cleaned, what="operator name")
+            except ValueError as exc:
+                raise VivaError(str(exc)) from exc
+        previous = self.operator()
+        self.runtime.set_operator(cleaned)
+        self.journal.append(
+            event_type="operator.set" if cleaned else "operator.cleared",
+            resident_id=self.current_resident_id(),
+            session_id=self.current_session_id(),
+            source="viva",
+            payload={"previous": previous, "operator": cleaned},
+        )
+        return cleaned
+
     def begin_session(self) -> str:
         session_id = self.runtime.begin_session()
         self.journal.append(
@@ -117,6 +171,7 @@ class VivaContext:
         return {
             "version": viva.__version__,
             "home": str(self.home),
+            "operator": self.operator(),
             "resident": resident,
             "workspace": workspace,
             "git": git,

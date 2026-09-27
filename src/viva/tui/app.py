@@ -33,7 +33,8 @@ from viva.tasks import TaskError
 from viva.workers import WorkerError
 
 HELP_TEXT = (
-    "Commands: help · status · member list|add <name> [--role R]|use <name>|show <name> · "
+    "Commands: help · status · operator [<name>|clear] · "
+    "member list|add <name> [--role R]|use <name>|show <name> · "
     "workspace list|add <path> [name]|use <name> · project list|add <name> · "
     "task list|new <title> [--kind K]|show <id>|brief <id> · "
     "dispatch <task> <member> [read_only|write] [note] · exec list · result <exec> · "
@@ -44,7 +45,7 @@ HELP_TEXT = (
 
 class VivaTui(App[None]):
     TITLE = "VIVA"
-    SUB_TITLE = "Personal AI Office — Haisu's local-first office"
+    SUB_TITLE = "Local-first Personal AI Office"
 
     CSS = """
     #status-panel {
@@ -74,6 +75,9 @@ class VivaTui(App[None]):
         self._log_lines: list[str] = []
         self._status_text = ""
         self._watched: set[str] = set()
+        operator = context.operator()
+        if operator:
+            self.sub_title = f"{operator}'s local-first office"
 
     # -- layout ---------------------------------------------------------------
 
@@ -81,7 +85,7 @@ class VivaTui(App[None]):
         yield Header(show_clock=True)
         yield Static("", id="status-panel")
         yield RichLog(id="journal", highlight=False, markup=False, max_lines=5000)
-        yield Input(placeholder="Haisu >  (type help)", id="prompt")
+        yield Input(placeholder=f"{self._label()} >  (type help)", id="prompt")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -96,6 +100,10 @@ class VivaTui(App[None]):
 
     # -- rendering helpers ----------------------------------------------------
 
+    def _label(self) -> str:
+        """The prompt label, read live so `operator <name>` applies without a restart."""
+        return self.context.operator_label()
+
     def log_line(self, text: str) -> None:
         self._log_lines.append(text)
         self.query_one("#journal", RichLog).write(text)
@@ -107,6 +115,12 @@ class VivaTui(App[None]):
 
     def _render_status(self, status: dict[str, Any]) -> str:
         lines = [f"Viva {status['version']}", ""]
+        operator = status.get("operator")
+        lines.append(
+            f"Operator   {operator}"
+            if operator
+            else "Operator   unset — `operator <name>` or VIVA_OPERATOR"
+        )
         current = status.get("resident")
         members = status.get("residents") or []
         lines.append(f"Members ({len(members)})")
@@ -189,7 +203,7 @@ class VivaTui(App[None]):
         event.input.value = ""
         if not raw:
             return
-        self.log_line(f"Haisu > {raw}")
+        self.log_line(f"{self._label()} > {raw}")
         try:
             self.context.journal.append(
                 event_type="user.command",
@@ -222,6 +236,8 @@ class VivaTui(App[None]):
             elif command == "status":
                 self.refresh_status()
                 self.log_line("Status refreshed (see left panel).")
+            elif command == "operator":
+                self._handle_operator(arguments)
             elif command == "memory":
                 self.log_line(
                     "Memory is not implemented. What you see is the experience journal — "
@@ -275,6 +291,30 @@ class VivaTui(App[None]):
         self.refresh_status()
 
     # -- handlers -------------------------------------------------------------
+
+    def _handle_operator(self, args: list[str]) -> None:
+        if not args:
+            current = self.context.operator()
+            self.log_line(
+                f"Operator: {current}"
+                if current
+                else (
+                    "Operator unset: the office shows 'you' and attributes actions to a "
+                    "generic user principal. Set it with `operator <name>`."
+                )
+            )
+            return
+        if args[0].casefold() == "clear":
+            self.context.set_operator(None)
+            self.sub_title = VivaTui.SUB_TITLE
+        else:
+            name = self.context.set_operator(" ".join(args))
+            self.sub_title = f"{name}'s local-first office"
+            self.log_line(
+                f"Operator set: {name} — this screen label and the audit attribution "
+                "come from the same identity."
+            )
+        self.query_one("#prompt", Input).placeholder = f"{self._label()} >  (type help)"
 
     def _handle_member(self, args: list[str]) -> None:
         if not args or args[0] == "list":
