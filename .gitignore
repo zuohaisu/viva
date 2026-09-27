@@ -65,3 +65,6 @@ sandbox/*
 .workbuddy/
 .zcode/
 .qoder/settings.local.json
+
+# Rust build artifacts (workspace target dir)
+/target
