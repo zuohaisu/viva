@@ -128,7 +128,10 @@ fn knowledge_review_is_repeatable_without_duplicates() {
     );
 
     // The fresh item is untouched by the stale threshold.
-    let item = registry.get_item(&fresh_item).expect("item").expect("exists");
+    let item = registry
+        .get_item(&fresh_item)
+        .expect("item")
+        .expect("exists");
     assert_eq!(item.status, viva::knowledge::KnowledgeStatus::Active);
 
     // Resolve it, then a re-run still proposes nothing new (the item is no
@@ -210,14 +213,23 @@ fn executed_exits_stay_traceable_and_recoverable() {
     // Execute both proposals.
     for proposal in &report.proposed {
         maintenance
-            .execute_proposal(&proposal.proposal_id, &actor, &authority, &registry, "review agreed")
+            .execute_proposal(
+                &proposal.proposal_id,
+                &actor,
+                &authority,
+                &registry,
+                "review agreed",
+            )
             .expect("execute");
     }
 
     // Knowledge exit: lifecycle reason recorded, body file kept, restore
     // path intact.
     let item_after = registry.get_item(&item).expect("item").expect("exists");
-    assert_eq!(item_after.status, viva::knowledge::KnowledgeStatus::Archived);
+    assert_eq!(
+        item_after.status,
+        viva::knowledge::KnowledgeStatus::Archived
+    );
     let lifecycle = registry.lifecycle(&item).expect("lifecycle");
     assert_eq!(lifecycle.len(), 1);
     assert!(
@@ -233,7 +245,10 @@ fn executed_exits_stay_traceable_and_recoverable() {
     assert_eq!(restored.status, viva::knowledge::KnowledgeStatus::Active);
 
     // Skill exit: office state only, SKILL.md untouched, re-enableable.
-    let skill_after = registry.skill(&skill.skill_id).expect("skill").expect("exists");
+    let skill_after = registry
+        .skill(&skill.skill_id)
+        .expect("skill")
+        .expect("exists");
     assert!(!skill_after.enabled);
     assert!(skill_after.entry_path.is_file(), "SKILL.md is untouched");
     registry
@@ -307,7 +322,13 @@ fn execution_is_grant_gated_and_human_review_stays_human() {
         grant: Some(scoped.grant_id),
     };
     let err = maintenance
-        .execute_proposal(&proposal_id, &scoped_actor, &authority, &registry, "task grant")
+        .execute_proposal(
+            &proposal_id,
+            &scoped_actor,
+            &authority,
+            &registry,
+            "task grant",
+        )
         .expect_err("task-scoped grants do not maintain the office");
     assert!(err.to_string().contains("not authorized"), "got: {err}");
 
@@ -361,11 +382,20 @@ fn worktree_and_cleanliness_proposals_stay_human_review_only() {
         .review_worktrees(&session, std::slice::from_ref(&record))
         .expect("worktree review");
     assert_eq!(report.proposed.len(), 1);
-    assert_eq!(report.proposed[0].suggested_action, SuggestedAction::HumanReview);
+    assert_eq!(
+        report.proposed[0].suggested_action,
+        SuggestedAction::HumanReview
+    );
 
     // Maintenance refuses to execute it — and the worktree still exists.
     let err = maintenance
-        .execute_proposal(&report.proposed[0].proposal_id, &actor, &authority, &registry, "prune it")
+        .execute_proposal(
+            &report.proposed[0].proposal_id,
+            &actor,
+            &authority,
+            &registry,
+            "prune it",
+        )
         .expect_err("human review is not executable by maintenance");
     assert!(err.to_string().contains("human review"), "got: {err}");
     assert!(wt.path().exists(), "the worktree directory is untouched");
@@ -469,10 +499,7 @@ fn skills_with_real_usage_are_not_proposed() {
         .review_knowledge(&session, &registry, 365)
         .expect("review");
     assert!(
-        report
-            .proposed
-            .iter()
-            .all(|p| p.subject != skill.skill_id),
+        report.proposed.iter().all(|p| p.subject != skill.skill_id),
         "a used skill is not idle: {:?}",
         report.proposed
     );

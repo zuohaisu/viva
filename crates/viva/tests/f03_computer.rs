@@ -14,8 +14,8 @@ use viva::foundation::store::{
     FOUNDATION_V1_SQL, MigrationRegistry, Store,
 };
 use viva::tools::computer::{
-    ActionSpec, ActionState, ComputerEngine, ForegroundCoordinator, ToolFailure, ToolRunner,
-    AUDITED_TOOLS, smoke_specs,
+    AUDITED_TOOLS, ActionSpec, ActionState, ComputerEngine, ForegroundCoordinator, ToolFailure,
+    ToolRunner, smoke_specs,
 };
 
 fn frozen() -> viva::foundation::store::FrozenMigrations {
@@ -202,7 +202,8 @@ fn target_drift_and_permission_gaps_never_fake_success() {
     let actor = actor_with_grant(&authority, Some(&task), GrantMode::ActAutonomously);
 
     // Pre-state does not mention the target: refusal, zero action runs.
-    let runner = Arc::new(ScriptedRunner::new().respond("list-apps", r#"{"apps":[{"name":"Finder"}]}"#));
+    let runner =
+        Arc::new(ScriptedRunner::new().respond("list-apps", r#"{"apps":[{"name":"Finder"}]}"#));
     {
         let engine = ComputerEngine::with_runner(
             &store,
@@ -214,7 +215,11 @@ fn target_drift_and_permission_gaps_never_fake_success() {
             .expect("the refusal is recorded");
         assert_eq!(record.state, ActionState::Refused);
         assert!(
-            record.reason.as_deref().unwrap_or("").contains("not visible"),
+            record
+                .reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("not visible"),
             "drift refusal explains itself: {:?}",
             record.reason
         );
@@ -223,7 +228,8 @@ fn target_drift_and_permission_gaps_never_fake_success() {
     assert_eq!(runner.action_runs(), 0, "no action ran on refusal");
 
     // Locator failure (missing permission, broken tool): honest failure.
-    let runner = Arc::new(ScriptedRunner::new().fail_on("list-apps", "accessibility permission missing"));
+    let runner =
+        Arc::new(ScriptedRunner::new().fail_on("list-apps", "accessibility permission missing"));
     let engine = ComputerEngine::with_runner(
         &store,
         ForegroundCoordinator::new(),
@@ -234,7 +240,11 @@ fn target_drift_and_permission_gaps_never_fake_success() {
         .expect("the failure is recorded");
     assert_eq!(record.state, ActionState::Failed);
     assert!(
-        record.reason.as_deref().unwrap_or("").contains("locate failed"),
+        record
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("locate failed"),
         "got: {:?}",
         record.reason
     );
@@ -256,7 +266,11 @@ fn target_drift_and_permission_gaps_never_fake_success() {
         .expect("recorded");
     assert_eq!(record.state, ActionState::Failed);
     assert!(
-        record.reason.as_deref().unwrap_or("").contains("recorded as failed"),
+        record
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("recorded as failed"),
         "got: {:?}",
         record.reason
     );
@@ -307,7 +321,11 @@ fn actions_are_task_scoped_and_grant_gated() {
         .execute(&authority, &foreign_actor, &task, &spec("Finder", false))
         .expect("recorded");
     assert_eq!(record.state, ActionState::Refused);
-    assert_eq!(runner.action_runs(), 0, "cross-task is refused before acting");
+    assert_eq!(
+        runner.action_runs(),
+        0,
+        "cross-task is refused before acting"
+    );
 
     // The matching task-scoped grant: locate → act → verify with evidence.
     let actor = actor_with_grant(&authority, Some(&task), GrantMode::ActWithApproval);
@@ -318,7 +336,10 @@ fn actions_are_task_scoped_and_grant_gated() {
     assert!(record.pre_state.expect("pre").contains("Finder"));
     assert!(record.post_state.expect("post").contains("Finder"));
     assert!(
-        record.action_output.expect("action output").contains("windows"),
+        record
+            .action_output
+            .expect("action output")
+            .contains("windows"),
         "the action's own observation is kept as evidence"
     );
     assert!(runner.action_runs() >= 1, "the action really ran");
@@ -423,7 +444,10 @@ fn foreground_lane_serializes_but_reads_run_free() {
             .execute(&authority, &actor, &task_a, &spec("Finder", false))
             .expect("read ran without waiting for the lane");
         assert_eq!(record.state, ActionState::Executed);
-        assert!(!record.foreground, "the read context took no foreground lane");
+        assert!(
+            !record.foreground,
+            "the read context took no foreground lane"
+        );
         assert!(
             started.elapsed() < std::time::Duration::from_millis(200),
             "the read context was not serialized behind B's foreground work"
@@ -482,7 +506,10 @@ fn audit_records_what_it_could_really_probe() {
 
     let specs = smoke_specs();
     assert_eq!(specs.len(), 2);
-    assert!(specs.iter().all(|(_, s)| !s.foreground), "smoke is read-only");
+    assert!(
+        specs.iter().all(|(_, s)| !s.foreground),
+        "smoke is read-only"
+    );
     assert!(
         specs.iter().any(|(_, s)| s.target.contains("Chrome")),
         "one browser task"

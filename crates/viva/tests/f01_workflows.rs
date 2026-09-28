@@ -100,7 +100,12 @@ fn delivery_walk_with_real_fix_and_authorized_delivery() {
             vec![evidence("implementation", HEAD_A, "change committed")],
         )
         .expect("implement");
-    assert_eq!(advance, StepAdvance::Passed { next_step: Some("verify".into()) });
+    assert_eq!(
+        advance,
+        StepAdvance::Passed {
+            next_step: Some("verify".into())
+        }
+    );
 
     // Verify really fails: a bug is found on head A. The run routes to the
     // configured fix step — evidence records the failure, honestly.
@@ -109,10 +114,19 @@ fn delivery_walk_with_real_fix_and_authorized_delivery() {
             &run.run_id,
             &actor,
             false,
-            vec![evidence("verification", HEAD_A, "cargo test: ordering assertion failed")],
+            vec![evidence(
+                "verification",
+                HEAD_A,
+                "cargo test: ordering assertion failed",
+            )],
         )
         .expect("verify fail recorded");
-    assert_eq!(advance, StepAdvance::RoutedTo { step_id: "fix".into() });
+    assert_eq!(
+        advance,
+        StepAdvance::RoutedTo {
+            step_id: "fix".into()
+        }
+    );
 
     // Fix passes and routes back to verification (fixed work re-earns it).
     let advance = engine
@@ -123,7 +137,12 @@ fn delivery_walk_with_real_fix_and_authorized_delivery() {
             vec![evidence("fix", HEAD_A, "ordering made deterministic")],
         )
         .expect("fix");
-    assert_eq!(advance, StepAdvance::Passed { next_step: Some("verify".into()) });
+    assert_eq!(
+        advance,
+        StepAdvance::Passed {
+            next_step: Some("verify".into())
+        }
+    );
 
     // Verification passes on the same head.
     let advance = engine
@@ -131,10 +150,19 @@ fn delivery_walk_with_real_fix_and_authorized_delivery() {
             &run.run_id,
             &actor,
             true,
-            vec![evidence("verification", HEAD_A, "cargo test --workspace: pass")],
+            vec![evidence(
+                "verification",
+                HEAD_A,
+                "cargo test --workspace: pass",
+            )],
         )
         .expect("verify pass");
-    assert_eq!(advance, StepAdvance::Passed { next_step: Some("review".into()) });
+    assert_eq!(
+        advance,
+        StepAdvance::Passed {
+            next_step: Some("review".into())
+        }
+    );
 
     // Independent review passes.
     let advance = engine
@@ -142,10 +170,19 @@ fn delivery_walk_with_real_fix_and_authorized_delivery() {
             &run.run_id,
             &reviewer,
             true,
-            vec![evidence("review", HEAD_A, "independent QA review: no blocking findings")],
+            vec![evidence(
+                "review",
+                HEAD_A,
+                "independent QA review: no blocking findings",
+            )],
         )
         .expect("review pass");
-    assert_eq!(advance, StepAdvance::Passed { next_step: Some("deliver".into()) });
+    assert_eq!(
+        advance,
+        StepAdvance::Passed {
+            next_step: Some("deliver".into())
+        }
+    );
 
     // Delivery cannot pass on a promise: missing authorization evidence.
     let err = engine
@@ -217,7 +254,10 @@ fn delivery_walk_with_real_fix_and_authorized_delivery() {
         .expect("authorized delivery");
     assert_eq!(advance, StepAdvance::Passed { next_step: None });
 
-    let finished = engine.get_run(&run.run_id).expect("run").expect("run exists");
+    let finished = engine
+        .get_run(&run.run_id)
+        .expect("run")
+        .expect("run exists");
     assert_eq!(finished.status, RunStatus::Completed);
 
     // The workflow never closes the task: completion is a separate
@@ -226,7 +266,10 @@ fn delivery_walk_with_real_fix_and_authorized_delivery() {
     tasks
         .complete_task(
             &task_id,
-            format!("workflow run {} completed; PR opened under grant {}", run.run_id, grant.grant_id),
+            format!(
+                "workflow run {} completed; PR opened under grant {}",
+                run.run_id, grant.grant_id
+            ),
             "owner-authorized delivery",
         )
         .expect("task outcome");
@@ -251,10 +294,11 @@ fn delivery_walk_with_real_fix_and_authorized_delivery() {
             ("deliver", "passed"),
         ]
     );
-    assert!(history
-        .records
-        .iter()
-        .all(|r| r.evidence.iter().all(|e| e.head_sha.as_deref() != Some("stale-head"))));
+    assert!(history.records.iter().all(|r| {
+        r.evidence
+            .iter()
+            .all(|e| e.head_sha.as_deref() != Some("stale-head"))
+    }));
     assert_eq!(history.config.steps.len(), 5, "config round-trips as data");
 }
 
@@ -275,10 +319,17 @@ fn evidence_for_another_head_is_rejected() {
             &run.run_id,
             &MemberId::new(),
             true,
-            vec![evidence("implementation", HEAD_B, "CI green — but on another head")],
+            vec![evidence(
+                "implementation",
+                HEAD_B,
+                "CI green — but on another head",
+            )],
         )
         .expect_err("cross-head evidence must be rejected");
-    assert!(err.to_string().contains("only apply to the head"), "got: {err}");
+    assert!(
+        err.to_string().contains("only apply to the head"),
+        "got: {err}"
+    );
 
     // Head-bound requirements also refuse headless evidence.
     let err = engine
@@ -292,7 +343,10 @@ fn evidence_for_another_head_is_rejected() {
     assert!(err.to_string().contains("head SHA"), "got: {err}");
 
     let history = engine.run_history(&run.run_id).expect("history");
-    assert!(history.records.is_empty(), "rejected results leave no record");
+    assert!(
+        history.records.is_empty(),
+        "rejected results leave no record"
+    );
     assert_eq!(history.run.current_step, 0);
 }
 
@@ -329,7 +383,12 @@ fn exhausted_budget_pauses_and_resume_rebinds_head() {
             vec![evidence("verification", HEAD_A, "still failing")],
         )
         .expect("verify fail 1");
-    assert_eq!(advance, StepAdvance::RoutedTo { step_id: "fix".into() });
+    assert_eq!(
+        advance,
+        StepAdvance::RoutedTo {
+            step_id: "fix".into()
+        }
+    );
 
     // The fix itself fails twice → its budget (2) is exhausted → pause.
     engine
@@ -381,7 +440,10 @@ fn exhausted_budget_pauses_and_resume_rebinds_head() {
             vec![evidence("fix", HEAD_A, "old head evidence after rebind")],
         )
         .expect_err("stale-head evidence is refused after a rebind");
-    assert!(err.to_string().contains("only apply to the head"), "got: {err}");
+    assert!(
+        err.to_string().contains("only apply to the head"),
+        "got: {err}"
+    );
     let advance = engine
         .record_step_result(
             &run.run_id,
@@ -390,7 +452,12 @@ fn exhausted_budget_pauses_and_resume_rebinds_head() {
             vec![evidence("fix", HEAD_B, "real fix committed")],
         )
         .expect("fix on new head");
-    assert_eq!(advance, StepAdvance::Passed { next_step: Some("verify".into()) });
+    assert_eq!(
+        advance,
+        StepAdvance::Passed {
+            next_step: Some("verify".into())
+        }
+    );
 
     let history = engine.run_history(&run.run_id).expect("history");
     let fix_records: Vec<&str> = history
@@ -417,12 +484,17 @@ fn read_only_review_shape_is_a_different_walk() {
 
     let config = WorkflowConfig::read_only_review_default();
     assert!(config.steps.iter().all(|s| {
-        !matches!(s.action.as_deref(), Some("deliver_pr") | Some("dispatch_delegated"))
+        !matches!(
+            s.action.as_deref(),
+            Some("deliver_pr") | Some("dispatch_delegated")
+        )
     }));
     assert!(config.steps.iter().all(|s| s.on_fail.is_none()));
     engine.register_config(&config).expect("config");
 
-    let run = engine.start_run(&task_id, "read-only-review", HEAD_A).expect("run");
+    let run = engine
+        .start_run(&task_id, "read-only-review", HEAD_A)
+        .expect("run");
     let actor = MemberId::new();
     let mut next = None;
     for (kind, head) in [
@@ -514,11 +586,16 @@ fn one_active_run_per_task() {
         .register_config(&WorkflowConfig::read_only_review_default())
         .expect("config");
 
-    let first = engine.start_run(&task_id, "read-only-review", HEAD_A).expect("run");
+    let first = engine
+        .start_run(&task_id, "read-only-review", HEAD_A)
+        .expect("run");
     let err = engine
         .start_run(&task_id, "read-only-review", HEAD_A)
         .expect_err("second active run must be refused");
-    assert!(err.to_string().contains("active workflow run"), "got: {err}");
+    assert!(
+        err.to_string().contains("active workflow run"),
+        "got: {err}"
+    );
 
     engine
         .abort_run(&first.run_id, "superseded by a re-scope")
@@ -540,5 +617,9 @@ fn one_active_run_per_task() {
 
     // Runs are bound to real tasks.
     let missing = TaskId::from_str("task-nope").expect("well-formed id");
-    assert!(engine.start_run(&missing, "read-only-review", HEAD_A).is_err());
+    assert!(
+        engine
+            .start_run(&missing, "read-only-review", HEAD_A)
+            .is_err()
+    );
 }

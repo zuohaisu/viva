@@ -312,11 +312,7 @@ pub fn smoke_specs() -> Vec<(String, ActionSpec)> {
             ActionSpec {
                 tool: "orca-computer",
                 program: "orca",
-                locator: vec![
-                    "computer".into(),
-                    "list-apps".into(),
-                    "--json".into(),
-                ],
+                locator: vec!["computer".into(), "list-apps".into(), "--json".into()],
                 target: "Google Chrome".into(),
                 argv: vec![
                     "computer".into(),
@@ -334,11 +330,7 @@ pub fn smoke_specs() -> Vec<(String, ActionSpec)> {
             ActionSpec {
                 tool: "orca-computer",
                 program: "orca",
-                locator: vec![
-                    "computer".into(),
-                    "list-apps".into(),
-                    "--json".into(),
-                ],
+                locator: vec!["computer".into(), "list-apps".into(), "--json".into()],
                 target: "Finder".into(),
                 argv: vec![
                     "computer".into(),
@@ -396,10 +388,10 @@ impl<'a> ComputerEngine<'a> {
         let mut reports = Vec::new();
         for tool in AUDITED_TOOLS {
             let now = utc_now();
-            let (present, detail, permission) = match self
-                .runner
-                .run(tool.program, &tool.probe.iter().map(|s| s.to_string()).collect::<Vec<_>>())
-            {
+            let (present, detail, permission) = match self.runner.run(
+                tool.program,
+                &tool.probe.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            ) {
                 Ok(out) => (true, out, "available"),
                 Err(failure) => (false, failure.to_string(), "unavailable"),
             };
@@ -421,7 +413,11 @@ impl<'a> ComputerEngine<'a> {
                 } else {
                     crate::authority::RestrictionState::Unverified
                 },
-                adapter_evidence: if present { Some("live probe succeeded".into()) } else { None },
+                adapter_evidence: if present {
+                    Some("live probe succeeded".into())
+                } else {
+                    None
+                },
             });
         }
         Ok(reports)

@@ -26,8 +26,8 @@ use std::path::Path;
 
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
-use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use crate::authority::{Actor, AuthorityEngine};
 use crate::foundation::error::{OfficeError, OfficeResult};
@@ -584,9 +584,7 @@ impl<'a> MaintenanceService<'a> {
                     resolution_note
              FROM maintenance_proposals WHERE proposal_id = ?1",
         )?;
-        let row = stmt
-            .query_row([proposal_id], map_proposal)
-            .optional()?;
+        let row = stmt.query_row([proposal_id], map_proposal).optional()?;
         Ok(row)
     }
 

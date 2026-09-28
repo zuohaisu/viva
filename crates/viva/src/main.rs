@@ -738,10 +738,7 @@ fn cmd_tools(args: &[String]) -> OfficeResult<()> {
                 }
                 results.insert(name, serde_json::to_value(&record)?);
             }
-            results.insert(
-                "capabilities".into(),
-                serde_json::to_value(&reports)?,
-            );
+            results.insert("capabilities".into(), serde_json::to_value(&reports)?);
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::Value::Object(results))?
@@ -785,7 +782,8 @@ fn cmd_office_create_task(args: &[String]) -> OfficeResult<()> {
         OfficeError::Validation("usage: viva office create-task --goal <text>".into())
     })?;
     let store = open_office_store()?;
-    let task = viva::tasks::TaskRegistry::new(&store).create_task(goal, vec![], None, None, None)?;
+    let task =
+        viva::tasks::TaskRegistry::new(&store).create_task(goal, vec![], None, None, None)?;
     println!("{}", serde_json::to_string_pretty(&task)?);
     Ok(())
 }
@@ -836,13 +834,14 @@ fn cmd_office_grant(args: &[String]) -> OfficeResult<()> {
                 .into(),
         )
     })?;
-    let mode = viva::authority::GrantMode::from_str_value(
-        &mode.ok_or_else(|| OfficeError::Validation("--mode is required (READ | PROPOSE | ACT_WITH_APPROVAL | ACT_AUTONOMOUSLY)".into()))?,
-    )?;
+    let mode = viva::authority::GrantMode::from_str_value(&mode.ok_or_else(|| {
+        OfficeError::Validation(
+            "--mode is required (READ | PROPOSE | ACT_WITH_APPROVAL | ACT_AUTONOMOUSLY)".into(),
+        )
+    })?)?;
     let store = open_office_store()?;
     let engine = viva::authority::AuthorityEngine::new(&store);
-    let grant =
-        engine.issue_root_grant(member, task, vec![action], mode, expires)?;
+    let grant = engine.issue_root_grant(member, task, vec![action], mode, expires)?;
     println!("{}", serde_json::to_string_pretty(&grant)?);
     Ok(())
 }
@@ -855,8 +854,7 @@ fn cmd_office_grant(args: &[String]) -> OfficeResult<()> {
 fn cmd_memory(args: &[String]) -> OfficeResult<()> {
     use std::str::FromStr as _;
 
-    let mut named: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
+    let mut named: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut i = 1; // args[0] is the subcommand
     while i < args.len() {
         let flag = args[i].as_str();

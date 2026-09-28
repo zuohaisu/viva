@@ -97,11 +97,25 @@ fn real_write_search_roundtrip_with_usage_evidence() {
     let member = MemberId::new();
 
     let link = service
-        .remember(&member, None, EN_FACT, "F04 integration test write", "general", "")
+        .remember(
+            &member,
+            None,
+            EN_FACT,
+            "F04 integration test write",
+            "general",
+            "",
+        )
         .expect("real write");
     assert!(link.fact_id > 0, "the external store returned a fact id");
     service
-        .remember(&member, None, CN_FACT, "F04 integration test write", "general", "")
+        .remember(
+            &member,
+            None,
+            CN_FACT,
+            "F04 integration test write",
+            "general",
+            "",
+        )
         .expect("real cn write");
 
     // Exact-term recall, EN.
@@ -172,7 +186,14 @@ fn member_and_project_isolation_on_the_real_store() {
     let project_b = ProjectId::new();
 
     service
-        .remember(&alice, Some(&project_a), EN_FACT, "alice wrote this", "general", "")
+        .remember(
+            &alice,
+            Some(&project_a),
+            EN_FACT,
+            "alice wrote this",
+            "general",
+            "",
+        )
         .expect("write");
 
     // Same member, right project: visible.
@@ -316,7 +337,11 @@ fn unavailable_store_says_so() {
     );
 
     // Writes fail closed as well — and refuse without provenance first.
-    assert!(service.remember(&member, None, "x", "", "general", "").is_err());
+    assert!(
+        service
+            .remember(&member, None, "x", "", "general", "")
+            .is_err()
+    );
 }
 
 /// Duplicate content resolves to the same external fact; the first source

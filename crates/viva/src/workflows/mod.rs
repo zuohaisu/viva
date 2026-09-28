@@ -514,10 +514,8 @@ impl<'a> WorkflowEngine<'a> {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        row.map(|(config_id, json)| {
-            Ok((config_id, serde_json::from_str(&json)?))
-        })
-        .transpose()
+        row.map(|(config_id, json)| Ok((config_id, serde_json::from_str(&json)?)))
+            .transpose()
     }
 
     // -- Run lifecycle ---------------------------------------------------------
@@ -533,18 +531,20 @@ impl<'a> WorkflowEngine<'a> {
         head_sha: impl Into<String>,
     ) -> OfficeResult<WorkflowRun> {
         self.require_task(task_id)?;
-        let (config_id, _) = self
-            .config_by_name(config_name)?
-            .ok_or_else(|| OfficeError::NotFound {
-                entity: "workflow config",
-                id: config_name.to_string(),
-            })?;
+        let (config_id, _) =
+            self.config_by_name(config_name)?
+                .ok_or_else(|| OfficeError::NotFound {
+                    entity: "workflow config",
+                    id: config_name.to_string(),
+                })?;
         let head_sha = validate_head_sha(head_sha)?;
         if let Some(active) = self.active_run_for_task(task_id)? {
             return Err(OfficeError::Validation(format!(
                 "task `{}` already has an active workflow run `{}` ({}) — resolve it \
                  (complete or abort) before starting another",
-                task_id, active.run_id, active.status.as_str()
+                task_id,
+                active.run_id,
+                active.status.as_str()
             )));
         }
         let now = utc_now();
@@ -601,11 +601,10 @@ impl<'a> WorkflowEngine<'a> {
     }
 
     fn require_run(&self, run_id: &str) -> OfficeResult<WorkflowRun> {
-        self.get_run(run_id)?
-            .ok_or_else(|| OfficeError::NotFound {
-                entity: "workflow run",
-                id: run_id.to_string(),
-            })
+        self.get_run(run_id)?.ok_or_else(|| OfficeError::NotFound {
+            entity: "workflow run",
+            id: run_id.to_string(),
+        })
     }
 
     /// Resume a paused run, optionally rebinding it to a new head (e.g.
@@ -689,22 +688,21 @@ impl<'a> WorkflowEngine<'a> {
                 run.status.as_str()
             )));
         }
-        let (_, config) = self
-            .config_by_id(&run.config_id)?
-            .ok_or_else(|| OfficeError::NotFound {
-                entity: "workflow config",
-                id: run.config_id.clone(),
-            })?;
-        let step = config
-            .steps
-            .get(run.current_step)
-            .ok_or_else(|| OfficeError::Validation(format!(
+        let (_, config) =
+            self.config_by_id(&run.config_id)?
+                .ok_or_else(|| OfficeError::NotFound {
+                    entity: "workflow config",
+                    id: run.config_id.clone(),
+                })?;
+        let step = config.steps.get(run.current_step).ok_or_else(|| {
+            OfficeError::Validation(format!(
                 "run `{}` current step index {} is outside its config ({} steps) — \
                  the config changed after the run started",
                 run_id,
                 run.current_step,
                 config.steps.len()
-            )))?;
+            ))
+        })?;
 
         for item in &evidence {
             if let Some(head) = &item.head_sha {
@@ -832,9 +830,7 @@ impl<'a> WorkflowEngine<'a> {
         evidence: &[StepEvidence],
     ) -> OfficeResult<()> {
         for requirement in &step.requires_evidence {
-            let covered = evidence
-                .iter()
-                .any(|item| item.kind == requirement.kind);
+            let covered = evidence.iter().any(|item| item.kind == requirement.kind);
             if !covered {
                 return Err(OfficeError::Validation(format!(
                     "step `{}` cannot pass without `{}` evidence — claims are not evidence",
@@ -842,9 +838,9 @@ impl<'a> WorkflowEngine<'a> {
                 )));
             }
             if requirement.require_head_sha {
-                let bound = evidence.iter().any(|item| {
-                    item.kind == requirement.kind && item.head_sha.is_some()
-                });
+                let bound = evidence
+                    .iter()
+                    .any(|item| item.kind == requirement.kind && item.head_sha.is_some());
                 if !bound {
                     return Err(OfficeError::Validation(format!(
                         "step `{}` `{}` evidence must carry the head SHA it was produced on",
@@ -891,12 +887,12 @@ impl<'a> WorkflowEngine<'a> {
     /// every appended attempt with its evidence and head bindings.
     pub fn run_history(&self, run_id: &str) -> OfficeResult<RunHistory> {
         let run = self.require_run(run_id)?;
-        let (_, config) = self
-            .config_by_id(&run.config_id)?
-            .ok_or_else(|| OfficeError::NotFound {
-                entity: "workflow config",
-                id: run.config_id.clone(),
-            })?;
+        let (_, config) =
+            self.config_by_id(&run.config_id)?
+                .ok_or_else(|| OfficeError::NotFound {
+                    entity: "workflow config",
+                    id: run.config_id.clone(),
+                })?;
         let mut stmt = self.store.connection().prepare(
             "SELECT record_id, run_id, step_index, step_id, role, actor_member_id,
                     outcome, evidence_json, recorded_at
@@ -1021,10 +1017,7 @@ impl<'a> WorkflowEngine<'a> {
 fn validate_head_sha(head_sha: impl Into<String>) -> OfficeResult<String> {
     let head_sha = head_sha.into();
     let trimmed = head_sha.trim();
-    if trimmed.len() < 7
-        || trimmed.len() > 64
-        || !trimmed.chars().all(|c| c.is_ascii_hexdigit())
-    {
+    if trimmed.len() < 7 || trimmed.len() > 64 || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(OfficeError::Validation(format!(
             "`{trimmed}` is not a git head SHA (expected 7–64 hex characters)"
         )));

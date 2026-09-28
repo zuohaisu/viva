@@ -350,9 +350,9 @@ impl<'a> MemoryService<'a> {
         }))?;
         if !answer.ok || answer.state != "fetched" {
             return Ok(MemorySearch::Unavailable {
-                reason: answer.error.unwrap_or_else(|| {
-                    "adapter answered without an error reason".to_string()
-                }),
+                reason: answer
+                    .error
+                    .unwrap_or_else(|| "adapter answered without an error reason".to_string()),
             });
         }
 
@@ -453,11 +453,10 @@ impl<'a> MemoryService<'a> {
                 )?;
             }
         }
-        self.link_of(fact_id)?
-            .ok_or_else(|| OfficeError::NotFound {
-                entity: "memory link",
-                id: fact_id.to_string(),
-            })
+        self.link_of(fact_id)?.ok_or_else(|| OfficeError::NotFound {
+            entity: "memory link",
+            id: fact_id.to_string(),
+        })
     }
 
     // -- Records -----------------------------------------------------------------
@@ -537,12 +536,7 @@ impl<'a> MemoryService<'a> {
         Ok(records)
     }
 
-    fn record_usage(
-        &self,
-        fact_id: i64,
-        member: &MemberId,
-        query: &str,
-    ) -> OfficeResult<()> {
+    fn record_usage(&self, fact_id: i64, member: &MemberId, query: &str) -> OfficeResult<()> {
         self.store.connection().execute(
             "INSERT INTO memory_usages(fact_id, member_id, query, used_at)
              VALUES (?1, ?2, ?3, ?4)",
