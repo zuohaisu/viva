@@ -15,6 +15,7 @@ pub mod foundation;
 pub mod git;
 pub mod harness;
 pub mod knowledge;
+pub mod maintenance;
 pub mod members;
 pub mod office;
 pub mod projects;

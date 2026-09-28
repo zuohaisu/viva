@@ -195,6 +195,7 @@ const DISPATCH_ACTIONS: &[&str] = &[
     "invoke_worker",
     "delegate_grant",
     "deliver_pr",
+    "maintain_knowledge",
 ];
 
 /// Read-class actions a plain chat identity may perform without any grant.

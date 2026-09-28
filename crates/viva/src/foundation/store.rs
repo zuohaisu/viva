@@ -56,6 +56,7 @@ pub const DOMAIN_GIT: Domain = Domain::new("git");
 pub const DOMAIN_CONVERSATIONS: Domain = Domain::new("conversations");
 pub const DOMAIN_KNOWLEDGE: Domain = Domain::new("knowledge");
 pub const DOMAIN_WORKFLOWS: Domain = Domain::new("workflows");
+pub const DOMAIN_MAINTENANCE: Domain = Domain::new("maintenance");
 
 /// Every domain V01 knows about; used by the CLI to validate event domains.
 pub const KNOWN_DOMAINS: &[Domain] = &[
@@ -68,6 +69,7 @@ pub const KNOWN_DOMAINS: &[Domain] = &[
     DOMAIN_CONVERSATIONS,
     DOMAIN_KNOWLEDGE,
     DOMAIN_WORKFLOWS,
+    DOMAIN_MAINTENANCE,
 ];
 
 /// Map a domain name read from the database back to a `Domain`. Known domains
