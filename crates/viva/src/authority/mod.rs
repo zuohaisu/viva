@@ -187,11 +187,14 @@ pub const PROTECTED_ACTIONS: &[&str] = &[
 
 /// Actions that mutate the world and therefore require a live grant with an
 /// ACT_* mode; everything else a grant lists requires at least PROPOSE.
+/// `deliver_pr` (F01) is a remote write: opening a pull request needs an
+/// owner grant, merging stays protected forever.
 const DISPATCH_ACTIONS: &[&str] = &[
     "dispatch_delegated",
     "stop_delegated",
     "invoke_worker",
     "delegate_grant",
+    "deliver_pr",
 ];
 
 /// Read-class actions a plain chat identity may perform without any grant.
