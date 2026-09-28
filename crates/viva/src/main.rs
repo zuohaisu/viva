@@ -30,6 +30,7 @@ fn run(args: &[String]) -> OfficeResult<()> {
         Some("doctor") => cmd_doctor(),
         Some("event") => cmd_event(args.get(1..).unwrap_or(&[])),
         Some("office") => cmd_office(args.get(1..).unwrap_or(&[])),
+        Some("conversations") => cmd_conversations(args.get(1..).unwrap_or(&[])),
         Some("version" | "--version" | "-V") => {
             println!("viva {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -459,4 +460,119 @@ fn print_office_response(response: &viva::office::OfficeResponse) -> OfficeResul
                 .unwrap_or_else(|| "rejected without a reason".into()),
         ))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Conversation metadata CLI (V10) — office-owned display names, fork trees
+// and handoff records. The harness-native transcript is never copied here.
+// ---------------------------------------------------------------------------
+
+fn cmd_conversations(args: &[String]) -> OfficeResult<()> {
+    let home = viva::foundation::paths::viva_home(None);
+    let store = viva::foundation::store::Store::open(
+        &viva::foundation::paths::database_path(&home),
+        viva::office::office_migrations(),
+    )?;
+    let registry = viva::conversations::ConversationRegistry::new(&store);
+    let mut named = std::collections::HashMap::new();
+    // args[0] is the subcommand; everything after is --flag value pairs.
+    let mut i = 1;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        i += 1;
+        let value = args
+            .get(i)
+            .cloned()
+            .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+        named.insert(flag.to_string(), value);
+        i += 1;
+    }
+    let get = |key: &str| named.get(key).cloned();
+    let require = |key: &str| -> OfficeResult<String> {
+        get(key)
+            .ok_or_else(|| OfficeError::Validation(format!("conversations {args:?} needs --{key}")))
+    };
+
+    match args.first().map(String::as_str) {
+        Some("create") => {
+            let session_id = viva::foundation::ids::SessionId::from_str(&require("--session")?)?;
+            let node = registry.create_root(
+                &session_id,
+                require("--name")?,
+                get("--harness").unwrap_or_else(|| "pi".into()),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&node)?);
+        }
+        Some("fork") => {
+            // Records a fork; call this only after the harness natively
+            // forked (the extension enforces the ordering).
+            let node = registry.record_fork(
+                &require("--parent")?,
+                require("--name")?,
+                get("--native-session"),
+                get("--native-node"),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&node)?);
+        }
+        Some("rename") => {
+            registry.rename(&require("--node")?, require("--name")?)?;
+            println!("renamed");
+        }
+        Some("set-native") => {
+            registry.set_native_ref(
+                &require("--node")?,
+                require("--native-session")?,
+                get("--native-node"),
+            )?;
+            println!("native reference set");
+        }
+        Some("attach-task") => {
+            registry.attach_task(
+                &require("--node")?,
+                &viva::foundation::ids::TaskId::from_str(&require("--task")?)?,
+            )?;
+            println!("task attached");
+        }
+        Some("detach-task") => {
+            registry.detach_task(&require("--node")?)?;
+            println!("task detached");
+        }
+        Some("archive") => {
+            registry.archive(&require("--node")?)?;
+            println!("archived (history and children untouched)");
+        }
+        Some("tree") => {
+            let session_id = viva::foundation::ids::SessionId::from_str(&require("--session")?)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&registry.tree(&session_id)?)?
+            );
+        }
+        Some("handoff") => {
+            let handoff = registry.record_handoff(
+                &require("--node")?,
+                require("--to")?,
+                viva::conversations::ForkCapability::from_str_value(
+                    &get("--capability").unwrap_or_else(|| "handoff_only".into()),
+                )?,
+                get("--native-session"),
+                get("--member")
+                    .map(|m| viva::foundation::ids::MemberId::from_str(&m))
+                    .transpose()?,
+                get("--task")
+                    .map(|t| viva::foundation::ids::TaskId::from_str(&t))
+                    .transpose()?,
+                get("--brief"),
+                get("--history-ref"),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&handoff)?);
+        }
+        _ => {
+            return Err(OfficeError::Validation(
+                "conversations needs create | fork | rename | set-native | attach-task | detach-task | archive | tree | handoff"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
 }

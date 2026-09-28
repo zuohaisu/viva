@@ -10,5 +10,5 @@
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": false
   },
-  "include": ["pi-api.d.ts", "*.ts", "test/**/*.ts"]
+  "include": ["pi-api.d.ts", "*.ts", "conversations/**/*.ts", "test/**/*.ts"]
 }
