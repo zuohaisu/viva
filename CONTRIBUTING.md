@@ -29,7 +29,9 @@ In short:
 git fetch origin
 # work in a dedicated worktree based on origin/main, on a branch named
 # agent/<type>-<short-description>
-python -m pytest tests/ -q
+cargo test --workspace                 # Rust product (units + acceptance)
+python3 -m pytest tests/acceptance -q  # stdlib-only acceptance tooling
+(cd extensions/pi && npm ci && npm run typecheck && npm test)  # Pi extension
 git diff --check
 ```
 
@@ -37,14 +39,14 @@ git diff --check
 
 | You want to… | Look at |
 | --- | --- |
-| change a member's identity, role, model or tool binding | `src/viva/residents/` |
-| change how authority or delegation works | `src/viva/permissions/` (and ADR 0007) |
-| change where work happens (worktrees, read-only tasks) | `src/viva/worktrees/` (and ADR 0009) |
-| change tasks, outputs, handoff briefs | `src/viva/tasks/` |
-| change dispatch/stop/status/recovery | `src/viva/office/`, `src/viva/executions/` |
-| change knowledge ownership or reuse evidence | `src/viva/knowledge/` (and ADR 0010) |
-| change GitHub linkage | `src/viva/github/` (read-only only) |
-| change the surfaces | `src/viva/cli/`, `src/viva/tui/` |
+| change a member's identity, role, model or tool binding | `crates/viva/src/members/` |
+| change how authority or delegation works | `crates/viva/src/authority/` (and ADR 0007) |
+| change where work happens (worktrees, GitHub evidence) | `crates/viva/src/git/` (and ADR 0009) |
+| change tasks, results, handoff briefs | `crates/viva/src/tasks/` |
+| change dispatch/stop/status/recovery (control plane) | `crates/viva/src/office/` |
+| change knowledge ownership or reuse evidence | `crates/viva/src/knowledge/` (and ADR 0010) |
+| change conversation trees, forks, handoffs | `crates/viva/src/conversations/` |
+| change the surfaces | `crates/viva/src/tui/`, `crates/viva/src/main.rs`, `extensions/pi/` |
 
 Do **not** reintroduce the retired delivery subsystem: no ticket/Plane/run/QA
 objects, no fixed pipelines presented as dynamic scheduling (ADR 0008).
@@ -53,14 +55,17 @@ archives) must not be deleted or rewritten.
 
 ## Tests
 
-`tests/viva/` is the suite. Meaningful coverage means:
+`crates/viva/tests/` is the product suite (per-issue acceptance tests over
+real processes: real Unix-socket channels, real PTYs, real local git
+repositories, a real `kill -9` crash-restart path). Meaningful coverage
+means:
 
 - a unit test for the object's rule (state transitions, refusal reasons,
   ownership boundaries);
 - an integration test when the behaviour crosses a process boundary —
-  dispatch, stopping and recovery use **real** worker processes
-  (`tests/viva/conftest.py` provides a controllable fake worker CLI);
-- the nine acceptance scenarios in `tests/viva/test_acceptance.py` stay green.
+  dispatch, stopping and recovery run **real** supervised processes;
+- the acceptance tooling tests (`tests/acceptance/`) and the Pi extension
+  suite (`extensions/pi/`: strict `tsc` + `node:test`) stay green.
 
 Never weaken or skip a test to make a change pass.
 

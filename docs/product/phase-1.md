@@ -4,9 +4,9 @@ Status: canonical · 版本：2026-09-27（AI Office 修订）· 上游：`visio
 
 本文分三部分：**已实现并有证据的能力**、**本轮范围之外但已定义的边界**、**明确未实现且不得假装的能力**。
 
-技术方向已批准为 Rust 宿主与终端 TUI，见 [ADR 0011](../decisions/0011-rust-host-and-tui.md)。下表仍描述当前 Python + Textual 实现；Rust 迁移、关闭 TUI 后暂停任务/维护的完整协议尚未验收，不能计入已实现能力。Pi 已批准为首个默认对话宿主（交互终端 + 小型扩展），成员可切换 harness；PTY 承载、Pi 扩展与外部记忆接入均尚未实现，具体边界见 ADR 0011 §5。2026-09-28，SQLite + 文件存储方案获批（ADR 0011 §8），数据库状态层与数据转换尚未实现，下表不作为 SQLite 运行证据。
+技术方向已批准并**落地**为 Rust 宿主与终端 TUI（[ADR 0011](../decisions/0011-rust-host-and-tui.md)；Python 运行时已于 V13 退役，映射见 `docs/validation/v13-python-retirement.md`）。本文写作时的 Python 实现表是历史记录，保留作对照；现行能力以 `crates/viva/` 及其验收测试为准。Pi 已作为首个默认对话宿主接入（交互终端 + `extensions/pi/` 小型扩展，真实 Pi 端到端待凭证后按 V12 记录）；外部记忆接入仍未实现，不装假 Holographic。SQLite + 文件存储为现行状态层。
 
-## 0. 已实现（2026-09-27，证据在 `tests/viva/`）
+## 0. 已实现（历史表：2026-09-27 的 Python 证据在 `tests/viva/`，V13 后能力由 `crates/viva/` 承载并以 `crates/viva/tests/` 为现行证据）
 
 | 能力 | 实现 | 证据 |
 | --- | --- | --- |
@@ -29,7 +29,7 @@ Status: canonical · 版本：2026-09-27（AI Office 修订）· 上游：`visio
 | Experience journal（append-only + 脱敏） | `experience/journal.py`、`core/redaction.py` | `test_experience.py`、`test_redaction.py` |
 | 旧子系统能力复用（worktree/脱敏/授权） | `worktrees/service.py`、`core/redaction.py`、`permissions/authority.py` | `test_worktree_service.py`、`test_redaction.py`、`test_permissions.py` |
 
-九个验收场景的端到端证据在 `tests/viva/test_acceptance.py`（每个场景一个测试函数，使用真实子进程）。
+九个验收场景的 Python 端到端证据曾是 `tests/viva/test_acceptance.py`；V13 后逐 issue 验收测试在 `crates/viva/tests/`（真实 UDS 通道、真实 PTY、真实本地 git 仓库、真实 kill -9 崩溃对账）。
 
 ## 1. Phase 1 的一句话目标
 

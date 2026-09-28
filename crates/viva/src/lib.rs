@@ -10,10 +10,13 @@
 //! V07 (lane A).
 
 pub mod authority;
+pub mod conversations;
 pub mod foundation;
 pub mod git;
+pub mod harness;
 pub mod knowledge;
 pub mod members;
+pub mod office;
 pub mod projects;
 pub mod redaction;
 pub mod tasks;

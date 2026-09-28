@@ -1,0 +1,7 @@
+{
+  "cold_seconds": 12.7,
+  "incremental_seconds": 0.1,
+  "cold_ok": true,
+  "incremental_ok": true,
+  "cold_stderr_tail": ""
+}

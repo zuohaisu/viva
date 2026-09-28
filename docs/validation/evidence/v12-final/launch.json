@@ -1,0 +1,18 @@
+{
+  "argv": [
+    "./target/debug/viva",
+    "doctor"
+  ],
+  "repeats": 7,
+  "seconds": [
+    0.0141,
+    0.0056,
+    0.0044,
+    0.0037,
+    0.0034,
+    0.0032,
+    0.0032
+  ],
+  "median_seconds": 0.0037,
+  "kind": "real"
+}

@@ -1,0 +1,16 @@
+{
+  "name": "@viva/pi-office-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Viva office extension for the Pi coding agent: member identity, office queries, controlled dispatch and explicit handoff (V09, issue #18).",
+  "license": "MIT",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test 'test/*.test.ts'"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

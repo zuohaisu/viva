@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "created_at": "2026-09-28T17:18:03+0800",
+  "machine": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "machine": "arm64",
+    "python": "3.14.6",
+    "cpu_count": 10,
+    "model": "Mac17,4",
+    "cpu_brand": "Apple M5",
+    "total_memory_bytes": 34359738368
+  },
+  "window": {
+    "lock": "/tmp/viva-v12-window.lock",
+    "exclusive": true,
+    "hold_hint_seconds": 120
+  },
+  "workload": {
+    "workload": "slice-cli",
+    "kind": "real",
+    "steps": [
+      {
+        "argv": [
+          "/Users/hzuo/orca/workspaces/viva/dev4/target/debug/viva",
+          "init"
+        ],
+        "seconds": 0.0097,
+        "exit_code": 0,
+        "stderr_tail": ""
+      },
+      {
+        "argv": [
+          "/Users/hzuo/orca/workspaces/viva/dev4/target/debug/viva",
+          "event",
+          "add",
+          "foundation",
+          "acceptance_sample",
+          "tool",
+          "v12",
+          "{\"source\":\"sampler\"}"
+        ],
+        "seconds": 0.0048,
+        "exit_code": 0,
+        "stderr_tail": ""
+      },
+      {
+        "argv": [
+          "/Users/hzuo/orca/workspaces/viva/dev4/target/debug/viva",
+          "doctor"
+        ],
+        "seconds": 0.004,
+        "exit_code": 0,
+        "stderr_tail": ""
+      }
+    ]
+  },
+  "step_peaks": [
+    {
+      "argv": [
+        "/Users/hzuo/orca/workspaces/viva/dev4/target/debug/viva",
+        "init"
+      ],
+      "supported": true,
+      "seconds": 0.0063,
+      "exit_code": 0,
+      "max_rss_kb": 4192
+    },
+    {
+      "argv": [
+        "/Users/hzuo/orca/workspaces/viva/dev4/target/debug/viva",
+        "event",
+        "add",
+        "foundation",
+        "acceptance_sample",
+        "tool",
+        "v12",
+        "{\"source\":\"sampler\"}"
+      ],
+      "supported": true,
+      "seconds": 0.0092,
+      "exit_code": 0,
+      "max_rss_kb": 4464
+    },
+    {
+      "argv": [
+        "/Users/hzuo/orca/workspaces/viva/dev4/target/debug/viva",
+        "doctor"
+      ],
+      "supported": true,
+      "seconds": 0.0058,
+      "exit_code": 0,
+      "max_rss_kb": 4288
+    }
+  ],
+  "system_memory": {
+    "source": "vm_stat",
+    "free_bytes": 16568320,
+    "inactive_bytes": 2454753280,
+    "purgeable_bytes": 27541504,
+    "wired_bytes": 914964480,
+    "compressed_bytes": 10157920256,
+    "swap_total_bytes": 15032385536,
+    "swap_used_bytes": 13738442752,
+    "swap_free_bytes": 1293942784
+  },
+  "honesty_notes": [
+    "workload kind is recorded per workload; simulated workloads validate control logic only",
+    "max_rss_kb is a per-process peak; it is never summed across processes into a physical-memory claim",
+    "pending platforms (Intel Mac, 16 real agents) are not covered by this record"
+  ]
+}
