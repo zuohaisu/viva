@@ -12,6 +12,7 @@
 pub mod authority;
 pub mod foundation;
 pub mod git;
+pub mod harness;
 pub mod knowledge;
 pub mod members;
 pub mod office;

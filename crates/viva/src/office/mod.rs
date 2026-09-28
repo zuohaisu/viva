@@ -445,6 +445,11 @@ fn handle_request(
         } => terminal_input(&shared, terminal_id, bytes_hex),
         OfficeRequestKind::TerminalStop { terminal_id } => terminal_stop(&shared, terminal_id),
         OfficeRequestKind::TaskResults { task_id } => task_results(&shared, task_id),
+        OfficeRequestKind::Handoff {
+            task_id,
+            member_id,
+            summary,
+        } => handoff(&shared, task_id, member_id, summary),
         OfficeRequestKind::Shutdown => Ok(serde_json::json!({"shutting_down": true})),
     }
 }
@@ -743,6 +748,76 @@ fn task_results(shared: &OfficeShared, task_id: &str) -> OfficeResult<serde_json
     let tasks = TaskRegistry::new(&store);
     let results = tasks.results_for_task(&task_id)?;
     Ok(serde_json::to_value(&results)?)
+}
+
+/// Record a member's handoff summary. The fact stored is "member X reported
+/// this at time T" — never a completion verdict; the task's own status only
+/// moves through the outcome ledger (V03). An identical repeat is reported
+/// as a duplicate and changes nothing (故障/重复事件不会把任务错误标为通过).
+fn handoff(
+    shared: &OfficeShared,
+    task_id: &str,
+    member_id: &str,
+    summary: &str,
+) -> OfficeResult<serde_json::Value> {
+    let task_id = TaskId::from_str(task_id)?;
+    let member_id = MemberId::from_str(member_id)?;
+    if summary.trim().is_empty() {
+        return Err(OfficeError::Validation(
+            "handoff summary must not be empty".into(),
+        ));
+    }
+    let store = shared.store.lock().expect("office store");
+    let tasks = TaskRegistry::new(&store);
+    tasks.require_task(&task_id)?;
+    // Attach the task's most recent launched execution when one exists; a
+    // handoff without an execution is still a valid member report.
+    let execution: Option<crate::foundation::ids::ExecutionId> = store
+        .connection()
+        .query_row(
+            "SELECT execution_id FROM launch_intents
+             WHERE task_id = ?1 AND execution_id IS NOT NULL
+             ORDER BY intended_at DESC LIMIT 1",
+            [task_id.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|s| crate::foundation::ids::ExecutionId::from_str(&s).ok());
+    // Deterministic dedup: the same task+member+summary is the same report.
+    let dedup = format!("handoff:{}:{}:{:016x}", task_id, member_id, fnv1a(summary));
+    match tasks.record_result(
+        &task_id,
+        execution,
+        crate::tasks::ResultSource::User,
+        "member_handoff",
+        dedup,
+        serde_json::json!({
+            "reporter_member_id": member_id.to_string(),
+            "summary": summary,
+        }),
+    )? {
+        Ok(result) => Ok(serde_json::json!({
+            "recorded": true,
+            "result_id": result.result_id,
+            "note": "member-reported fact; not a completion verdict and not acceptance PASS",
+        })),
+        Err(_duplicate) => Ok(serde_json::json!({
+            "recorded": false,
+            "duplicate": true,
+            "note": "an identical handoff is already recorded; task state unchanged",
+        })),
+    }
+}
+
+/// FNV-1a (64-bit) over the summary text — a deterministic dedup key needs
+/// a stable hash; std's DefaultHasher is not stable across releases.
+fn fnv1a(text: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 // ---------------------------------------------------------------------------

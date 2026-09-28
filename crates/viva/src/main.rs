@@ -6,6 +6,7 @@
 //! more than the office currently does.
 
 use std::process::ExitCode;
+use std::str::FromStr as _;
 
 use viva::foundation::events::{self, NewEvent};
 use viva::foundation::paths::{database_path, ensure_private_dir, viva_home};
@@ -267,14 +268,77 @@ fn cmd_office(args: &[String]) -> OfficeResult<()> {
             println!("office: shutdown accepted; owned terminals stopped, handoff persisted");
             Ok(())
         }
+        Some("brief") => cmd_office_brief(args.get(1..).unwrap_or(&[])),
+        Some("handoff") => cmd_office_handoff(&home, args.get(1..).unwrap_or(&[])),
         _ => {
             print_usage();
             Err(OfficeError::Validation(
-                "office needs start | status | dispatch | terminals | stop-terminal | result | shutdown"
+                "office needs start | status | dispatch | terminals | stop-terminal | result | brief | handoff | shutdown"
                     .into(),
             ))
         }
     }
+}
+
+/// `viva office brief <task-id>` — offline, read-only task brief from the
+/// store (the extension's context-entry endpoint).
+fn cmd_office_brief(args: &[String]) -> OfficeResult<()> {
+    let task_id = args
+        .first()
+        .ok_or_else(|| OfficeError::Validation("usage: viva office brief <task-id>".into()))?;
+    let task_id = viva::foundation::ids::TaskId::from_str(task_id)?;
+    let home = viva::foundation::paths::viva_home(None);
+    let store = viva::foundation::store::Store::open(
+        &viva::foundation::paths::database_path(&home),
+        viva::office::office_migrations(),
+    )?;
+    let tasks = viva::tasks::TaskRegistry::new(&store);
+    let brief = tasks.generate_brief(&task_id)?;
+    println!("{}", serde_json::to_string_pretty(&brief)?);
+    Ok(())
+}
+
+/// `viva office handoff --task <id> --member <id> --summary <text>` —
+/// records a member-reported handoff over the live channel. A member
+/// report is a fact about who said what; it never completes a task.
+fn cmd_office_handoff(home: &std::path::Path, args: &[String]) -> OfficeResult<()> {
+    let mut task_id = None;
+    let mut member_id = None;
+    let mut summary = None;
+    let mut i = 0;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        i += 1;
+        let value = args
+            .get(i)
+            .cloned()
+            .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+        match flag {
+            "--task" => task_id = Some(value),
+            "--member" => member_id = Some(value),
+            "--summary" => summary = Some(value),
+            other => {
+                return Err(OfficeError::Validation(format!(
+                    "unknown handoff flag `{other}`"
+                )));
+            }
+        }
+        i += 1;
+    }
+    let (Some(task_id), Some(member_id), Some(summary)) = (task_id, member_id, summary) else {
+        return Err(OfficeError::Validation(
+            "usage: viva office handoff --task <id> --member <id> --summary <text>".into(),
+        ));
+    };
+    let response = viva::office::send_request(
+        home,
+        viva::office::new_request(viva::office::OfficeRequestKind::Handoff {
+            task_id,
+            member_id,
+            summary,
+        }),
+    )?;
+    print_office_response(&response)
 }
 
 fn cmd_office_start(home: &std::path::Path) -> OfficeResult<()> {

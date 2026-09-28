@@ -70,6 +70,14 @@ pub enum OfficeRequestKind {
     TerminalStop { terminal_id: String },
     /// Results recorded for a task (process facts, QA conclusions, PR/CI).
     TaskResults { task_id: String },
+    /// Record one member's explicit handoff summary for a task. A
+    /// member-reported fact: it never completes the task and never counts
+    /// as a QA verdict or acceptance PASS.
+    Handoff {
+        task_id: String,
+        member_id: String,
+        summary: String,
+    },
     /// Ask the host to shut down gracefully: stop new dispatch, stop owned
     /// terminals, persist the handoff, release the channel.
     Shutdown,
