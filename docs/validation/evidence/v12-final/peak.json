@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "created_at": "2026-09-28T09:17:23Z",
+  "machine": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "machine": "arm64",
+    "python": "3.14.6",
+    "cpu_count": 10,
+    "model": "Mac17,4",
+    "cpu_brand": "Apple M5",
+    "total_memory_bytes": 34359738368
+  },
+  "scenario": "office-peak-16",
+  "kind": "simulated_agents",
+  "honesty_notes": [
+    "16 REAL supervised PTY processes through the REAL control plane; sleep stand-ins, NOT real agent CLIs \u2014 model workload performance stays pending (no credentials/harness in this environment)",
+    "role RSS maxima are per-process peaks, never additive memory"
+  ],
+  "dispatch_seconds": [
+    0.011,
+    0.0254,
+    0.0301,
+    0.0304,
+    0.0303,
+    0.0266,
+    0.0302,
+    0.0302,
+    0.0301,
+    0.0312,
+    0.0298,
+    0.0253,
+    0.0299,
+    0.03,
+    0.0276,
+    0.0294
+  ],
+  "dispatch_median_seconds": 0.03,
+  "dispatched": 16,
+  "peak_sample": {
+    "snapshot_count": 15,
+    "totals": {
+      "roles": {
+        "host": {
+          "pids_observed": 1,
+          "rss_kb_max": 8864,
+          "cpu_pct_max": 0.0
+        },
+        "worker": {
+          "pids_observed": 0,
+          "rss_kb_max": 0,
+          "cpu_pct_max": 0.0
+        },
+        "browser": {
+          "pids_observed": 0,
+          "rss_kb_max": 0,
+          "cpu_pct_max": 0.0
+        },
+        "build": {
+          "pids_observed": 0,
+          "rss_kb_max": 0,
+          "cpu_pct_max": 0.0
+        },
+        "other": {
+          "pids_observed": 16,
+          "rss_kb_max": 1168,
+          "cpu_pct_max": 0.1
+        }
+      },
+      "note": "Repeated-snapshot maxima. RSS includes shared pages; role maxima are per-process peaks, never additive physical memory. The whole-machine view lives in system_memory."
+    },
+    "system_memory": {
+      "source": "vm_stat",
+      "free_bytes": 34078720,
+      "inactive_bytes": 2447364096,
+      "purgeable_bytes": 22867968,
+      "wired_bytes": 917827584,
+      "compressed_bytes": 10184966144,
+      "swap_total_bytes": 15032385536,
+      "swap_used_bytes": 13755219968,
+      "swap_free_bytes": 1277165568
+    },
+    "sleep_children_observed": 16
+  },
+  "stop_isolation": {
+    "stopped": [
+      "term-da7de92e7fc44500a919f772376318d6",
+      "term-c5ef8db9352e4700be07aaabdcc9377d"
+    ],
+    "survivor_still_live": true,
+    "live_before": 16,
+    "live_after": 14
+  },
+  "shutdown": {
+    "host_exit_code": 0,
+    "socket_removed": true,
+    "sleep_processes_on_machine_after": 0,
+    "note": "leftover count includes unrelated system sleep processes; the office-owned ones are covered by the terminal stop discipline tested in v07_office (graceful shutdown reaps every owned terminal)"
+  },
+  "offline_status_after": {
+    "active_host": null,
+    "home": "/private/tmp/viva-v12-final",
+    "last_host": {
+      "exit_kind": "graceful",
+      "exited_at": "2026-09-28T09:17:27.603633Z",
+      "host_id": "host-b95463558ef44a6da1855f03c764b7db",
+      "pid": 79422
+    },
+    "recovery_events": 1,
+    "socket_present": false
+  }
+}

@@ -11,7 +11,7 @@ use std::str::FromStr as _;
 use viva::foundation::events::{self, NewEvent};
 use viva::foundation::paths::{database_path, ensure_private_dir, viva_home};
 use viva::foundation::store::{KNOWN_DOMAINS, Store};
-use viva::foundation::{OfficeError, OfficeResult, foundation_migrations};
+use viva::foundation::{OfficeError, OfficeResult};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -95,7 +95,10 @@ USAGE:
 fn open_office_store() -> OfficeResult<Store> {
     let home = viva_home(None);
     ensure_private_dir(&home)?;
-    Store::open(&database_path(&home), foundation_migrations())
+    // The product entry opens the FULL office composition (every delivered
+    // domain), not just the foundation slice — `viva init` must leave a
+    // store the office can actually use.
+    Store::open(&database_path(&home), viva::office::office_migrations())
 }
 
 fn cmd_init() -> OfficeResult<()> {
@@ -266,7 +269,9 @@ fn cmd_office(args: &[String]) -> OfficeResult<()> {
         }
         Some("shutdown") => {
             cmd_office_query(&home, viva::office::OfficeRequestKind::Shutdown)?;
-            println!("office: shutdown accepted; owned terminals stopped, handoff persisted");
+            // Human commentary goes to stderr; stdout stays pure JSON for
+            // callers that parse it (the extension envelope, tooling).
+            eprintln!("office: shutdown accepted; owned terminals stopped, handoff persisted");
             Ok(())
         }
         Some("brief") => cmd_office_brief(args.get(1..).unwrap_or(&[])),
@@ -344,14 +349,14 @@ fn cmd_office_handoff(home: &std::path::Path, args: &[String]) -> OfficeResult<(
 
 fn cmd_office_start(home: &std::path::Path) -> OfficeResult<()> {
     let host = viva::office::OfficeHost::open(home)?;
-    println!(
+    eprintln!(
         "office host {} active (pid {}) — home {}",
         host.shared().host_id,
         std::process::id(),
         home.display()
     );
     host.serve()?;
-    println!("office host released the control channel");
+    eprintln!("office host released the control channel");
     Ok(())
 }
 

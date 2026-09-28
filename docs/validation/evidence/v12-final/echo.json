@@ -1,0 +1,9 @@
+{
+  "probe": "pty-echo-cat",
+  "payload_bytes": 11,
+  "seconds": 8e-05,
+  "timed_out": false,
+  "child_exit_status": 0,
+  "kind": "real",
+  "note": "single round trip, cold child; not an aggregate benchmark"
+}

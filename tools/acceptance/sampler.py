@@ -181,8 +181,10 @@ def process_table() -> list[ProcessRow]:
     ).stdout
     rows: list[ProcessRow] = []
     for line in out.splitlines():
-        parts = line.split(None, 5)
-        if len(parts) < 6:
+        # Four numeric columns, then the FULL command line as the remainder
+        # (maxsplit=5 would steal argv[0] and leave only the last argument).
+        parts = line.split(None, 4)
+        if len(parts) < 5:
             continue
         try:
             rows.append(
@@ -191,8 +193,8 @@ def process_table() -> list[ProcessRow]:
                     ppid=int(parts[1]),
                     rss_kb=int(parts[2]),
                     cpu_pct=float(parts[3]),
-                    role=classify_process(parts[5]),
-                    command=parts[5].strip(),
+                    role=classify_process(parts[4]),
+                    command=parts[4].strip(),
                 )
             )
         except ValueError:
