@@ -1,11 +1,13 @@
 # Research — Orca 的概念模型与 Viva/Orca 边界
 
-Status: research note · Date: 2026-09-27 · 来源：本机 Orca 安装（Orca.app）与其 `orca` CLI 版本化指南（`orca skills get orca-cli`）
+Status: **Historical observation; product-boundary recommendations superseded 2026-09-28** · Date: 2026-09-27 · 来源：本机 Orca 安装（Orca.app）与其 `orca` CLI 版本化指南（`orca skills get orca-cli`）
 
-> **状态说明（2026-09-27 修订后）**：本文是上一轮（单 Resident 框架）的研究笔记，其中的 Q 编号与对象命名已被 `docs/decisions/0006`–`0010` 修正；研究结论本身仍然有效，与当前产品模型冲突处以后者为准。
+> **状态说明（2026-09-27 修订后）**：本文是上一轮（单 Resident 框架）的研究笔记，其中的 Q 编号与对象命名已被 `docs/decisions/0006`–`0010` 修正；本机观察作为历史材料保留，产品边界建议已被2026-09-28新要求取代，不作为当前推荐。
 
 
 本文回答两个问题：**Orca 把 worktree 做成了什么；Viva 与 Orca 的边界在哪里（Q10）。**
+
+> 2026-09-28 修正：下文 §2/§4/§5 的产品边界建议已由[独立首版门槛](../product/first-usable-version.md)取代。公开源码与复用以 [新核查](orca-reuse-audit-2026-09-28.md) 为准，旧“完整/最好”措辞不是当前验收结论。
 
 ## 1. Orca 的概念模型（来自本机 CLI guide，非二手资料）
 
