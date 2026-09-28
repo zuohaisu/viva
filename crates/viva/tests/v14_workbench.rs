@@ -123,6 +123,30 @@ fn user_shell_harness(cwd: &Path) -> HarnessSpec {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn the_workbench_entry_exists_and_fails_honestly_without_a_tty() {
+    // D5/D6: `viva workbench` is a real product entry. Without an
+    // interactive terminal it refuses loudly (it never half-runs against a
+    // pipe); with one, quit goes through the office shutdown protocol
+    // (stop owned terminals → join watchers → persist handoff), which the
+    // v07 graceful-shutdown test pins at the protocol level.
+    let out = Command::new(env!("CARGO_BIN_EXE_viva"))
+        .args(["workbench"])
+        .env(
+            "VIVA_HOME",
+            std::env::temp_dir().join("viva-workbench-tty-test"),
+        )
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("viva runs");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a piped stdin must not silently pass: {stderr}"
+    );
+    assert!(stderr.contains("interactive terminal"), "got: {stderr}");
+}
+
+#[test]
 fn workbench_spans_projects_tasks_worktrees_with_real_git_facts() {
     let b = bench();
     let repo_a = repo_with_origin(b._dir.path(), "alpha");

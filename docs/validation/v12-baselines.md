@@ -30,11 +30,11 @@ python tools/acceptance/sampler.py build-times --repo .
 
 | 指标 | 测量值 | 方法 |
 | --- | --- | --- |
-| `viva doctor` 响应（中位，7 次） | **2.7 ms** | 真实进程 wall-clock |
+| `viva doctor` 响应（中位，7 次） | **2.6 ms** | 真实进程 wall-clock |
 | `viva init` 峰值 RSS | 3392 KiB | OS 退出时报告（`/usr/bin/time -l`） |
 | `viva event add` 峰值 RSS | 3552 KiB | 同上 |
 | `viva doctor` 峰值 RSS | 3440 KiB | 同上 |
-| PTY 输入回程（1 字节，真 pty + `cat`） | **60 µs**，未超时 | 真实 PTY 设备往返 |
+| PTY 输入回程（11 字节，真 pty + `cat`） | **90 µs**，未超时 | 真实 PTY 设备往返 |
 | 冷构建（`cargo clean` 后 build） | **12.7 s** | 独占窗口内 |
 | 增量构建 | **0.1 s** | 同上 |
 
@@ -46,9 +46,9 @@ python tools/acceptance/sampler.py build-times --repo .
 
 | 指标 | 预算上限 | 首切片实测 | 状态 |
 | --- | --- | --- | --- |
-| CLI 命令响应（doctor 级） | ≤ 1 s | 2.7 ms | within |
+| CLI 命令响应（doctor 级） | ≤ 1 s | 2.6 ms | within |
 | 单 host 进程峰值 RSS（CLI 切片） | ≤ 200 MB | ~3.4 MB | within |
-| PTY 输入回程 | ≤ 100 ms | 60 µs | within |
+| PTY 输入回程 | ≤ 100 ms | 90 µs | within |
 | 冷构建 | ≤ 300 s | 12.7 s | within |
 | 增量构建 | ≤ 30 s | 0.1 s | within |
 | TUI 空闲 CPU（viva office 运行时） | ≤ 5% | 未测（切片未含 TUI 常驻） | missing |

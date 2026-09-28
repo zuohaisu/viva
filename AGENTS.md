@@ -101,9 +101,11 @@ then through a pull request and a merge into the remote default branch.
   target in the current request. A merged PR, passing tests, a stale branch,
   or task completion never implies that authorization.
 - Before committing, run the closest checks in the worktree:
-  `python -m pytest tests/ -q` (or the subset covering the change),
-  `git diff --check`, and an inspection of the final diff for secrets and
-  generated artifacts. Report blocked or unrun checks honestly; never weaken
+  `cargo test --workspace` (or the subset covering the change; the Python
+  product runtime was retired in V13 — `tests/acceptance` is pytest-only
+  tooling and `extensions/pi` has its own npm suite), `git diff --check`,
+  and an inspection of the final diff for secrets and generated
+  artifacts. Report blocked or unrun checks honestly; never weaken
   or skip tests to make them pass.
 - Stage paths explicitly; do not use `git add .` or `git add -A`. Use concise
   imperative commits describing the delivered behavior. Push the task branch

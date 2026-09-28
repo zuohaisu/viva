@@ -23,6 +23,8 @@ use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
+use std::str::FromStr as _;
+
 use crate::foundation::error::OfficeResult;
 use crate::terminal::TerminalSnapshot;
 
@@ -149,7 +151,7 @@ impl WorkbenchApp {
             terminal_mode: None,
             terminal_view: None,
             diff_view: None,
-            status_line: "? help · 1-4 panes · Tab cycle · Enter terminal · q quit".into(),
+            status_line: "1-4 panes · Tab cycle · Enter terminal · d diff · s stop · r refresh · Esc releases · q quit".into(),
             quit_requested: false,
         }
     }
@@ -245,18 +247,7 @@ impl WorkbenchApp {
                     self.leave_terminal_mode();
                     KeyOutcome::Handled
                 }
-                KeyCode::Char(c) => {
-                    let mut bytes: Vec<u8> = Vec::new();
-                    if key.modifiers.contains(KeyModifiers::CONTROL) {
-                        // Ctrl-letter → control byte (c == 0x03 etc.).
-                        let upper = c.to_ascii_uppercase() as u8;
-                        bytes.push(upper - b'A' + 1);
-                    } else {
-                        let mut buf = [0u8; 4];
-                        bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
-                    }
-                    KeyOutcome::Forward(bytes)
-                }
+                KeyCode::Char(c) => KeyOutcome::Forward(encode_char(key.modifiers, c)),
                 KeyCode::Enter => KeyOutcome::Forward(b"\r".to_vec()),
                 KeyCode::Backspace => KeyOutcome::Forward(b"\x7f".to_vec()),
                 KeyCode::Tab => KeyOutcome::Forward(b"\t".to_vec()),
@@ -264,6 +255,12 @@ impl WorkbenchApp {
                 KeyCode::Down => KeyOutcome::Forward(b"\x1b[B".to_vec()),
                 KeyCode::Right => KeyOutcome::Forward(b"\x1b[C".to_vec()),
                 KeyCode::Left => KeyOutcome::Forward(b"\x1b[D".to_vec()),
+                KeyCode::Home => KeyOutcome::Forward(b"\x1b[H".to_vec()),
+                KeyCode::End => KeyOutcome::Forward(b"\x1b[F".to_vec()),
+                KeyCode::PageUp => KeyOutcome::Forward(b"\x1b[5~".to_vec()),
+                KeyCode::PageDown => KeyOutcome::Forward(b"\x1b[6~".to_vec()),
+                KeyCode::Delete => KeyOutcome::Forward(b"\x1b[3~".to_vec()),
+                KeyCode::Insert => KeyOutcome::Forward(b"\x1b[2~".to_vec()),
                 _ => KeyOutcome::Ignored,
             };
         }
@@ -274,7 +271,6 @@ impl WorkbenchApp {
             return KeyOutcome::QuitRequested;
         }
         match key.code {
-            KeyCode::Char('?') => KeyOutcome::Handled, // help toggles in draw_help key state
             KeyCode::Char('q') | KeyCode::Char('Q') => {
                 self.quit_requested = true;
                 KeyOutcome::QuitRequested
@@ -549,6 +545,32 @@ impl Default for WorkbenchApp {
     }
 }
 
+/// Encode one character for the focused terminal. Control combos map to
+/// their real control bytes; a Ctrl combo with no control-byte meaning
+/// (Ctrl+Space → NUL is defined, Ctrl+9 is not) forwards the raw character
+/// instead of panicking or sending garbage.
+fn encode_char(modifiers: ratatui::crossterm::event::KeyModifiers, c: char) -> Vec<u8> {
+    use ratatui::crossterm::event::KeyModifiers;
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        let upper = c.to_ascii_uppercase();
+        let control: Option<u8> = match upper {
+            '@' | ' ' => Some(0x00),
+            'A'..='Z' => Some(upper as u8 - b'A' + 1),
+            '[' => Some(0x1b), // Esc
+            '\\' => Some(0x1c),
+            ']' => Some(0x1d),
+            '^' => Some(0x1e),
+            '_' => Some(0x1f),
+            _ => None,
+        };
+        if let Some(byte) = control {
+            return vec![byte];
+        }
+    }
+    let mut buf = [0u8; 4];
+    c.encode_utf8(&mut buf).as_bytes().to_vec()
+}
+
 fn centered(area: Rect, percent_x: u16, height: u16) -> Rect {
     let width = area.width * percent_x / 100;
     let x = area.x + area.width.saturating_sub(width) / 2;
@@ -633,12 +655,14 @@ impl<'a> WorkbenchStore<'a> {
             .list()
             .into_iter()
             .map(|entry| {
+                // An unreadable wait state stays unknown — never guessed
+                // as live.
                 let live = self
                     .terminals
                     .handle(&entry.terminal_id)
                     .ok()
                     .flatten()
-                    .map(|h| h.try_wait().ok().flatten().is_none());
+                    .and_then(|h| h.try_wait().ok().map(|exit| exit.is_none()));
                 TerminalRow {
                     terminal_id: entry.terminal_id.to_string(),
                     worktree_id: entry.worktree_id.map(|w| w.to_string()),
@@ -792,6 +816,161 @@ fn owner_label(owner: &crate::foundation::records::TerminalOwner) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The product entry: run the workbench as THE active office host
+// ---------------------------------------------------------------------------
+
+/// Run the interactive workbench on this terminal. The caller has already
+/// opened the office host (`OfficeHost::open`) and runs its serve loop on
+/// a background thread; this loop owns the UI and, on quit, performs the
+/// real office shutdown (stop owned terminals, join watchers, persist the
+/// handoff, release the channel) before restoring the physical terminal.
+pub fn run(shared: std::sync::Arc<crate::office::OfficeShared>) -> OfficeResult<()> {
+    // Honest gate: a workbench without a real terminal cannot work. Fail
+    // loudly instead of half-working against a pipe.
+    #[cfg(unix)]
+    let stdin_is_tty = unsafe { libc::isatty(0) == 1 };
+    #[cfg(not(unix))]
+    let stdin_is_tty = true;
+    if !stdin_is_tty {
+        return Err(crate::foundation::OfficeError::Validation(
+            "viva workbench needs an interactive terminal (stdin is not a tty); \
+             use `viva office start` for the headless host"
+                .into(),
+        ));
+    }
+
+    let guard = crate::tui::TerminalGuard::enter()?;
+    let result = run_inner(shared);
+    drop(guard); // raw mode off + main screen back on EVERY path
+    result
+}
+
+fn run_inner(shared: std::sync::Arc<crate::office::OfficeShared>) -> OfficeResult<()> {
+    use ratatui::crossterm::event::{self, Event, KeyEventKind};
+    let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
+    let mut terminal = ratatui::Terminal::new(backend)
+        .map_err(|e| crate::foundation::OfficeError::Io(std::io::Error::other(e.to_string())))?;
+
+    let mut app = WorkbenchApp::new();
+    let quit = loop {
+        // Refresh from the real registries (never inside draw).
+        match refresh_app(&shared, &mut app) {
+            Ok(()) => {}
+            Err(err) => app.set_status(format!("data error: {err}")),
+        }
+        terminal.draw(|frame| app.draw(frame)).map_err(|e| {
+            crate::foundation::OfficeError::Io(std::io::Error::other(e.to_string()))
+        })?;
+
+        if !event::poll(std::time::Duration::from_millis(200))
+            .map_err(|e| crate::foundation::OfficeError::Io(std::io::Error::other(e.to_string())))?
+        {
+            continue;
+        }
+        let Event::Key(key) = event::read().map_err(|e| {
+            crate::foundation::OfficeError::Io(std::io::Error::other(e.to_string()))
+        })?
+        else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        match app.on_key(key) {
+            KeyOutcome::QuitRequested => break true,
+            KeyOutcome::Action(action) => {
+                if let Err(err) = apply_action(&shared, &mut app, action) {
+                    app.set_status(format!("action failed: {err}"));
+                }
+            }
+            KeyOutcome::Forward(bytes) => {
+                if let Some(id) = app.terminal_mode().map(str::to_string) {
+                    if let Ok(terminal_id) = crate::foundation::ids::TerminalId::from_str(&id) {
+                        if let Ok(Some(handle)) = shared.terminals.handle(&terminal_id) {
+                            handle.input(&bytes)?;
+                        }
+                    }
+                }
+            }
+            KeyOutcome::Handled | KeyOutcome::Ignored => {}
+        }
+    };
+    if quit {
+        // The quit protocol, really: stop owned terminals, join exit
+        // watchers, persist the handoff, release the channel.
+        crate::office::OfficeHost::shutdown_shared(&shared)?;
+    }
+    // Ask the serve loop to finish (its own shutdown is idempotent).
+    shared
+        .stopping
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
+/// Pull a fresh model from the real registries into the app.
+fn refresh_app(shared: &crate::office::OfficeShared, app: &mut WorkbenchApp) -> OfficeResult<()> {
+    let store = shared.store.lock().expect("office store");
+    let workbench = WorkbenchStore {
+        store: &store,
+        terminals: &shared.terminals,
+        protected: crate::git::worktrees::ProtectedRefs::new(vec![]),
+    };
+    app.set_model(workbench.refresh()?);
+    Ok(())
+}
+
+/// Execute one workbench action against the owning registries.
+fn apply_action(
+    shared: &crate::office::OfficeShared,
+    app: &mut WorkbenchApp,
+    action: WorkbenchAction,
+) -> OfficeResult<()> {
+    match action {
+        WorkbenchAction::EnterTerminal(id) => {
+            app.enter_terminal_mode(id);
+            Ok(())
+        }
+        WorkbenchAction::StopTerminal(id) => {
+            let terminal_id = crate::foundation::ids::TerminalId::from_str(&id)?;
+            let store = shared.store.lock().expect("office store");
+            let workbench = WorkbenchStore {
+                store: &store,
+                terminals: &shared.terminals,
+                protected: crate::git::worktrees::ProtectedRefs::new(vec![]),
+            };
+            workbench.stop_terminal(&terminal_id)?;
+            app.set_status(format!("terminal {id} stopped"));
+            Ok(())
+        }
+        WorkbenchAction::ShowDiff(worktree_id) => {
+            let worktree_id_parsed = crate::foundation::ids::WorktreeId::from_str(&worktree_id)?;
+            let store = shared.store.lock().expect("office store");
+            let workbench = WorkbenchStore {
+                store: &store,
+                terminals: &shared.terminals,
+                protected: crate::git::worktrees::ProtectedRefs::new(vec![]),
+            };
+            let record = crate::git::worktrees::WorktreeService::new(
+                &store,
+                crate::git::worktrees::ProtectedRefs::new(vec![]),
+            )
+            .record(&worktree_id_parsed)?
+            .ok_or_else(|| crate::foundation::OfficeError::NotFound {
+                entity: "worktree",
+                id: worktree_id.clone(),
+            })?;
+            let diff = workbench.worktree_diff(&record.worktree_path, 64 * 1024)?;
+            app.set_diff_view(Some(diff));
+            Ok(())
+        }
+        WorkbenchAction::Refresh => {
+            refresh_app(shared, app)?;
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -870,7 +1049,8 @@ mod tests {
     fn attention_markers_surface_without_second_state() {
         let mut app = WorkbenchApp::new();
         app.set_model(sample());
-        let view = render(&app, 120, 20);
+        // Wide enough that the attention suffix is not clipped.
+        let view = render(&app, 200, 20);
         assert!(
             view.contains("needs attention") && view.contains("execution_failed"),
             "markers are visible facts: {view}"
@@ -908,6 +1088,43 @@ mod tests {
             KeyOutcome::Handled
         );
         assert!(app.terminal_mode().is_none());
+    }
+
+    #[test]
+    fn control_combos_map_to_real_control_bytes_without_panicking() {
+        // D7 regression: every Ctrl combo must produce a defined byte —
+        // no overflow panic (Ctrl+Space), no garbage (Ctrl+9).
+        let ctrl = ratatui::crossterm::event::KeyModifiers::CONTROL;
+        assert_eq!(encode_char(ctrl, 'c'), vec![0x03]);
+        assert_eq!(encode_char(ctrl, ' '), vec![0x00]); // Ctrl+Space → NUL
+        assert_eq!(encode_char(ctrl, '['), vec![0x1b]); // Ctrl+[ → Esc
+        assert_eq!(encode_char(ctrl, 'z'), vec![0x1a]);
+        // A Ctrl combo with no control-byte meaning forwards the raw char.
+        assert_eq!(encode_char(ctrl, '9'), b"9".to_vec());
+        assert_eq!(encode_char(ctrl, 'é'), "é".as_bytes().to_vec());
+        // Plain characters are unaffected.
+        assert_eq!(
+            encode_char(ratatui::crossterm::event::KeyModifiers::empty(), 'x'),
+            b"x".to_vec()
+        );
+    }
+
+    #[test]
+    fn editing_and_navigation_keys_are_forwarded_in_terminal_mode() {
+        let mut app = WorkbenchApp::new();
+        app.enter_terminal_mode("t");
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Delete)),
+            KeyOutcome::Forward(b"\x1b[3~".to_vec())
+        );
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::PageUp)),
+            KeyOutcome::Forward(b"\x1b[5~".to_vec())
+        );
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Home)),
+            KeyOutcome::Forward(b"\x1b[H".to_vec())
+        );
     }
 
     #[test]

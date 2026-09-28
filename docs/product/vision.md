@@ -92,9 +92,15 @@ Viva 的存在就是把这些变成**办公室的资产**：成员持续存在�
 
 核心纪律：**成员不是进程，任务不是 worktree，执行必须有归属与授权。**
 
-## 7. 现状（2026-09-27，本轮实现后）
+## 7. 现状（2026-09-28 更新）
 
-已实现并有测试证据（`tests/viva/`）：
+> 历史注记：本节的"已实现"最初以 Python + Textual 实现并在 `tests/viva/`
+> 有证据；V13（issue #22）退役了 Python 运行时。下述能力现由 Rust 办公室
+> 承载，证据在 `crates/viva/tests/`（逐 issue 验收测试）。V13 退役映射见
+> `docs/validation/v13-python-retirement.md`。个别条目以 Rust 侧实际交付
+> 为准（经验/日记能力首版未建，无假声明）。
+
+已实现并有测试证据：
 
 - 多成员 + 角色/模型/工具配置，换模型保留历史与知识，不可用时报错不替换；
 - Workspace / Project / Repository / Worktree / Task 对象与 `task brief` 交接简报；

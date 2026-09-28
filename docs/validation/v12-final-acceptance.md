@@ -49,7 +49,7 @@ G1 时只有 CLI 切片；本轮验收覆盖 V07/V09/V10/V14 交付后的组合�
 | 授权撤回竞态 | revoke 后派发在生效时刻被拒，零执行创建 | v07_office::revoked_grant… |
 | 重复启动/请求重放 | 第二宿主拒绝并指认活跃 pid；同 request key 重放不重复启动 | v07_office::second_host…, cli_dispatches… |
 | 无活跃 office 时 mutation | 明确拒绝，不起后台 daemon，不凭空造 socket | v07_office::mutation_without… |
-| 优雅退出收尾 | owned 终端全部停止并记录、交接持久化、socket 释放 | v07_office::graceful_shutdown… |
+| 优雅退出收尾 | owned 终端全部停止，退出 watcher 先 join（每条退出事实先落账）再写交接记录，下次启动无虚假 orphan 记录；socket 释放 | v07_office::graceful_shutdown…、graceful_shutdown_records_every_exit_before_the_handoff |
 | 存储/迁移回滚 | 迁移失败无半状态、事务失败回滚、append-only 触发器 | V01 store 单元 |
 
 ### 2.4 工作负载达到预算时的行为
@@ -58,10 +58,10 @@ G1 时只有 CLI 切片；本轮验收覆盖 V07/V09/V10/V14 交付后的组合�
 
 ## 3. 零越权 / 误杀 / 归属丢失 / 重放 的证据结论
 
-- **零越权**：撤权竞态拒绝（V07 测试）；grant 范围在生效时刻复核（`dispatch_delegated` + ACT_* 模式）；聊天无 grant 时扩展侧拒发派发并提议走授权（V09 TS 测试）。
+- **零越权**：撤权竞态拒绝（V07 测试）；grant 范围在生效时刻复核且 **grant 主体必须等于派发成员**（v07_office::a_grant_never_serves_a_member_other_than_its_principal）；控制通道经 peer-uid 校验 + 0700 目录双重门禁（v07_office::host_home_and_channel_are_private_and_authenticated）；聊天无 grant 时扩展侧拒发派发并提议走授权（V09 TS 测试）。
 - **零误杀**：停止只发本终端进程组；崩溃对账明确"不 signal 孤儿"；pid start marker 防 pid 复用误认（V05/V07）。
 - **零归属丢失**：终端 owner 类型化（member_execution 必带 execution id，DB CHECK 背书）；派发留 launch spec + intent + 归属快照。
-- **零重放**：request key 幂等（重放返回原执行）；去重键防重复结果/交接（V10 handoff 重复返回 duplicate 且不改状态）。
+- **零重放**：request key 幂等且**按任务隔离**（跨任务同 key 直接拒绝，v07_office::request_keys_never_replay_across_tasks）；task handoff 与 conversation handoff 各自幂等（同一交接登记两次只有一行，conversations 单测）。
 
 ## 4. Pending（非 PASS，缺硬件/凭证/真实负载如实标注）
 

@@ -31,6 +31,7 @@ fn run(args: &[String]) -> OfficeResult<()> {
         Some("event") => cmd_event(args.get(1..).unwrap_or(&[])),
         Some("office") => cmd_office(args.get(1..).unwrap_or(&[])),
         Some("conversations") => cmd_conversations(args.get(1..).unwrap_or(&[])),
+        Some("workbench") => cmd_workbench(),
         Some("data") => cmd_data(args.get(1..).unwrap_or(&[])),
         Some("version" | "--version" | "-V") => {
             println!("viva {}", env!("CARGO_PKG_VERSION"));
@@ -43,6 +44,32 @@ fn run(args: &[String]) -> OfficeResult<()> {
             ))
         }
     }
+}
+
+/// `viva workbench` — the interactive parallel-development workbench, as
+/// THE active office host for this VIVA_HOME. One process owns the store,
+/// the terminals and the UI; `q` really stops owned terminals, joins the
+/// exit watchers, persists the handoff and restores the terminal.
+fn cmd_workbench() -> OfficeResult<()> {
+    let home = viva::foundation::paths::viva_home(None);
+    viva::foundation::paths::ensure_private_dir(&home)?;
+    let host = viva::office::OfficeHost::open(&home)?;
+    let shared = host.shared();
+    eprintln!(
+        "workbench: office host {} active (pid {}) — home {}",
+        shared.host_id,
+        std::process::id(),
+        home.display()
+    );
+    let server = host.serve_background();
+    let result = viva::tui::workbench::run(std::sync::Arc::clone(&shared));
+    // Whatever the loop's outcome, the serve loop must end and the channel
+    // must be released (run() already shut the office down on `q`).
+    shared
+        .stopping
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = server.join();
+    result
 }
 
 fn print_usage() {
@@ -92,10 +119,14 @@ USAGE:
     viva conversations <create|fork|rename|set-native|attach-task|detach-task|archive|tree|handoff> [flags]
         Conversation metadata (office-owned tree; the harness owns the transcript).
 
+    viva workbench
+        Run the interactive parallel-development workbench as THE active
+        office host for this VIVA_HOME (needs a real terminal).
+
     viva data export --out <dir>
-        Read-only export of every fact table in this VIVA_HOME to JSON files
-        plus a manifest. Never touches anything outside the store — no
-        worktrees, no historical data directories.
+        Read-only export (dump) of every fact table in this VIVA_HOME to
+        JSON files plus a manifest. Never touches anything outside the
+        store — no worktrees, no historical data directories.
 
     viva version"
     );
@@ -303,10 +334,15 @@ fn cmd_office_brief(args: &[String]) -> OfficeResult<()> {
         .ok_or_else(|| OfficeError::Validation("usage: viva office brief <task-id>".into()))?;
     let task_id = viva::foundation::ids::TaskId::from_str(task_id)?;
     let home = viva::foundation::paths::viva_home(None);
-    let store = viva::foundation::store::Store::open(
-        &viva::foundation::paths::database_path(&home),
-        viva::office::office_migrations(),
-    )?;
+    let db = viva::foundation::paths::database_path(&home);
+    if !db.exists() {
+        return Err(OfficeError::Validation(format!(
+            "no office store at {} (run `viva init` first); nothing was created",
+            db.display()
+        )));
+    }
+    viva::foundation::paths::ensure_private_dir(&home)?;
+    let store = viva::foundation::store::Store::open(&db, viva::office::office_migrations())?;
     let tasks = viva::tasks::TaskRegistry::new(&store);
     let brief = tasks.generate_brief(&task_id)?;
     println!("{}", serde_json::to_string_pretty(&brief)?);
@@ -591,11 +627,13 @@ fn cmd_conversations(args: &[String]) -> OfficeResult<()> {
     Ok(())
 }
 
-/// `viva data export --out <dir>` — read-only asset inventory and backup
+/// `viva data export --out <dir>` — read-only asset inventory and dump
 /// (V13): every user table in this VIVA_HOME goes to one JSON file per
-/// table plus a manifest. The database is opened READ-ONLY and nothing
-/// outside the store is touched: no worktrees, no historical Ticket
-/// Autopilot data, no other agents' homes.
+/// table plus a manifest. This is an export for inspection and preserve,
+/// not a restorable backup: there is no schema migration or import path.
+/// The database is opened READ-ONLY and nothing outside the store is
+/// touched: no worktrees, no historical Ticket Autopilot data, no other
+/// agents' homes.
 fn cmd_data(args: &[String]) -> OfficeResult<()> {
     match args.first().map(String::as_str) {
         Some("export") => cmd_data_export(args.get(1..).unwrap_or(&[])),
@@ -634,12 +672,20 @@ fn cmd_data_export(args: &[String]) -> OfficeResult<()> {
             out_path.display()
         )));
     }
-    std::fs::create_dir_all(&out_path)?;
 
     let home = viva::foundation::paths::viva_home(None);
     let db = database_path(&home);
+    if !db.exists() {
+        return Err(OfficeError::Validation(format!(
+            "no office store at {} (run `viva init` first); nothing was created",
+            db.display()
+        )));
+    }
     let conn =
         rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    // Only after the store is verified do we create the output directory,
+    // so a failed export leaves no litter behind.
+    std::fs::create_dir_all(&out_path)?;
 
     let mut tables: Vec<String> = {
         let mut stmt = conn.prepare(

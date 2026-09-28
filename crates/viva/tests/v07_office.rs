@@ -550,3 +550,207 @@ fn crash_restart_reconciles_without_rerunning_finished_work() {
 }
 
 use std::str::FromStr as _;
+
+// ---------------------------------------------------------------------------
+// QA-round regressions (D1–D4): the ledger must not lie, the channel must
+// be authenticated, grants must stay with their principal, and request-key
+// idempotency must never cross tasks.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn graceful_shutdown_records_every_exit_before_the_handoff() {
+    // D1: after a graceful shutdown, every dispatched execution has its
+    // exit recorded (intent exited), and the NEXT host must NOT write a
+    // false "execution_orphaned" recovery for anything this office
+    // stopped itself.
+    let dir = TempDir::new().expect("dir");
+    let home = dir.path().to_path_buf();
+    let seed = seed(&home, "d1 graceful exits");
+
+    let host = spawn_host_thread(home.clone());
+    wait_until("socket", Duration::from_secs(10), || socket_ready(&home));
+
+    send(
+        &home,
+        dispatch_request(&seed, "req-d1", vec!["/bin/sleep".into(), "30".into()]),
+    )
+    .expect("dispatch");
+
+    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown))
+        .expect("shutdown");
+    host.join().expect("serve ends");
+
+    wait_until(
+        "intent exited after shutdown",
+        Duration::from_secs(15),
+        || {
+            let store = viva::foundation::store::Store::open(
+                &viva::foundation::paths::database_path(&home),
+                office::office_migrations(),
+            )
+            .expect("store");
+            let (state, exit_code): (String, Option<i64>) = store
+                .connection()
+                .query_row(
+                    "SELECT state, exit_code FROM launch_intents WHERE request_key = 'req-d1'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap_or_default();
+            state == "exited" && exit_code.is_some()
+        },
+    );
+
+    // Reopen: reconciliation must find NOTHING orphaned.
+    let host = spawn_host_thread(home.clone());
+    wait_until("socket", Duration::from_secs(10), || socket_ready(&home));
+    let store = viva::foundation::store::Store::open(
+        &viva::foundation::paths::database_path(&home),
+        office::office_migrations(),
+    )
+    .expect("store");
+    let false_orphans: Vec<String> = {
+        let mut stmt = store
+            .connection()
+            .prepare(
+                "SELECT detail FROM office_recovery_events
+                 WHERE kind = 'execution_orphaned'",
+            )
+            .expect("prepare");
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query");
+        rows.collect::<Result<Vec<_>, _>>().expect("collect")
+    };
+    assert!(
+        false_orphans.is_empty(),
+        "a graceful shutdown must not be recorded as orphaning its own terminals: {false_orphans:?}"
+    );
+    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown)).ok();
+    host.join().ok();
+}
+
+#[test]
+fn host_home_and_channel_are_private_and_authenticated() {
+    // D2: a host started against a missing home creates it with 0700 (not
+    // 0755), so the socket inside it is unreachable to other users; the
+    // in-process peer-uid check drops any peer the OS cannot attribute to
+    // this process owner.
+    let dir = TempDir::new().expect("dir");
+    let home = dir.path().join("fresh-home");
+
+    let host = spawn_host_thread(home.clone());
+    wait_until("socket", Duration::from_secs(10), || socket_ready(&home));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&home).expect("home").permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o700,
+            "the office home must be private even when the host created it"
+        );
+    }
+
+    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown)).ok();
+    host.join().ok();
+}
+
+#[test]
+fn a_grant_never_serves_a_member_other_than_its_principal() {
+    // D3: member2 presenting member1's grant is refused; nothing is
+    // attributed to member2.
+    let dir = TempDir::new().expect("dir");
+    let home = dir.path().to_path_buf();
+    let seed = seed(&home, "principal binding");
+
+    // A second member, fully bound but holding no grant of their own.
+    let member2: MemberId = {
+        let store = viva::foundation::store::Store::open(
+            &viva::foundation::paths::database_path(&home),
+            office::office_migrations(),
+        )
+        .expect("store");
+        let members = MemberRegistry::new(&store);
+        let member2 = members.register("Deven").expect("member2").member_id;
+        members
+            .set_binding(&MemberBinding {
+                member_id: member2.clone(),
+                role: "developer".into(),
+                model_binding: "glm-5.3-flash".into(),
+                tools: vec!["pi-cli".into()],
+                updated_at: viva::foundation::ids::utc_now(),
+            })
+            .expect("member2 binding");
+        member2
+    };
+
+    let host = spawn_host_thread(home.clone());
+    wait_until("socket", Duration::from_secs(10), || socket_ready(&home));
+
+    let err = send(
+        &home,
+        OfficeRequestKind::Dispatch {
+            task_id: seed.task_id.clone(),
+            member_id: member2.to_string(),
+            grant_id: seed.grant_id.clone(),
+            request_key: "req-d3".into(),
+            argv: vec!["/bin/sleep".into(), "1".into()],
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+            worktree_id: None,
+        },
+    )
+    .expect_err("a foreign grant must be denied");
+    assert!(err.contains("was not issued to member"), "got: {err}");
+    assert_eq!(count_executions(&home), 0, "no execution may be created");
+
+    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown)).ok();
+    host.join().ok();
+}
+
+#[test]
+fn request_keys_never_replay_across_tasks() {
+    // D4: the same request key on a DIFFERENT task is a client bug —
+    // rejected loudly, never answered with the other task's execution.
+    let dir = TempDir::new().expect("dir");
+    let home = dir.path().to_path_buf();
+    let seed_a = seed(&home, "task one");
+    let seed_b = seed(&home, "task two");
+
+    let host = spawn_host_thread(home.clone());
+    wait_until("socket", Duration::from_secs(10), || socket_ready(&home));
+
+    let first = send(
+        &home,
+        dispatch_request(&seed_a, "shared-key", vec!["/bin/sleep".into(), "1".into()]),
+    )
+    .expect("task one dispatch");
+    assert_eq!(first["replayed"], false);
+
+    let err = send(
+        &home,
+        dispatch_request(&seed_b, "shared-key", vec!["/bin/sleep".into(), "1".into()]),
+    )
+    .expect_err("cross-task key reuse must be refused");
+    assert!(err.contains("already belongs to task"), "got: {err}");
+
+    // And the refusal created no execution for task two.
+    let store = viva::foundation::store::Store::open(
+        &viva::foundation::paths::database_path(&home),
+        office::office_migrations(),
+    )
+    .expect("store");
+    let task2_intents: i64 = store
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM launch_intents WHERE task_id = ?1",
+            [seed_b.task_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    assert_eq!(task2_intents, 0, "task two must have no intent");
+
+    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown)).ok();
+    host.join().ok();
+}

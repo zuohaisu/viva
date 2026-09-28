@@ -115,6 +115,12 @@ pub struct OfficeShared {
     pub terminals: TerminalRegistry,
     pub channels: Mutex<crate::foundation::envelope::ChannelRegistry>,
     pub stopping: AtomicBool,
+    /// Exit-watchers for dispatched executions. The graceful shutdown
+    /// joins them BEFORE writing its handoff record — otherwise the
+    /// process exit would die with the process and the next host would
+    /// record a false "orphaned" recovery for a terminal this office
+    /// stopped itself.
+    watchers: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
 /// A claimed, running Office host.
@@ -126,9 +132,11 @@ pub struct OfficeHost {
 impl OfficeHost {
     /// Open the store and claim the single active-host slot for this
     /// `VIVA_HOME`. Refuses when a healthy host already listens on the
-    /// socket; claims a stale socket only with a recovery record.
+    /// socket; claims a stale socket only with a recovery record. The home
+    /// is forced to private 0700 permissions first — the socket is the
+    /// control plane, and its directory is part of its access control.
     pub fn open(home: &Path) -> OfficeResult<Self> {
-        std::fs::create_dir_all(home)?;
+        crate::foundation::paths::ensure_private_dir(home)?;
         let socket_path = home.join(OFFICE_SOCKET_NAME);
         let host_id = format!("host-{}", uuid::Uuid::new_v4().simple());
 
@@ -175,6 +183,7 @@ impl OfficeHost {
             terminals: TerminalRegistry::new(),
             channels: Mutex::new(crate::foundation::envelope::ChannelRegistry::new()),
             stopping: AtomicBool::new(false),
+            watchers: Mutex::new(Vec::new()),
         });
         Ok(Self { shared, listener })
     }
@@ -304,6 +313,15 @@ impl OfficeHost {
             }
             match listener.accept() {
                 Ok((stream, _)) => {
+                    // Channel authentication (issue #16 requires it): the
+                    // OS reports the connected peer's uid via
+                    // getpeereid(2). A socket in a 0700 directory is the
+                    // first gate; this peer check is the second — same
+                    // process owner only, regardless of any future
+                    // permissions drift on the socket file.
+                    if !peer_is_owner(&stream) {
+                        continue;
+                    }
                     let shared = Arc::clone(&shared);
                     std::thread::spawn(move || {
                         let _ = handle_connection(shared, stream);
@@ -323,17 +341,36 @@ impl OfficeHost {
     }
 
     /// Graceful shutdown: stop new dispatch (already: no new connections
-    /// are served), stop every owned terminal, persist the handoff, mark
-    /// the host exited, release the channel.
-    fn shutdown_shared(shared: &OfficeShared) -> OfficeResult<()> {
-        let store = shared.store.lock().expect("office store");
-        let terminals = shared.terminals.list();
-        let terminal_count = terminals.len();
-        for entry in terminals {
-            let _ = shared
-                .terminals
-                .stop(&entry.terminal_id, StopPolicy::default(), Some(&store));
+    /// are served), stop every owned terminal, join the exit watchers so
+    /// every stop lands in the ledger BEFORE the handoff is written, then
+    /// persist the handoff and release the channel. Also the workbench
+    /// quit path (D6: QuitRequested is really consumed).
+    pub fn shutdown_shared(shared: &OfficeShared) -> OfficeResult<()> {
+        let terminal_count = {
+            let store = shared.store.lock().expect("office store");
+            let terminals = shared.terminals.list();
+            let terminal_count = terminals.len();
+            for entry in terminals {
+                let _ =
+                    shared
+                        .terminals
+                        .stop(&entry.terminal_id, StopPolicy::default(), Some(&store));
+            }
+            terminal_count
+        };
+        // Join watchers WITHOUT holding the store lock: each watcher needs
+        // it to record its exit. A watcher cannot hang: the stop above made
+        // its child exit, so `wait` returns promptly.
+        let watchers: Vec<std::thread::JoinHandle<()>> = shared
+            .watchers
+            .lock()
+            .expect("watcher registry")
+            .drain(..)
+            .collect();
+        for watcher in watchers {
+            let _ = watcher.join();
         }
+        let store = shared.store.lock().expect("office store");
         store.connection().execute(
             "UPDATE office_hosts SET exited_at = ?2, exit_kind = 'graceful'
              WHERE host_id = ?1 AND exited_at IS NULL",
@@ -344,13 +381,21 @@ impl OfficeHost {
             &shared.host_id,
             "graceful_handoff",
             &format!(
-                "host stopped {} owned terminal(s); state persisted for the next host",
+                "host stopped {} owned terminal(s) and recorded their exits; state persisted for the next host",
                 terminal_count
             ),
         )?;
         drop(store);
         let _ = std::fs::remove_file(&shared.socket_path);
         Ok(())
+    }
+
+    /// Run this host on a background thread (the workbench entry runs its
+    /// UI on the main thread and shuts the host down on quit).
+    pub fn serve_background(self) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let _ = self.serve();
+        })
     }
 
     pub fn shared(&self) -> Arc<OfficeShared> {
@@ -365,6 +410,18 @@ fn record_recovery(store: &Store, host_id: &str, kind: &str, detail: &str) -> Of
         rusqlite::params![host_id, kind, detail, utc_now()],
     )?;
     Ok(())
+}
+
+/// True when the connected peer's uid is this process's effective uid.
+/// False on any probe failure too: an unverifiable peer is not trusted.
+#[cfg(unix)]
+fn peer_is_owner(stream: &UnixStream) -> bool {
+    use std::os::fd::AsRawFd as _;
+    let mut peer_uid: libc::uid_t = 0;
+    let mut peer_gid: libc::gid_t = 0;
+    // SAFETY: getpeereid takes the stream's own fd and two out-params.
+    let ok = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut peer_uid, &mut peer_gid) };
+    ok == 0 && peer_uid == unsafe { libc::geteuid() }
 }
 
 // ---------------------------------------------------------------------------
@@ -382,8 +439,18 @@ fn handle_connection(shared: Arc<OfficeShared>, mut stream: UnixStream) -> Offic
         .issue(crate::foundation::envelope::CallerRole::User);
     loop {
         let line = protocol::read_message(&mut stream)?;
-        let request: OfficeRequest = serde_json::from_str(&line)
-            .map_err(|e| OfficeError::Validation(format!("malformed control request: {e}")))?;
+        // A malformed or unknown request is an error RESPONSE, not a
+        // dropped connection: the caller learns why and may retry.
+        let request: OfficeRequest = match serde_json::from_str(&line) {
+            Ok(request) => request,
+            Err(err) => {
+                protocol::write_message(
+                    &mut stream,
+                    &OfficeResponse::err("unknown", format!("malformed control request: {err}")),
+                )?;
+                continue;
+            }
+        };
         if request.version != PROTOCOL_VERSION {
             let response = OfficeResponse::err(
                 &request.request_id,
@@ -486,7 +553,7 @@ fn status(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
                     .handle(&entry.terminal_id)
                     .ok()
                     .flatten()
-                    .map(|h| h.try_wait().ok().flatten().is_none()),
+                    .and_then(|h| h.try_wait().ok().map(|exit| exit.is_none())),
             })
         })
         .collect::<Vec<_>>();
@@ -558,6 +625,20 @@ fn dispatch(
         }
         Err(err) => return Err(err),
     }
+    // The grant must BELONG to the dispatching member: a member's grant
+    // never serves another member's dispatch, even for the same task.
+    let grant = authority.require_grant(&grant_id)?;
+    if grant.principal_member_id.as_ref() != Some(&member_id) {
+        return Err(OfficeError::Validation(format!(
+            "dispatch denied: grant `{grant_id}` was not issued to member `{member_id}` \
+             (principal: {:?}) — grants are not transferable between members",
+            grant
+                .principal_member_id
+                .as_ref()
+                .map(|m| m.to_string())
+                .unwrap_or_else(|| "<none>".into())
+        )));
+    }
 
     let tasks = TaskRegistry::new(&store);
     let task = tasks.require_task(&task_id)?;
@@ -576,6 +657,24 @@ fn dispatch(
         )));
     }
 
+    // A named worktree must be a real office record, not a free-form
+    // string: the attribution should never point at a worktree this
+    // office does not know.
+    if let Some(worktree) = worktree_id {
+        let known: i64 = store.connection().query_row(
+            "SELECT COUNT(*) FROM task_worktrees
+             WHERE worktree_id = ?1 AND released_at IS NULL",
+            [worktree],
+            |row| row.get(0),
+        )?;
+        if known == 0 {
+            return Err(OfficeError::NotFound {
+                entity: "worktree",
+                id: worktree.to_string(),
+            });
+        }
+    }
+
     let mut attribution = AttributionSnapshot::capture(
         member_id.clone(),
         binding.role.clone(),
@@ -592,7 +691,17 @@ fn dispatch(
     let start = tasks.begin_execution(&task_id, &attribution, request_key)?;
     let intent = match start {
         ExecutionStart::Replayed(intent) => {
-            // Idempotency by request key: nothing duplicated.
+            // Idempotency by request key — but ONLY within the same task.
+            // The same key on a different task is a client bug: silently
+            // returning another task's execution would make task2 look
+            // started when it never ran.
+            if intent.task_id != task_id {
+                return Err(OfficeError::Validation(format!(
+                    "request key `{request_key}` already belongs to task `{}`; \
+                     keys are replayed per task — use a different key for task `{task_id}`",
+                    intent.task_id
+                )));
+            }
             return Ok(serde_json::json!({
                 "replayed": true,
                 "request_key": intent.request_key,
@@ -647,14 +756,15 @@ fn dispatch(
     // Exit watcher: records the process exit through the same intent
     // protocol (a process fact — it never completes the task) and appends
     // one process-source task result so "取结果" over the channel has the
-    // real exit fact. The owning Arc keeps the store alive even after the
-    // host struct itself is gone.
+    // real exit fact. The handle is registered on the shared state so the
+    // graceful shutdown can join it: a detached watcher would die with the
+    // process and the next host would record a false orphan recovery.
     let watcher_shared = Arc::clone(shared);
     let watcher_key = request_key.to_string();
     let watcher_task = task_id.clone();
     let watcher_execution = execution_id.clone();
     let watcher_handle = std::sync::Arc::clone(&handle);
-    std::thread::spawn(move || {
+    let watcher = std::thread::spawn(move || {
         if let Ok(exit) = watcher_handle.wait() {
             // A signal exit carries no exit code; the intent protocol's
             // integer field records it as -1 rather than staying silent —
@@ -675,6 +785,11 @@ fn dispatch(
             }
         }
     });
+    shared
+        .watchers
+        .lock()
+        .expect("watcher registry")
+        .push(watcher);
 
     Ok(serde_json::json!({
         "replayed": false,
@@ -845,10 +960,19 @@ pub fn offline_status(home: &Path) -> OfficeResult<serde_json::Value> {
     use rusqlite::OptionalExtension;
 
     let socket_path = home.join(OFFICE_SOCKET_NAME);
-    let store = Store::open(
-        &crate::foundation::paths::database_path(home),
-        office_migrations(),
-    )?;
+    let db = crate::foundation::paths::database_path(home);
+    if !db.exists() {
+        // Read-only by design: a missing store is reported, not created.
+        return Ok(serde_json::json!({
+            "home": home.display().to_string(),
+            "socket_present": socket_path.exists(),
+            "active_host": null,
+            "last_host": null,
+            "recovery_events": 0,
+            "store": "absent",
+        }));
+    }
+    let store = Store::open(&db, office_migrations())?;
     let last_host: Option<(String, i64, Option<String>, Option<String>)> = {
         let mut stmt = store.connection().prepare(
             "SELECT host_id, pid, exited_at, exit_kind FROM office_hosts

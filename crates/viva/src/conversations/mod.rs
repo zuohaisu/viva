@@ -379,10 +379,47 @@ impl<'a> ConversationRegistry<'a> {
         history_ref: Option<String>,
     ) -> OfficeResult<ConversationHandoff> {
         self.require_node(from_node_id)?;
+        let to_harness = to_harness.into();
+        // Idempotent: the SAME handoff (same source node, target harness,
+        // native reference, identity, task, brief copy and history
+        // reference) recorded twice is ONE handoff — the second call
+        // returns the first record unchanged. A genuinely different
+        // handoff (different brief/target/refs) still gets its own row.
+        let existing: Option<ConversationHandoff> = {
+            let mut stmt = self.store.connection().prepare(
+                "SELECT handoff_id, from_node_id, to_harness, to_capability,
+                        native_session_id, identity_member_id, task_id,
+                        brief_snapshot, history_ref, created_at
+                 FROM conversation_handoffs
+                 WHERE from_node_id = ?1 AND to_harness = ?2
+                   AND to_capability = ?3
+                   AND native_session_id IS ?4 AND identity_member_id IS ?5
+                   AND task_id IS ?6 AND brief_snapshot IS ?7 AND history_ref IS ?8
+                 ORDER BY created_at LIMIT 1",
+            )?;
+            stmt.query_row(
+                rusqlite::params![
+                    from_node_id,
+                    to_harness,
+                    to_capability.as_str(),
+                    native_session_id,
+                    identity_member_id.as_ref().map(|m| m.as_str()),
+                    task_id.as_ref().map(|t| t.as_str()),
+                    brief_snapshot,
+                    history_ref,
+                ],
+                map_handoff,
+            )
+            .optional()
+            .map_err(OfficeError::from)?
+        };
+        if let Some(handoff) = existing {
+            return Ok(handoff);
+        }
         let handoff = ConversationHandoff {
             handoff_id: format!("handoff-{}", uuid::Uuid::new_v4().simple()),
             from_node_id: from_node_id.to_string(),
-            to_harness: to_harness.into(),
+            to_harness,
             to_capability,
             native_session_id,
             identity_member_id,
@@ -655,6 +692,62 @@ mod tests {
                 .archived_at
                 .is_none(),
             "completing/archiving one branch never deletes another"
+        );
+    }
+
+    #[test]
+    fn an_identical_handoff_recorded_twice_is_one_row() {
+        let store = store();
+        let session = session(&store);
+        let registry = ConversationRegistry::new(&store);
+        let root = registry
+            .create_root(&session.session_id, "Main", "pi")
+            .expect("root");
+        let identity = MemberId::new();
+        let record = |registry: &ConversationRegistry| {
+            registry.record_handoff(
+                &root.node_id,
+                "codex",
+                ForkCapability::HandoffOnly,
+                Some("codex-native-1".into()),
+                Some(identity.clone()),
+                None,
+                Some("brief".into()),
+                Some("hist-ref".into()),
+            )
+        };
+        let first = record(&registry).expect("first");
+        let second = record(&registry).expect("second");
+        assert_eq!(
+            first.handoff_id, second.handoff_id,
+            "the same handoff returns the first record"
+        );
+        assert_eq!(
+            registry
+                .handoffs_for_node(&root.node_id)
+                .expect("list")
+                .len(),
+            1
+        );
+        // A different brief is a genuinely different handoff and gets a row.
+        registry
+            .record_handoff(
+                &root.node_id,
+                "codex",
+                ForkCapability::HandoffOnly,
+                None,
+                None,
+                None,
+                Some("different brief".into()),
+                None,
+            )
+            .expect("different");
+        assert_eq!(
+            registry
+                .handoffs_for_node(&root.node_id)
+                .expect("list")
+                .len(),
+            2
         );
     }
 

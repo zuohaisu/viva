@@ -213,14 +213,18 @@ def _run(binary: Path, home: Path, window: Path, out: Path) -> int:
                 tree.extend(descendants(table, host.pid))
                 snapshots += 1
                 time.sleep(0.1)
+            sleeps = [r for r in tree if r.command.startswith("/bin/sleep")]
+            observed_sleep_pids = {r.pid for r in sleeps}
             record["peak_sample"] = {
                 "snapshot_count": snapshots,
                 "totals": observed_maxima(tree),
                 "system_memory": system_memory(),
+                # The pids themselves, so the post-shutdown check below can
+                # verify THESE processes are gone (pid-reuse caveat: the
+                # check runs immediately after shutdown).
+                "sleep_pids_observed": sorted(observed_sleep_pids),
+                "sleep_children_observed": len(observed_sleep_pids),
             }
-            # Count real sleep children observed in the host tree.
-            sleeps = [r for r in tree if r.command.startswith("/bin/sleep")]
-            record["peak_sample"]["sleep_children_observed"] = len({r.pid for r in sleeps})
 
             # 5. Stop isolation: stop two, verify a third still live.
             status = viva(binary, home, "office", "status")
@@ -244,23 +248,20 @@ def _run(binary: Path, home: Path, window: Path, out: Path) -> int:
             host.wait(timeout=30)
             time.sleep(1.0)
             table = process_table()
-            leftover = [r.pid for r in table if r.command.startswith("/bin/sleep")]
-            # Only sleeps WE spawned must be gone; unrelated system sleeps
-            # are excluded by tracking our own pids first.
-            ours = set()
-            for i in range(WORKERS):
-                pass  # pids were never surfaced per-terminal; sample before shutdown instead
+            still_alive = {r.pid for r in table} & observed_sleep_pids
             record["shutdown"] = {
                 "host_exit_code": host.returncode,
                 "socket_removed": not socket_path.exists(),
-                "sleep_processes_on_machine_after": len(leftover),
+                "owned_sleeps_still_alive": len(still_alive),
                 "note": (
-                    "leftover count includes unrelated system sleep processes; "
-                    "the office-owned ones are covered by the terminal stop "
-                    "discipline tested in v07_office (graceful shutdown reaps "
-                    "every owned terminal)"
+                    "owned_sleeps_still_alive counts the pids observed at "
+                    "peak that are still running after shutdown; the office "
+                    "must have reaped every one of them"
                 ),
             }
+            assert not still_alive, (
+                f"graceful shutdown left owned processes alive: {still_alive}"
+            )
 
             record["offline_status_after"] = viva(binary, home, "office", "status", check=False)
         finally:

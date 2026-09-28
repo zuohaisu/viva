@@ -29,7 +29,9 @@ In short:
 git fetch origin
 # work in a dedicated worktree based on origin/main, on a branch named
 # agent/<type>-<short-description>
-python -m pytest tests/ -q
+cargo test --workspace                 # Rust product (units + acceptance)
+python3 -m pytest tests/acceptance -q  # stdlib-only acceptance tooling
+(cd extensions/pi && npm ci && npm run typecheck && npm test)  # Pi extension
 git diff --check
 ```
 
@@ -53,14 +55,17 @@ archives) must not be deleted or rewritten.
 
 ## Tests
 
-`tests/viva/` is the suite. Meaningful coverage means:
+`crates/viva/tests/` is the product suite (per-issue acceptance tests over
+real processes: real Unix-socket channels, real PTYs, real local git
+repositories, a real `kill -9` crash-restart path). Meaningful coverage
+means:
 
 - a unit test for the object's rule (state transitions, refusal reasons,
   ownership boundaries);
 - an integration test when the behaviour crosses a process boundary —
-  dispatch, stopping and recovery use **real** worker processes
-  (`tests/viva/conftest.py` provides a controllable fake worker CLI);
-- the nine acceptance scenarios in `tests/viva/test_acceptance.py` stay green.
+  dispatch, stopping and recovery run **real** supervised processes;
+- the acceptance tooling tests (`tests/acceptance/`) and the Pi extension
+  suite (`extensions/pi/`: strict `tsc` + `node:test`) stay green.
 
 Never weaken or skip a test to make a change pass.
 
