@@ -12,7 +12,7 @@ executions whose attribution and authority are always recoverable;
 work that actually gets done through real tools.
 ```
 
-Viva 是 **Haisu 的本地优先 Personal AI Office**。Viva 不是 AI 成员，不是 Claude Code wrapper，不是 worktree 管理器，也不是记忆数据库——它是成员在其中生活、工作、协作的地方。
+Viva 是 **Haisu 的本地优先 Personal AI Office**。Viva 不是 AI 成员，也不是单一 Agent 的 wrapper、只有 worktree 功能的工具或记忆数据库——它是成员在其中生活、工作、协作的地方。首个可用版本必须由 Viva 自己提供多 worktree 并行开发入口，不依赖 Orca.app；[投入使用门槛](docs/product/first-usable-version.md)明确了真实验收。
 
 ## 核心不变量
 

@@ -114,6 +114,17 @@ core       →  stdlib only
 | `github/` | `gh` CLI（已安装且已认证）、旧 GitHub 连接器 | 只需只读关联与证据读取，且必须禁止写操作 | 新组件（薄）：白名单式只读 `gh` 调用 |
 | TUI 并发 | 旧 `_worker_running` 全局布尔 | 同一个成员要能并行多个执行，停止互不影响 | 用执行注册表取代布尔；归属取自执行记录（bug 修复） |
 
+### 6.1 首个独立 Rust 版本的执行体验缺口（2026-09-28，规划）
+
+以下为新规划，不改变 §5–§9 的 Python 现状记录。产品投入使用要求见 [first-usable-version.md](../product/first-usable-version.md)。
+
+| 新模块/组合 | 已检查能力 | 真实缺口 | 交付原则 |
+| --- | --- | --- | --- |
+| 交互终端 | 当前 runner stdin=DEVNULL；Orca 的公开实现；成熟 PTY/终端库 | 日常 Agent TUI、输入/resize/scrollback 与有界进程生命周期 | V05 核对源码/库及许可证后选择；不因开源就搬 Electron |
+| 多 worktree 开发工作台 | 仓库 worktree service/discovery；Git/gh；V02/V03/V05–V09；Orca 行为与源码 | 用户无法只开一个 Viva 即管理多个任务、终端、改动和恢复 | V14 组合现有事实与小接口；不新建工作流状态源，不依赖 Orca.app/外部 CLI 通过验收；Viva 打包拥有的源码 helper 需验证退出与预算 |
+
+候选复用的固定源码与耦合证据见 [Orca reuse audit](../research/orca-reuse-audit-2026-09-28.md)，实现与运行均待验收。
+
 ## 7. 持久状态：`~/.viva/`
 
 ```text

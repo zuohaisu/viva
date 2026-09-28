@@ -117,4 +117,4 @@ Haisu ──grant（来源=user，范围=task+actions+mode）──► Samuel（
 7. **重复行为何时影响 Self-Model？** 本轮不实现；只记录 `self_model_candidate`。
 8. **Hermes 是 Worker 还是能力来源？** 见 ADR 0005（未变，本轮不涉及）。
 9. **与 VS Code 的关系？** companion：Viva 管成员/任务/执行/历史，VS Code 管编辑。
-10. **与 Orca 的关系？** 执行织物 vs 办公室：Orca 回答"我的并行 agent 在哪干活"，Viva 回答"谁在替谁做什么、结果如何、凭什么"。
+10. **与 Orca 的关系？** 首个可用版本必须独立替代其多 worktree 并行开发入口；Viva 自己管理任务 worktree、交互终端与恢复，并保留成员/授权/历史语义。可复用 Orca 开源代码或底层库，但 Orca 应用不是运行依赖，见 [首版投入使用门槛](first-usable-version.md)。
