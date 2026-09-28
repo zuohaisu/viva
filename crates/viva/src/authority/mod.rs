@@ -93,6 +93,20 @@ impl GrantMode {
             GrantMode::ActAutonomously => "ACT_AUTONOMOUSLY",
         }
     }
+
+    /// Parse the persisted/CLI spelling of a mode.
+    pub fn from_str_value(text: &str) -> OfficeResult<Self> {
+        match text {
+            "READ" => Ok(GrantMode::Read),
+            "PROPOSE" => Ok(GrantMode::Propose),
+            "ACT_WITH_APPROVAL" => Ok(GrantMode::ActWithApproval),
+            "ACT_AUTONOMOUSLY" => Ok(GrantMode::ActAutonomously),
+            other => Err(OfficeError::Validation(format!(
+                "unknown grant mode `{other}` (READ | PROPOSE | ACT_WITH_APPROVAL | \
+                 ACT_AUTONOMOUSLY)"
+            ))),
+        }
+    }
 }
 
 /// A grant as persisted.
@@ -196,6 +210,7 @@ const DISPATCH_ACTIONS: &[&str] = &[
     "delegate_grant",
     "deliver_pr",
     "maintain_knowledge",
+    "computer_input",
 ];
 
 /// Read-class actions a plain chat identity may perform without any grant.

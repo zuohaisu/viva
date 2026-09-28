@@ -33,6 +33,7 @@ fn run(args: &[String]) -> OfficeResult<()> {
         Some("conversations") => cmd_conversations(args.get(1..).unwrap_or(&[])),
         Some("workbench") => cmd_workbench(),
         Some("data") => cmd_data(args.get(1..).unwrap_or(&[])),
+        Some("tools") => cmd_tools(args.get(1..).unwrap_or(&[])),
         Some("version" | "--version" | "-V") => {
             println!("viva {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -127,6 +128,15 @@ USAGE:
         Read-only export (dump) of every fact table in this VIVA_HOME to
         JSON files plus a manifest. Never touches anything outside the
         store — no worktrees, no historical data directories.
+
+    viva tools computer audit
+        Probe the reused computer tools (orca computer, osascript) and
+        record what is really available (read-only).
+
+    viva tools computer smoke --task <id> --member <id> --grant <id>
+        Run the two controlled smoke tasks (browser + native app) through
+        the locate → act → verify chain under the given task-scoped grant.
+        Read-only inspections; evidence rows are recorded either way.
 
     viva version"
     );
@@ -315,11 +325,13 @@ fn cmd_office(args: &[String]) -> OfficeResult<()> {
             Ok(())
         }
         Some("brief") => cmd_office_brief(args.get(1..).unwrap_or(&[])),
+        Some("create-task") => cmd_office_create_task(args.get(1..).unwrap_or(&[])),
+        Some("grant") => cmd_office_grant(args.get(1..).unwrap_or(&[])),
         Some("handoff") => cmd_office_handoff(&home, args.get(1..).unwrap_or(&[])),
         _ => {
             print_usage();
             Err(OfficeError::Validation(
-                "office needs start | status | dispatch | terminals | stop-terminal | result | brief | handoff | shutdown"
+                "office needs start | status | dispatch | terminals | stop-terminal | result | brief | create-task | grant | handoff | shutdown"
                     .into(),
             ))
         }
@@ -627,6 +639,195 @@ fn cmd_conversations(args: &[String]) -> OfficeResult<()> {
             ));
         }
     }
+    Ok(())
+}
+
+/// `viva tools computer …` (F03) — audit the reused computer tools, or run
+/// the two controlled smoke tasks through the locate → act → verify chain.
+/// Everything here is a read-only inspection of real windows; input
+/// actions live behind the office's task-scoped grant path, never in chat.
+fn cmd_tools(args: &[String]) -> OfficeResult<()> {
+    use std::str::FromStr as _;
+
+    // args[0] is the tool family (`computer`); args[1..] its command.
+    if args.first().map(String::as_str) != Some("computer") {
+        return Err(OfficeError::Validation(
+            "usage: viva tools computer audit | viva tools computer smoke --task <id> \
+             --member <id> --grant <id>"
+                .into(),
+        ));
+    }
+    match args.get(1).map(String::as_str) {
+        Some("audit") => {
+            let store = open_office_store()?;
+            let coordinator = viva::tools::computer::ForegroundCoordinator::new();
+            let engine = viva::tools::computer::ComputerEngine::new(&store, coordinator);
+            for report in engine.audit()? {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
+            Ok(())
+        }
+        Some("smoke") => {
+            let mut task_id = None;
+            let mut member_id = None;
+            let mut grant_id = None;
+            let mut i = 2;
+            while i < args.len() {
+                let flag = args[i].as_str();
+                i += 1;
+                let value = args
+                    .get(i)
+                    .cloned()
+                    .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+                match flag {
+                    "--task" => task_id = Some(value),
+                    "--member" => member_id = Some(value),
+                    "--grant" => grant_id = Some(value),
+                    other => {
+                        return Err(OfficeError::Validation(format!(
+                            "unknown smoke flag `{other}`"
+                        )));
+                    }
+                }
+                i += 1;
+            }
+            let (Some(task_id), Some(member_id), Some(grant_id)) = (task_id, member_id, grant_id)
+            else {
+                return Err(OfficeError::Validation(
+                    "usage: viva tools computer smoke --task <id> --member <id> --grant <id>"
+                        .into(),
+                ));
+            };
+            let task_id = viva::foundation::ids::TaskId::from_str(&task_id)?;
+            let member_id = viva::foundation::ids::MemberId::from_str(&member_id)?;
+            let grant_id = viva::foundation::ids::GrantId::from_str(&grant_id)?;
+
+            let store = open_office_store()?;
+            // Smoke evidence binds to a real office task, not an invented one.
+            viva::tasks::TaskRegistry::new(&store).require_task(&task_id)?;
+            let authority = viva::authority::AuthorityEngine::new(&store);
+            let actor = viva::authority::Actor::Member {
+                member: member_id,
+                grant: Some(grant_id),
+            };
+            let coordinator = viva::tools::computer::ForegroundCoordinator::new();
+            let engine = viva::tools::computer::ComputerEngine::new(&store, coordinator);
+            let reports = engine.audit()?;
+            let mut executed = 0;
+            let mut results = serde_json::Map::new();
+            for (name, spec) in viva::tools::computer::smoke_specs() {
+                let record = engine.execute(&authority, &actor, &task_id, &spec)?;
+                if record.state == viva::tools::computer::ActionState::Executed {
+                    executed += 1;
+                }
+                results.insert(name, serde_json::to_value(&record)?);
+            }
+            results.insert(
+                "capabilities".into(),
+                serde_json::to_value(&reports)?,
+            );
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::Value::Object(results))?
+            );
+            if executed < 2 {
+                return Err(OfficeError::Validation(format!(
+                    "smoke incomplete: {executed}/2 tasks executed — see the evidence \
+                     above for the honest state"
+                )));
+            }
+            Ok(())
+        }
+        other => Err(OfficeError::Validation(format!(
+            "unknown tools computer command `{}`; expected `audit` or `smoke`",
+            other.unwrap_or("<missing>")
+        ))),
+    }
+}
+
+/// `viva office create-task --goal <text>` — open one office task. This is
+/// an owner-side CLI: whoever runs the binary creates the task in their
+/// own VIVA_HOME.
+fn cmd_office_create_task(args: &[String]) -> OfficeResult<()> {
+    let mut goal = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--goal" => {
+                i += 1;
+                goal = args.get(i).cloned();
+            }
+            other => {
+                return Err(OfficeError::Validation(format!(
+                    "unknown create-task flag `{other}`"
+                )));
+            }
+        }
+        i += 1;
+    }
+    let goal = goal.ok_or_else(|| {
+        OfficeError::Validation("usage: viva office create-task --goal <text>".into())
+    })?;
+    let store = open_office_store()?;
+    let task = viva::tasks::TaskRegistry::new(&store).create_task(goal, vec![], None, None, None)?;
+    println!("{}", serde_json::to_string_pretty(&task)?);
+    Ok(())
+}
+
+/// `viva office grant --member <id> --task <id> --action <a> --mode <m>
+/// [--expires <rfc3339>]` — an owner-side root grant (the CLI runner IS
+/// the user; the engine records issuer=user). Protected actions are
+/// refused by the engine itself.
+fn cmd_office_grant(args: &[String]) -> OfficeResult<()> {
+    use std::str::FromStr as _;
+    let mut member = None;
+    let mut task = None;
+    let mut action = None;
+    let mut mode = None;
+    let mut expires = None;
+    let mut i = 0;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        i += 1;
+        let value = args
+            .get(i)
+            .cloned()
+            .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+        match flag {
+            "--member" => member = Some(value),
+            "--task" => task = Some(value),
+            "--action" => action = Some(value),
+            "--mode" => mode = Some(value),
+            "--expires" => expires = Some(value),
+            other => {
+                return Err(OfficeError::Validation(format!(
+                    "unknown grant flag `{other}`"
+                )));
+            }
+        }
+        i += 1;
+    }
+    let member = member
+        .map(|m| viva::foundation::ids::MemberId::from_str(&m))
+        .transpose()?;
+    let task = task
+        .map(|t| viva::foundation::ids::TaskId::from_str(&t))
+        .transpose()?;
+    let action = action.ok_or_else(|| {
+        OfficeError::Validation(
+            "usage: viva office grant --member <id> --task <id> --action <a> --mode <m> \
+             [--expires <rfc3339>]"
+                .into(),
+        )
+    })?;
+    let mode = viva::authority::GrantMode::from_str_value(
+        &mode.ok_or_else(|| OfficeError::Validation("--mode is required (READ | PROPOSE | ACT_WITH_APPROVAL | ACT_AUTONOMOUSLY)".into()))?,
+    )?;
+    let store = open_office_store()?;
+    let engine = viva::authority::AuthorityEngine::new(&store);
+    let grant =
+        engine.issue_root_grant(member, task, vec![action], mode, expires)?;
+    println!("{}", serde_json::to_string_pretty(&grant)?);
     Ok(())
 }
 

@@ -19,6 +19,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "./pi-api.ts";
 import { officeEnv, planDispatch, runEnvelope, toolText, type OfficeEnv } from "./lib.ts";
+import { registerComputerTools } from "./computer/computer.ts";
 
 export default function vivaOffice(pi: ExtensionAPI): void {
   const env: OfficeEnv | null = officeEnv(process.env);
@@ -164,4 +165,9 @@ export default function vivaOffice(pi: ExtensionAPI): void {
       }
     },
   });
+
+
+  // F03 (issue #25): the read-only computer audit tool. Input stays off
+  // chat — it lives on the office's task-scoped grant path only.
+  registerComputerTools(pi, env);
 }
