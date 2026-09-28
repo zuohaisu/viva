@@ -31,6 +31,7 @@ fn run(args: &[String]) -> OfficeResult<()> {
         Some("event") => cmd_event(args.get(1..).unwrap_or(&[])),
         Some("office") => cmd_office(args.get(1..).unwrap_or(&[])),
         Some("conversations") => cmd_conversations(args.get(1..).unwrap_or(&[])),
+        Some("data") => cmd_data(args.get(1..).unwrap_or(&[])),
         Some("version" | "--version" | "-V") => {
             println!("viva {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -87,6 +88,14 @@ USAGE:
     viva office shutdown
         Ask the active host to stop dispatch, stop owned terminals, persist
         the handoff and release the channel.
+
+    viva conversations <create|fork|rename|set-native|attach-task|detach-task|archive|tree|handoff> [flags]
+        Conversation metadata (office-owned tree; the harness owns the transcript).
+
+    viva data export --out <dir>
+        Read-only export of every fact table in this VIVA_HOME to JSON files
+        plus a manifest. Never touches anything outside the store — no
+        worktrees, no historical data directories.
 
     viva version"
     );
@@ -579,5 +588,114 @@ fn cmd_conversations(args: &[String]) -> OfficeResult<()> {
             ));
         }
     }
+    Ok(())
+}
+
+/// `viva data export --out <dir>` — read-only asset inventory and backup
+/// (V13): every user table in this VIVA_HOME goes to one JSON file per
+/// table plus a manifest. The database is opened READ-ONLY and nothing
+/// outside the store is touched: no worktrees, no historical Ticket
+/// Autopilot data, no other agents' homes.
+fn cmd_data(args: &[String]) -> OfficeResult<()> {
+    match args.first().map(String::as_str) {
+        Some("export") => cmd_data_export(args.get(1..).unwrap_or(&[])),
+        _ => Err(OfficeError::Validation(
+            "data needs `export --out <dir>`".into(),
+        )),
+    }
+}
+
+fn cmd_data_export(args: &[String]) -> OfficeResult<()> {
+    let mut out_dir = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--out" => {
+                i += 1;
+                out_dir = args.get(i).cloned();
+            }
+            other => {
+                return Err(OfficeError::Validation(format!(
+                    "unknown export flag `{other}`"
+                )));
+            }
+        }
+        i += 1;
+    }
+    let Some(out_dir) = out_dir else {
+        return Err(OfficeError::Validation(
+            "usage: viva data export --out <dir>".into(),
+        ));
+    };
+    let out_path = std::path::PathBuf::from(out_dir);
+    if out_path.exists() {
+        return Err(OfficeError::Validation(format!(
+            "refusing to overwrite an existing export directory: {}",
+            out_path.display()
+        )));
+    }
+    std::fs::create_dir_all(&out_path)?;
+
+    let home = viva::foundation::paths::viva_home(None);
+    let db = database_path(&home);
+    let conn =
+        rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+
+    let mut tables: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table'
+             AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+
+    let mut manifest = serde_json::Map::new();
+    manifest.insert(
+        "exported_at".into(),
+        serde_json::Value::String(viva::foundation::ids::utc_now()),
+    );
+    manifest.insert(
+        "viva_home".into(),
+        serde_json::Value::String(home.display().to_string()),
+    );
+    manifest.insert("read_only".into(), serde_json::Value::Bool(true));
+    let mut table_rows = serde_json::Map::new();
+    tables.sort();
+    for table in &tables {
+        let mut stmt = conn.prepare(&format!("SELECT * FROM \"{table}\""))?;
+        let column_names: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
+        let rows = stmt.query_map([], |row| {
+            let mut obj = serde_json::Map::new();
+            for (idx, column) in column_names.iter().enumerate() {
+                let value = match row.get_ref(idx)? {
+                    rusqlite::types::ValueRef::Null => serde_json::Value::Null,
+                    rusqlite::types::ValueRef::Integer(v) => serde_json::Value::from(v),
+                    rusqlite::types::ValueRef::Real(v) => serde_json::Value::from(v),
+                    rusqlite::types::ValueRef::Text(text) => {
+                        serde_json::Value::from(String::from_utf8_lossy(text).into_owned())
+                    }
+                    rusqlite::types::ValueRef::Blob(blob) => serde_json::Value::from(
+                        blob.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                    ),
+                };
+                obj.insert(column.clone(), value);
+            }
+            Ok(serde_json::Value::Object(obj))
+        })?;
+        let mut list = Vec::new();
+        for row in rows {
+            list.push(row?);
+        }
+        table_rows.insert(table.clone(), serde_json::Value::from(list.len() as i64));
+        let file = out_path.join(format!("{table}.json"));
+        std::fs::write(&file, serde_json::to_string_pretty(&list)?)?;
+    }
+    manifest.insert("tables".into(), serde_json::Value::Object(table_rows));
+    std::fs::write(
+        out_path.join("manifest.json"),
+        serde_json::to_string_pretty(&serde_json::Value::Object(manifest))?,
+    )?;
+    println!("exported {} tables to {}", tables.len(), out_path.display());
     Ok(())
 }

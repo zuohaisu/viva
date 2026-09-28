@@ -37,14 +37,14 @@ git diff --check
 
 | You want to… | Look at |
 | --- | --- |
-| change a member's identity, role, model or tool binding | `src/viva/residents/` |
-| change how authority or delegation works | `src/viva/permissions/` (and ADR 0007) |
-| change where work happens (worktrees, read-only tasks) | `src/viva/worktrees/` (and ADR 0009) |
-| change tasks, outputs, handoff briefs | `src/viva/tasks/` |
-| change dispatch/stop/status/recovery | `src/viva/office/`, `src/viva/executions/` |
-| change knowledge ownership or reuse evidence | `src/viva/knowledge/` (and ADR 0010) |
-| change GitHub linkage | `src/viva/github/` (read-only only) |
-| change the surfaces | `src/viva/cli/`, `src/viva/tui/` |
+| change a member's identity, role, model or tool binding | `crates/viva/src/members/` |
+| change how authority or delegation works | `crates/viva/src/authority/` (and ADR 0007) |
+| change where work happens (worktrees, GitHub evidence) | `crates/viva/src/git/` (and ADR 0009) |
+| change tasks, results, handoff briefs | `crates/viva/src/tasks/` |
+| change dispatch/stop/status/recovery (control plane) | `crates/viva/src/office/` |
+| change knowledge ownership or reuse evidence | `crates/viva/src/knowledge/` (and ADR 0010) |
+| change conversation trees, forks, handoffs | `crates/viva/src/conversations/` |
+| change the surfaces | `crates/viva/src/tui/`, `crates/viva/src/main.rs`, `extensions/pi/` |
 
 Do **not** reintroduce the retired delivery subsystem: no ticket/Plane/run/QA
 objects, no fixed pipelines presented as dynamic scheduling (ADR 0008).

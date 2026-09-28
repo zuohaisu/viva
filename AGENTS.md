@@ -64,9 +64,10 @@ the gap it fills (pattern and the current table: `docs/architecture/viva-transit
 `src/ticket_autopilot/` was **retired** on 2026-09-27 (ADR 0008). Do not
 reintroduce it, do not re-add ticket/Plane/run/QA-verdict objects, and do not
 recreate a fixed delivery pipeline and call it dynamic scheduling. The three
-capabilities that were still useful were moved into `src/viva/`
-(`worktrees/service.py`, `core/redaction.py`, `permissions/authority.py`) —
-change them there. Historical run data (`~/.ticket-autopilot/`, `qa-verdict.json`,
+capabilities that were still useful live in the Rust office
+(`crates/viva/src/git/`, `crates/viva/src/redaction/`,
+`crates/viva/src/authority/`) — change them there. The Python runtime was
+retired in V13 (issue #22); the Rust binary is the only `viva` entry. Historical run data (`~/.ticket-autopilot/`, `qa-verdict.json`,
 `tasks/` archives) is preserved and must not be deleted or rewritten.
 
 ## Concurrent Development: Worktree(+Branch) → Commits → PR → Merge
@@ -153,7 +154,7 @@ isolated. Use `TECHNICAL_BLOCKED` only for an operation that actually fails
 because of credentials, network, conflict, or remote rejection.
 
 The permission vocabulary (READ / PROPOSE / ACT_WITH_APPROVAL /
-ACT_AUTONOMOUSLY / FORBIDDEN) lives in `src/viva/permissions/`. Member-initiated
+ACT_AUTONOMOUSLY / FORBIDDEN) lives in `crates/viva/src/authority/`. Member-initiated
 dispatch and stopping are allowed **only** through a live grant (ADR 0007); a
 worker request must never be recorded as if Haisu had issued it, and a child
 grant may never widen its parent. New member/task/execution actions must not

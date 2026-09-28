@@ -7,23 +7,10 @@
 > AI member: it is the office the members work in.
 >
 > Customer Zero is **Haisu**; the office ships with no built-in personas.
-> `Samuel`, `Deven`, `Alice`, `Oliver` and `Richard` are records you create.
+> `Samuel`, `Deven` and `Alice` are records you create — configuration data,
+> never hard-coded identity.
 >
 > Canonical product definition: [docs/product/vision.md](docs/product/vision.md).
-
-```bash
-$ viva
-```
-
-```text
-VIVA                                    Office
-Members (3)                             Workspace   office · git main · 4 wt
- * Samuel   coordinator                 Project     viva (1 repo)
-   Deven    developer                   Tasks (2 open)
-   Alice    reviewer                      task-issue-150-...  delivery in_progress
-Executions (1 running, 0 unresolved)      task-issue-151-...  delivery in_progress
-   exec-1a2b3c4d   deven  fakeworker      Tools       2/3: claude qodercli
-```
 
 ## The core distinctions
 
@@ -31,141 +18,132 @@ Executions (1 running, 0 unresolved)      task-issue-151-...  delivery in_progre
 Resident ≠ Role ≠ Cognitive Engine ≠ Worker ≠ Execution Session
 Workspace ≠ Project ≠ Repository ≠ Worktree ≠ Task
 raw event ≠ experience ≠ memory ≠ self-model ≠ identity
+Session dies. Resident persists.
 ```
 
-| Example | What it is |
-| --- | --- |
-| Samuel / Deven / Alice | **Members (Residents)** — persistent AI identities; records, not code |
-| coordinator / developer / reviewer | **Roles** — configuration data in `~/.viva/config/roles.json` |
-| Claude / GPT / GLM / local | **Cognitive engines** — replaceable model bindings |
-| Claude Code / Qoder CLI / Codex | **Workers** — replaceable execution tools |
-| `exec-1a2b3c4d` | **Execution** — one real run with its own attribution and authority |
-| office → Viva → VicTrader | **Workspace → Project → Repository** |
-| `task/issue-150` worktree | **Worktree** — an isolated writable checkout per task |
+## What the Rust office does today
 
-Changing a member's model, tool or role never deletes its record, history or
-knowledge. Sessions die; members, tasks and executions persist.
+`viva` is a single native binary (Rust + SQLite). All facts live in
+`$VIVA_HOME` (default `~/.viva`, 0700); member names and model/tool bindings
+are configuration, and every completion claim carries recorded evidence.
 
-## What works today
+- **Foundation** — `viva init` creates the home and applies the full office
+  schema; `viva doctor` reports state, schema versions and table counts;
+  `viva event add/list` records and reloads office events across restarts.
+- **Active office control plane** — `viva office start` becomes the single
+  active host for the home (a second start refuses and names the running
+  one) and serves a private Unix-socket channel. From any other process:
+  `viva office status/dispatch/terminals/stop-terminal/result/handoff/shutdown`.
+  Dispatch is grant-checked at the moment of effect, idempotent by request
+  key, and launches a real PTY in the task's worktree. With no active
+  office, mutations are clean rejections — no daemon is ever started behind
+  your back. On a crash, the next host reconciles: interrupted launches and
+  orphaned executions get honest recovery records; nothing is re-run,
+  nothing is killed, finished tasks refuse re-dispatch.
+- **Parallel development workbench** — one office spans projects, tasks,
+  worktrees and terminals (see `crates/viva/src/tui/workbench/`): real git
+  facts (branch/dirty/diff), purpose-terminals per worktree with focused
+  keyboard input that never crosses neighbors, and a quit protocol that
+  stops owned processes while preserving every worktree and record.
+- **Conversation metadata** — `viva conversations` keeps the office-owned
+  tree: display names, fork hierarchy, write-once native session pointers,
+  explicit task attachment, and cross-harness handoffs with declared
+  capability. The harness (Pi) owns the transcript; the office owns the tree.
+- **Pi as the default conversational host** — members meet in Pi's own UI
+  inside a Viva terminal (`crates/viva/src/harness/pi/` +
+  [extensions/pi/](extensions/pi/)). The extension injects the member's
+  office context and offers office queries, grant-controlled dispatch and
+  explicit handoff. It states plainly when no external memory is connected.
+- **Data preservation** — `viva data export --out <dir>` dumps every fact
+  table read-only to JSON with a manifest. Historical Ticket Autopilot data
+  is never read, written or migrated.
 
-- **Members** — `viva resident add/list/show`, roles (`viva role list`), engines
-  (`viva engine list`), per-member model + tool bindings that can be rebound
-  without losing anything. An unavailable model or tool fails loudly; Viva
-  never substitutes one silently.
-- **Work** — `viva workspace add`, `viva project add/bind`, `viva task new`
-  (intent, constraints, assignees, outputs, unfinished items) and
-  `viva task brief` — the handoff pack the next member actually needs.
-- **Executions** — `viva office dispatch/status/result/stop/recover`. Real
-  subprocesses in real worktrees; several run at once (the same member can work
-  on two tasks in parallel); stopping one leaves the others alone; every run
-  records its member, task, model, tool, work location, requester and authority
-  at launch, so switching what the UI shows cannot rewrite history.
-- **Delegation** — a coordinating member may dispatch, observe, read results
-  and stop other members *inside a scope Haisu granted*
-  (`viva office grant`). A child grant can never widen its parent, an
-  ungranted worker request is refused, and the refusal is recorded with its
-  reason. Requests are never relabelled as Haisu's own.
-- **Recovery** — after a restart, `viva office recover` reports honestly what
-  is running, what exited without a recorded result, what cannot be told apart,
-  and what can be resumed. It never restarts a finished run.
-- **GitHub (read-only)** — `viva github link/evidence` ties a task to its
-  repository, issue, branch, PR, checks and reviews through `gh`.
-- **Knowledge** — `viva knowledge add/list/show/use/reuse`: personal memory,
-  self-model *candidates*, project knowledge, team knowledge and skills, each
-  with one owner and mandatory provenance. Only entries a later execution
-  actually used count as reuse evidence.
-- **Experience journal** — append-only, secret-redacted
-  (`~/.viva/experiences/journal.jsonl`).
+**Not implemented, and never faked**: automatic reflection, self-model
+evolution, automatic memory promotion, a daemon, automatic remote writes,
+multi-user support. Unavailable models/tools/providers fail loudly; Viva
+never substitutes one silently.
 
-Not implemented, and never faked: automatic reflection, self-model evolution,
-automatic memory promotion, a daemon, automatic remote writes, multi-user
-support, Jev integration. See [docs/product/phase-1.md](docs/product/phase-1.md) §4.
+## Install
+
+Requires **macOS** (Apple Silicon or Intel). External tools, when you use the
+matching features: `git` (required for worktrees; fetched read-only), `gh`
+(optional, GitHub evidence), [Pi](https://github.com/earendil-works/pi)
+(optional, member conversation host) and your own model-CLI credentials —
+Viva never stores credentials.
+
+**From a release (no Rust toolchain needed):** grab `viva-macos-<arch>.tar.gz`
+from the [releases page](https://github.com/zuohaisu/viva/releases), unpack,
+and run `./viva`. Each artifact ships with a sha256 checksum and includes the
+Pi extension sources and licenses.
+
+**From source:**
+
+```bash
+cargo install --path crates/viva    # or: cargo build --release
+viva init && viva doctor
+```
+
+**Run the office:**
+
+```bash
+viva office start        # the active host for this VIVA_HOME
+viva office status       # from any second terminal/process
+```
 
 ## Technology decision
 
-The approved target is **Rust + Tokio + Ratatui + Crossterm** for the Office
-host and terminal surface. [ADR 0011](docs/decisions/0011-rust-host-and-tui.md)
-is the authoritative selection, including reuse boundaries and validation.
-The runnable implementation remains **Python 3.11+ / Textual**; the Rust
-migration has not shipped. Pi is approved as the first default conversation
-host, using its own interactive UI inside a Viva terminal plus a small extension.
-Member identity and long-term assets remain independent of the harness.
-SQLite plus ordinary files is approved for Office state storage, separate from
-external memory. Rust/Pi/PTY and SQLite integration are not implemented; the
-concrete external memory integration remains unconfirmed.
-
-## Quickstart
-
-Requires Python 3.11+ and Git.
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -e '.[dev]'
-
-viva resident add Samuel --role coordinator --engine claude-default
-viva resident add Deven  --role developer   --engine claude-default
-viva resident add Alice  --role reviewer    --engine claude-default
-viva workspace add ~/Documents/code/viva office
-viva project add viva --repo ~/Documents/code/viva
-viva task new "Fix issue 150" --kind delivery --project viva --repo ~/Documents/code/viva \
-     --assign deven --constraint "never touch main"
-
-viva office dispatch --task <task-id> --to deven --wait
-viva office status
-viva task brief <task-id>
-```
-
-In the TUI: `help` lists the commands, `Ctrl+Q` quits. Member/workspace
-selection persists in `~/.viva/`; the selection is navigation only.
+The approved target is **Rust + Ratatui/Crossterm** for the Office host and
+terminal surface, **Pi + a small TypeScript extension** for member
+conversation, and **SQLite + ordinary files** for office state.
+[ADR 0011](docs/decisions/0011-rust-host-and-tui.md) is the authoritative
+selection. The Python runtime was retired in V13
+([retirement record](docs/validation/v13-python-retirement.md) maps every
+retired behavior to its Rust evidence); the Rust binary is the only `viva`
+entry.
 
 ## Architecture
 
 - [IDEA.md](IDEA.md) — the charter and the ontology invariants.
 - [AGENTS.md](AGENTS.md) — the working charter for agents in this repo.
 - [docs/product/](docs/product/) — vision, product model, customer zero,
-  workflows, phase-1 scope.
-- [docs/architecture/](docs/architecture/) — conceptual architecture (the seven
-  relations), domain model (objects, states, invariants), temporal model
-  (event → experience → knowledge), and the migration/retirement record.
-- [docs/decisions/](docs/decisions/) — ADRs 0001–0011, including the decisions
-  this round superseded and why.
+  workflows, phase-1 scope, first-usable-version gate.
+- [docs/architecture/](docs/architecture/) — conceptual architecture, domain
+  model, temporal model, and the migration/retirement record.
+- [docs/decisions/](docs/decisions/) — ADRs 0001–0011.
+- [docs/validation/](docs/validation/) — V12 baselines and final acceptance
+  records with raw evidence.
 
 ```text
-src/viva/
-  core/         store, paths, ids, redaction
-  residents/    members + role/engine catalogues (config data)
-  permissions/  permission vocabulary, owner authority, grant ledger
-  workspaces/ projects/ worktrees/
-  tasks/        task registry + handoff brief
-  executions/   execution registry + real process runner
-  office/       dispatch / status / result / stop / grant / recover
-  knowledge/    four knowledge kinds + reuse evidence
-  github/       read-only GitHub linkage through gh
-  experience/   append-only journal
-  cli/ tui/     surfaces over one composition root
+crates/viva/src/
+  foundation/   ids, paths, store (SQLite/migrations), events, envelope, records
+  members/ workspaces/ projects/          configuration and context domains
+  tasks/        task registry, launch-intent protocol, results, briefs
+  authority/ redaction/                grants, denial ledger, redaction policy
+  terminal/     real PTY sessions (spawn/input/resize/snapshot/stop/wait)
+  git/          worktrees (discover/create/adopt), read-only GitHub evidence
+  knowledge/    sources, lifecycle, selection, usage evidence
+  conversations/                        tree, forks, handoffs (V10)
+  office/       active host, control channel, reconciliation (V07)
+  harness/      explicit launch combinations; Pi specialization (V09)
+  tui/          shell, parallel-development workbench (V14), conversations
+extensions/pi/  the Pi office extension (TypeScript, independently tested)
 ```
-
-Dependency direction: `cli/tui → context → domain → platform (worktrees,
-workers, store)`; `core` is stdlib-only.
 
 ## Testing
 
 ```bash
-python -m pytest tests/ -q
+cargo test --workspace          # Rust: units + per-issue acceptance tests
+python -m pytest tests/acceptance -q   # acceptance tooling (stdlib-only)
+cd extensions/pi && npm ci && npm run typecheck && npm test   # Pi extension
 ```
-
-`tests/viva/` covers the members, tasks, executions, authority, knowledge,
-GitHub linkage, CLI, TUI (headless Textual driver) and the nine acceptance
-scenarios end-to-end with real worker processes
-(`tests/viva/test_acceptance.py`).
 
 ## Security and boundaries
 
 Members and workers never gain repository-owner authority: no protected-branch
-pushes, no merges, no approving their own PR, no self-authorization. Remote
-actions require an explicit, audited owner decision
-(`src/viva/permissions/authority.py`). Every persisted artifact is private
+pushes, no merges, no approving their own PR, no self-authorization — the
+vocabulary lives in `crates/viva/src/authority/` and protected actions are
+refused to every grant. Caller roles exist only because the office issued a
+channel; nothing self-declares. Every persisted artifact is private
 (0o600/0o700) and secret-redacted before it is written. Viva never reads,
 writes or migrates the historical `~/.ticket-autopilot/` state.
 
