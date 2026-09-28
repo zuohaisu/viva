@@ -314,14 +314,21 @@ impl OfficeHost {
             match listener.accept() {
                 Ok((stream, _)) => {
                     // Channel authentication (issue #16 requires it): the
-                    // OS reports the connected peer's uid via
-                    // getpeereid(2). A socket in a 0700 directory is the
-                    // first gate; this peer check is the second — same
-                    // process owner only, regardless of any future
-                    // permissions drift on the socket file.
+                    // OS reports the connected peer's uid (getpeereid(2) on
+                    // BSD/macOS, SO_PEERCRED on Linux). A socket in a 0700
+                    // directory is the first gate; this peer check is the
+                    // second — same process owner only, regardless of any
+                    // future permissions drift on the socket file.
                     if !peer_is_owner(&stream) {
                         continue;
                     }
+                    // The listener is non-blocking (the serve loop polls),
+                    // and on BSD/macOS accept() passes O_NONBLOCK on to the
+                    // accepted socket — which would turn the first slow
+                    // client read into EAGAIN and drop a perfectly valid
+                    // request. The connection handler is synchronous and
+                    // has its own IO timeouts, so restore blocking mode.
+                    stream.set_nonblocking(false)?;
                     let shared = Arc::clone(&shared);
                     std::thread::spawn(move || {
                         let _ = handle_connection(shared, stream);
@@ -414,7 +421,39 @@ fn record_recovery(store: &Store, host_id: &str, kind: &str, detail: &str) -> Of
 
 /// True when the connected peer's uid is this process's effective uid.
 /// False on any probe failure too: an unverifiable peer is not trusted.
-#[cfg(unix)]
+/// Platform split: `getpeereid(2)` is BSD/macOS-only; Linux exposes the
+/// same fact as `SO_PEERCRED`. Any unix neither covers fails closed (the
+/// host refuses every client rather than trust strangers).
+#[cfg(target_os = "linux")]
+fn peer_is_owner(stream: &UnixStream) -> bool {
+    use std::os::fd::AsRawFd as _;
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len: libc::socklen_t = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: getsockopt with SO_PEERCRED fills the ucred out-param for the
+    // stream's own fd.
+    let ok = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut libc::ucred as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    ok == 0 && cred.uid == unsafe { libc::geteuid() }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+))]
 fn peer_is_owner(stream: &UnixStream) -> bool {
     use std::os::fd::AsRawFd as _;
     let mut peer_uid: libc::uid_t = 0;
@@ -422,6 +461,45 @@ fn peer_is_owner(stream: &UnixStream) -> bool {
     // SAFETY: getpeereid takes the stream's own fd and two out-params.
     let ok = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut peer_uid, &mut peer_gid) };
     ok == 0 && peer_uid == unsafe { libc::geteuid() }
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+)))]
+fn peer_is_owner(_stream: &UnixStream) -> bool {
+    false
+}
+
+#[cfg(all(
+    test,
+    any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    )
+))]
+mod peer_tests {
+    use super::*;
+
+    /// Same-uid reachability of the peer check: a connected socket owned
+    /// by this process must pass. The cross-uid refusal path cannot be
+    /// constructed on a single-uid machine; it rests on the OS contract
+    /// (getpeereid/SO_PEERCRED report the peer's real uid) and is recorded
+    /// in docs/validation/v12-final-acceptance.md §5.
+    #[test]
+    fn peer_check_accepts_same_owner_sockets() {
+        let (a, b) = UnixStream::pair().expect("pair");
+        assert!(peer_is_owner(&a), "own-process socket must be trusted");
+        assert!(peer_is_owner(&b));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -691,15 +769,23 @@ fn dispatch(
     let start = tasks.begin_execution(&task_id, &attribution, request_key)?;
     let intent = match start {
         ExecutionStart::Replayed(intent) => {
-            // Idempotency by request key — but ONLY within the same task.
-            // The same key on a different task is a client bug: silently
-            // returning another task's execution would make task2 look
+            // Idempotency by request key — but ONLY within the same
+            // task AND the same member. The same key on a different task
+            // or from a different member is a client bug: silently
+            // returning the other caller's execution would make it look
             // started when it never ran.
             if intent.task_id != task_id {
                 return Err(OfficeError::Validation(format!(
                     "request key `{request_key}` already belongs to task `{}`; \
                      keys are replayed per task — use a different key for task `{task_id}`",
                     intent.task_id
+                )));
+            }
+            if intent.member_id != member_id {
+                return Err(OfficeError::Validation(format!(
+                    "request key `{request_key}` was already used by member `{}`; \
+                     keys are replayed per (task, member) — use a different key",
+                    intent.member_id
                 )));
             }
             return Ok(serde_json::json!({
@@ -770,17 +856,28 @@ fn dispatch(
             // integer field records it as -1 rather than staying silent —
             // a stopped process must always land in the ledger.
             let code = exit.code.unwrap_or(-1);
+            let office_stopped = !matches!(exit.via, crate::terminal::ExitVia::ChildExit);
             let store = watcher_shared.store.lock().expect("office store");
             let tasks = TaskRegistry::new(&store);
             let _ = tasks.record_exit(&watcher_key, code);
             {
+                // The exit-code ledger sorts non-zero into `failed`; an
+                // exit the OFFICE caused (graceful stop / forced kill) is
+                // a stop, not a failure — correct the record and say why.
+                if office_stopped {
+                    let _ = store.connection().execute(
+                        "UPDATE office_executions SET status = 'stopped', updated_at = ?2
+                         WHERE execution_id = ?1 AND status = 'failed'",
+                        rusqlite::params![watcher_execution.as_str(), utc_now()],
+                    );
+                }
                 let _ = tasks.record_result(
                     &watcher_task,
                     Some(watcher_execution),
                     crate::tasks::ResultSource::Process,
                     "process_exit",
                     format!("{watcher_key}:exit"),
-                    serde_json::json!({ "exit_code": code }),
+                    serde_json::json!({ "exit_code": code, "via": format!("{:?}", exit.via) }),
                 );
             }
         }

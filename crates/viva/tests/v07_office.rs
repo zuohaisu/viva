@@ -754,3 +754,47 @@ fn request_keys_never_replay_across_tasks() {
     office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown)).ok();
     host.join().ok();
 }
+
+#[test]
+fn channel_survives_delayed_and_pipelined_requests() {
+    // B2 regression: the accepted socket must be synchronous. A client
+    // that connects and only sends later (or sends several requests on
+    // one connection) must never lose a request to a spurious EAGAIN.
+    let dir = TempDir::new().expect("dir");
+    let home = dir.path().to_path_buf();
+    seed(&home, "channel robustness");
+
+    let host = spawn_host_thread(home.clone());
+    wait_until("socket", Duration::from_secs(10), || socket_ready(&home));
+
+    let mut stream = std::os::unix::net::UnixStream::connect(home.join(office::OFFICE_SOCKET_NAME))
+        .expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+
+    // 1. Delayed first frame: connect, wait well past any scheduling
+    //    window, only then send.
+    std::thread::sleep(Duration::from_millis(300));
+    office::write_message(&mut stream, &office::new_request(OfficeRequestKind::Ping))
+        .expect("delayed first frame");
+    let first = office::read_message(&mut stream).expect("delayed frame answered");
+    assert!(first.contains("\"ok\":true"), "got: {first}");
+
+    // 2. A second request on the SAME connection must be served too.
+    office::write_message(&mut stream, &office::new_request(OfficeRequestKind::Ping))
+        .expect("second frame on the same connection");
+    let second = office::read_message(&mut stream).expect("second frame answered");
+    assert!(second.contains("\"ok\":true"), "got: {second}");
+
+    // 3. A malformed frame gets an error RESPONSE (not a dropped pipe).
+    use std::io::Write as _;
+    stream
+        .write_all(b"this is not json\n")
+        .expect("write malformed");
+    let third = office::read_message(&mut stream).expect("malformed answered in-band");
+    assert!(third.contains("\"ok\":false"), "got: {third}");
+
+    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown)).ok();
+    host.join().ok();
+}

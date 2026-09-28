@@ -24,7 +24,7 @@ G1 时只有 CLI 切片；本轮验收覆盖 V07/V09/V10/V14 交付后的组合�
 | Office host 常驻峰值 RSS（承载 16 终端时） | ≤ 150 MB（新预算，首测） | **8.7 MB** | peak.json | within |
 | 16 个被监督子进程的每进程峰值 RSS | — | ~1.2 MB/个（sleep 替身） | peak.json | 记录 |
 | 控制面单次派发往返（16 次中位） | ≤ 500 ms（新预算，首测） | **30 ms** | peak.json | within |
-| PTY 输入回程（1 字节真 pty） | ≤ 100 ms | **80 µs** | echo.json | within |
+| PTY 输入回程（11 字节真 pty + `cat`） | ≤ 100 ms | **80 µs** | echo.json | within |
 | 冷构建（`cargo clean` 后全 workspace） | ≤ 300 s | **15.0 s** | build.json | within |
 | 增量构建 | ≤ 30 s | **0.1 s** | build.json | within |
 
@@ -45,9 +45,9 @@ G1 时只有 CLI 切片；本轮验收覆盖 V07/V09/V10/V14 交付后的组合�
 | --- | --- | --- |
 | 强制退出（kill -9 宿主） | 重启对账记录 `previous_host_crashed` 与 `execution_orphaned`；孤儿执行如实标 `stopped`；不重跑、不杀孤儿进程、不误认 pid | v07_office::crash_restart_reconciles… |
 | 完成任务不重放 | 已完成任务再派发被拒（"never executed again"），零新增执行 | 同上 |
-| 停止/退出竞态与误杀 | 停一个终端不影响邻居；信号退出以 `-1` 如实入账；stop 纪律（先 TERM 后 KILL、已 reap 不再发信号）由 V05 单元/集成覆盖 | v07/v14/v05 |
+| 停止/退出竞态与误杀 | 停一个终端不影响邻居；信号退出以 `-1` 如实入账且 office 主动停止记 `stopped`（不是 failed）；stop 纪律（先 TERM 后 KILL、已 reap 不再发信号）由 V05 单元/集成覆盖 | v07/v14/v05 |
 | 授权撤回竞态 | revoke 后派发在生效时刻被拒，零执行创建 | v07_office::revoked_grant… |
-| 重复启动/请求重放 | 第二宿主拒绝并指认活跃 pid；同 request key 重放不重复启动 | v07_office::second_host…, cli_dispatches… |
+| 重复启动/请求重放 | 第二宿主拒绝并指认活跃 pid；同 request key 重放不重复启动，且按 (task, member) 隔离——跨任务/跨成员同 key 响亮拒绝 | v07_office::second_host…, request_keys_never_replay… |
 | 无活跃 office 时 mutation | 明确拒绝，不起后台 daemon，不凭空造 socket | v07_office::mutation_without… |
 | 优雅退出收尾 | owned 终端全部停止，退出 watcher 先 join（每条退出事实先落账）再写交接记录，下次启动无虚假 orphan 记录；socket 释放 | v07_office::graceful_shutdown…、graceful_shutdown_records_every_exit_before_the_handoff |
 | 存储/迁移回滚 | 迁移失败无半状态、事务失败回滚、append-only 触发器 | V01 store 单元 |
@@ -73,7 +73,13 @@ G1 时只有 CLI 切片；本轮验收覆盖 V07/V09/V10/V14 交付后的组合�
 4. **V14 三真实任务端到端用户演示（含真实 Pi + 另一已安装 CLI）** — V14 的组合行为已由真实 git/PTY/进程测试覆盖，但"真实 Pi + 另一 CLI"的人工并行开发演示待凭证与工具就绪后按 [first-usable-version.md](../product/first-usable-version.md) 执行。
 5. **共享桌面动作的串行验证**（issue 要求）— 未执行。
 
-## 5. 方法可重复性
+## 5. 边界与备注（回归验证轮补充）
+
+- 控制通道健壮性由 `channel_survives_delayed_and_pipelined_requests` 钉住：连接后延迟发送、同连接多帧、malformed 帧在线错误响应（不断连、不丢请求）。
+- **Rust CLI 层不做 native fork 前置校验**：native-first 顺序由 Pi 扩展强制（feature-detect fork 入口，失败即拒）；conversations 域只登记 harness 已确认的分叉。把顺序下沉为域强校验留作 V10 后续小票。
+- peer-uid 拒绝路径（跨 uid 客户端被拒）在单 uid 机器上无法构造实测，机制为 OS 语义（getpeereid/SO_PEERCRED）+ 同 uid 路径已测；跨 uid 行为依赖上述系统调用语义。
+
+## 6. 方法可重复性
 
 ```bash
 cargo build --workspace

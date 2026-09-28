@@ -599,7 +599,7 @@ fn cmd_conversations(args: &[String]) -> OfficeResult<()> {
             );
         }
         Some("handoff") => {
-            let handoff = registry.record_handoff(
+            let (handoff, duplicate) = registry.record_handoff_checked(
                 &require("--node")?,
                 require("--to")?,
                 viva::conversations::ForkCapability::from_str_value(
@@ -615,7 +615,10 @@ fn cmd_conversations(args: &[String]) -> OfficeResult<()> {
                 get("--brief"),
                 get("--history-ref"),
             )?;
-            println!("{}", serde_json::to_string_pretty(&handoff)?);
+            // `duplicate: true` = an identical earlier handoff was reused.
+            let mut value = serde_json::to_value(&handoff)?;
+            value["duplicate"] = serde_json::Value::Bool(duplicate);
+            println!("{}", serde_json::to_string_pretty(&value)?);
         }
         _ => {
             return Err(OfficeError::Validation(

@@ -366,6 +366,7 @@ impl<'a> ConversationRegistry<'a> {
     /// Record a handoff to another harness. The record is the traceable
     /// fact: who handed what (brief copy, history reference) to which
     /// harness, with that harness's declared capability.
+    /// Record a handoff; identical repeats return the first record.
     #[allow(clippy::too_many_arguments)]
     pub fn record_handoff(
         &self,
@@ -378,6 +379,34 @@ impl<'a> ConversationRegistry<'a> {
         brief_snapshot: Option<String>,
         history_ref: Option<String>,
     ) -> OfficeResult<ConversationHandoff> {
+        self.record_handoff_checked(
+            from_node_id,
+            to_harness,
+            to_capability,
+            native_session_id,
+            identity_member_id,
+            task_id,
+            brief_snapshot,
+            history_ref,
+        )
+        .map(|(handoff, _duplicate)| handoff)
+    }
+
+    /// Like [`record_handoff`], but tells the caller whether the handoff
+    /// was newly created (false) or an identical earlier record was reused
+    /// (true) — clients can surface the difference honestly.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_handoff_checked(
+        &self,
+        from_node_id: &str,
+        to_harness: impl Into<String>,
+        to_capability: ForkCapability,
+        native_session_id: Option<String>,
+        identity_member_id: Option<MemberId>,
+        task_id: Option<TaskId>,
+        brief_snapshot: Option<String>,
+        history_ref: Option<String>,
+    ) -> OfficeResult<(ConversationHandoff, bool)> {
         self.require_node(from_node_id)?;
         let to_harness = to_harness.into();
         // Idempotent: the SAME handoff (same source node, target harness,
@@ -414,7 +443,7 @@ impl<'a> ConversationRegistry<'a> {
             .map_err(OfficeError::from)?
         };
         if let Some(handoff) = existing {
-            return Ok(handoff);
+            return Ok((handoff, true));
         }
         let handoff = ConversationHandoff {
             handoff_id: format!("handoff-{}", uuid::Uuid::new_v4().simple()),
@@ -447,7 +476,7 @@ impl<'a> ConversationRegistry<'a> {
                 handoff.created_at,
             ],
         )?;
-        Ok(handoff)
+        Ok((handoff, false))
     }
 
     pub fn handoffs_for_node(&self, node_id: &str) -> OfficeResult<Vec<ConversationHandoff>> {

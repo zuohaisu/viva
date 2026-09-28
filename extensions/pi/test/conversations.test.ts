@@ -6,7 +6,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -102,9 +102,11 @@ test("fork records in the office only after the native fork succeeds", async () 
 
 test("fork without a native entry point refuses and records nothing", async () => {
   await withEnv(BASE_ENV, async () => {
-    let calls = 0;
-    const viva = fakeViva('#!/bin/sh\ncalls=$((calls+1)); echo "{}"\n');
-    // Count calls by overwriting: each run appends to a file we reset.
+    // The fake viva appends every invocation to a call log. The refusal
+    // must mean the office CLI was NEVER called: `calls=0` inside a shell
+    // script can't be observed from JS, but the log file can.
+    const callLog = join(tmpdir(), `viva-conv-calls-${process.pid}-${Date.now()}.log`);
+    const viva = fakeViva(`#!/bin/sh\necho "$@" >> ${callLog}\necho "{}"\n`);
     const registered = fakePiWith(harnessWith(viva));
     const fork = registered.get("viva_conversations_fork")!;
     const result = await fork.execute(
@@ -114,7 +116,11 @@ test("fork without a native entry point refuses and records nothing", async () =
     assert.equal(result.isError, true);
     assert.match(result.content, /no native fork entry point/);
     assert.match(result.content, /nothing was recorded/);
-    assert.equal(calls, 0);
+    assert.equal(
+      existsSync(callLog),
+      false,
+      "the office CLI must never be invoked when the native fork is refused",
+    );
   });
 });
 
