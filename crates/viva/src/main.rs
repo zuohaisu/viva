@@ -28,6 +28,7 @@ fn run(args: &[String]) -> OfficeResult<()> {
         Some("init") => cmd_init(),
         Some("doctor") => cmd_doctor(),
         Some("event") => cmd_event(args.get(1..).unwrap_or(&[])),
+        Some("office") => cmd_office(args.get(1..).unwrap_or(&[])),
         Some("version" | "--version" | "-V") => {
             println!("viva {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -58,6 +59,32 @@ USAGE:
 
     viva event list [limit]
         List the most recent office events (default 20).
+
+    viva office start
+        Become the active office host for this VIVA_HOME (one per home).
+        Serves the control channel until `viva office shutdown` arrives.
+
+    viva office status
+        Office snapshot. Uses the live channel when a host is active, and
+        falls back to offline store reads otherwise (read-only by design).
+
+    viva office dispatch --task <id> --member <id> --grant <id>
+        --request-key <key> --cwd <dir> -- argv...
+        Dispatch one task execution under a grant over the real channel.
+        Idempotent by --request-key: a retry never spawns twice.
+
+    viva office terminals
+        List terminals registered by the active host.
+
+    viva office stop-terminal <terminal-id>
+        Stop one terminal (its process group only).
+
+    viva office result <task-id>
+        Show the results recorded for a task.
+
+    viva office shutdown
+        Ask the active host to stop dispatch, stop owned terminals, persist
+        the handoff and release the channel.
 
     viva version"
     );
@@ -200,4 +227,172 @@ fn parse_domain(name: &str) -> OfficeResult<viva::foundation::store::Domain> {
                     .join(", ")
             ))
         })
+}
+
+// ---------------------------------------------------------------------------
+// Office control plane (V07)
+// ---------------------------------------------------------------------------
+
+fn cmd_office(args: &[String]) -> OfficeResult<()> {
+    let home = viva::foundation::paths::viva_home(None);
+    match args.first().map(String::as_str) {
+        Some("start") => cmd_office_start(&home),
+        Some("status") => cmd_office_status(&home),
+        Some("dispatch") => cmd_office_dispatch(&home, args.get(1..).unwrap_or(&[])),
+        Some("terminals") => cmd_office_query(&home, viva::office::OfficeRequestKind::TerminalList),
+        Some("stop-terminal") => {
+            let terminal_id = args.get(1).ok_or_else(|| {
+                OfficeError::Validation("usage: viva office stop-terminal <terminal-id>".into())
+            })?;
+            cmd_office_query(
+                &home,
+                viva::office::OfficeRequestKind::TerminalStop {
+                    terminal_id: terminal_id.clone(),
+                },
+            )
+        }
+        Some("result") => {
+            let task_id = args.get(1).ok_or_else(|| {
+                OfficeError::Validation("usage: viva office result <task-id>".into())
+            })?;
+            cmd_office_query(
+                &home,
+                viva::office::OfficeRequestKind::TaskResults {
+                    task_id: task_id.clone(),
+                },
+            )
+        }
+        Some("shutdown") => {
+            cmd_office_query(&home, viva::office::OfficeRequestKind::Shutdown)?;
+            println!("office: shutdown accepted; owned terminals stopped, handoff persisted");
+            Ok(())
+        }
+        _ => {
+            print_usage();
+            Err(OfficeError::Validation(
+                "office needs start | status | dispatch | terminals | stop-terminal | result | shutdown"
+                    .into(),
+            ))
+        }
+    }
+}
+
+fn cmd_office_start(home: &std::path::Path) -> OfficeResult<()> {
+    let host = viva::office::OfficeHost::open(home)?;
+    println!(
+        "office host {} active (pid {}) — home {}",
+        host.shared().host_id,
+        std::process::id(),
+        home.display()
+    );
+    host.serve()?;
+    println!("office host released the control channel");
+    Ok(())
+}
+
+fn cmd_office_status(home: &std::path::Path) -> OfficeResult<()> {
+    let request = viva::office::new_request(viva::office::OfficeRequestKind::Status);
+    match viva::office::send_request(home, request) {
+        Ok(response) => print_office_response(&response),
+        Err(live_err) => {
+            // Read-only status is answerable offline by design; say both
+            // facts plainly.
+            eprintln!("office: live channel unavailable: {live_err}");
+            let offline = viva::office::offline_status(home)?;
+            println!("{}", serde_json::to_string_pretty(&offline)?);
+            Ok(())
+        }
+    }
+}
+
+fn cmd_office_query(
+    home: &std::path::Path,
+    kind: viva::office::OfficeRequestKind,
+) -> OfficeResult<()> {
+    let response = viva::office::send_request(home, viva::office::new_request(kind))?;
+    print_office_response(&response)
+}
+
+fn cmd_office_dispatch(home: &std::path::Path, args: &[String]) -> OfficeResult<()> {
+    let mut task_id = None;
+    let mut member_id = None;
+    let mut grant_id = None;
+    let mut request_key = None;
+    let mut cwd: Option<String> = None;
+    let mut worktree_id = None;
+    let mut argv: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        let value = |i: &mut usize| -> OfficeResult<String> {
+            *i += 1;
+            args.get(*i)
+                .cloned()
+                .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))
+        };
+        match flag {
+            "--task" => task_id = Some(value(&mut i)?),
+            "--member" => member_id = Some(value(&mut i)?),
+            "--grant" => grant_id = Some(value(&mut i)?),
+            "--request-key" => request_key = Some(value(&mut i)?),
+            "--cwd" => cwd = Some(value(&mut i)?),
+            "--worktree" => worktree_id = Some(value(&mut i)?),
+            "--" => {
+                argv = args[i + 1..].to_vec();
+                break;
+            }
+            other => {
+                return Err(OfficeError::Validation(format!(
+                    "unknown dispatch flag `{other}`"
+                )));
+            }
+        }
+        i += 1;
+    }
+    let (Some(task_id), Some(member_id), Some(grant_id), Some(request_key), Some(cwd)) =
+        (task_id, member_id, grant_id, request_key, cwd)
+    else {
+        return Err(OfficeError::Validation(
+            "usage: viva office dispatch --task <id> --member <id> --grant <id> \
+             --request-key <key> --cwd <dir> [--worktree <id>] -- argv..."
+                .into(),
+        ));
+    };
+    if argv.is_empty() {
+        return Err(OfficeError::Validation(
+            "dispatch needs an explicit argv after `--` (no joined shell strings)".into(),
+        ));
+    }
+    let response = viva::office::send_request(
+        home,
+        viva::office::new_request(viva::office::OfficeRequestKind::Dispatch {
+            task_id,
+            member_id,
+            grant_id,
+            request_key,
+            argv,
+            cwd,
+            worktree_id,
+        }),
+    )?;
+    print_office_response(&response)
+}
+
+fn print_office_response(response: &viva::office::OfficeResponse) -> OfficeResult<()> {
+    if response.ok {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                response.result.as_ref().unwrap_or(&serde_json::Value::Null)
+            )?
+        );
+        Ok(())
+    } else {
+        Err(OfficeError::Validation(
+            response
+                .error
+                .clone()
+                .unwrap_or_else(|| "rejected without a reason".into()),
+        ))
+    }
 }

@@ -14,6 +14,7 @@ pub mod foundation;
 pub mod git;
 pub mod knowledge;
 pub mod members;
+pub mod office;
 pub mod projects;
 pub mod redaction;
 pub mod tasks;
