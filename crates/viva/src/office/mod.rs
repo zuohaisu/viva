@@ -102,6 +102,7 @@ pub fn office_migrations() -> &'static crate::foundation::store::FrozenMigration
         let registry = crate::workflows::register_migrations(registry);
         let registry = crate::maintenance::register_migrations(registry);
         let registry = crate::tools::computer::register_migrations(registry);
+        let registry = crate::memory::register_migrations(registry);
         registry
             .register(DOMAIN_OFFICE_HOST, 1, "office host v1", OFFICE_HOST_V1_SQL)
             .freeze()

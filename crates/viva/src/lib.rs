@@ -17,6 +17,7 @@ pub mod harness;
 pub mod knowledge;
 pub mod maintenance;
 pub mod members;
+pub mod memory;
 pub mod office;
 pub mod projects;
 pub mod redaction;

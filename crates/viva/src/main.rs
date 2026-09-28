@@ -34,6 +34,7 @@ fn run(args: &[String]) -> OfficeResult<()> {
         Some("workbench") => cmd_workbench(),
         Some("data") => cmd_data(args.get(1..).unwrap_or(&[])),
         Some("tools") => cmd_tools(args.get(1..).unwrap_or(&[])),
+        Some("memory") => cmd_memory(args.get(1..).unwrap_or(&[])),
         Some("version" | "--version" | "-V") => {
             println!("viva {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -137,6 +138,21 @@ USAGE:
         Run the two controlled smoke tasks (browser + native app) through
         the locate → act → verify chain under the given task-scoped grant.
         Read-only inspections; evidence rows are recorded either way.
+
+    viva memory search --member <id> [--project <id>] --query <text>
+        Search the linked external memory for one member's scope
+        (read-only). Unavailable stores say so; unclaimable hits are
+        counted, not silently mixed in.
+
+    viva memory remember --member <id> [--project <id>] --content <text>
+                         --source <provenance> [--category <c>] [--tags <t>]
+        Write one fact through the real provider with mandatory provenance.
+
+    viva memory archive|restore --fact <id> --reason <text>
+        Exit paths over the office link layer. Nothing here deletes.
+
+    viva memory status
+        Report which store/checkout the office is wired to.
 
     viva version"
     );
@@ -829,6 +845,117 @@ fn cmd_office_grant(args: &[String]) -> OfficeResult<()> {
         engine.issue_root_grant(member, task, vec![action], mode, expires)?;
     println!("{}", serde_json::to_string_pretty(&grant)?);
     Ok(())
+}
+
+/// `viva memory …` (F04) — the office's namespace/audit layer over the
+/// real external memory. Search/remember/archive all go through the
+/// office link layer: member scoping, provenance, usage evidence, and
+/// recoverable exit (no delete). The adapter subprocess always receives
+/// an explicit db path.
+fn cmd_memory(args: &[String]) -> OfficeResult<()> {
+    use std::str::FromStr as _;
+
+    let mut named: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut i = 1; // args[0] is the subcommand
+    while i < args.len() {
+        let flag = args[i].as_str();
+        i += 1;
+        let value = args
+            .get(i)
+            .cloned()
+            .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+        named.insert(flag.to_string(), value);
+        i += 1;
+    }
+    let get = |key: &str| named.get(key).cloned();
+    let require = |key: &str| -> OfficeResult<String> {
+        get(key).ok_or_else(|| OfficeError::Validation(format!("memory needs --{key}")))
+    };
+
+    let store = open_office_store()?;
+    let service = viva::memory::MemoryService::new(&store);
+    match args.first().map(String::as_str) {
+        Some("search") => {
+            let viewer = viva::foundation::ids::MemberId::from_str(&require("--member")?)?;
+            let project = get("--project")
+                .map(|p| viva::foundation::ids::ProjectId::from_str(&p))
+                .transpose()?;
+            let query = require("--query")?;
+            match service.search(&viewer, project.as_ref(), &query, 16 * 1024)? {
+                viva::memory::MemorySearch::Fetched {
+                    facts,
+                    hidden_unclaimable,
+                } => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "state": "fetched",
+                            "facts": facts,
+                            "hidden_unclaimable": hidden_unclaimable,
+                        }))?
+                    );
+                }
+                viva::memory::MemorySearch::Unavailable { reason } => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "state": "unavailable",
+                            "reason": reason,
+                        }))?
+                    );
+                }
+            }
+            Ok(())
+        }
+        Some("remember") => {
+            let member_id = viva::foundation::ids::MemberId::from_str(&require("--member")?)?;
+            let project = get("--project")
+                .map(|p| viva::foundation::ids::ProjectId::from_str(&p))
+                .transpose()?;
+            let link = service.remember(
+                &member_id,
+                project.as_ref(),
+                &require("--content")?,
+                &require("--source")?,
+                &get("--category").unwrap_or_else(|| "general".into()),
+                &get("--tags").unwrap_or_default(),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&link)?);
+            Ok(())
+        }
+        Some(cmd @ ("archive" | "restore")) => {
+            let fact_id: i64 = require("--fact")?.parse().map_err(|_| {
+                OfficeError::Validation("--fact must be the external fact's integer id".into())
+            })?;
+            let actor = viva::foundation::ids::MemberId::from_str(&require("--member")?)?;
+            let link = if cmd == "archive" {
+                service.archive(fact_id, &require("--reason")?, &actor)?
+            } else {
+                service.restore(fact_id, &require("--reason")?, &actor)?
+            };
+            println!("{}", serde_json::to_string_pretty(&link)?);
+            Ok(())
+        }
+        Some("status") => {
+            let config = viva::memory::AdapterConfig::from_env();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "python": config.python.display().to_string(),
+                    "adapter": config.adapter_script.display().to_string(),
+                    "adapter_present": config.adapter_script.is_file(),
+                    "agent_dir": config.agent_dir.display().to_string(),
+                    "agent_dir_present": config.agent_dir.is_dir(),
+                    "db_path": config.db_path.display().to_string(),
+                }))?
+            );
+            Ok(())
+        }
+        _ => Err(OfficeError::Validation(
+            "memory needs search | remember | archive | restore | status".into(),
+        )),
+    }
 }
 
 /// `viva data export --out <dir>` — read-only asset inventory and dump
