@@ -513,3 +513,69 @@ fn recorded_terminal_events_keep_the_ownership_boundary() {
     }
     assert!(seen_member && seen_user_shell);
 }
+
+/// QA regression gate (independent-QA finding Q2): the stop/wait/exit race
+/// previously deadlocked intermittently (~2 of 6 rounds held locks across a
+/// blocking child.wait). The reap discipline is now lock-under-no-blocking;
+/// this test loops the race to keep that honest.
+#[test]
+fn stop_wait_race_survives_repeated_rounds() {
+    for round in 0..4 {
+        let reg = registry();
+        let (_id, a) = reg
+            .spawn(
+                spec(&["/bin/sh", "-c", "sleep 20 & wait"]),
+                TerminalOwner::UserShell,
+                None,
+                format!("race-a{round}"),
+                None,
+                None,
+            )
+            .expect("spawn a");
+        let (_id, b) = reg
+            .spawn(
+                spec(&["/bin/sh", "-c", "sleep 20 & wait"]),
+                TerminalOwner::UserShell,
+                None,
+                format!("race-b{round}"),
+                None,
+                None,
+            )
+            .expect("spawn b");
+
+        let a_handle = a.clone();
+        let policy = StopPolicy {
+            graceful_timeout: Duration::from_secs(3),
+        };
+        let racers: Vec<_> = (0..4)
+            .map(|_| {
+                let handle = a_handle.clone();
+                std::thread::spawn(move || handle.stop(policy))
+            })
+            .collect();
+        let waiter = {
+            let handle = a_handle.clone();
+            std::thread::spawn(move || handle.wait())
+        };
+
+        let first = a.stop(policy).expect("stop");
+        assert_ne!(
+            first.via,
+            ExitVia::ChildExit,
+            "round {round}: our stop must drive the exit, not the child's own"
+        );
+        let waited = waiter.join().expect("wait joins").expect("wait ok");
+        assert_eq!(
+            waited, first,
+            "round {round}: wait sees the same conclusion"
+        );
+        for racer in racers {
+            let exit = racer.join().expect("racer joins").expect("racer ok");
+            assert_eq!(exit, first, "round {round}: identical recorded conclusion");
+        }
+
+        // The neighbor survives every round.
+        assert!(b.try_wait().expect("b alive").is_none());
+        b.stop(StopPolicy::default()).expect("stop b");
+    }
+}

@@ -233,11 +233,22 @@ enum SessionState {
     Exited(TerminalExit),
 }
 
+/// Lifecycle state plus the child slot, guarded by ONE mutex. Every
+/// operation under the core lock is non-blocking (`try_wait` only) — no
+/// lock is ever held while waiting on an external event. That is the
+/// structural property that makes stop/wait/exit races safe: a stop can
+/// always acquire the lock and signal, and no ABBA lock cycle can close.
+struct SessionCore {
+    state: SessionState,
+    /// Set once stop() escalates to SIGKILL; drives exit attribution.
+    escalated: bool,
+    child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+}
+
 struct SessionShared {
     parser: Mutex<Parser>,
     writer: Mutex<Box<dyn std::io::Write + Send>>,
-    state: Mutex<SessionState>,
-    exit_waiters: Mutex<Vec<std::sync::mpsc::Sender<TerminalExit>>>,
+    core: Mutex<SessionCore>,
     total_output_bytes: AtomicU64,
     eof_seen: AtomicBool,
 }
@@ -249,7 +260,6 @@ struct SessionShared {
 pub struct TerminalHandle {
     shared: Arc<SessionShared>,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
-    child: Arc<Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>>,
     pid: Option<u32>,
     /// `(pid, argv0, spawned_at)` — the start marker recorded beside the pid
     /// so a later process with the same pid can never be mistaken for this
@@ -302,8 +312,11 @@ impl TerminalHandle {
         let shared = Arc::new(SessionShared {
             parser: Mutex::new(Parser::new(spec.rows, spec.cols, SCROLLBACK_LINES)),
             writer: Mutex::new(writer),
-            state: Mutex::new(SessionState::Running),
-            exit_waiters: Mutex::new(Vec::new()),
+            core: Mutex::new(SessionCore {
+                state: SessionState::Running,
+                escalated: false,
+                child: Some(child),
+            }),
             total_output_bytes: AtomicU64::new(0),
             eof_seen: AtomicBool::new(false),
         });
@@ -311,7 +324,6 @@ impl TerminalHandle {
         let handle = Self {
             shared,
             master: Mutex::new(Some(pair.master)),
-            child: Arc::new(Mutex::new(Some(child))),
             pid,
             pid_start_marker: format!(
                 "pid={pid:?} argv0={} spawned_at={}",
@@ -464,78 +476,26 @@ impl TerminalHandle {
         self.shared.total_output_bytes.load(Ordering::SeqCst)
     }
 
-    /// Non-blocking exit check.
+    /// Non-blocking exit check. All reap discipline lives here: the core
+    /// lock is held only across the non-blocking `try_wait`, never across a
+    /// blocking wait, so a concurrent stop() can always run its
+    /// signal/escalation protocol and no lock cycle can deadlock.
     pub fn try_wait(&self) -> OfficeResult<Option<TerminalExit>> {
-        let mut state = self.shared.state.lock().expect("session state");
-        if let SessionState::Exited(exit) = &*state {
-            return Ok(Some(exit.clone()));
-        }
-        let mut child_slot = self.child.lock().expect("child");
-        let Some(child) = child_slot.as_mut() else {
-            return Ok(None);
-        };
-        match child
-            .try_wait()
-            .map_err(|e| OfficeError::Io(std::io::Error::other(e.to_string())))?
-        {
-            Some(status) => {
-                // If a stop was already initiated, this reap is the stop
-                // protocol's outcome — attribute it honestly.
-                let via = if *state == SessionState::Stopping {
-                    ExitVia::GracefulStop
-                } else {
-                    ExitVia::ChildExit
-                };
-                let exit = exit_from(status, via);
-                *state = SessionState::Exited(exit.clone());
-                *child_slot = None;
-                self.notify_exit(&exit);
-                Ok(Some(exit))
-            }
-            None => Ok(None),
-        }
+        let mut core = self.shared.core.lock().expect("session core");
+        reap_under_lock(&mut core)
     }
 
-    /// Block until the child exits (idempotent; the first recorded
-    /// conclusion is the permanent one).
+    /// Block until the child exits. Idempotent: the first recorded
+    /// conclusion is permanent. Implemented as `try_wait` polling — the
+    /// sleep happens outside every lock, so a concurrent stop() can always
+    /// acquire the core lock, signal the group, and escalate on time.
     pub fn wait(&self) -> OfficeResult<TerminalExit> {
-        {
-            let state = self.shared.state.lock().expect("session state");
-            if let SessionState::Exited(exit) = &*state {
-                return Ok(exit.clone());
-            }
-        }
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.shared.exit_waiters.lock().expect("waiters").push(tx);
-
-        // Another thread may have reaped between the check and the push.
-        {
-            let mut state = self.shared.state.lock().expect("session state");
-            if let SessionState::Exited(exit) = state.clone() {
+        loop {
+            if let Some(exit) = self.try_wait()? {
                 return Ok(exit);
             }
-            let mut child_slot = self.child.lock().expect("child");
-            if let Some(child) = child_slot.as_mut() {
-                let status = child
-                    .wait()
-                    .map_err(|e| OfficeError::Io(std::io::Error::other(e.to_string())))?;
-                // Same attribution rule as try_wait: a reap after a stop
-                // request is the stop's conclusion.
-                let via = if *state == SessionState::Stopping {
-                    ExitVia::GracefulStop
-                } else {
-                    ExitVia::ChildExit
-                };
-                let exit = exit_from(status, via);
-                *state = SessionState::Exited(exit.clone());
-                *child_slot = None;
-                self.notify_exit(&exit);
-                return Ok(exit);
-            }
+            std::thread::sleep(Duration::from_millis(25));
         }
-        // The child was reaped by someone else; wait for the broadcast.
-        rx.recv()
-            .map_err(|_| OfficeError::Validation("exit waiter channel closed unexpectedly".into()))
     }
 
     /// Stop the session: SIGTERM to the process group, escalate to SIGKILL
@@ -543,69 +503,47 @@ impl TerminalHandle {
     /// recorded, later stops return it unchanged and never signal again.
     pub fn stop(&self, policy: StopPolicy) -> OfficeResult<TerminalExit> {
         {
-            let mut state = self.shared.state.lock().expect("session state");
-            if let SessionState::Exited(exit) = &*state {
-                return Ok(exit.clone());
+            let mut core = self.shared.core.lock().expect("session core");
+            if let SessionState::Exited(exit) = core.state.clone() {
+                return Ok(exit);
             }
-            *state = SessionState::Stopping;
+            core.state = SessionState::Stopping;
         }
 
         // Graceful: TERM to the whole process group (pgid == pid under the
-        // pty session discipline). Only while our child is unreaped.
+        // pty session discipline). Always timely: nothing above blocks on a
+        // lock held elsewhere across a wait.
         self.signal_group(signal::SIGTERM);
 
         let deadline = Instant::now() + policy.graceful_timeout;
         loop {
-            let mut child_slot = self.child.lock().expect("child");
-            if let Some(child) = child_slot.as_mut() {
-                match child
-                    .try_wait()
-                    .map_err(|e| OfficeError::Io(std::io::Error::other(e.to_string())))?
-                {
-                    Some(status) => {
-                        let exit = exit_from(status, ExitVia::GracefulStop);
-                        let mut state = self.shared.state.lock().expect("session state");
-                        *state = SessionState::Exited(exit.clone());
-                        *child_slot = None;
-                        drop(child_slot);
-                        self.notify_exit(&exit);
-                        if let Some(log) = &self.disk_log {
-                            log.finish();
-                        }
-                        return Ok(exit);
-                    }
-                    None if Instant::now() >= deadline => {
-                        // Escalate: KILL the group, then confirm by reap.
-                        self.signal_group(signal::SIGKILL);
-                        let status = child
-                            .wait()
-                            .map_err(|e| OfficeError::Io(std::io::Error::other(e.to_string())))?;
-                        let exit = exit_from(status, ExitVia::ForcedKill);
-                        let mut state = self.shared.state.lock().expect("session state");
-                        *state = SessionState::Exited(exit.clone());
-                        *child_slot = None;
-                        drop(child_slot);
-                        self.notify_exit(&exit);
-                        if let Some(log) = &self.disk_log {
-                            log.finish();
-                        }
-                        return Ok(exit);
-                    }
-                    None => {
-                        drop(child_slot);
-                        std::thread::sleep(Duration::from_millis(20));
-                    }
+            if let Some(exit) = self.try_wait()? {
+                if let Some(log) = &self.disk_log {
+                    log.finish();
                 }
-            } else {
-                // Reaped elsewhere between our state check and now.
-                let state = self.shared.state.lock().expect("session state");
-                return match &*state {
-                    SessionState::Exited(exit) => Ok(exit.clone()),
-                    _ => Err(OfficeError::Validation(
-                        "session child vanished without a recorded exit".into(),
-                    )),
-                };
+                return Ok(exit);
             }
+            if Instant::now() >= deadline {
+                // Escalate: KILL the group, then confirm by reaping.
+                {
+                    let mut core = self.shared.core.lock().expect("session core");
+                    if let SessionState::Exited(exit) = core.state.clone() {
+                        return Ok(exit);
+                    }
+                    core.escalated = true;
+                }
+                self.signal_group(signal::SIGKILL);
+                loop {
+                    if let Some(exit) = self.try_wait()? {
+                        if let Some(log) = &self.disk_log {
+                            log.finish();
+                        }
+                        return Ok(exit);
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 
@@ -627,27 +565,58 @@ impl TerminalHandle {
             let _ = sig;
         }
     }
+}
 
-    fn notify_exit(&self, exit: &TerminalExit) {
-        let mut waiters = self.shared.exit_waiters.lock().expect("waiters");
-        for waiter in waiters.drain(..) {
-            let _ = waiter.send(exit.clone());
-        }
+/// Reap the child if it has exited. Called ONLY with the core lock held
+/// and ONLY across non-blocking work (portable-pty's `try_wait` is a
+/// WNOHANG-style check). Attribution: a reap after escalation is the
+/// forced kill's conclusion; after a stop request (pre-escalation) it is
+/// the graceful stop's; otherwise the child's own exit.
+fn reap_under_lock(core: &mut SessionCore) -> OfficeResult<Option<TerminalExit>> {
+    if let SessionState::Exited(exit) = core.state.clone() {
+        return Ok(Some(exit));
     }
+    let Some(child) = core.child.as_mut() else {
+        return Ok(None);
+    };
+    let Some(status) = child
+        .try_wait()
+        .map_err(|e| OfficeError::Io(std::io::Error::other(e.to_string())))?
+    else {
+        return Ok(None);
+    };
+    let via = if core.escalated {
+        ExitVia::ForcedKill
+    } else if core.state == SessionState::Stopping {
+        ExitVia::GracefulStop
+    } else {
+        ExitVia::ChildExit
+    };
+    let exit = exit_from(status, via);
+    core.state = SessionState::Exited(exit.clone());
+    core.child = None;
+    Ok(Some(exit))
 }
 
 impl Drop for TerminalHandle {
     fn drop(&mut self) {
         // Never kill on drop (stopping is an explicit office decision), but
         // reap in the background so an exited child does not linger as a
-        // zombie. If the child is still running it keeps running — the
-        // office records ownership and decides separately.
-        let child = self.child.clone();
+        // zombie. Polling reap: no lock is held across the sleep. If the
+        // child is still running it keeps running — the office records
+        // ownership and decides separately.
+        let shared = self.shared.clone();
         std::thread::spawn(move || {
-            if let Ok(mut slot) = child.lock() {
-                if let Some(mut child) = slot.take() {
-                    let _ = child.wait();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let outcome = {
+                    let mut core = shared.core.lock().expect("session core");
+                    reap_under_lock(&mut core).ok().flatten()
+                };
+                if outcome.is_some() || Instant::now() >= deadline {
+                    break;
                 }
+                std::thread::sleep(Duration::from_millis(50));
             }
         });
     }
