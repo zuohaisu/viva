@@ -531,3 +531,90 @@ fn nonzero_exit_marks_execution_failed_not_task_cancelled() {
     let _ = TaskId::new(); // keep import used
     assert_eq!(store.row_count("launch_intents").expect("rows"), 1);
 }
+
+/// QA round: a dispatch racing on the same request key gets a clean
+/// Replayed outcome, not a raw SQLite constraint error.
+#[test]
+fn racing_same_request_key_replays_instead_of_erroring() {
+    let dir = tempfile::TempDir::new().expect("dir");
+    let db = dir.path().join("office.db");
+    let migrations = frozen();
+    let task_id = {
+        let store = Store::open(&db, &migrations).expect("open");
+        let member = MemberId::new();
+        TaskRegistry::new(&store)
+            .create_task("racy dispatch", vec![], Some(member.clone()), None, None)
+            .expect("task")
+            .task_id
+    };
+
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let db = db.clone();
+            let task_id = task_id.clone();
+            let migrations = migrations.clone();
+            std::thread::spawn(move || {
+                let store = Store::open(&db, &migrations).expect("thread open");
+                let member = MemberId::new();
+                let attr =
+                    AttributionSnapshot::capture(member, "developer", "glm-5.3-flash", "cli");
+                TaskRegistry::new(&store).begin_execution(&task_id, &attr, "one-racy-key")
+            })
+        })
+        .collect();
+    let mut created = 0;
+    let mut replayed = 0;
+    for handle in handles {
+        match handle
+            .join()
+            .expect("joins")
+            .expect("NO thread may error on a lost race")
+        {
+            ExecutionStart::Created(_) => created += 1,
+            ExecutionStart::Replayed(_) => replayed += 1,
+        }
+    }
+    assert_eq!(created, 1, "exactly one winner");
+    assert_eq!(replayed, 7, "losers replay the winner's intent");
+}
+
+/// QA round: briefs pass through redaction when the registry is configured
+/// with secrets — persisted briefs never carry them.
+#[test]
+fn generated_briefs_respect_redaction() {
+    let dir = tempfile::TempDir::new().expect("dir");
+    let db = dir.path().join("office.db");
+    let store = Store::open(&db, &frozen()).expect("open");
+    let secret = "brief-secret-7734";
+    let tasks = TaskRegistry::new(&store).with_redaction(vec![secret.to_string()]);
+    let member = MemberId::new();
+    let task = tasks
+        .create_task(
+            "leaky deliverable",
+            vec![],
+            Some(member.clone()),
+            None,
+            None,
+        )
+        .expect("task");
+    tasks
+        .record_result(
+            &task.task_id,
+            None,
+            ResultSource::User,
+            "delivered",
+            "user::d::1",
+            serde_json::json!({"note": format!("done with {secret}")}),
+        )
+        .expect("result")
+        .expect("fresh");
+    let brief = tasks.generate_brief(&task.task_id).expect("brief");
+    let persisted = tasks
+        .latest_brief(&task.task_id)
+        .expect("brief")
+        .expect("persisted");
+    for value in [brief, persisted] {
+        let text = serde_json::to_string(&value).expect("json");
+        assert!(!text.contains(secret), "brief leaked the secret: {text}");
+    }
+}

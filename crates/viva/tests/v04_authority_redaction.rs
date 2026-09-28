@@ -272,3 +272,75 @@ fn read_only_restriction_requires_adapter_evidence() {
         "a promised restriction must display as unverified, not restricted"
     );
 }
+
+/// QA round Q1: an expired parent grant delegates nothing, and a child
+/// grant can never outlive its parent — the ceiling holds in time too.
+#[test]
+fn expired_parent_cannot_delegate_and_child_expiry_is_capped() {
+    let dir = tempfile::TempDir::new().expect("dir");
+    let db = dir.path().join("office.db");
+    let store = Store::open(&db, &frozen()).expect("open");
+    let engine = AuthorityEngine::new(&store);
+    let task = TaskId::new();
+
+    // An already-expired parent refuses delegation outright.
+    let expired = engine
+        .issue_root_grant(
+            None,
+            Some(task.clone()),
+            vec!["read_task".into()],
+            GrantMode::Read,
+            Some("2000-01-01T00:00:00Z".into()),
+        )
+        .expect("expired parent issues (expiry only bites at check time)");
+    let err = engine
+        .delegate_grant(
+            &expired.grant_id,
+            MemberId::new(),
+            vec!["read_task".into()],
+            GrantMode::Read,
+            None,
+        )
+        .expect_err("expired parent must not delegate");
+    assert!(err.to_string().contains("expired"), "got: {err}");
+
+    // A live parent caps the child's expiry at its own — including the
+    // child asking for "no expiry".
+    let parent = engine
+        .issue_root_grant(
+            None,
+            Some(task.clone()),
+            vec!["read_task".into()],
+            GrantMode::Read,
+            Some("2099-01-01T00:00:00Z".into()),
+        )
+        .expect("parent");
+    let child = engine
+        .delegate_grant(
+            &parent.grant_id,
+            MemberId::new(),
+            vec!["read_task".into()],
+            GrantMode::Read,
+            None,
+        )
+        .expect("child");
+    assert_eq!(
+        child.expires_at,
+        Some("2099-01-01T00:00:00Z".into()),
+        "child without expiry inherits the parent's ceiling"
+    );
+    let child2 = engine
+        .delegate_grant(
+            &parent.grant_id,
+            MemberId::new(),
+            vec!["read_task".into()],
+            GrantMode::Read,
+            Some("2099-06-01T00:00:00Z".into()),
+        )
+        .expect("child2");
+    assert_eq!(
+        child2.expires_at,
+        Some("2099-01-01T00:00:00Z".into()),
+        "a later child expiry is capped at the parent's"
+    );
+}

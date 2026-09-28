@@ -538,6 +538,12 @@ impl<'a> KnowledgeRegistry<'a> {
     /// Select knowledge for a task context: minimal relevant subset within
     /// a byte budget, scope-filtered (personal entries never leak across
     /// members), active-only unless explicitly requested otherwise.
+    ///
+    /// Project-scope semantics (QA round裁定, owner review pending): a
+    /// project entry appears ONLY when the context names that project. A
+    /// context without a project sees no project entries at all — a task
+    /// outside any project never inherits another project's knowledge.
+    ///
     /// Term matching scores title + tags; bodies are read from their
     /// authoritative files only for the chosen entries.
     pub fn select_for_context(
@@ -559,7 +565,7 @@ impl<'a> KnowledgeRegistry<'a> {
              WHERE {status_filter}
                AND (scope = 'team'
                     OR (scope = 'personal' AND owner_member_id = ?1)
-                    OR (scope = 'project' AND project_id IS NOT NULL AND (?2 IS NULL OR project_id = ?2))
+                    OR (scope = 'project' AND project_id IS NOT NULL AND project_id = ?2)
                     OR scope = 'skill')
              ORDER BY created_at, item_id"
         ))?;
@@ -605,18 +611,16 @@ impl<'a> KnowledgeRegistry<'a> {
             .collect();
         scored.sort_by_key(|(score, _item)| std::cmp::Reverse(*score));
 
-        // Fill the budget with the best entries; stop rather than overflow.
+        // Fill the budget with the best entries. The budget is a HARD
+        // constraint: an entry that does not fit — including a single
+        // oversized one — is never loaded, even if that leaves the result
+        // empty (QA round Q4).
         let mut selected = Vec::new();
         let mut used = 0usize;
         for (_score, item) in scored {
             let entry = self.read_body_for(item)?;
             let size = entry.bytes();
-            if used + size > options.max_total_bytes && !selected.is_empty() {
-                break;
-            }
-            // A single oversized entry is skipped unless nothing fits yet —
-            // the budget stays honest either way.
-            if size > options.max_total_bytes && !selected.is_empty() {
+            if used + size > options.max_total_bytes {
                 continue;
             }
             used += size;

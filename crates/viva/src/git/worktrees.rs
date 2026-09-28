@@ -56,6 +56,7 @@ CREATE TABLE task_worktrees (
 CREATE TABLE github_evidence (
     evidence_id TEXT PRIMARY KEY,
     task_id     TEXT NOT NULL,
+    worktree_id TEXT,
     kind        TEXT NOT NULL CHECK (kind IN ('pr', 'issue', 'checks')),
     subject     TEXT NOT NULL,
     head_sha    TEXT,
@@ -151,6 +152,8 @@ pub struct DiscoveredWorktree {
     pub tree: TreeState,
     /// Set when a task in this office holds this worktree.
     pub occupied_by_task: Option<TaskId>,
+    /// How the office claims it (created/adopted), when it does.
+    pub office_source: Option<WorktreeSource>,
 }
 
 pub struct WorktreeService<'a> {
@@ -197,6 +200,7 @@ impl<'a> WorktreeService<'a> {
                     prunable: None,
                     tree: TreeState::Clean,
                     occupied_by_task: None,
+                    office_source: None,
                 });
             } else if let Some(sha) = line.strip_prefix("HEAD ") {
                 if let Some(entry) = current.as_mut() {
@@ -239,7 +243,9 @@ impl<'a> WorktreeService<'a> {
                 entry.tree = tree_state(&self.runner, &entry.path);
             }
             if let Some(branch) = entry.branch.clone() {
-                entry.occupied_by_task = self.task_on_branch(repo_root, &branch)?;
+                let claim = self.office_claim(repo_root, &branch)?;
+                entry.occupied_by_task = claim.as_ref().map(|(task, _)| task.clone());
+                entry.office_source = claim.map(|(_, source)| source);
             }
         }
         Ok(found)
@@ -479,18 +485,45 @@ impl<'a> WorktreeService<'a> {
             .any(|w| w.branch.as_deref() == Some(branch)))
     }
 
-    fn task_on_branch(&self, repo_root: &Path, branch: &str) -> OfficeResult<Option<TaskId>> {
+    /// The office's live claim on a branch: which task holds it and via
+    /// which source (created vs adopted).
+    fn office_claim(
+        &self,
+        repo_root: &Path,
+        branch: &str,
+    ) -> OfficeResult<Option<(TaskId, WorktreeSource)>> {
         let mut stmt = self.store.connection().prepare(
-            "SELECT task_id FROM task_worktrees
+            "SELECT task_id, source FROM task_worktrees
              WHERE repo_root = ?1 AND branch = ?2 AND released_at IS NULL LIMIT 1",
         )?;
-        let row: Option<String> = stmt
+        let row: Option<(String, String)> = stmt
             .query_row(
                 rusqlite::params![repo_root.to_string_lossy().as_ref(), branch],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        Ok(row.as_deref().and_then(|t| TaskId::from_str(t).ok()))
+        Ok(row.map(|(task, source)| {
+            (
+                TaskId::from_str(&task).expect("registry task ids are well-formed"),
+                match source.as_str() {
+                    "created" => WorktreeSource::Created,
+                    "adopted" => WorktreeSource::Adopted,
+                    other => panic!("task_worktrees.source holds an unknown value `{other}`"),
+                },
+            )
+        }))
+    }
+
+    /// Bounded working-tree diff against HEAD for a worktree (V14 need:
+    /// real diff, bounded, aligned with head). Read-only.
+    pub fn worktree_diff(&self, worktree_path: &Path, max_bytes: usize) -> OfficeResult<String> {
+        let out = self
+            .runner
+            .git_ok(worktree_path, &["--no-pager", "diff", "HEAD", "--"])?;
+        Ok(crate::git::cli::bounded_output(
+            out.stdout.as_bytes(),
+            max_bytes,
+        ))
     }
 
     fn insert_record(&self, record: &TaskWorktreeRecord) -> OfficeResult<()> {

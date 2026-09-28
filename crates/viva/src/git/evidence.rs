@@ -30,6 +30,8 @@ pub const READ_WHITELIST: &[&[&str]] = &[
     &["pr", "list"],
     &["pr", "status"],
     &["pr", "view"],
+    &["pr", "checks"],
+    &["pr", "reviews"],
     &["issue", "list"],
     &["issue", "view"],
     &["run", "list"],
@@ -69,6 +71,8 @@ pub enum EvidenceState<T> {
 pub struct EvidenceRecord {
     pub evidence_id: String,
     pub task_id: TaskId,
+    /// The worktree whose head this evidence was bound to, when given.
+    pub worktree_id: Option<WorktreeId>,
     pub kind: String,
     pub subject: String,
     pub head_sha: Option<String>,
@@ -228,6 +232,7 @@ impl<'a> EvidenceStore<'a> {
         let record = EvidenceRecord {
             evidence_id: format!("ev-{}", uuid::Uuid::new_v4().simple()),
             task_id: task_id.clone(),
+            worktree_id: worktree.cloned(),
             kind: kind.to_string(),
             subject: subject.to_string(),
             head_sha: head_sha.clone(),
@@ -235,14 +240,14 @@ impl<'a> EvidenceStore<'a> {
             fetched_at: utc_now(),
             stale: false,
         };
-        let _ = worktree;
         self.store.connection().execute(
-            "INSERT INTO github_evidence(evidence_id, task_id, kind, subject, head_sha,
-                                         state_json, fetched_at, stale)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO github_evidence(evidence_id, task_id, worktree_id, kind, subject,
+                                         head_sha, state_json, fetched_at, stale)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 record.evidence_id,
                 record.task_id.as_str(),
+                record.worktree_id.as_ref().map(|w| w.as_str()),
                 record.kind,
                 record.subject,
                 record.head_sha,
@@ -263,7 +268,7 @@ impl<'a> EvidenceStore<'a> {
         current_head: Option<&str>,
     ) -> OfficeResult<Option<EvidenceRecord>> {
         let mut stmt = self.store.connection().prepare(
-            "SELECT evidence_id, task_id, kind, subject, head_sha, state_json,
+            "SELECT evidence_id, task_id, worktree_id, kind, subject, head_sha, state_json,
                     fetched_at, stale
              FROM github_evidence WHERE evidence_id = ?1",
         )?;
@@ -272,18 +277,20 @@ impl<'a> EvidenceStore<'a> {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
                     row.get::<_, String>(6)?,
-                    row.get::<_, i64>(7)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, i64>(8)?,
                 ))
             })
             .optional()?;
         if let Some((
             evidence_id,
             task_id,
+            worktree_id,
             kind,
             subject,
             head_sha,
@@ -309,6 +316,9 @@ impl<'a> EvidenceStore<'a> {
                         Box::new(e),
                     )
                 })?,
+                worktree_id: worktree_id
+                    .as_deref()
+                    .and_then(|w| WorktreeId::from_str(w).ok()),
                 kind,
                 subject,
                 head_sha,
@@ -323,7 +333,7 @@ impl<'a> EvidenceStore<'a> {
     /// All evidence rows for a task (history view).
     pub fn for_task(&self, task_id: &TaskId) -> OfficeResult<Vec<EvidenceRecord>> {
         let mut stmt = self.store.connection().prepare(
-            "SELECT evidence_id, task_id, kind, subject, head_sha, state_json,
+            "SELECT evidence_id, task_id, worktree_id, kind, subject, head_sha, state_json,
                     fetched_at, stale
              FROM github_evidence WHERE task_id = ?1 ORDER BY fetched_at",
         )?;
@@ -337,12 +347,16 @@ impl<'a> EvidenceStore<'a> {
                         Box::new(e),
                     )
                 })?,
-                kind: row.get(2)?,
-                subject: row.get(3)?,
-                head_sha: row.get(4)?,
-                state_json: row.get(5)?,
-                fetched_at: row.get(6)?,
-                stale: row.get::<_, i64>(7)? != 0,
+                worktree_id: row
+                    .get::<_, Option<String>>(2)?
+                    .as_deref()
+                    .and_then(|w| WorktreeId::from_str(w).ok()),
+                kind: row.get(3)?,
+                subject: row.get(4)?,
+                head_sha: row.get(5)?,
+                state_json: row.get(6)?,
+                fetched_at: row.get(7)?,
+                stale: row.get::<_, i64>(8)? != 0,
             })
         })?;
         let mut records = Vec::new();

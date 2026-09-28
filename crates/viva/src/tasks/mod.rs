@@ -260,11 +260,25 @@ pub enum ExecutionStart {
 
 pub struct TaskRegistry<'a> {
     store: &'a Store,
+    /// When configured (by the composition layer, V04 integration), every
+    /// generated brief passes through redaction before persisting.
+    redactor: Option<crate::redaction::Redactor>,
 }
 
 impl<'a> TaskRegistry<'a> {
     pub fn new(store: &'a Store) -> Self {
-        Self { store }
+        Self {
+            store,
+            redactor: None,
+        }
+    }
+
+    /// Route generated briefs through redaction before they touch the
+    /// database (QA round: briefs are Viva-written output and must respect
+    /// the V04 streaming-redaction discipline).
+    pub fn with_redaction(mut self, secrets: Vec<String>) -> Self {
+        self.redactor = Some(crate::redaction::Redactor::new(secrets));
+        self
     }
 
     /// Create a task. The attribution context is part of the record at
@@ -478,7 +492,7 @@ impl<'a> TaskRegistry<'a> {
         let execution = ExecutionRecord::start(task_id.clone(), attribution.clone());
         let tx = self.store.transaction()?;
         insert_execution_in(&tx, &execution)?;
-        tx.execute(
+        let insert = tx.execute(
             "INSERT INTO launch_intents(intent_id, task_id, request_key, member_id, state, execution_id, intended_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![
@@ -490,7 +504,22 @@ impl<'a> TaskRegistry<'a> {
                 execution.execution_id.as_str(),
                 now,
             ],
-        )?;
+        );
+        if let Err(rusqlite::Error::SqliteFailure(err, message)) = insert {
+            if err.code == rusqlite::ErrorCode::ConstraintViolation {
+                // A racing dispatch won this request key: drop our
+                // half-made execution (the transaction rolls back) and
+                // replay the winner's recorded intent.
+                drop(tx);
+                if let Some(existing) = self.intent_by_request_key(&request_key)? {
+                    return Ok(ExecutionStart::Replayed(existing));
+                }
+            }
+            return Err(OfficeError::Validation(format!(
+                "launch intent insert failed: {}",
+                message.unwrap_or_default()
+            )));
+        }
         tx.commit()?;
         Ok(ExecutionStart::Created(
             self.require_intent_by_request_key(&request_key)?,
@@ -641,21 +670,21 @@ impl<'a> TaskRegistry<'a> {
 
     /// Complete a task. The only path to `done`: an appended outcome event
     /// carrying evidence. Process exits and results never complete a task.
+    /// The outcome append and the status flip share one transaction (QA
+    /// round: the two writes were previously separate).
     pub fn complete_task(
         &self,
         task_id: &TaskId,
         evidence: impl Into<String>,
         actor: impl Into<String>,
     ) -> OfficeResult<()> {
-        self.append_outcome(task_id, OutcomeKind::Completed, evidence, actor)?;
-        self.store.connection().execute(
-            "UPDATE tasks SET status = 'done', updated_at = ?2 WHERE task_id = ?1",
-            rusqlite::params![task_id.as_str(), utc_now()],
-        )?;
-        Ok(())
+        self.append_outcome(task_id, OutcomeKind::Completed, evidence, actor)
+            .map(|_| ())
     }
 
-    /// Append a correction / withdrawal / reopening event with its reason.
+    /// Append an outcome event (completion / correction / withdrawal /
+    /// reopening) with its reason. The ledger insert and the implied task
+    /// status transition commit atomically.
     pub fn append_outcome(
         &self,
         task_id: &TaskId,
@@ -672,34 +701,25 @@ impl<'a> TaskRegistry<'a> {
             ));
         }
         let now = utc_now();
-        self.store.connection().execute(
+        let tx = self.store.transaction()?;
+        tx.execute(
             "INSERT INTO task_outcomes(task_id, kind, evidence, actor, recorded_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![task_id.as_str(), kind.as_str(), evidence, actor, now],
         )?;
-        // Corrections and withdrawals keep the task record's status in sync
-        // where the kind implies a status transition.
-        match kind {
-            OutcomeKind::Corrected => {
-                self.store.connection().execute(
-                    "UPDATE tasks SET status = 'in_progress', updated_at = ?2 WHERE task_id = ?1",
-                    rusqlite::params![task_id.as_str(), now],
-                )?;
-            }
-            OutcomeKind::Withdrawn => {
-                self.store.connection().execute(
-                    "UPDATE tasks SET status = 'cancelled', updated_at = ?2 WHERE task_id = ?1",
-                    rusqlite::params![task_id.as_str(), now],
-                )?;
-            }
-            OutcomeKind::Reopened => {
-                self.store.connection().execute(
-                    "UPDATE tasks SET status = 'open', updated_at = ?2 WHERE task_id = ?1",
-                    rusqlite::params![task_id.as_str(), now],
-                )?;
-            }
-            OutcomeKind::Completed => {}
-        }
+        // Every kind implies a status transition — including Completed —
+        // and it commits atomically with the ledger row.
+        let new_status = match kind {
+            OutcomeKind::Corrected => "in_progress",
+            OutcomeKind::Withdrawn => "cancelled",
+            OutcomeKind::Reopened => "open",
+            OutcomeKind::Completed => "done",
+        };
+        tx.execute(
+            "UPDATE tasks SET status = ?2, updated_at = ?3 WHERE task_id = ?1",
+            rusqlite::params![task_id.as_str(), new_status, now],
+        )?;
+        tx.commit()?;
         Ok(TaskOutcome {
             seq: self.store.connection().last_insert_rowid(),
             task_id: task_id.clone(),
@@ -920,6 +940,10 @@ impl<'a> TaskRegistry<'a> {
             })).collect::<Vec<_>>(),
         });
 
+        let brief = match &self.redactor {
+            Some(redactor) => redactor.scrub_json(&brief),
+            None => brief,
+        };
         let brief_json = serde_json::to_string(&brief)?;
         self.store.connection().execute(
             "INSERT INTO task_briefs(brief_id, task_id, brief_json, generated_at)

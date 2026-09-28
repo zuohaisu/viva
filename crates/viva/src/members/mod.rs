@@ -407,14 +407,40 @@ fn run_probe(
             None => std::thread::sleep(Duration::from_millis(10)),
         }
     }
-    // Bounded keep: the pipes are drained to avoid a blocked child, but only
-    // the first `max_output_bytes` of stdout are retained for the report.
-    let output = child.wait_with_output()?;
-    let status = output.status;
-    let mut kept_bytes = output.stdout;
-    if kept_bytes.len() > max_output_bytes {
-        kept_bytes.truncate(max_output_bytes);
+    // Bounded memory: stderr is drained and discarded in a background
+    // thread; stdout is read incrementally and only the first
+    // `max_output_bytes` are retained — a loud probe never balloons the
+    // office's memory (QA round small item).
+    let stderr_pipe = child.stderr.take();
+    let stderr_drain = std::thread::spawn(move || {
+        if let Some(mut pipe) = stderr_pipe {
+            use std::io::Read as _;
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = pipe.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+            }
+        }
+    });
+    let mut kept_bytes: Vec<u8> = Vec::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        use std::io::Read as _;
+        let mut buf = [0u8; 8192];
+        loop {
+            match pipe.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let room = max_output_bytes.saturating_sub(kept_bytes.len());
+                    if room > 0 {
+                        kept_bytes.extend_from_slice(&buf[..n.min(room)]);
+                    }
+                }
+            }
+        }
     }
+    let status = child.wait()?;
+    let _ = stderr_drain.join();
     let kept = String::from_utf8_lossy(&kept_bytes).into_owned();
     Ok(ToolProbeResult {
         argv: argv.to_vec(),

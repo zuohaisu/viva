@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use viva::foundation::ids::TaskId;
+use viva::foundation::ids::{TaskId, WorktreeId};
 use viva::foundation::store::{
     DOMAIN_FOUNDATION, DOMAIN_GIT, FOUNDATION_V1_SQL, MigrationRegistry, Store,
 };
@@ -305,6 +305,24 @@ fn discovery_marks_dirty_worktrees_without_modifying_them() {
     // The discovery was read-only: the change is still there.
     let content = std::fs::read_to_string(wt.worktree_path.join("file.txt")).expect("read");
     assert_eq!(content, "dirty change\n");
+
+    // QA round additions: the discovery shows the office claim's source,
+    // and the diff API returns a bounded, real diff against HEAD.
+    assert_eq!(
+        mine.office_source,
+        Some(viva::git::worktrees::WorktreeSource::Created)
+    );
+    let diff = service
+        .worktree_diff(&wt.worktree_path, 64 * 1024)
+        .expect("diff");
+    assert!(diff.contains("dirty change"), "real diff content: {diff}");
+    let tiny = service
+        .worktree_diff(&wt.worktree_path, 16)
+        .expect("diff bounded");
+    assert!(
+        tiny.contains("truncated"),
+        "bounded diff is visibly truncated: {tiny}"
+    );
 }
 
 /// Acceptance: "真实 gh 查询的结果与 head SHA 可追溯，缺联网/认证时不报告
@@ -337,6 +355,32 @@ fn evidence_binds_to_head_sha_marks_stale_and_never_fakes_pass() {
     let record = evidence
         .bind(&task, None, "pr", "999", Some("abc123".into()), &state)
         .expect("bind even an unavailable state (it is a fact)");
+    assert!(
+        record.worktree_id.is_none(),
+        "bind without a worktree stays None"
+    );
+
+    // The worktree binding persists (QA round: the parameter was ignored).
+    let wt = WorktreeId::new();
+    let bound = evidence
+        .bind(
+            &task,
+            Some(&wt),
+            "checks",
+            "pr-7",
+            Some("abc123".into()),
+            &state,
+        )
+        .expect("bind with worktree");
+    let reloaded = evidence
+        .get_marking_stale(&bound.evidence_id, Some("abc123"))
+        .expect("read")
+        .expect("exists");
+    assert_eq!(
+        reloaded.worktree_id,
+        Some(wt),
+        "worktree binding roundtrips"
+    );
 
     // Stale marking: worktree head moved past the bound SHA.
     let reloaded = evidence

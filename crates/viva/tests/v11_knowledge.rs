@@ -408,6 +408,22 @@ fn selection_is_budget_bounded_and_external_refs_stay_honest() {
             )
             .expect("record");
     }
+    // One entry whose body alone exceeds the whole budget: the hard
+    // budget means it is never loaded (QA round Q4).
+    registry
+        .record(
+            "giant dump",
+            Scope::Personal,
+            write_body(dir.path(), "giant.md", &"y".repeat(20 * 1024)),
+            "one-shot export dump",
+            Some(member.clone()),
+            None,
+            vec!["deploy".into()],
+            None,
+            ExternalState::None,
+        )
+        .expect("record giant");
+
     // One entry backed by an unverified external memory reference.
     registry
         .record(
@@ -447,9 +463,22 @@ fn selection_is_budget_bounded_and_external_refs_stay_honest() {
         "selection is a minimal relevant subset, not a full load: {}",
         selected.len()
     );
+    // Every entry with a body is term-related; the unavailable external
+    // reference (no body, no budget cost) may ride along as metadata.
     assert!(
-        selected.iter().all(|e| e.title.contains("deploy")),
-        "term matching prefers related entries"
+        selected
+            .iter()
+            .filter(|e| e.bytes() > 0)
+            .all(|e| e.title.contains("deploy")),
+        "term matching prefers related entries: {:?}",
+        selected
+            .iter()
+            .map(|e| e.title.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !selected.iter().any(|e| e.title == "giant dump"),
+        "a single oversized entry never breaks the budget"
     );
 
     // The external reference, when selected explicitly, comes back with no

@@ -174,8 +174,15 @@ impl CliRunner {
 }
 
 fn bounded_lossy(bytes: &[u8]) -> String {
-    let truncated = bytes.len() > MAX_CAPTURED_OUTPUT;
-    let mut end = bytes.len().min(MAX_CAPTURED_OUTPUT);
+    bounded_output(bytes, MAX_CAPTURED_OUTPUT)
+}
+
+/// Public bounded-output helper: truncate at a UTF-8 boundary with a
+/// visible marker. Used by diff/status projections so large output stays
+/// bounded and visibly so.
+pub fn bounded_output(bytes: &[u8], max: usize) -> String {
+    let truncated = bytes.len() > max;
+    let mut end = bytes.len().min(max);
     // Boundaries matter only for valid UTF-8 slices of a possibly-invalid
     // byte stream; from_utf8_lossy handles the rest.
     while end > 0 && bytes[end - 1] & 0xC0 == 0x80 {

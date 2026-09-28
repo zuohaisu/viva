@@ -278,6 +278,15 @@ impl<'a> AuthorityEngine<'a> {
                 ));
             }
         }
+        // Child never widens: the ceiling holds in TIME too. An expired
+        // parent delegates nothing, and a child never outlives its parent.
+        if let Some(expires_at) = &parent.expires_at {
+            if expires_at.as_str() <= utc_now().as_str() {
+                return Err(OfficeError::Validation(
+                    "an expired grant cannot delegate — refresh or reissue the parent first".into(),
+                ));
+            }
+        }
         // Child never widens: action subset.
         for action in &actions {
             if Self::is_protected(action) {
@@ -300,7 +309,16 @@ impl<'a> AuthorityEngine<'a> {
                 parent.mode.as_str()
             )));
         }
-        // Child never widens: task scope.
+        // Child never widens: task scope, and the child's expiry is capped
+        // at the parent's (an unset child expiry inherits the parent's).
+        let expires_at = match (&parent.expires_at, expires_at) {
+            (Some(parent_exp), Some(child_exp)) if child_exp.as_str() <= parent_exp.as_str() => {
+                Some(child_exp)
+            }
+            (Some(parent_exp), Some(_too_late)) => Some(parent_exp.clone()),
+            (Some(parent_exp), None) => Some(parent_exp.clone()),
+            (None, child_exp) => child_exp,
+        };
         let grant = Grant {
             grant_id: GrantId::new(),
             parent_grant_id: Some(parent.grant_id.clone()),
