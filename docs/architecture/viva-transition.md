@@ -1,10 +1,10 @@
-# Viva Architecture Transition — AI Office 改造记录
+# Viva Architecture Transition — 多成员协作改造记录
 
 Status: **authoritative**（2026-09-27，取代本文 2026-09-27 早先的 Ticket Autopilot 过渡版本）。
 
 Rust 宿主的批准目标与当前 Python 实现的区别见 §12 及 [ADR 0011](../decisions/0011-rust-host-and-tui.md)。
 
-本文记录两件事：**（A）** 仓库从 "Ticket Autopilot 作为保留子系统" 迁移到 "Personal AI Office" 的边界变更；**（B）** 旧子系统的能力清点、复用点与退役清单。代码变更以本文为索引，`docs/decisions/0006`–`0010` 是边界决策本身。
+本文记录两件事：**（A）** 仓库从 "Ticket Autopilot 作为保留子系统" 迁移到 "个人 AI 协作系统" 的边界变更；**（B）** 旧子系统的能力清点、复用点与退役清单。代码变更以本文为索引，`docs/decisions/0006`–`0010` 是边界决策本身。
 
 ## 1. 产品边界的两次变化
 
@@ -16,7 +16,7 @@ Rust 宿主的批准目标与当前 Python 实现的区别见 §12 及 [ADR 0011
 上一轮（已作废）：Viva = 单 Resident 的持续性层；Ticket Autopilot 作为保留的
       Delivery Automation 子系统继续存在（ADR 0004）
 
-现在：Viva = Haisu 的本地优先 Personal AI Office（ADR 0006）
+现在：Viva = Haisu 的本地优先个人 AI 协作系统（ADR 0006）
       - 多个持续存在的 AI 成员（Resident），职责由 Role 配置
       - 模型（Engine）与执行工具（Worker）是可替换绑定
       - Task 是意图；Execution 是一次真实执行并固定自己的归属与授权
@@ -115,7 +115,7 @@ core       →  stdlib only
 | TUI 并发 | 旧 `_worker_running` 全局布尔 | 同一个成员要能并行多个执行，停止互不影响 | 用执行注册表取代布尔；归属取自执行记录（bug 修复） |
 | `workflows/`（F01） | Task/Execution/grant（V03/V04）、`gh`/git（V08）、task brief、退役流水线的失败经验 | 交付型任务需要可配置的步骤/角色/证据/重试预算，且不能再造固定 ticket pipeline | 新组件（薄）：工作流是数据（步骤×角色×证据×预算×转移）；推进只认绑定真实 head 的证据；保护动作注册期拒绝；无 ticket/run/verdict 对象 |
 | `maintenance/`（F02） | knowledge lifecycle/skills（V11）、git 只读检查（V08）、TaskRegistry | 运行期复审只有手动管理；需要带证据、幂等、可逆、授权门控的提议机制 | 新组件：session 窗口 + dedup 提议 ledger；本模块无删除/prune/远端写；worktree 与整洁类仅人审 |
-| `tools/computer/`（F03） | `orca computer` CLI（本机已装已授权）、`osascript`、members 探测 | 成员需要经办公室定位→动作→核验地操作浏览器/原生应用，带授权与前后证据 | 新组件（薄）：复用现有工具的 argv 适配 + 审计 + task 级授权 + 跨进程前台 lease；不写自动化平台 |
+| `tools/computer/`（F03） | `orca computer` CLI（本机已装已授权）、`osascript`、members 探测 | 成员需要经 Viva 定位→动作→核验地操作浏览器/原生应用，带授权与前后证据 | 新组件（薄）：复用现有工具的 argv 适配 + 审计 + task 级授权 + 跨进程前台 lease；不写自动化平台 |
 | `memory/`（F04） | 用户实际运行的 Hermes bundled Holographic（`~/.hermes/hermes-agent`，v0.21.4+canary，`fact_store` 工具接口）、knowledge 的 external_ref 机制 | bundled schema 无成员/项目作用域、无来源、无可恢复退出（`remove_fact` 是物理 DELETE） | 新组件（薄）：Python 适配器复用真实 provider；Viva 层补 per-member link + 来源 + usage + archive/restore；不重写 FTS/HRR |
 
 ### 6.1 首个独立 Rust 版本的执行体验缺口（2026-09-28，规划）
@@ -178,6 +178,6 @@ core       →  stdlib only
 
 ## 12. Rust 宿主裁决（批准目标，未实施迁移）
 
-2026-09-27，Haisu 批准 Rust 技术方向。唯一权威结论为 [ADR 0011](../decisions/0011-rust-host-and-tui.md)，其中记录实施默认组合 Tokio / Ratatui / Crossterm、已有能力与缺口、所有权、退出与恢复、资源/速度/构建验证。后续批准 Pi 作为首个默认对话宿主，以交互终端与小型扩展接入；身份与长期资产独立于 harness，RPC/SDK 仅为未来可选路径。2026-09-28，用户另批准 SQLite + 普通文件保存办公室状态，与外部记忆分开。Rust、PTY、Pi 扩展与 SQLite 状态层均尚未实施；Holographic 的公开 Hermes 实现已通过[专项研究](../research/hermes-holographic-memory-2026-09-28.md)定位；用户实际版本与 Pi/其他 harness 接入尚未验收，研究不构成后端接入批准。
+2026-09-27，Haisu 批准 Rust 技术方向。唯一权威结论为 [ADR 0011](../decisions/0011-rust-host-and-tui.md)，其中记录实施默认组合 Tokio / Ratatui / Crossterm、已有能力与缺口、所有权、退出与恢复、资源/速度/构建验证。后续批准 Pi 作为首个默认对话宿主，以交互终端与小型扩展接入；身份与长期资产独立于 harness，RPC/SDK 仅为未来可选路径。2026-09-28，用户另批准 SQLite + 普通文件保存 Viva 状态，与外部记忆分开。Rust、PTY、Pi 扩展与 SQLite 状态层均尚未实施；Holographic 的公开 Hermes 实现已通过[专项研究](../research/hermes-holographic-memory-2026-09-28.md)定位；用户实际版本与 Pi/其他 harness 接入尚未验收，研究不构成后端接入批准。
 
 §5–§9 仍是当前 Python 实现及历史改造记录，不是 Rust 已落地的证明。此次文档裁决没有替换 `src/viva/`、数据格式、安装入口或 CI；后续实施可直接替换 Python；旧源码、内部结构与接口没有延续或兼容义务，验收以有效产品需求、用户数据保全及授权边界为准，具体规则只见 ADR 0011 §4。之前的多轮技术研究进入 [历史存档](../research/archive/technology-selection/2026-09-27/README.md)，其中阶段性推荐不再作为现行决策。

@@ -36,7 +36,7 @@ branch.
 | grant | `envelope.rs` (`ControlRequest.grant`) | The envelope carries a `GrantId` reference; scope enforcement belongs to V04. Grants are never self-issued (see caller binding). |
 | 工作台/辅助终端 | `records.rs` (`WorkbenchQuery`/`WorkbenchActions`) | Workbench types/trait signatures frozen; implementations land with V02/V05/V08/V07. Pure projections — no second workflow state, no slot statuses. |
 
-G0 supplement (issue #10, 2026-09-28): one office spans projects/tasks/
+G0 supplement (issue #10, 2026-09-28): one Viva instance spans projects/tasks/
 worktrees/terminals via these references; one worktree may host many
 purpose-terminals; a user auxiliary shell (`TerminalOwner::UserShell`) can
 never carry or fake an execution id — unrepresentable in the type and

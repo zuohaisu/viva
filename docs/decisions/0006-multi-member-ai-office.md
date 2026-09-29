@@ -1,8 +1,10 @@
-# ADR 0006 — 多成员 AI Office：Resident ≠ Role ≠ Engine ≠ Worker ≠ Execution
+# ADR 0006 — 多成员 AI 协作：Resident ≠ Role ≠ Engine ≠ Worker ≠ Execution
 
 Status: **Accepted**（Haisu 显式指令，2026-09-27）· Supersedes: ADR 0001 §Decision 1 的推论（"单人类用户 → 没有 AI Team/Member"）、ADR 0002 的"单一 Resident"框架 · Superseded by: —（本 ADR 为当前有效边界）
 
-> 效力说明：**"Viva 是 Haisu 的本地优先 Personal AI Office，其中有多个持续存在的 AI 成员（Samuel/Oliver/Alice/Deven/Richard…），名字与职责都是配置数据"是 Haisu 的显式决定**。本文把它展开为对象关系与实现约束；展开细节（字段、状态布局）是实现选择，可随实现演进。
+术语说明：此处统一产品称呼，不更改 2026-09-27 对多成员、身份与授权的裁决；下文引述为术语更新后的意译。
+
+> 效力说明：**"Viva 是 Haisu 的本地优先个人 AI 协作系统，其中有多个持续存在的 AI 成员（Samuel/Oliver/Alice/Deven/Richard…），名字与职责都是配置数据"是 Haisu 的显式决定**。本文把它展开为对象关系与实现约束；展开细节（字段、状态布局）是实现选择，可随实现演进。
 
 ## Context
 
@@ -15,7 +17,7 @@ Status: **Accepted**（Haisu 显式指令，2026-09-27）· Supersedes: ADR 0001
 
 ## Decision
 
-1. **Viva 是 Personal AI Office**：一个人类用户拥有多个持续存在的 AI 成员（Resident）。成员有各自的状态、历史、知识、技能与未来可演化的 Self-Model。
+1. **Viva 是个人 AI 协作系统**：一个人类用户拥有多个持续存在的 AI 成员（Resident）。成员有各自的状态、历史、知识、技能与未来可演化的 Self-Model。
 2. 对象关系固定为：
 
 ```text

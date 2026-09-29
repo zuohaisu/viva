@@ -6,14 +6,14 @@ Status: **Accepted**（Haisu 显式指令，2026-09-27）· Supersedes: ADR 0003
 
 ## Context
 
-旧定义把 Workspace 抬成唯一语境对象，并明确写"**没有** Project"。结果是：一个 workspace 只能对应一个仓库目录，无法表达"Haisu 的 office 里有多个项目、一个项目跨多个仓库、一个仓库同时服务两个项目"，也无法区分"意图"（要做什么）与"执行环境"（在哪个 checkout 里做）。
+旧定义把 Workspace 抬成唯一语境对象，并明确写"**没有** Project"。结果是：一个 workspace 只能对应一个仓库目录，无法表达"Haisu 用 Viva 管理多个项目、一个项目跨多个仓库、一个仓库同时服务两个项目"，也无法区分"意图"（要做什么）与"执行环境"（在哪个 checkout 里做）。
 
 ## Decision
 
 对象与包含关系：
 
 ```text
-Workspace（长期工作语境，如 "office"）
+Workspace（长期工作语境，如 "开发协作"）
   └─ Project（一摊有名字的工作，如 "Viva" / "Hiring automation"）
        └─ Repository（一个 git 仓库；一个项目可引用多个，一个仓库也可被多个项目引用）
             └─ Worktree（一个可独立写入的 checkout，按任务分配）

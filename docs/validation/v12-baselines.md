@@ -51,7 +51,7 @@ python tools/acceptance/sampler.py build-times --repo .
 | PTY 输入回程 | ≤ 100 ms | 90 µs | within |
 | 冷构建 | ≤ 300 s | 12.7 s | within |
 | 增量构建 | ≤ 30 s | 0.1 s | within |
-| TUI 空闲 CPU（viva office 运行时） | ≤ 5% | 未测（切片未含 TUI 常驻） | missing |
+| TUI 空闲 CPU（Viva 宿主运行时） | ≤ 5% | 未测（切片未含 TUI 常驻） | missing |
 | 16 真实 Agent 同负载整机内存/swap | 待定（需 16-agent 采样） | 未测 | missing |
 | Pi 承载 vs 独立运行增量 | 待定 | 未测 | missing |
 | Intel Mac 对应基线 | 待定 | 未测（无 Intel 硬件） | pending |

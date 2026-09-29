@@ -8,7 +8,7 @@ Status: **部分验收（方法 + 真实运行证据 + 故障场景），平台/
 
 G1 时只有 CLI 切片；本轮验收覆盖 V07/V09/V10/V14 交付后的组合切片：
 
-- **活跃 Office 控制面**：真实 Unix domain socket 通道、单活跃宿主、CLI 回调、派发/观察/停止。
+- **活跃 Viva 控制面**：真实 Unix domain socket 通道、单活跃宿主、CLI 回调、派发/观察/停止。
 - **真实 PTY 终端监督**：每个派发一个真 PTY 进程组、优雅停止与升级杀灭、退出记录。
 - **崩溃恢复对账**：真实 `kill -9` 宿主进程后的重启对账。
 - **工作台组合事实**：多项目/任务/worktree/终端的真实 git 与进程事实。
@@ -21,7 +21,7 @@ G1 时只有 CLI 切片；本轮验收覆盖 V07/V09/V10/V14 交付后的组合�
 | --- | --- | --- | --- | --- |
 | CLI 命令响应（doctor，7 次中位） | ≤ 1 s | **3.7 ms** | launch.json | within |
 | 单 host 进程峰值 RSS（CLI 切片） | ≤ 200 MB | **~4.2 MB** | slice-cli.json | within |
-| Office host 常驻峰值 RSS（承载 16 终端时） | ≤ 150 MB（新预算，首测） | **8.7 MB** | peak.json | within |
+| Viva 宿主常驻峰值 RSS（承载 16 终端时） | ≤ 150 MB（新预算，首测） | **8.7 MB** | peak.json | within |
 | 16 个被监督子进程的每进程峰值 RSS | — | ~1.2 MB/个（sleep 替身） | peak.json | 记录 |
 | 控制面单次派发往返（16 次中位） | ≤ 500 ms（新预算，首测） | **30 ms** | peak.json | within |
 | PTY 输入回程（11 字节真 pty + `cat`） | ≤ 100 ms | **80 µs** | echo.json | within |
@@ -45,10 +45,10 @@ G1 时只有 CLI 切片；本轮验收覆盖 V07/V09/V10/V14 交付后的组合�
 | --- | --- | --- |
 | 强制退出（kill -9 宿主） | 重启对账记录 `previous_host_crashed` 与 `execution_orphaned`；孤儿执行如实标 `stopped`；不重跑、不杀孤儿进程、不误认 pid | v07_office::crash_restart_reconciles… |
 | 完成任务不重放 | 已完成任务再派发被拒（"never executed again"），零新增执行 | 同上 |
-| 停止/退出竞态与误杀 | 停一个终端不影响邻居；信号退出以 `-1` 如实入账且 office 主动停止记 `stopped`（不是 failed）；stop 纪律（先 TERM 后 KILL、已 reap 不再发信号）由 V05 单元/集成覆盖 | v07/v14/v05 |
+| 停止/退出竞态与误杀 | 停一个终端不影响邻居；信号退出以 `-1` 如实入账且 Viva 主动停止记 `stopped`（不是 failed）；stop 纪律（先 TERM 后 KILL、已 reap 不再发信号）由 V05 单元/集成覆盖 | v07/v14/v05 |
 | 授权撤回竞态 | revoke 后派发在生效时刻被拒，零执行创建 | v07_office::revoked_grant… |
 | 重复启动/请求重放 | 第二宿主拒绝并指认活跃 pid；同 request key 重放不重复启动，且按 (task, member) 隔离——跨任务/跨成员同 key 响亮拒绝 | v07_office::second_host…, request_keys_never_replay… |
-| 无活跃 office 时 mutation | 明确拒绝，不起后台 daemon，不凭空造 socket | v07_office::mutation_without… |
+| 无活跃 Viva 宿主时 mutation | 明确拒绝，不起后台 daemon，不凭空造 socket | v07_office::mutation_without… |
 | 优雅退出收尾 | owned 终端全部停止，退出 watcher 先 join（每条退出事实先落账）再写交接记录，下次启动无虚假 orphan 记录；socket 释放 | v07_office::graceful_shutdown…、graceful_shutdown_records_every_exit_before_the_handoff |
 | 存储/迁移回滚 | 迁移失败无半状态、事务失败回滚、append-only 触发器 | V01 store 单元 |
 

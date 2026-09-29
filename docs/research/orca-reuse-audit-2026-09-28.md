@@ -12,7 +12,7 @@ Status: planning evidence; source inspected, integration not built or benchmarke
 
 下面全部源码链接固定到安装元数据所指 commit。该 commit 的 [package.json](https://github.com/stablyai/orca/blob/841503152c6a0a6885566bd8b0a21b2bde4a7aa1/package.json) 自报 1.4.197，与应用显示 1.4.212 不同：这里记录两份第一方证据，**没有证明二进制与此源码完全可重现一致**。实时仓库首页还显示另一个 main commit `27b823f934f739bc85914dd717b776835f60bcf7`；本次未混用它的实现来证明安装版本能力。
 
-## 2. 首版边界：复用执行能力，不依赖 Orca 办公室
+## 2. 首版边界：复用执行能力，不依赖 Orca 的运行环境
 
 用户明确要求首版能够替代 Orca 的多 worktree 并行开发工作面。验收因此须在不启动 Orca、不连接它的现有 profile/runtime/socket 的条件下完成：一个 Viva 实例列出多个工作上下文，在不同 worktree 启动不同 agent CLI，切换和交互，观察真实进程/等待输入状态，保存会话关联，停止指定进程并在重启后按能力恢复。
 
@@ -22,7 +22,7 @@ Status: planning evidence; source inspected, integration not built or benchmarke
 
 | 能力 | 已检查源码 | 复用类别 | Viva 仍需填补的具体缺口 |
 | --- | --- | --- | --- |
-| Git/worktree 列举 | [porcelain parser](https://github.com/stablyai/orca/blob/841503152c6a0a6885566bd8b0a21b2bde4a7aa1/src/shared/git-worktree-porcelain-parser.ts#L1-L81) | 小函数可抽取或移植；直接调用成熟 git CLI | NUL/引用路径、main/locked/prunable 信息应测试；列表不是 Office Task/成员归属。Rust 实现可复用行为和案例，不必加载 TS runtime。 |
+| Git/worktree 列举 | [porcelain parser](https://github.com/stablyai/orca/blob/841503152c6a0a6885566bd8b0a21b2bde4a7aa1/src/shared/git-worktree-porcelain-parser.ts#L1-L81) | 小函数可抽取或移植；直接调用成熟 git CLI | NUL/引用路径、main/locked/prunable 信息应测试；列表不是 Viva Task/成员归属。Rust 实现可复用行为和案例，不必加载 TS runtime。 |
 | worktree 创建与并发修改 | [worktree-add](https://github.com/stablyai/orca/blob/841503152c6a0a6885566bd8b0a21b2bde4a7aa1/src/main/git/worktree-add.ts)、[worktree operation lock](https://github.com/stablyai/orca/blob/841503152c6a0a6885566bd8b0a21b2bde4a7aa1/src/shared/git-worktree-operation-lock.ts) | 语义和小代码可复用；完整创建模块耦合 | 创建模块还依赖 Git runner、ref maintenance、cache 和 WSL routing。Viva 需自己的 operation/Task 映射、取消和授权；锁的对象要按实际 Git 共享资源区分，不能把 worktree 路径锁当所有 repo ref 安全的证明。 |
 | PTY 创建、输入、resize、生命周期 | [TerminalHost](https://github.com/stablyai/orca/blob/841503152c6a0a6885566bd8b0a21b2bde4a7aa1/src/main/daemon/terminal-host.ts#L1-L105)、[Session](https://github.com/stablyai/orca/blob/841503152c6a0a6885566bd8b0a21b2bde4a7aa1/src/main/daemon/session.ts)、[native spawn](https://github.com/stablyai/orca/blob/841503152c6a0a6885566bd8b0a21b2bde4a7aa1/src/main/daemon/pty-subprocess/native-pty-spawn.ts) | 可切出 Node 执行 slice 的候选；不是已发布的独立 TerminalHost 库 | TerminalHost 注入 spawn，并管理 creation fencing、session owner 与 tombstone；Session 再依赖 output pipeline、shell readiness、termination 和 startup ingress。native spawn 用 node-pty，还带 macOS TCC、Windows job/fallback。需证明独立打包、边界 API、停止单个进程树与 owned cleanup。 |
 | 终端历史与重启恢复 | [terminal-history-log](https://github.com/stablyai/orca/blob/841503152c6a0a6885566bd8b0a21b2bde4a7aa1/src/main/daemon/terminal-history-log.ts)、[workspace session schema](https://github.com/stablyai/orca/blob/841503152c6a0a6885566bd8b0a21b2bde4a7aa1/src/shared/workspace-session-schema.ts)、[workspace session controller](https://github.com/stablyai/orca/blob/841503152c6a0a6885566bd8b0a21b2bde4a7aa1/src/main/runtime/runtime-workspace-session-controller.ts) | framed log 的恢复规则可移植；整个 workspace UI schema 不宜照搬 | log 的长度帧可识别 torn tail。schema/controller 同时描述 tab/layout/editor/browser、host partition 和 runtime store，不能成为 Viva 的第二份会话事实。保存输出也不等于恢复 LLM context；恢复须用 harness 原生 session 标识及支持能力。 |
@@ -44,12 +44,12 @@ Status: planning evidence; source inspected, integration not built or benchmarke
 
 ## 5. 对已规划 issue 的裁决建议
 
-Rust Office 的决策无需撤销。先在终端执行 issue 中设置一个短、可证伪的集成门槛，对同一 API 比较两条路径：
+Rust 宿主的决策无需撤销。先在终端执行 issue 中设置一个短、可证伪的集成门槛，对同一 API 比较两条路径：
 
 1. 成熟 Rust PTY/终端解析库 + 最小 Viva 生命周期 glue；所选库的版本、源码与许可还需在该门槛实际核对。
 2. 固定 Orca commit 的 Node-only terminal slice，或受 Viva 监督、隔离 data root 的 orcad helper；保留 MIT notices，限定功能图，不运行现有 Orca app。
 
-helper 应由一份 Office 共享，不为每个 Task 启动一整套平台；IPC 的请求/输出队列需有上限和背压。V05 的选路门槛输出应是最小 runnable proof、依赖/发行清单及同机测量：真实 PTY 输入/resize/paste、错误启动、指定停止、helper 退出与 owned cleanup、内存/IPC/响应，不等待整个工作台完成。随后 V14/V12 的整体门槛验证三个隔离 worktree、Pi 与另一种真实 CLI、shell 命令、切换、Viva 退出、重启关联/resume；不能把全产品体验反过来作为底层选路前提，也不靠语言优势推断。Mac Intel 的最终容量验证依然属于资源验收；没有目标机器不能填 PASS。只把明确定义的能力门槛作为依赖，不让整个后续资源 issue 阻塞所有实现。
+helper 应由一份 Viva 实例共享，不为每个 Task 启动一整套平台；IPC 的请求/输出队列需有上限和背压。V05 的选路门槛输出应是最小 runnable proof、依赖/发行清单及同机测量：真实 PTY 输入/resize/paste、错误启动、指定停止、helper 退出与 owned cleanup、内存/IPC/响应，不等待整个工作台完成。随后 V14/V12 的整体门槛验证三个隔离 worktree、Pi 与另一种真实 CLI、shell 命令、切换、Viva 退出、重启关联/resume；不能把全产品体验反过来作为底层选路前提，也不靠语言优势推断。Mac Intel 的最终容量验证依然属于资源验收；没有目标机器不能填 PASS。只把明确定义的能力门槛作为依赖，不让整个后续资源 issue 阻塞所有实现。
 
 Git/worktree issue 直接围绕 git CLI、现有 Viva 契约及 Orca 的路径/锁/恢复反例收敛；TUI issue 必须交付多 worktree 导航和真实交互，而不只是 Samuel 单会话；发行/总体验收必须要求无需 Orca 安装。Orca optional driver 可以保留作为方便的外部适配，但不算独立替代证据。
 

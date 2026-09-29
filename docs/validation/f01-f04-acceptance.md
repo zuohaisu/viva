@@ -5,7 +5,7 @@
 
 ## 第五轮独立 QA 后续整改（R5-N1，待独立复验）
 
-旧两列表的非空租约经 v3 修复后无 PID，仍不得自动回收。现在可用 `viva tools computer lane` **只读列出全部**持有者、PID、标记及取得时间；它不触发租约 reconcile，但打开 Office 库时仍会应用未执行的版本化迁移（包括 v3）。确认原动作确已停止后，由持有该 task 的 owner-issued、指名成员、ACT_WITH_APPROVAL 的 `release_foreground_lease` grant 的成员执行：
+旧两列表的非空租约经 v3 修复后无 PID，仍不得自动回收。现在可用 `viva tools computer lane` **只读列出全部**持有者、PID、标记及取得时间；它不触发租约 reconcile，但打开 Viva 数据库时仍会应用未执行的版本化迁移（包括 v3）。确认原动作确已停止后，由持有该 task 的 owner-issued、指名成员、ACT_WITH_APPROVAL 的 `release_foreground_lease` grant 的成员执行：
 
 ```text
 viva tools computer release-lease --task <lane 中的 task_id> \
@@ -13,20 +13,20 @@ viva tools computer release-lease --task <lane 中的 task_id> \
   --grant <grant-id> --reason "已核实旧动作停止；说明核查依据" --confirm
 ```
 
-只有 PID 与标记都为 NULL 且取得时间未变的行可释放；活 PID 或行已变化均拒绝。删除与 append-only Office event 同事务提交，事件记录**成员/授权来源**和“已停止”为调用者断言，**不伪装成系统核验或 Haisu 亲自操作**。`--confirm` 本身不是身份认证；需事先由 owner 授予该成员针对这个 task 的 grant，且授权/核实过程仍由操作者负责。无合法 task ID、无法确认原动作已停、或无法取得授权时保持锁定，不应盲目改 SQLite。CLI 的同用户进程隔离不是 OS 沙箱；真实键鼠/焦点目标平台验收仍待完成。本轮仅临时库测试，未释放真实 Office 租约。
+只有 PID 与标记都为 NULL 且取得时间未变的行可释放；活 PID 或行已变化均拒绝。删除与 append-only Viva event 同事务提交，事件记录**成员/授权来源**和“已停止”为调用者断言，**不伪装成系统核验或 Haisu 亲自操作**。`--confirm` 本身不是身份认证；需事先由 owner 授予该成员针对这个 task 的 grant，且授权/核实过程仍由操作者负责。无合法 task ID、无法确认原动作已停、或无法取得授权时保持锁定，不应盲目改 SQLite。CLI 的同用户进程隔离不是 OS 沙箱；真实键鼠/焦点目标平台验收仍待完成。本轮仅临时库测试，未释放真实 Viva 租约。
 
 ## 第四轮独立 QA 后续整改（待独立复验）
 
 - M-A：租约探针以 `kill(pid,0)` 的 errno 区分 ESRCH 与 EPERM；后者及其他不可判定结果不删除租约。出生标记确认已复用时仍可回收。无 PID 的旧两列表租约无法证明死亡，**不会自动清除**；操作者须先确认原前台动作已停，再人工处理该租约，不得在活持有者期间抢道。
 - tools_computer v2 已登记不能重写：新增 v3 条件迁移，把旧两列表经建新表→复制→替换升级成四列，保留 task_id/acquired_at；已有健康四列保持原行和 PID 标记。临时文件库模拟“已登记 v2 但旧表仍两列”升级、重开、持有者不被抢占。
 - M-B：`viva data export` 是资产保全用的**原样未脱敏**导出；manifest 显式 `redacted:false`、`contains_sensitive_data:true` 并显示警告，Unix 上新建 0700 目录、0600 文件，拒绝覆盖。导出产物不得提交或分享；标记与私有权限不等于脱敏。
-- R4-N1 冲突处理：maintenance v2 的历史 UPDATE 不改写（已登记）。若裸键 X 和 X:0000 并存，迁移保留数据并给出备份/诊断提示，而不是静默丢弃人审决定。**操作者路径**：先停止 Office，使用 SQLite backup（包括 WAL 中尚未 checkpoint 的更改）保全数据库；可通过 `viva data export --out <仅本人可访问的目录>` 查看原始提案（注意是敏感原文），核对冲突行的 proposal_id、status、resolution_note，再由 owner 决定哪条承载该主题代际零。若两条都要保留，可在备份后对裸键的特定 proposal_id 在 SQLite 事务内改名为 `X:legacy:<proposal_id>`（迁移会再加 `:0000`），保留原状态与主键；重开 `viva doctor` 验证。不要自动合并或删除人审记录。此为人工处置指南，**没有对用户真实库执行**。
+- R4-N1 冲突处理：maintenance v2 的历史 UPDATE 不改写（已登记）。若裸键 X 和 X:0000 并存，迁移保留数据并给出备份/诊断提示，而不是静默丢弃人审决定。**操作者路径**：先停止 Viva，使用 SQLite backup（包括 WAL 中尚未 checkpoint 的更改）保全数据库；可通过 `viva data export --out <仅本人可访问的目录>` 查看原始提案（注意是敏感原文），核对冲突行的 proposal_id、status、resolution_note，再由 owner 决定哪条承载该主题代际零。若两条都要保留，可在备份后对裸键的特定 proposal_id 在 SQLite 事务内改名为 `X:legacy:<proposal_id>`（迁移会再加 `:0000`），保留原状态与主键；重开 `viva doctor` 验证。不要自动合并或删除人审记录。此为人工处置指南，**没有对用户真实库执行**。
 - #25 的真实前台输入/目标平台并发验收仍未进行；本轮的安全机制及文件库回归不等于产品判据通过。
 
 ## 第三轮独立 QA 后续整改（2026-09-29，待独立复验）
 
 - R3-N8：`start-run` / `resume --cwd` 共用 tracked-tree 干净树检查，resume 必须给 cwd；临时仓库 CLI 回归覆盖 dirty、缺 cwd、提交后恢复。仍有 Git status 与 rev-parse 之间的 TOCTOU；untracked/ignored 文件不纳入 head 证明。
-- R3-N9：dispatch 类 workflow pass 的 grant 必须显式绑定本 run 的 task；无 task 的 office-wide grant 不能充当 per-task 授权。office-wide grant 对其他动作的既有语义不变。
+- R3-N9：dispatch 类 workflow pass 的 grant 必须显式绑定本 run 的 task；无 task 的全局 grant 不能充当 per-task 授权。全局 grant 对其他动作的既有语义不变。
 - R3-N10：跨进程 SQLite 租约按 OS 进程出生标记核对 PID；旧无标记行仅在 PID 消失或当前进程的运行时长短于该行已持有时长（加两秒容差，说明 PID 被回收）时回收；健康持有者不会仅因超过时限而被抢占。macOS `ps lstart` 精度为秒，极端同秒 PID 回收/系统探针异常仍需目标平台验证。现有 smoke 全是 `foreground:false`，无真实键鼠/焦点生产 spec；#25 前台互斥只能称单机测试机制，**不能称已做目标平台端到端验收**。
 - R3-N11：maintenance v2 迁移给旧裸 dedup key 补 `:0000`，保留 proposal 主键、状态、人审结论；已带代际后缀的库保持原样。用从 v1 升级的临时数据库验算。
 - R3-N13：设置 VIVA_HOME 而不设置 VIVA_MEMORY_DB 时，provider 路径默认落在 VIVA_HOME 内；没有 VIVA_HOME 的日常默认仍是用户 Hermes 库。临时 home CLI status 回归验证路径，未对真实记忆库写入。
@@ -60,7 +60,7 @@ viva tools computer release-lease --task <lane 中的 task_id> \
 | #24 dismiss 无授权 | **已修**：dismiss 与 execute 同样要求 live `maintain_knowledge` grant，拒绝入审计日志（f02 测试更新） |
 | #24 无入口/无运行主体 | **已修**：`viva maintenance review-knowledge/review-worktrees/review-repo/proposals/execute/dismiss` CLI；每次评审即一个有界 session（开→扫→关），无 daemon |
 | #25 重言式核验 + 丢截图 | **已修**：verify 双轴——动作自身输出必须含观察标记（`expect_action_output`）且 post 状态含世界标记；smoke 去掉 `--no-screenshot`，截图作为前后证据的一部分 |
-| #25 grant 放大（无 task 限定 + 无 principal 比对） | **已修（principal 绑定）**：`evaluate` 比对 `principal_member_id`，非本人 grant 即 `NotPrincipal` 拒绝并记录；**保留** office 级 grant（task=None）形态——它是 F02 维护所依赖的 owner 直签形态，principal 绑定后滥用面收敛到持有者本人，不可再冒充他人 |
+| #25 grant 放大（无 task 限定 + 无 principal 比对） | **已修（principal 绑定）**：`evaluate` 比对 `principal_member_id`，非本人 grant 即 `NotPrincipal` 拒绝并记录；**保留全局 grant**（task=None）形态——它是 F02 维护所依赖的 owner 直签形态，principal 绑定后滥用面收敛到持有者本人，不可再冒充他人 |
 | #25 lease 进程内 + foreground 无可达路径 | **已修（lease 跨进程）**：租约改为 VIVA_HOME 库内 `foreground_leases` 行（写事务即跨进程门），两个独立连接/进程共享同一文件即互斥；f03 测试以两个连接验证。foreground 输入路径仍只在库层提供（真实键鼠注入需要真实任务 + owner grant 时启用），证据文档如实标注 |
 | #26 开箱即死 + status 假就绪 | **已修**：python 未显式配置时优先探测 checkout 自带 venv（实测系统 python 缺 ruamel）；`memory status` 现在真实调 adapter（list round trip）并报告 `hrr: active/degraded`（NumPy 降级可见），不再是文件存在性断言 |
 | #26 写侧隔离被偷 | **已修**：link 改为 `(fact_id, member_id)` 唯一（migration v2），Bob 写同内容获得**自己的** link 与来源；exit 双门——owner 条件（只能退自己的 claim）+ live `maintain_knowledge` grant；本机真实复现并落证据 |
@@ -77,7 +77,7 @@ viva tools computer release-lease --task <lane 中的 task_id> \
 | N1（BLOCKER，隐私）| **已处置，历史改写待 owner 裁决**：仓库内证据文件已脱敏（verdict/fingerprint 保留，原文移除，commit 5ba7c7a 前身）；`viva tools computer smoke` 的证据输出永久改为摘要化（redacted + bytes + fingerprint），原始快照只留在本机私有 VIVA_HOME store——泄露路径已结构性关闭。⚠️ 已推送的 git 历史仍含原始转储（GitHub 端 blob），改写/接受由 owner 决定；候选命令已附于 PR。|
 | N2 迁移缺陷 | **已修**：`foreground_leases` 改为正规 v2 迁移（`IF NOT EXISTS` 同时保住 3570ae2 衍生库），v1 恢复原样 |
 | N3 租约焊死 | **已修**：租约行记录 holder pid，acquire 前清理死进程行（`kill -0` argv 数组探测）；崩溃进程不再永久占用输入道；有测试覆盖（幽灵行自愈 + 活持有者不被清） |
-| N4 computer_input 无 scope 放大 | **已修**：engine 层强制 `computer_input` grant 必须等于当前 task——office 级例外对该动作不存在承托物（QA 判断正确），无 scope 即拒绝为"不是全机许可证" |
+| N4 computer_input 无 scope 放大 | **已修**：engine 层强制 `computer_input` grant 必须等于当前 task——全局例外对该动作不存在承托物（QA 判断正确），无 scope 即拒绝为"不是全机许可证" |
 | N5 head 形式锚定 | **已修**：删除自由 `--head` 旗标（head 一律 rev-parse 解析）；start-run 拒绝脏工作树（tracked 未提交变更 = 同 SHA 不同内容）；resume 同样只经 checkout 解析；证据侧短 SHA 按 前缀归一化匹配。首轮 f01 证据即"绑在干净 SHA 上却含 1687 行未提交内容"的反面案例，本轮证据已在**提交后的干净树**上重跑（见下） |
 | N6 --ignored 假信号 | **已修**：宏改为 panic——`--ignored` 且无 provider 时是可见 FAIL（实测 5 FAILED），有 provider 时 5/5 真通过 |
 | N7 adapter 相对路径 | **已修**：解析顺序 env → 运行中二进制的祖先目录（打包布局）→ 编译期 checkout 路径；实测从 /tmp 运行 `viva memory status` 解析成功且探测为真 |

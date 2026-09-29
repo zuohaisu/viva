@@ -1,12 +1,12 @@
 # Viva — Customer Zero
 
-Status: canonical · 版本：2026-09-27（AI Office 修订）· 本文不给 hypothetical persona，只记录 Haisu 的真实工作方式
+Status: canonical · 版本：2026-09-27（多成员协作修订）· 本文不给 hypothetical persona，只记录 Haisu 的真实工作方式
 
-Viva 只有一个人类用户：**Haisu**。他不是一个"使用工具的人"，他是一间 AI 办公室的主人：多个 AI 成员长期存在，各有职责，同时推进多个任务。所有产品判断的最终检验：
+Viva 只有一个人类用户：**Haisu**。他不是一个"使用工具的人"，他通过 Viva 管理多个长期存在、各有职责、同时推进多个任务的 AI 成员。所有产品判断的最终检验：
 
 > **这是否让 Haisu 的工作由多个长期成员持续推进，并让这段协作的上下文、历史与能力积累下来？**
 
-## 1. Haisu 的办公室（2026-09 实况）
+## 1. Haisu 的多成员协作方式（2026-09 实况）
 
 - **AI 成员**：Samuel（PM/调度）、Oliver（运维）、Alice（QA/review）、Deven（开发）、Richard（研究）——名字与职责是 Haisu 配置的数据；成员可以增删改角色。
 - **认知模型**：Claude、GPT、GLM、DeepSeek、本地模型等，按成员绑定，随时可换。

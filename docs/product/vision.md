@@ -6,9 +6,9 @@ Status: canonical · 版本：2026-09-27 · Owner: Haisu · 本文取代本文�
 
 ## 1. 一句话定义
 
-> **Viva 是 Haisu 的本地优先 Personal AI Office：多个持续存在的 AI 成员在其中分工、协作、留下各自的历史与知识，并调用真实工具完成工作。**
+> **Viva 是 Haisu 的本地优先个人 AI 协作系统：多个持续存在的 AI 成员分工协作，保留各自的历史与知识，并调用真实工具完成工作。**
 
-英文：*Viva is Haisu's local-first personal AI office: several persistent AI members work there, keep their own history and knowledge, and drive real tools to get work done.*
+英文：*Viva is Haisu's local-first personal AI collaboration system: several persistent AI members keep their own history and knowledge, collaborate, and drive real tools to get work done.*
 
 ### 1.1 这次定义改了什么，为什么
 
@@ -16,9 +16,9 @@ Status: canonical · 版本：2026-09-27 · Owner: Haisu · 本文取代本文�
 | --- | --- | --- |
 | "Haisu 与**一个**常驻 Agent Samuel 协作的本地开发环境" | 多个持续存在的 AI 成员 | Haisu 的真实工作方式是让职责不同的成员长期协作（PM/调度、开发、QA、运维、研究），同一成员同时参与多个任务 |
 | 把 multi-resident UX 与 AI 团队协作排除在范围外 | 是产品本体 | "只有一个人类用户"曾被错误地推出"没有 AI 团队"；客户数量与成员数量是两件事（ADR 0006） |
-| Workspace 取代所有 Project 概念 | `Workspace ≠ Project ≠ Repository ≠ Worktree ≠ Task` | 需要表达"一个办公室多个项目、一个项目多个仓库"（ADR 0009） |
+| Workspace 取代所有 Project 概念 | `Workspace ≠ Project ≠ Repository ≠ Worktree ≠ Task` | 需要表达"一个 Viva 实例管理多个项目、一个项目多个仓库"（ADR 0009） |
 | 禁止所有 Worker 发起的委派 | 协调成员可在用户授予的范围内调用其他成员 | 否则"协调"只是文案（ADR 0007） |
-| Ticket Autopilot 作为保留子系统 | 已退役，只复用仍有用的三个能力 | 它的对象（ticket/run/verdict）与 Office 的对象（Task/Execution/Grant）不同源（ADR 0008） |
+| Ticket Autopilot 作为保留子系统 | 已退役，只复用仍有用的三个能力 | 它的对象（ticket/run/verdict）与 Viva 的对象（Task/Execution/Grant）不同源（ADR 0008） |
 
 **没有改变的部分**：单人类用户、本地优先、连续性优先、诚实约束（不假装记得、不假装成长）、`Viva ≠ Samuel`（名字与职责是配置数据）。
 
@@ -32,7 +32,7 @@ Haisu 每天使用大量开发工具与 AI agents。痛点不是"缺一个更聪
 - 好实践无法复利：一次漂亮的并行 review 编排不会变成下次可调用的方法；
 - 任务历史依附于某个进程：worker 一死，做到哪、为什么失败、还欠什么，全部丢失。
 
-Viva 的存在就是把这些变成**办公室的资产**：成员持续存在，任务持续存在，执行的归属与结果持续存在。
+Viva 的存在就是把这些变成**Viva 持续保留的资产**：成员持续存在，任务持续存在，执行的归属与结果持续存在。
 
 ## 3. 给谁用：Customer Zero
 
@@ -44,7 +44,7 @@ Viva 的存在就是把这些变成**办公室的资产**：成员持续存在�
 
 > **它是否让 Haisu 的工作由多个长期成员持续推进，并让这段协作的上下文、历史与能力积累下来？**
 
-**首版投入使用标准（2026-09-28）**：Viva 必须能从普通终端独立启动，并替代 Orca 的多 worktree 并行开发入口。办公室的持续性语义建立在自己可用的执行体验上；Orca 不是必需宿主。具体验收见 [first-usable-version.md](first-usable-version.md)，当前尚未达标。
+**首版投入使用标准（2026-09-28）**：Viva 必须能从普通终端独立启动，并替代 Orca 的多 worktree 并行开发入口。成员与任务的持续性语义建立在自己可用的执行体验上；Orca 不是必需宿主。具体验收见 [first-usable-version.md](first-usable-version.md)，当前尚未达标。
 
 ## 4. 存在性测试（为什么不是"几个 CLI 加一个终端"）
 
@@ -55,7 +55,7 @@ Viva 的存在就是把这些变成**办公室的资产**：成员持续存在�
 | Codex / Claude Code / Qoder | 当前会话的上下文 | 其他成员；上次派发；失败原因；任务未完成项 |
 | Ticket 系统（Plane/Linear） | 工单状态 | 谁在什么时候用什么模型做了什么、结果如何 |
 
-**Viva 不可替代的中心**：它管理的是一间办公室——**多个成员 × 多个任务 × 多次真实执行**的关系与历史，并让这些历史反哺下一次工作。
+**Viva 不可替代的中心**：它管理**多个成员 × 多个任务 × 多次真实执行**的关系与历史，并让这些历史反哺下一次工作。
 
 两条使这个中心成立的约束：
 
@@ -95,7 +95,7 @@ Viva 的存在就是把这些变成**办公室的资产**：成员持续存在�
 ## 7. 现状（2026-09-28 更新）
 
 > 历史注记：本节的"已实现"最初以 Python + Textual 实现并在 `tests/viva/`
-> 有证据；V13（issue #22）退役了 Python 运行时。下述能力现由 Rust 办公室
+> 有证据；V13（issue #22）退役了 Python 运行时。下述能力现由 Rust 实现
 > 承载，证据在 `crates/viva/tests/`（逐 issue 验收测试）。V13 退役映射见
 > `docs/validation/v13-python-retirement.md`。个别条目以 Rust 侧实际交付
 > 为准（经验/日记能力首版未建，无假声明）。

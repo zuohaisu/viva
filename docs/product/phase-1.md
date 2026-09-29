@@ -1,6 +1,6 @@
 # Viva — Phase 1 Scope
 
-Status: canonical · 版本：2026-09-27（AI Office 修订）· 上游：`vision.md` / `workflows.md`
+Status: canonical · 版本：2026-09-27（多成员协作修订）· 上游：`vision.md` / `workflows.md`
 
 本文分三部分：**已实现并有证据的能力**、**本轮范围之外但已定义的边界**、**明确未实现且不得假装的能力**。
 

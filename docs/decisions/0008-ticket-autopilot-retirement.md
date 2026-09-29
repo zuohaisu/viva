@@ -8,7 +8,7 @@ Status: **Accepted**（Haisu 显式指令，2026-09-27）· Supersedes: ADR 0004
 
 仓库主体曾是 Ticket Autopilot：Plane-first 的 ticket 交付控制器（worktree 隔离 → Developer → deterministic checks → 独立 QA → 有界修复 → owner 授权 → 本地 commit），带本地 Web 控制器、YAML engine、Plane/GitHub 连接器、票务门槛与固定流水线，约 8.3k 行 + 约 150 个专属测试。
 
-新方向（ADR 0006/0007）里没有它的位置：Office 的通用对象是 **Task / Execution / Grant / Member**，而 Ticket Autopilot 的对象是 **ticket / run / QA verdict / Plane issue**。保留它意味着维护两套并行语义，并让"固定流水线"伪装成"动态调度"。
+新方向（ADR 0006/0007）里没有它的位置：Viva 的通用对象是 **Task / Execution / Grant / Member**，而 Ticket Autopilot 的对象是 **ticket / run / QA verdict / Plane issue**。保留它意味着维护两套并行语义，并让"固定流水线"伪装成"动态调度"。
 
 ## Decision
 
@@ -22,7 +22,7 @@ Status: **Accepted**（Haisu 显式指令，2026-09-27）· Supersedes: ADR 0004
 | `services/delivery_policy`（owner 授权部分） | `viva/permissions/authority.py` | 授权：远端动作仍需 owner 明确授权 + 审计记录。测试 `tests/viva/test_permissions.py` |
 
 3. **退役其余部分**（删除，不迁移）：Plane 连接器与票务门槛、固定 dev→QA 流水线与其 prompt/verdict schema、旧 Web 控制器与 `start-ticket-autopilot` 启动入口、`ticket-controller` 脚本入口、YAML engine、只验证旧行为的测试（`tests/test_*.py`、`tests/integration/`、`tests/unit/`）、旧产品定义文档（`docs/closed-loop-workflow.md`、`docs/manual-pilot-checklist.md`、`docs/run-event-schema.md`、`specs/`、`overview.md`）、Plane 辅助脚本 `tooling/spec_to_issue.py`。
-4. **动态调度不得伪装成流水线**：被删除的是"顺序固定、角色固定、状态机固定"的那部分；Office 保留的是通用 dispatch/stop/status/result（ADR 0007）。
+4. **动态调度不得伪装成流水线**：被删除的是"顺序固定、角色固定、状态机固定"的那部分；Viva 保留的是通用 dispatch/stop/status/result（ADR 0007）。
 5. **历史不删除**：
 
 - `~/.ticket-autopilot/` 运行状态**不读、不写、不迁移、不删除**；

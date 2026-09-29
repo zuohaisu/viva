@@ -1,6 +1,6 @@
 # Viva — Workflows
 
-Status: canonical · 版本：2026-09-27（AI Office 修订）· 素材：`customer-zero.md` 场景 S1–S9 · 验收对象：`phase-1.md`
+Status: canonical · 版本：2026-09-27（多成员协作修订）· 素材：`customer-zero.md` 场景 S1–S9 · 验收对象：`phase-1.md`
 
 每条 workflow 标注它对对象模型的最低要求（这些就是验收线）和本轮的实现位置。
 
