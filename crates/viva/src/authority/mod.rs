@@ -151,6 +151,9 @@ pub enum DenialReason {
     NoGrant,
     GrantNotLive,
     GrantExpired,
+    /// The grant names a principal member and the caller is not that
+    /// member: a grant id is never a bearer token.
+    NotPrincipal,
     ActionOutsideScope,
     CrossTask,
     ModeInsufficient,
@@ -165,6 +168,9 @@ impl std::fmt::Display for DenialReason {
             DenialReason::NoGrant => "this action requires a live grant; plain chat may only read",
             DenialReason::GrantNotLive => "the grant is revoked and no longer authorizes anything",
             DenialReason::GrantExpired => "the grant has expired",
+            DenialReason::NotPrincipal => {
+                "the grant belongs to another member — a grant id is not a bearer token"
+            }
             DenialReason::ActionOutsideScope => "the action is outside this grant's action scope",
             DenialReason::CrossTask => "the grant is scoped to another task",
             DenialReason::ModeInsufficient => "the grant mode is insufficient for this action",
@@ -420,7 +426,7 @@ impl<'a> AuthorityEngine<'a> {
             return Ok(Err(DenialReason::ProtectedAction));
         }
 
-        let Actor::Member { grant, .. } = actor else {
+        let Actor::Member { member, grant } = actor else {
             // Workers act through their own credential path (see
             // `check_worker_credential`); they cannot take member actions.
             return Ok(Err(DenialReason::UntrustedWorker));
@@ -441,6 +447,15 @@ impl<'a> AuthorityEngine<'a> {
         if let Some(expires_at) = &grant.expires_at {
             if expires_at.as_str() <= utc_now().as_str() {
                 return Ok(Err(DenialReason::GrantExpired));
+            }
+        }
+        // A grant is bound to its principal: presenting someone else's
+        // grant id is impersonation, not authorization. Principal-less
+        // grants are owner-issued shared authority (documented) and stay
+        // usable by any member.
+        if let Some(principal) = &grant.principal_member_id {
+            if principal != member {
+                return Ok(Err(DenialReason::NotPrincipal));
             }
         }
         // Cross-task scope: a grant scoped to a task cannot serve another.
@@ -619,6 +634,13 @@ impl<'a> AuthorityEngine<'a> {
 
     fn is_protected(action: &str) -> bool {
         PROTECTED_ACTIONS.contains(&action)
+    }
+
+    /// Whether an action mutates the world and therefore needs an ACT_*
+    /// grant. Public so delivery/workflow gates can enforce authorization
+    /// structurally instead of by evidence-field convention.
+    pub fn is_dispatch_action(action: &str) -> bool {
+        DISPATCH_ACTIONS.contains(&action)
     }
 
     fn is_dispatch(action: &str) -> bool {
@@ -994,5 +1016,48 @@ mod tests {
             RestrictionState::Unverified,
             "a promised restriction must not display as enforced"
         );
+    }
+
+    #[test]
+    fn a_grant_id_is_not_a_bearer_token() {
+        let store = store();
+        let engine = AuthorityEngine::new(&store);
+        let alice = MemberId::new();
+        let mallory = MemberId::new();
+        let task = TaskId::new();
+        let grant = engine
+            .issue_root_grant(
+                Some(alice.clone()),
+                Some(task.clone()),
+                vec!["read_task".into()],
+                GrantMode::Read,
+                None,
+            )
+            .expect("grant");
+
+        // Alice's own grant works for Alice.
+        let alice_actor = Actor::Member {
+            member: alice,
+            grant: Some(grant.grant_id.clone()),
+        };
+        assert_eq!(
+            engine
+                .check(&alice_actor, "read_task", Some(&task))
+                .expect("check"),
+            Ok(())
+        );
+
+        // Mallory presenting Alice's grant id is denied as impersonation.
+        let mallory_actor = Actor::Member {
+            member: mallory,
+            grant: Some(grant.grant_id),
+        };
+        assert_eq!(
+            engine
+                .check(&mallory_actor, "read_task", Some(&task))
+                .expect("check"),
+            Err(DenialReason::NotPrincipal)
+        );
+        assert!(!engine.recent_denials(10).expect("denials").is_empty());
     }
 }

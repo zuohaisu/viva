@@ -67,6 +67,30 @@ fn evidence(kind: &str, head: &str, note: &str) -> StepEvidence {
     StepEvidence::new(kind, note).with_head(head)
 }
 
+/// A live owner grant covering `dispatch_delegated` for one task — what a
+/// member needs to pass any dispatch-class workflow step (structural rule,
+/// independent of the config's evidence list).
+fn dispatch_grant(
+    authority: &AuthorityEngine,
+    member: &MemberId,
+    task: &TaskId,
+) -> viva::foundation::ids::GrantId {
+    authority
+        .issue_root_grant(
+            Some(member.clone()),
+            Some(task.clone()),
+            vec!["dispatch_delegated".into()],
+            GrantMode::ActWithApproval,
+            None,
+        )
+        .expect("dispatch grant")
+        .grant_id
+}
+
+fn auth_evidence(grant_id: &str) -> StepEvidence {
+    StepEvidence::new("authorization", "owner grant issued for this task").with_grant(grant_id)
+}
+
 /// Acceptance: "一张真实低风险任务走完实现→验证→独立复核→必要修复→授权 PR，
 /// 过程记录可恢复". The verify step really fails once, routes through the
 /// bounded fix step, re-earns verification, passes independent review, and
@@ -91,13 +115,19 @@ fn delivery_walk_with_real_fix_and_authorized_delivery() {
         .expect("run starts");
     assert_eq!(run.status, RunStatus::Running);
 
-    // Implement passes on head A.
+    let implement_grant = dispatch_grant(&authority, &implementer, &task_id);
+    let actor_grant = dispatch_grant(&authority, &actor, &task_id);
+
+    // Implement passes on head A, under its dispatch grant.
     let advance = engine
         .record_step_result(
             &run.run_id,
             &implementer,
             true,
-            vec![evidence("implementation", HEAD_A, "change committed")],
+            vec![
+                evidence("implementation", HEAD_A, "change committed"),
+                auth_evidence(implement_grant.as_str()),
+            ],
         )
         .expect("implement");
     assert_eq!(
@@ -134,7 +164,10 @@ fn delivery_walk_with_real_fix_and_authorized_delivery() {
             &run.run_id,
             &actor,
             true,
-            vec![evidence("fix", HEAD_A, "ordering made deterministic")],
+            vec![
+                evidence("fix", HEAD_A, "ordering made deterministic"),
+                auth_evidence(actor_grant.as_str()),
+            ],
         )
         .expect("fix");
     assert_eq!(
@@ -150,11 +183,10 @@ fn delivery_walk_with_real_fix_and_authorized_delivery() {
             &run.run_id,
             &actor,
             true,
-            vec![evidence(
-                "verification",
-                HEAD_A,
-                "cargo test --workspace: pass",
-            )],
+            vec![
+                evidence("verification", HEAD_A, "cargo test --workspace: pass"),
+                auth_evidence(actor_grant.as_str()),
+            ],
         )
         .expect("verify pass");
     assert_eq!(
@@ -219,7 +251,7 @@ fn delivery_walk_with_real_fix_and_authorized_delivery() {
         )
         .expect_err("PROPOSE grant must not deliver");
     assert!(
-        err.to_string().contains("delivery authorization rejected"),
+        err.to_string().contains("authorization rejected"),
         "got: {err}"
     );
     let denials = authority.recent_denials(10).expect("denials");
@@ -363,6 +395,8 @@ fn exhausted_budget_pauses_and_resume_rebinds_head() {
         .expect("config");
     let run = engine.start_run(&task_id, "delivery", HEAD_A).expect("run");
     let actor = MemberId::new();
+    let authority = AuthorityEngine::new(&store);
+    let actor_grant = dispatch_grant(&authority, &actor, &task_id);
 
     // Implement passes, then verification fails twice (budget 2):
     // first fail routes to fix, the fix also fails… second verify fail
@@ -372,7 +406,10 @@ fn exhausted_budget_pauses_and_resume_rebinds_head() {
             &run.run_id,
             &actor,
             true,
-            vec![evidence("implementation", HEAD_A, "done")],
+            vec![
+                evidence("implementation", HEAD_A, "done"),
+                auth_evidence(actor_grant.as_str()),
+            ],
         )
         .expect("implement");
     let advance = engine
@@ -449,7 +486,10 @@ fn exhausted_budget_pauses_and_resume_rebinds_head() {
             &run.run_id,
             &actor,
             true,
-            vec![evidence("fix", HEAD_B, "real fix committed")],
+            vec![
+                evidence("fix", HEAD_B, "real fix committed"),
+                auth_evidence(actor_grant.as_str()),
+            ],
         )
         .expect("fix on new head");
     assert_eq!(

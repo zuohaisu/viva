@@ -25,7 +25,6 @@
 
 use std::str::FromStr as _;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
 
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -74,6 +73,15 @@ CREATE TABLE computer_actions (
     post_state      TEXT,
     foreground      INTEGER NOT NULL CHECK (foreground IN (0, 1)),
     recorded_at     TEXT NOT NULL
+);
+
+-- The single foreground input lane. Backed by the office store itself so
+-- the exclusion holds across processes (two `viva` invocations share the
+-- database file), not just across threads of one process (QA finding:
+-- an in-process Mutex could not coordinate separate CLI runs).
+CREATE TABLE foreground_leases (
+    task_id     TEXT PRIMARY KEY,
+    acquired_at TEXT NOT NULL
 );
 "#;
 
@@ -144,76 +152,113 @@ impl ToolRunner for ProcessRunner {
 }
 
 // ---------------------------------------------------------------------------
-// Foreground lease: one global input lane, tasks queue, reads don't
+// Foreground lease: one global input lane across PROCESSES, tasks queue,
+// reads don't
 // ---------------------------------------------------------------------------
 
-/// Coordinates global keyboard/mouse/focus work. A foreground action must
-/// hold the single lease; while it is held, other foreground actions wait
-/// and independent API/browser-context actions proceed untouched.
-#[derive(Default)]
-pub struct ForegroundCoordinator {
-    holder: Mutex<Option<String>>,
-    released: Condvar,
+/// Coordinates global keyboard/mouse/focus work through the office store:
+/// the lease is a row in `foreground_leases`, so the exclusion holds
+/// between separate `viva` processes sharing the same VIVA_HOME file, not
+/// only between threads. A foreground action must hold the single lease;
+/// while it is held, other foreground actions wait and independent
+/// API/browser-context actions proceed untouched.
+pub struct ForegroundCoordinator<'a> {
+    store: &'a Store,
+    acquire_timeout: std::time::Duration,
 }
 
 /// Held lease; releasing happens on drop, so an early return can never
 /// leave the lane stuck.
-pub struct ForegroundLease {
-    coordinator: Arc<ForegroundCoordinator>,
+pub struct ForegroundLease<'c> {
+    coordinator: &'c ForegroundCoordinator<'c>,
     pub task_id: String,
 }
 
-impl std::fmt::Debug for ForegroundLease {
+impl std::fmt::Debug for ForegroundLease<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "ForegroundLease({})", self.task_id)
     }
 }
 
-impl Drop for ForegroundLease {
+impl Drop for ForegroundLease<'_> {
     fn drop(&mut self) {
-        let mut holder = self.coordinator.holder.lock().expect("lease lock");
-        if holder.as_deref() == Some(self.task_id.as_str()) {
-            *holder = None;
-            self.coordinator.released.notify_all();
-        }
+        // Best-effort release; the row is keyed by task so a crashed
+        // process cannot be impersonated by a later holder.
+        let _ = self.coordinator.store.connection().execute(
+            "DELETE FROM foreground_leases WHERE task_id = ?1",
+            [&self.task_id],
+        );
     }
 }
 
-impl ForegroundCoordinator {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self::default())
-    }
-
-    /// Block until this task holds the single foreground lane.
-    pub fn acquire_foreground(self: &Arc<Self>, task_id: &str) -> ForegroundLease {
-        let mut holder = self.holder.lock().expect("lease lock");
-        while holder.is_some() {
-            holder = self.released.wait(holder).expect("lease wait");
-        }
-        *holder = Some(task_id.to_string());
-        ForegroundLease {
-            coordinator: Arc::clone(self),
-            task_id: task_id.to_string(),
+impl<'a> ForegroundCoordinator<'a> {
+    pub fn new(store: &'a Store) -> Self {
+        Self {
+            store,
+            acquire_timeout: std::time::Duration::from_secs(30),
         }
     }
 
-    /// Take the lane only if it is free (used where waiting is worse than
-    /// pausing the action).
-    pub fn try_acquire_foreground(self: &Arc<Self>, task_id: &str) -> Option<ForegroundLease> {
-        let mut holder = self.holder.lock().expect("lease lock");
-        if holder.is_some() {
-            return None;
+    /// Take the lane only if it is free, in one transactional step. The
+    /// write transaction is the cross-process gate: only one writer can
+    /// insert while the table is empty.
+    pub fn try_acquire_foreground(
+        &self,
+        task_id: &str,
+    ) -> OfficeResult<Option<ForegroundLease<'_>>> {
+        let tx = self.store.transaction()?;
+        let held: i64 = tx.query_row("SELECT COUNT(*) FROM foreground_leases", [], |r| r.get(0))?;
+        if held > 0 {
+            drop(tx);
+            return Ok(None);
         }
-        *holder = Some(task_id.to_string());
-        Some(ForegroundLease {
-            coordinator: Arc::clone(self),
+        let insert = tx.execute(
+            "INSERT INTO foreground_leases(task_id, acquired_at) VALUES (?1, ?2)",
+            rusqlite::params![task_id, utc_now()],
+        );
+        if let Err(err) = insert {
+            drop(tx);
+            if matches!(err, rusqlite::Error::SqliteFailure(_, _)) {
+                return Ok(None); // another process won the race
+            }
+            return Err(err.into());
+        }
+        tx.commit()?;
+        Ok(Some(ForegroundLease {
+            coordinator: self,
             task_id: task_id.to_string(),
-        })
+        }))
+    }
+
+    /// Block until this task holds the single foreground lane (bounded by
+    /// the acquire timeout — waiting forever would wedge the host).
+    pub fn acquire_foreground(&self, task_id: &str) -> OfficeResult<ForegroundLease<'_>> {
+        let deadline = std::time::Instant::now() + self.acquire_timeout;
+        loop {
+            if let Some(lease) = self.try_acquire_foreground(task_id)? {
+                return Ok(lease);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(OfficeError::Validation(format!(
+                    "the foreground input lane is still held after {}s — pausing instead of \
+                     interleaving keystrokes",
+                    self.acquire_timeout.as_secs()
+                )));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
     }
 
     /// Who holds the lane right now (observability).
-    pub fn holder(&self) -> Option<String> {
-        self.holder.lock().expect("lease lock").clone()
+    pub fn holder(&self) -> OfficeResult<Option<String>> {
+        let row: Option<String> = self
+            .store
+            .connection()
+            .query_row("SELECT task_id FROM foreground_leases LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        Ok(row)
     }
 }
 
@@ -258,8 +303,14 @@ pub struct ActionSpec {
     pub target: String,
     /// Full argv of the action (after the program).
     pub argv: Vec<String>,
-    /// Marker that must appear in the post-action state.
+    /// Marker that must appear in the post-action locator state (the
+    /// world after the action).
     pub expect_post: String,
+    /// Marker that must appear in the ACTION's own output — the actual
+    /// observation. Without this, a read-only action whose world is
+    /// unchanged would always "verify" against the locator alone
+    /// (tautological verification, QA finding).
+    pub expect_action_output: Option<String>,
     /// Foreground input serializes on the global lease.
     pub foreground: bool,
 }
@@ -304,7 +355,9 @@ pub struct ActionRecord {
 /// The two low-risk smoke tasks (issue acceptance: one browser task, one
 /// native-app task, each locate → act → verify with evidence). Both are
 /// read-only inspections through the real tools: they prove the chain
-/// without typing anywhere.
+/// without typing anywhere. Verification checks the ACTION'S OWN output
+/// (the observation), not just an unchanged world state, and the visual
+/// capture stays on — the screenshot is part of the before/after evidence.
 pub fn smoke_specs() -> Vec<(String, ActionSpec)> {
     vec![
         (
@@ -322,6 +375,7 @@ pub fn smoke_specs() -> Vec<(String, ActionSpec)> {
                     "--json".into(),
                 ],
                 expect_post: "Google Chrome".into(),
+                expect_action_output: Some("windows".into()),
                 foreground: false,
             },
         ),
@@ -338,9 +392,9 @@ pub fn smoke_specs() -> Vec<(String, ActionSpec)> {
                     "--app".into(),
                     "Finder".into(),
                     "--json".into(),
-                    "--no-screenshot".into(),
                 ],
                 expect_post: "Finder".into(),
+                expect_action_output: Some("snapshot".into()),
                 foreground: false,
             },
         ),
@@ -354,29 +408,19 @@ pub fn smoke_specs() -> Vec<(String, ActionSpec)> {
 pub struct ComputerEngine<'a> {
     store: &'a Store,
     runner: Box<dyn ToolRunner>,
-    coordinator: Arc<ForegroundCoordinator>,
 }
 
 impl<'a> ComputerEngine<'a> {
-    pub fn new(store: &'a Store, coordinator: Arc<ForegroundCoordinator>) -> Self {
+    pub fn new(store: &'a Store) -> Self {
         Self {
             store,
             runner: Box::new(ProcessRunner::default()),
-            coordinator,
         }
     }
 
     /// Test/bespoke seam: a scripted runner.
-    pub fn with_runner(
-        store: &'a Store,
-        coordinator: Arc<ForegroundCoordinator>,
-        runner: Box<dyn ToolRunner>,
-    ) -> Self {
-        Self {
-            store,
-            runner,
-            coordinator,
-        }
+    pub fn with_runner(store: &'a Store, runner: Box<dyn ToolRunner>) -> Self {
+        Self { store, runner }
     }
 
     // -- Audit -----------------------------------------------------------------
@@ -497,8 +541,11 @@ impl<'a> ComputerEngine<'a> {
         let _ = authorized;
 
         // Foreground actions take the single input lane; reads don't.
+        // The coordinator is a per-call view over the shared store — the
+        // lease row itself carries the exclusion across processes.
+        let foreground_coordinator = ForegroundCoordinator::new(self.store);
         let _lease = if spec.foreground {
-            Some(self.coordinator.acquire_foreground(task_id.as_str()))
+            Some(foreground_coordinator.acquire_foreground(task_id.as_str())?)
         } else {
             None
         };
@@ -577,23 +624,38 @@ impl<'a> ComputerEngine<'a> {
             }
         };
 
-        // Verify: the expected marker must appear in the post-action
-        // locator state.
+        // Verify on BOTH axes: the action's own output must contain its
+        // observation marker (the actual effect/observation), and the
+        // post-action locator state must contain the world marker. Two
+        // independent checks — neither alone can tautologically pass.
         let post_text = self
             .runner
             .run(spec.program, &spec.locator)
             .map_err(|failure| {
                 OfficeError::Validation(format!("post-action verify failed: {failure}"))
             })?;
-        let (state, reason) = if post_text.contains(&spec.expect_post) {
+        let mut failures: Vec<String> = Vec::new();
+        if let (Some(marker), Some(output)) = (&spec.expect_action_output, &action_output) {
+            if !output.contains(marker) {
+                failures.push(format!(
+                    "the action's own output does not show the expected observation `{marker}`"
+                ));
+            }
+        }
+        if !post_text.contains(&spec.expect_post) {
+            failures.push(format!(
+                "the post-action state does not show `{}`",
+                spec.expect_post
+            ));
+        }
+        let (state, reason) = if failures.is_empty() {
             (ActionState::Executed, None)
         } else {
             (
                 ActionState::Failed,
                 Some(format!(
-                    "expected `{}` after the action, but the post-action state does not \
-                     show it — recorded as failed, not as success",
-                    spec.expect_post
+                    "{} — recorded as failed, not as success",
+                    failures.join("; ")
                 )),
             )
         };
@@ -614,6 +676,11 @@ impl<'a> ComputerEngine<'a> {
             recorded_at: utc_now(),
         })?;
         Ok(record)
+    }
+
+    /// Who holds the foreground lane right now (observability).
+    pub fn holder(&self) -> OfficeResult<Option<String>> {
+        ForegroundCoordinator::new(self.store).holder()
     }
 
     pub fn actions_for_task(&self, task_id: &TaskId) -> OfficeResult<Vec<ActionRecord>> {
@@ -703,14 +770,32 @@ mod tests {
 
     #[test]
     fn foreground_lane_serializes_and_reads_do_not_queue() {
-        let coordinator = ForegroundCoordinator::new();
-        let lease = coordinator.acquire_foreground("task-a");
-        assert_eq!(coordinator.holder().as_deref(), Some("task-a"));
+        let frozen = crate::foundation::store::MigrationRegistry::new()
+            .register(
+                crate::foundation::store::DOMAIN_TOOLS_COMPUTER,
+                1,
+                "tools computer v1",
+                TOOLS_COMPUTER_V1_SQL,
+            )
+            .freeze()
+            .expect("registry");
+        let store = crate::foundation::store::Store::open_in_memory(&frozen).expect("store");
+        let coordinator = ForegroundCoordinator::new(&store);
+        let lease = coordinator.acquire_foreground("task-a").expect("acquire");
+        assert_eq!(
+            coordinator.holder().expect("holder").as_deref(),
+            Some("task-a")
+        );
         // A second task cannot take the lane while it is held.
-        assert!(coordinator.try_acquire_foreground("task-b").is_none());
+        assert!(
+            coordinator
+                .try_acquire_foreground("task-b")
+                .expect("try")
+                .is_none()
+        );
         // An independent (non-foreground) context needs no lane at all.
         drop(lease);
-        let next = coordinator.try_acquire_foreground("task-b");
+        let next = coordinator.try_acquire_foreground("task-b").expect("try");
         assert!(next.is_some(), "the lane frees on drop");
     }
 }

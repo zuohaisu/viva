@@ -134,14 +134,18 @@ fn knowledge_review_is_repeatable_without_duplicates() {
         .expect("exists");
     assert_eq!(item.status, viva::knowledge::KnowledgeStatus::Active);
 
-    // Resolve it, then a re-run still proposes nothing new (the item is no
-    // longer active; the resolved proposal keeps its record).
-    let actor = Actor::Member {
-        member: MemberId::new(),
-        grant: None,
-    };
+    // Resolve it with an authorized dismissal, then a re-run still
+    // proposes nothing new: a dismissal is a standing human decision and
+    // its subject stays silent (generation unchanged).
+    let authority = AuthorityEngine::new(&store);
+    let dismiss_actor = granted_actor(&authority);
     maintenance
-        .dismiss_proposal(&first_id, &actor, "owner: still relevant, keep it")
+        .dismiss_proposal(
+            &first_id,
+            &dismiss_actor,
+            &authority,
+            "owner: still relevant, keep it",
+        )
         .expect("dismiss");
     let third = maintenance
         .review_knowledge(&session, &registry, 365)
@@ -150,7 +154,48 @@ fn knowledge_review_is_repeatable_without_duplicates() {
         third.proposed.is_empty(),
         "dismissed proposals do not resurrect"
     );
+
+    // Dismissal without a live grant is refused and logged.
+    let second_stale = make_item(&registry, dir.path(), "stale2", "Second aged item");
+    store
+        .connection()
+        .execute(
+            "UPDATE knowledge_items SET updated_at = '2021-01-01T00:00:00Z' WHERE item_id = ?1",
+            [&second_stale],
+        )
+        .expect("age item 2");
+    let report2 = maintenance
+        .review_knowledge(&session, &registry, 365)
+        .expect("review 2");
+    assert_eq!(report2.proposed.len(), 1, "the second stale item proposes");
+    let bare = Actor::Member {
+        member: MemberId::new(),
+        grant: None,
+    };
+    let err = maintenance
+        .dismiss_proposal(&report2.proposed[0].proposal_id, &bare, &authority, "sneak")
+        .expect_err("dismissal needs a live maintain_knowledge grant");
+    assert!(err.to_string().contains("not authorized"), "got: {err}");
     session.end(&store).expect("session ends");
+}
+
+/// An office-wide ACT grant covering maintenance (the shape an owner
+/// issues through `viva office grant`).
+fn granted_actor(authority: &AuthorityEngine<'_>) -> Actor {
+    let member = MemberId::new();
+    let grant = authority
+        .issue_root_grant(
+            Some(member.clone()),
+            None,
+            vec!["maintain_knowledge".into()],
+            GrantMode::ActWithApproval,
+            None,
+        )
+        .expect("grant");
+    Actor::Member {
+        member,
+        grant: Some(grant.grant_id),
+    }
 }
 
 /// Acceptance: "知识/技能退出保留来源/理由与可取回路径" — archiving goes
@@ -504,4 +549,127 @@ fn skills_with_real_usage_are_not_proposed() {
         report.proposed
     );
     session.end(&store).expect("ends");
+}
+
+/// A dismissed proposal keeps its subject silent; an EXECUTED one whose
+/// condition re-enters the scan population (skill re-enabled, still idle)
+/// proposes again as a new generation — no UNIQUE collision, no silence.
+#[test]
+fn executed_cycle_reproposes_but_dismissal_stays_silent() {
+    let store = store();
+    let authority = AuthorityEngine::new(&store);
+    let registry = KnowledgeRegistry::new(&store);
+    let maintenance = MaintenanceService::new(&store);
+    let dir = tempfile::TempDir::new().expect("dir");
+
+    let entry = dir.path().join("flaky-skill");
+    std::fs::create_dir_all(&entry).expect("dir");
+    std::fs::write(entry.join("SKILL.md"), "# flaky").expect("SKILL.md");
+    let skill = registry
+        .register_skill(
+            "Flaky skill",
+            entry.join("SKILL.md"),
+            "imported",
+            None,
+            vec![],
+        )
+        .expect("skill");
+
+    let session = MaintenanceSession::open(&store).expect("session");
+    let first = maintenance
+        .review_knowledge(&session, &registry, 365)
+        .expect("review 1");
+    assert_eq!(first.proposed.len(), 1, "the idle skill proposes");
+
+    // Execute the disable.
+    let actor = granted_actor(&authority);
+    maintenance
+        .execute_proposal(
+            &first.proposed[0].proposal_id,
+            &actor,
+            &authority,
+            &registry,
+            "agreed",
+        )
+        .expect("execute");
+
+    // Owner re-enables the skill; it is still idle → a NEW proposal.
+    registry
+        .set_skill_enabled(&skill.skill_id, true)
+        .expect("re-enable");
+    let second = maintenance
+        .review_knowledge(&session, &registry, 365)
+        .expect("review 2");
+    assert_eq!(
+        second.proposed.len(),
+        1,
+        "the re-entered condition proposes as a new generation"
+    );
+    assert_ne!(
+        second.proposed[0].proposal_id, first.proposed[0].proposal_id,
+        "distinct proposal rows"
+    );
+
+    // Dismiss the new one: it must stay silent on later scans.
+    maintenance
+        .dismiss_proposal(
+            &second.proposed[0].proposal_id,
+            &actor,
+            &authority,
+            "keep it",
+        )
+        .expect("dismiss");
+    let third = maintenance
+        .review_knowledge(&session, &registry, 365)
+        .expect("review 3");
+    assert!(third.proposed.is_empty(), "dismissal silences its subject");
+    session.end(&store).expect("ends");
+}
+
+/// A disabled skill is actually retired from task-context selection —
+/// office state gates injection (QA finding: `enabled` had no readers).
+#[test]
+fn disabled_skills_leave_task_context_selection() {
+    let store = store();
+    let registry = KnowledgeRegistry::new(&store);
+    let dir = tempfile::TempDir::new().expect("dir");
+
+    let entry = dir.path().join("noisy-skill");
+    std::fs::create_dir_all(&entry).expect("dir");
+    std::fs::write(entry.join("SKILL.md"), "# noisy deploy skill").expect("SKILL.md");
+    let skill = registry
+        .register_skill(
+            "Deploy runbook helper",
+            entry.join("SKILL.md"),
+            "imported",
+            None,
+            vec![],
+        )
+        .expect("skill");
+
+    let viewer = MemberId::new();
+    let ctx = viva::knowledge::SelectionContext {
+        viewer_member_id: viewer,
+        project_id: None,
+    };
+    let select = |enabled: bool| -> usize {
+        registry
+            .set_skill_enabled(&skill.skill_id, enabled)
+            .expect("set enabled");
+        registry
+            .select_for_context(
+                &ctx,
+                &["deploy"],
+                viva::knowledge::SelectionOptions::default(),
+            )
+            .expect("select")
+            .len()
+    };
+
+    assert_eq!(select(true), 1, "an enabled skill is selectable");
+    assert_eq!(
+        select(false),
+        0,
+        "a disabled skill leaves the task context — disable is real"
+    );
 }

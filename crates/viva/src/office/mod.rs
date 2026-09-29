@@ -685,12 +685,29 @@ fn dispatch(
         ))
     })?;
 
+    // The grant must BELONG to the dispatching member: a member's grant
+    // never serves another member's dispatch, even for the same task.
+    // Checked before the authority verdict so the actionable message wins
+    // (the engine enforces the same rule for every other path).
+    let authority = AuthorityEngine::new(&store);
+    let grant = authority.require_grant(&grant_id)?;
+    if grant.principal_member_id.as_ref() != Some(&member_id) {
+        return Err(OfficeError::Validation(format!(
+            "dispatch denied: grant `{grant_id}` was not issued to member `{member_id}` \
+             (principal: {:?}) — grants are not transferable between members",
+            grant
+                .principal_member_id
+                .as_ref()
+                .map(|m| m.to_string())
+                .unwrap_or_else(|| "<none>".into())
+        )));
+    }
+
     // Authorization: the grant must be live, in scope for this task, and
     // carry a dispatch action in an ACT_* mode. Revocation races are
     // denied here, at the moment of effect — not at request time. `check`
     // layers two results: storage failures and the authorization verdict
     // itself; both must be honored.
-    let authority = AuthorityEngine::new(&store);
     match authority.check(
         &Actor::Member {
             member: member_id.clone(),
@@ -706,20 +723,6 @@ fn dispatch(
             )));
         }
         Err(err) => return Err(err),
-    }
-    // The grant must BELONG to the dispatching member: a member's grant
-    // never serves another member's dispatch, even for the same task.
-    let grant = authority.require_grant(&grant_id)?;
-    if grant.principal_member_id.as_ref() != Some(&member_id) {
-        return Err(OfficeError::Validation(format!(
-            "dispatch denied: grant `{grant_id}` was not issued to member `{member_id}` \
-             (principal: {:?}) — grants are not transferable between members",
-            grant
-                .principal_member_id
-                .as_ref()
-                .map(|m| m.to_string())
-                .unwrap_or_else(|| "<none>".into())
-        )));
     }
 
     let tasks = TaskRegistry::new(&store);

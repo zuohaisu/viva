@@ -180,9 +180,11 @@ fn spec(target: &str, fg: bool) -> ActionSpec {
             "--app".into(),
             target.into(),
         ],
-        // The verify marker is checked against the post locator output:
-        // the target app must still be visible after the action.
+        // Verify markers on BOTH axes: the action's own output must show
+        // the observation (the app state JSON), and the post locator must
+        // still show the target.
         expect_post: target.to_string(),
+        expect_action_output: Some("windows".into()),
         foreground: fg,
     }
 }
@@ -205,11 +207,8 @@ fn target_drift_and_permission_gaps_never_fake_success() {
     let runner =
         Arc::new(ScriptedRunner::new().respond("list-apps", r#"{"apps":[{"name":"Finder"}]}"#));
     {
-        let engine = ComputerEngine::with_runner(
-            &store,
-            ForegroundCoordinator::new(),
-            Box::new(SharedRunner(Arc::clone(&runner))),
-        );
+        let engine =
+            ComputerEngine::with_runner(&store, Box::new(SharedRunner(Arc::clone(&runner))));
         let record = engine
             .execute(&authority, &actor, &task, &spec("Google Chrome", false))
             .expect("the refusal is recorded");
@@ -230,11 +229,7 @@ fn target_drift_and_permission_gaps_never_fake_success() {
     // Locator failure (missing permission, broken tool): honest failure.
     let runner =
         Arc::new(ScriptedRunner::new().fail_on("list-apps", "accessibility permission missing"));
-    let engine = ComputerEngine::with_runner(
-        &store,
-        ForegroundCoordinator::new(),
-        Box::new(SharedRunner(runner)),
-    );
+    let engine = ComputerEngine::with_runner(&store, Box::new(SharedRunner(runner)));
     let record = engine
         .execute(&authority, &actor, &task, &spec("Finder", false))
         .expect("the failure is recorded");
@@ -256,11 +251,7 @@ fn target_drift_and_permission_gaps_never_fake_success() {
             .respond("get-app-state", FINDER_STATE)
             .respond_after_action("list-apps", r#"{"apps":[]}"#),
     );
-    let engine = ComputerEngine::with_runner(
-        &store,
-        ForegroundCoordinator::new(),
-        Box::new(SharedRunner(runner)),
-    );
+    let engine = ComputerEngine::with_runner(&store, Box::new(SharedRunner(runner)));
     let record = engine
         .execute(&authority, &actor, &task, &spec("Finder", false))
         .expect("recorded");
@@ -271,6 +262,29 @@ fn target_drift_and_permission_gaps_never_fake_success() {
             .as_deref()
             .unwrap_or("")
             .contains("recorded as failed"),
+        "got: {:?}",
+        record.reason
+    );
+
+    // Verification axis two: the action's OWN output lacking the expected
+    // observation also fails, even when the world state looks unchanged —
+    // a tautological locator check can no longer pass alone (QA finding).
+    let runner = Arc::new(
+        ScriptedRunner::new()
+            .respond("list-apps", APP_LIST)
+            .respond("get-app-state", r#"{"note":"no observation here"}"#),
+    );
+    let engine = ComputerEngine::with_runner(&store, Box::new(SharedRunner(runner)));
+    let record = engine
+        .execute(&authority, &actor, &task, &spec("Finder", false))
+        .expect("recorded");
+    assert_eq!(record.state, ActionState::Failed);
+    assert!(
+        record
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("own output does not show"),
         "got: {:?}",
         record.reason
     );
@@ -290,11 +304,7 @@ fn actions_are_task_scoped_and_grant_gated() {
             .respond("list-apps", APP_LIST)
             .respond("get-app-state", FINDER_STATE),
     );
-    let engine = ComputerEngine::with_runner(
-        &store,
-        ForegroundCoordinator::new(),
-        Box::new(SharedRunner(Arc::clone(&runner))),
-    );
+    let engine = ComputerEngine::with_runner(&store, Box::new(SharedRunner(Arc::clone(&runner))));
 
     // No grant: refused, nothing executed, denial logged.
     let bare = Actor::Member {
@@ -367,11 +377,9 @@ fn foreground_lane_serializes_but_reads_run_free() {
         actor_with_grant(&authority, Some(&task_b), GrantMode::ActAutonomously);
     }
 
-    let coordinator = ForegroundCoordinator::new();
-
     // Task B: a foreground action whose tool call is slow — it holds the
-    // lane for a while. Its own file-backed store sees the same grants.
-    let coordinator_b = Arc::clone(&coordinator);
+    // lane for a while. Its own CONNECTION to the same file shares the
+    // lease row, exactly like two separate `viva` processes would.
     let task_for_b = task_b.clone();
     let db_for_b = db.clone();
     let handle = std::thread::spawn(move || {
@@ -395,23 +403,26 @@ fn foreground_lane_serializes_but_reads_run_free() {
             .respond("list-apps", APP_LIST)
             .respond("get-app-state", FINDER_STATE)
             .with_action_delay(std::time::Duration::from_millis(250));
-        let engine = ComputerEngine::with_runner(
-            &store,
-            coordinator_b,
-            Box::new(SharedRunner(Arc::new(runner))),
-        );
+        let engine = ComputerEngine::with_runner(&store, Box::new(SharedRunner(Arc::new(runner))));
+        let holder = engine.holder().expect("holder");
+        assert!(holder.is_none(), "the lane starts free");
         engine
             .execute(&authority, &actor, &task_for_b, &spec("Finder", true))
             .expect("b executed")
     });
 
-    // While B is mid-action, the lane is B's.
+    // While B is mid-action, the lane is B's — visible from A's own
+    // separate connection.
     std::thread::sleep(std::time::Duration::from_millis(80));
-    assert_eq!(
-        coordinator.holder().as_deref(),
-        Some(task_b.as_str()),
-        "B holds the foreground lane while its action runs"
-    );
+    {
+        let store = Store::open(&db, &frozen()).expect("store check");
+        let coordinator = ForegroundCoordinator::new(&store);
+        assert_eq!(
+            coordinator.holder().expect("holder").as_deref(),
+            Some(task_b.as_str()),
+            "B holds the foreground lane while its action runs (cross-connection)"
+        );
+    }
 
     // A's independent read context does not wait for the lane.
     {
@@ -434,11 +445,7 @@ fn foreground_lane_serializes_but_reads_run_free() {
         let runner = ScriptedRunner::new()
             .respond("list-apps", APP_LIST)
             .respond("get-app-state", FINDER_STATE);
-        let engine = ComputerEngine::with_runner(
-            &store,
-            Arc::clone(&coordinator),
-            Box::new(SharedRunner(Arc::new(runner))),
-        );
+        let engine = ComputerEngine::with_runner(&store, Box::new(SharedRunner(Arc::new(runner))));
         let started = std::time::Instant::now();
         let record = engine
             .execute(&authority, &actor, &task_a, &spec("Finder", false))
@@ -464,11 +471,16 @@ fn foreground_lane_serializes_but_reads_run_free() {
             started.elapsed() >= std::time::Duration::from_millis(100),
             "the foreground action really waited for the lane"
         );
+        let coordinator = ForegroundCoordinator::new(&store);
+        assert_eq!(
+            coordinator.holder().expect("holder"),
+            None,
+            "the lane frees afterwards"
+        );
     }
 
     let record_b = handle.join().expect("b joins");
     assert_eq!(record_b.state, ActionState::Executed);
-    assert_eq!(coordinator.holder(), None, "the lane frees afterwards");
 }
 
 /// Acceptance: "核查当前可调用工具与权限" — the audit probes the reused
@@ -481,11 +493,7 @@ fn audit_records_what_it_could_really_probe() {
 
     // orca probes fine; the other tool is missing on this fake host.
     let runner = ScriptedRunner::new().respond("capabilities", "orca-computer-use-macos");
-    let engine = ComputerEngine::with_runner(
-        &store,
-        ForegroundCoordinator::new(),
-        Box::new(SharedRunner(Arc::new(runner))),
-    );
+    let engine = ComputerEngine::with_runner(&store, Box::new(SharedRunner(Arc::new(runner))));
     let reports = engine.audit().expect("audit");
     assert_eq!(reports.len(), AUDITED_TOOLS.len());
 

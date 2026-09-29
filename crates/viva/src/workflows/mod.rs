@@ -54,8 +54,12 @@ CREATE TABLE workflow_configs (
 );
 
 -- One run per delivery attempt of a task. At most one run may be active
--- (running or paused) per task: the task is the single delivery state
--- source, runs never compete with it.
+-- (running or paused) per task.
+-- Layered-state semantics (mirrors V03's launch intents): run status and
+-- current_step are PROCESS facts (where the workflow is), never delivery
+-- facts. Nothing here closes, fails or reopens a task — the task's own
+-- status changes only through appended task_outcomes, so the two layers
+-- cannot compete for the same fact.
 CREATE TABLE workflow_runs (
     run_id        TEXT PRIMARY KEY,
     task_id       TEXT NOT NULL REFERENCES tasks(task_id),
@@ -335,12 +339,16 @@ impl WorkflowConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepEvidence {
     pub kind: String,
+    #[serde(default)]
     pub head_sha: Option<String>,
+    #[serde(default)]
     pub note: String,
-    /// For `authorization` evidence: the live owner grant covering
-    /// `deliver_pr`. Checked against the authority engine at record time.
+    /// The live owner grant authorizing a dispatch-class step. Checked
+    /// against the authority engine at record time.
+    #[serde(default)]
     pub grant_id: Option<String>,
     /// External references worth keeping (PR URL, CI run URL, …).
+    #[serde(default)]
     pub references: Vec<String>,
 }
 
@@ -435,7 +443,7 @@ impl StepOutcome {
 }
 
 /// What recording one result decided.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum StepAdvance {
     /// The step passed; the run moved to the next step, or completed.
     Passed { next_step: Option<String> },
@@ -448,7 +456,7 @@ pub enum StepAdvance {
     Paused { reason: String },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunHistory {
     pub run: WorkflowRun,
     pub config: WorkflowConfig,
@@ -818,10 +826,13 @@ impl<'a> WorkflowEngine<'a> {
     }
 
     /// A passing step must really stand on evidence: every requirement is
-    /// covered by a matching item, and the `authorization` requirement is
-    /// checked against the authority engine — a live owner grant covering
-    /// `deliver_pr`. Anything else is rejected before a record is written
-    /// (the authority engine appends its own denial).
+    /// covered by a matching item with the required head binding, and —
+    /// structurally, independent of what the config declares — a step
+    /// whose action is dispatch-class (a world-mutating action such as
+    /// `deliver_pr`) can only pass with `authorization` evidence citing a
+    /// live owner grant. An empty `requires_evidence` list can therefore
+    /// never bypass authorization (QA finding: the grant check was keyed
+    /// on an evidence kind a config could omit).
     fn enforce_requirements(
         &self,
         actor: &MemberId,
@@ -829,6 +840,10 @@ impl<'a> WorkflowEngine<'a> {
         step: &WorkflowStep,
         evidence: &[StepEvidence],
     ) -> OfficeResult<()> {
+        let needs_authorization = step
+            .action
+            .as_deref()
+            .is_some_and(AuthorityEngine::is_dispatch_action);
         for requirement in &step.requires_evidence {
             let covered = evidence.iter().any(|item| item.kind == requirement.kind);
             if !covered {
@@ -848,34 +863,42 @@ impl<'a> WorkflowEngine<'a> {
                     )));
                 }
             }
-            if requirement.kind == "authorization" {
-                let item = evidence
-                    .iter()
-                    .find(|item| item.kind == "authorization")
-                    .expect("covered above");
-                let grant_id = item.grant_id.as_deref().ok_or_else(|| {
+        }
+        if needs_authorization {
+            let action = step.action.as_deref().expect("checked above");
+            let item = evidence
+                .iter()
+                .find(|item| item.kind == "authorization")
+                .ok_or_else(|| {
                     OfficeError::Validation(format!(
-                        "step `{}` authorization evidence must cite the owner grant id",
+                        "step `{}` performs the world-mutating action `{action}` — passing it \
+                         requires authorization evidence citing the owner grant",
                         step.step_id
                     ))
                 })?;
-                let grant_id = GrantId::from_str(grant_id).map_err(|err| {
-                    OfficeError::Validation(format!("authorization grant id invalid: {err}"))
-                })?;
-                let engine = AuthorityEngine::new(self.store);
-                let decision = engine.check(
-                    &Actor::Member {
-                        member: actor.clone(),
-                        grant: Some(grant_id),
-                    },
-                    step.action.as_deref().unwrap_or("deliver_pr"),
-                    Some(&run.task_id),
-                )?;
-                if let Err(reason) = decision {
-                    return Err(OfficeError::Validation(format!(
-                        "delivery authorization rejected: {reason}"
-                    )));
-                }
+            let grant_id = item.grant_id.as_deref().ok_or_else(|| {
+                OfficeError::Validation(format!(
+                    "step `{}` authorization evidence must cite the owner grant id",
+                    step.step_id
+                ))
+            })?;
+            let grant_id = GrantId::from_str(grant_id).map_err(|err| {
+                OfficeError::Validation(format!("authorization grant id invalid: {err}"))
+            })?;
+            let engine = AuthorityEngine::new(self.store);
+            let decision = engine.check(
+                &Actor::Member {
+                    member: actor.clone(),
+                    grant: Some(grant_id),
+                },
+                action,
+                Some(&run.task_id),
+            )?;
+            if let Err(reason) = decision {
+                return Err(OfficeError::Validation(format!(
+                    "step `{}` authorization rejected: {reason}",
+                    step.step_id
+                )));
             }
         }
         Ok(())

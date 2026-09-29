@@ -91,6 +91,10 @@ def main() -> int:
     p_search.add_argument("--query", required=True)
     p_search.add_argument("--limit", type=int, default=10)
 
+    p_probe = common(sub.add_parser("probe"))
+    p_probe.add_argument("--entity", required=True)
+    p_probe.add_argument("--limit", type=int, default=10)
+
     p_add = common(sub.add_parser("add"))
     p_add.add_argument("--content", required=True)
     p_add.add_argument("--category", default="general")
@@ -116,6 +120,13 @@ def main() -> int:
             # The provider's search answers under "results"; "list" answers
             # under "facts" — verified against the live checkout.
             emit({"ok": True, "state": "fetched", "facts": payload.get("results", [])})
+        elif args.command == "probe":
+            raw = provider.handle_tool_call(
+                "fact_store",
+                {"action": "probe", "entity": args.entity, "limit": max(1, args.limit)},
+            )
+            payload = json.loads(raw)
+            emit({"ok": True, "state": "fetched", "facts": payload.get("results", [])})
         elif args.command == "add":
             raw = provider.handle_tool_call(
                 "fact_store",
@@ -138,12 +149,22 @@ def main() -> int:
             raw = provider.handle_tool_call(
                 "fact_store", {"action": "list", "limit": 1}
             )
-            json.loads(raw)
+            payload = json.loads(raw)
+            # Honest degradation visibility: the provider silently falls
+            # back to FTS/Jaccard when NumPy is missing — surface that.
+            try:
+                import numpy  # noqa: F401
+
+                hrr = "active"
+            except Exception:  # noqa: BLE001
+                hrr = "degraded (NumPy missing: HRR reranking off)"
             emit(
                 {
                     "ok": True,
                     "state": "fetched",
                     "store": str(Path(args.db).expanduser()) if args.db else "default",
+                    "facts_total": payload.get("count"),
+                    "hrr": hrr,
                 }
             )
     except Exception as err:  # noqa: BLE001

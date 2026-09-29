@@ -29,13 +29,25 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::authority::{Actor, AuthorityEngine};
 use crate::foundation::error::{OfficeError, OfficeResult};
 use crate::foundation::ids::{MemberId, ProjectId, utc_now};
 use crate::foundation::store::{DOMAIN_MEMORY, MigrationRegistry, Store};
 
-/// Register the `memory` domain migrations (F04's namespace).
+/// Register the `memory` domain migrations (F04's namespace). v2 re-scopes
+/// links to (fact_id, member): the external store dedupes content across
+/// writers, but each member's claim on a fact is its own row — the v1
+/// UNIQUE(fact_id) silently handed the first writer's link to everyone
+/// else (QA finding).
 pub fn register_migrations(registry: MigrationRegistry) -> MigrationRegistry {
-    registry.register(DOMAIN_MEMORY, 1, "memory v1", MEMORY_V1_SQL)
+    registry
+        .register(DOMAIN_MEMORY, 1, "memory v1", MEMORY_V1_SQL)
+        .register(
+            DOMAIN_MEMORY,
+            2,
+            "memory v2 per-member links",
+            MEMORY_V2_SQL,
+        )
 }
 
 pub const MEMORY_V1_SQL: &str = r#"
@@ -67,6 +79,31 @@ CREATE TABLE memory_usages (
 );
 "#;
 
+pub const MEMORY_V2_SQL: &str = r#"
+-- One claim per (fact, member). The provider dedupes content globally, so
+-- two members writing the same text share the underlying fact row; their
+-- links, sources and exit states stay separate.
+CREATE TABLE memory_links_v2 (
+    link_id         TEXT PRIMARY KEY,
+    fact_id         INTEGER NOT NULL,
+    member_id       TEXT NOT NULL,
+    project_id      TEXT,
+    source          TEXT NOT NULL CHECK (length(trim(source)) > 0),
+    status          TEXT NOT NULL DEFAULT 'active'
+                    CHECK (status IN ('active', 'archived')),
+    created_at      TEXT NOT NULL,
+    archived_at     TEXT,
+    archived_reason TEXT,
+    UNIQUE (fact_id, member_id)
+);
+INSERT INTO memory_links_v2
+    SELECT link_id, fact_id, member_id, project_id, source, status,
+           created_at, archived_at, archived_reason
+    FROM memory_links;
+DROP TABLE memory_links;
+ALTER TABLE memory_links_v2 RENAME TO memory_links;
+"#;
+
 // ---------------------------------------------------------------------------
 // Adapter configuration
 // ---------------------------------------------------------------------------
@@ -85,6 +122,11 @@ pub struct AdapterConfig {
 impl AdapterConfig {
     /// Environment-driven defaults. `VIVA_MEMORY_PYTHON`,
     /// `VIVA_HERMES_AGENT`, `VIVA_MEMORY_DB`, `VIVA_MEMORY_ADAPTER`.
+    ///
+    /// When the python is not pinned by env, the checkout's own venv is
+    /// preferred: the bundled plugin package imports YAML tooling that a
+    /// bare system python lacks (verified: a system python answers
+    /// `unavailable: No module named 'ruamel'`).
     pub fn from_env() -> Self {
         let home = std::env::var("HOME").unwrap_or_default();
         let env_path = |key: &str, default: &str| -> PathBuf {
@@ -92,13 +134,25 @@ impl AdapterConfig {
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from(default.replace('~', &home)))
         };
+        let agent_dir = env_path("VIVA_HERMES_AGENT", "~/.hermes/hermes-agent");
+        let python = match std::env::var("VIVA_MEMORY_PYTHON") {
+            Ok(pinned) => PathBuf::from(pinned),
+            Err(_) => {
+                let venv_python = agent_dir.join("venv").join("bin").join("python");
+                if venv_python.is_file() {
+                    venv_python
+                } else {
+                    PathBuf::from("python3")
+                }
+            }
+        };
         Self {
-            python: env_path("VIVA_MEMORY_PYTHON", "python3"),
+            python,
             adapter_script: env_path(
                 "VIVA_MEMORY_ADAPTER",
                 "extensions/pi/memory/memory_adapter.py",
             ),
-            agent_dir: env_path("VIVA_HERMES_AGENT", "~/.hermes/hermes-agent"),
+            agent_dir,
             db_path: env_path("VIVA_MEMORY_DB", "~/.hermes/memory_store.db"),
         }
     }
@@ -188,6 +242,10 @@ struct AdapterAnswer {
     facts: Vec<AdapterFact>,
     #[serde(default)]
     fact: Option<AdapterAddedFact>,
+    #[serde(default)]
+    hrr: Option<String>,
+    #[serde(default)]
+    facts_total: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -232,12 +290,27 @@ impl<'a> MemoryService<'a> {
         &self.adapter
     }
 
+    /// Run the adapter's real status command (a read-only `list` through
+    /// the provider) so readiness is reported from an actual round trip —
+    /// never from file existence alone.
+    pub fn probe_adapter_status(&self) -> OfficeResult<serde_json::Value> {
+        let answer = self.run_adapter(json!({ "command": "status" }))?;
+        Ok(json!({
+            "ok": answer.ok,
+            "state": answer.state,
+            "error": answer.error,
+            "hrr": answer.hrr,
+            "facts_total": answer.facts_total,
+        }))
+    }
+
     // -- Writing ---------------------------------------------------------------
 
     /// Write one fact through the real provider and link it to its writer.
-    /// The source is mandatory provenance; a duplicate content resolves to
-    /// the existing fact and the first source wins (the fact is one asset,
-    /// not one per writer).
+    /// The source is mandatory provenance. The provider dedupes identical
+    /// content to one underlying fact row; each writer still gets their
+    /// OWN link (claim + source + exit state), so a second member writing
+    /// the same text never inherits the first member's link.
     pub fn remember(
         &self,
         member: &MemberId,
@@ -281,7 +354,8 @@ impl<'a> MemoryService<'a> {
     }
 
     /// Link an existing external fact id (e.g. re-adopting a fact after a
-    /// harness switch, resolved through the same asset reference).
+    /// harness switch, resolved through the same asset reference). Idempotent
+    /// per member: re-linking one's own fact returns the existing link.
     pub fn link_fact(
         &self,
         fact_id: i64,
@@ -294,9 +368,8 @@ impl<'a> MemoryService<'a> {
                 "memory links require a source".into(),
             ));
         }
-        let existing = self.link_of(fact_id)?;
-        if let Some(link) = existing {
-            return Ok(link);
+        if let Some(existing) = self.link_for(fact_id, member)? {
+            return Ok(existing);
         }
         let link = MemoryLink {
             link_id: format!("mlink-{}", uuid::Uuid::new_v4().simple()),
@@ -360,13 +433,88 @@ impl<'a> MemoryService<'a> {
         let mut hidden_unclaimable = 0usize;
         let mut used_bytes = 0usize;
         for hit in answer.facts {
-            let Some(link) = self.link_of(hit.fact_id)? else {
+            // The claim filter is per-viewer: a hit is claimable only
+            // through the viewer's OWN active link (no link, another
+            // member's link, another project's link, or archived → hidden
+            // and counted, never mixed in).
+            let Some(link) = self.link_for(hit.fact_id, viewer)? else {
                 hidden_unclaimable += 1;
                 continue;
             };
-            let in_scope = link.status == LinkStatus::Active
-                && link.member_id == *viewer
-                && link.project_id == project.cloned();
+            let in_scope = link.status == LinkStatus::Active && link.project_id == project.cloned();
+            if !in_scope {
+                hidden_unclaimable += 1;
+                continue;
+            }
+            let size = hit.content.len();
+            if used_bytes + size > max_total_bytes {
+                hidden_unclaimable += 1;
+                continue;
+            }
+            used_bytes += size;
+            self.record_usage(hit.fact_id, viewer, query)?;
+            facts.push(RecalledFact {
+                fact_id: hit.fact_id,
+                content: hit.content,
+                score: hit.score,
+                trust: hit.trust,
+                member_id: link.member_id,
+                project_id: link.project_id,
+                source: link.source,
+            });
+        }
+        Ok(MemorySearch::Fetched {
+            facts,
+            hidden_unclaimable,
+        })
+    }
+
+    /// Entity-based recall through the provider's real `probe` interface,
+    /// filtered by the same per-viewer claim rules as `search`.
+    pub fn probe(
+        &self,
+        viewer: &MemberId,
+        project: Option<&ProjectId>,
+        entity: &str,
+        max_total_bytes: usize,
+    ) -> OfficeResult<MemorySearch> {
+        if entity.trim().is_empty() {
+            return Err(OfficeError::Validation(
+                "memory probe entity must not be empty".into(),
+            ));
+        }
+        let answer = self.run_adapter(json!({
+            "command": "probe",
+            "entity": entity,
+            "limit": 25,
+        }))?;
+        if !answer.ok || answer.state != "fetched" {
+            return Ok(MemorySearch::Unavailable {
+                reason: answer
+                    .error
+                    .unwrap_or_else(|| "adapter answered without an error reason".to_string()),
+            });
+        }
+        self.claim_hits(viewer, project, answer.facts, entity, max_total_bytes)
+    }
+
+    fn claim_hits(
+        &self,
+        viewer: &MemberId,
+        project: Option<&ProjectId>,
+        hits: Vec<AdapterFact>,
+        query: &str,
+        max_total_bytes: usize,
+    ) -> OfficeResult<MemorySearch> {
+        let mut facts = Vec::new();
+        let mut hidden_unclaimable = 0usize;
+        let mut used_bytes = 0usize;
+        for hit in hits {
+            let Some(link) = self.link_for(hit.fact_id, viewer)? else {
+                hidden_unclaimable += 1;
+                continue;
+            };
+            let in_scope = link.status == LinkStatus::Active && link.project_id == project.cloned();
             if !in_scope {
                 hidden_unclaimable += 1;
                 continue;
@@ -397,24 +545,27 @@ impl<'a> MemoryService<'a> {
     // -- Exit paths (no delete) --------------------------------------------------
 
     /// Archive a linked fact: hidden from selection, still on disk, still
-    /// resolvable by explicit request. The bundled `remove_fact` (physical
-    /// DELETE) is deliberately not exposed here.
+    /// resolvable by explicit request. Only the link's OWN member may exit
+    /// it, and only under a live `maintain_knowledge` grant. The bundled
+    /// `remove_fact` (physical DELETE) is deliberately not exposed here.
     pub fn archive(
         &self,
         fact_id: i64,
         reason: &str,
-        actor: &MemberId,
+        actor: &Actor,
+        authority: &AuthorityEngine<'_>,
     ) -> OfficeResult<MemoryLink> {
-        self.exit_flip(fact_id, LinkStatus::Archived, reason, actor)
+        self.exit_flip(fact_id, LinkStatus::Archived, reason, actor, authority)
     }
 
     pub fn restore(
         &self,
         fact_id: i64,
         reason: &str,
-        actor: &MemberId,
+        actor: &Actor,
+        authority: &AuthorityEngine<'_>,
     ) -> OfficeResult<MemoryLink> {
-        self.exit_flip(fact_id, LinkStatus::Active, reason, actor)
+        self.exit_flip(fact_id, LinkStatus::Active, reason, actor, authority)
     }
 
     fn exit_flip(
@@ -422,13 +573,28 @@ impl<'a> MemoryService<'a> {
         fact_id: i64,
         status: LinkStatus,
         reason: &str,
-        actor: &MemberId,
+        actor: &Actor,
+        authority: &AuthorityEngine<'_>,
     ) -> OfficeResult<MemoryLink> {
-        self.link_of(fact_id)?
-            .ok_or_else(|| OfficeError::NotFound {
-                entity: "memory link",
-                id: fact_id.to_string(),
+        let Actor::Member { member, grant: _ } = actor else {
+            return Err(OfficeError::Validation(
+                "workers do not exit memories; member grants only".into(),
+            ));
+        };
+        // Exit is an office-state mutation: a live grant is required, and
+        // the authority engine appends its own denial record.
+        authority
+            .check(actor, "maintain_knowledge", None)?
+            .map_err(|reason| {
+                OfficeError::Validation(format!("memory exit not authorized: {reason}"))
             })?;
+        // Owner condition: a member exits only their OWN claim on a fact.
+        let Some(_link) = self.link_for(fact_id, member)? else {
+            return Err(OfficeError::NotFound {
+                entity: "own memory link",
+                id: fact_id.to_string(),
+            });
+        };
         if reason.trim().is_empty() {
             return Err(OfficeError::Validation(
                 "a memory exit action requires a reason".into(),
@@ -438,37 +604,44 @@ impl<'a> MemoryService<'a> {
         match status {
             LinkStatus::Archived => {
                 self.store.connection().execute(
-                    "UPDATE memory_links SET status = 'archived', archived_at = ?2,
-                            archived_reason = ?3
-                     WHERE fact_id = ?1",
-                    rusqlite::params![fact_id, now, format!("{reason} (by {})", actor.as_str())],
+                    "UPDATE memory_links SET status = 'archived', archived_at = ?3,
+                            archived_reason = ?4
+                     WHERE fact_id = ?1 AND member_id = ?2",
+                    rusqlite::params![
+                        fact_id,
+                        member.as_str(),
+                        now,
+                        format!("{reason} (by {})", member.as_str()),
+                    ],
                 )?;
             }
             LinkStatus::Active => {
                 self.store.connection().execute(
                     "UPDATE memory_links SET status = 'active', archived_at = NULL,
                             archived_reason = NULL
-                     WHERE fact_id = ?1",
-                    rusqlite::params![fact_id],
+                     WHERE fact_id = ?1 AND member_id = ?2",
+                    rusqlite::params![fact_id, member.as_str()],
                 )?;
             }
         }
-        self.link_of(fact_id)?.ok_or_else(|| OfficeError::NotFound {
-            entity: "memory link",
-            id: fact_id.to_string(),
-        })
+        self.link_for(fact_id, member)?
+            .ok_or_else(|| OfficeError::NotFound {
+                entity: "own memory link",
+                id: fact_id.to_string(),
+            })
     }
 
     // -- Records -----------------------------------------------------------------
 
-    pub fn link_of(&self, fact_id: i64) -> OfficeResult<Option<MemoryLink>> {
+    /// The viewer's own link on a fact, if any.
+    pub fn link_for(&self, fact_id: i64, member: &MemberId) -> OfficeResult<Option<MemoryLink>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT link_id, fact_id, member_id, project_id, source, status, created_at,
                     archived_at, archived_reason
-             FROM memory_links WHERE fact_id = ?1",
+             FROM memory_links WHERE fact_id = ?1 AND member_id = ?2",
         )?;
         let row = stmt
-            .query_row([fact_id], |row| {
+            .query_row(rusqlite::params![fact_id, member.as_str()], |row| {
                 let member: String = row.get(2)?;
                 let project: Option<String> = row.get(3)?;
                 let status: String = row.get(5)?;
@@ -591,6 +764,24 @@ impl<'a> MemoryService<'a> {
                         .to_string(),
                 );
             }
+            "probe" => {
+                args.push("--entity".into());
+                args.push(
+                    request
+                        .get("entity")
+                        .and_then(|e| e.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                );
+                args.push("--limit".into());
+                args.push(
+                    request
+                        .get("limit")
+                        .and_then(|l| l.as_i64())
+                        .unwrap_or(10)
+                        .to_string(),
+                );
+            }
             "add" => {
                 for (flag, key) in [
                     ("--content", "content"),
@@ -603,6 +794,7 @@ impl<'a> MemoryService<'a> {
                     }
                 }
             }
+            "status" => {} // no extra flags
             other => {
                 return Err(OfficeError::Validation(format!(
                     "unknown adapter command `{other}`"

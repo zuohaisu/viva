@@ -546,10 +546,14 @@ impl<'a> MaintenanceService<'a> {
     }
 
     /// Dismiss a proposal without executing it (decision recorded).
+    /// Dismissal silences a finding, so it is an office-state mutation too:
+    /// it requires a live `maintain_knowledge` grant like execution does,
+    /// and the denial is appended when refused.
     pub fn dismiss_proposal(
         &self,
         proposal_id: &str,
         actor: &Actor,
+        authority: &AuthorityEngine<'_>,
         note: impl Into<String>,
     ) -> OfficeResult<Proposal> {
         let proposal = self.require_proposal(proposal_id)?;
@@ -559,6 +563,11 @@ impl<'a> MaintenanceService<'a> {
                 proposal.status.as_str()
             )));
         }
+        authority
+            .check(actor, "maintain_knowledge", None)?
+            .map_err(|reason| {
+                OfficeError::Validation(format!("maintenance dismissal not authorized: {reason}"))
+            })?;
         let note = note.into();
         let actor_str = match actor {
             Actor::Member { member, .. } => format!("member:{}", member.as_str()),
@@ -638,12 +647,26 @@ impl<'a> MaintenanceService<'a> {
         scan_id: &str,
         new: NewProposal,
     ) -> OfficeResult<Option<Proposal>> {
+        // Dedup rule: a proposal is unique per (kind, subject, generation).
+        // The generation counts EXECUTED proposals for the subject — an
+        // executed exit removes the subject from the scan population, so
+        // the condition re-proposing means a genuinely new cycle (e.g. a
+        // disabled skill was re-enabled and is idle again). A DISMISSED
+        // proposal is a standing human decision and keeps silencing its
+        // subject (generation unchanged) — re-runs never nag.
+        let generation: i64 = self.store.connection().query_row(
+            "SELECT COUNT(*) FROM maintenance_proposals
+             WHERE kind = ?1 AND subject = ?2 AND status = 'executed'",
+            rusqlite::params![new.kind.as_str(), new.subject],
+            |row| row.get(0),
+        )?;
+        let dedup_key = format!("{}:{:04}", new.dedup_key, generation);
         let existing: Option<String> = self
             .store
             .connection()
             .query_row(
                 "SELECT proposal_id FROM maintenance_proposals WHERE dedup_key = ?1",
-                [&new.dedup_key],
+                [&dedup_key],
                 |row| row.get(0),
             )
             .optional()?;
@@ -653,7 +676,7 @@ impl<'a> MaintenanceService<'a> {
         let proposal = Proposal {
             proposal_id: format!("prop-{}", uuid::Uuid::new_v4().simple()),
             session_id: session.session_id.clone(),
-            dedup_key: new.dedup_key,
+            dedup_key,
             kind: new.kind,
             subject: new.subject,
             evidence: new.evidence,
