@@ -1,0 +1,11 @@
+{
+  "link_id": "mlink-52a58fa4862d4b738d5b036064efd936",
+  "fact_id": 1,
+  "member_id": "mem-alice",
+  "project_id": "proj-alpha",
+  "source": "F04 CLI validation run",
+  "status": "active",
+  "created_at": "2026-09-29T03:19:38.859718Z",
+  "archived_at": null,
+  "archived_reason": null
+}

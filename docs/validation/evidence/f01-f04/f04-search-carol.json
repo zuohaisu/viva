@@ -1,0 +1,15 @@
+{
+  "facts": [
+    {
+      "content": "F04 evidence run: the office wiki lives at wiki.example.com",
+      "fact_id": 1,
+      "member_id": "mem-carol",
+      "project_id": null,
+      "score": 0.30878959632854885,
+      "source": "adopted from harness switch via asset reference",
+      "trust": 0.5
+    }
+  ],
+  "hidden_unclaimable": 0,
+  "state": "fetched"
+}

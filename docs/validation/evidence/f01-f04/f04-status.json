@@ -1,0 +1,15 @@
+{
+  "adapter": "extensions/pi/memory/memory_adapter.py",
+  "adapter_present": true,
+  "agent_dir": "/Users/hzuo/.hermes/hermes-agent",
+  "agent_dir_present": true,
+  "db_path": "/var/folders/8k/cz3lc7yd3dq6gbdx5dbf_j8h0000gn/T/tmp.0Q0CJcX5SO/memory.db",
+  "probe": {
+    "error": null,
+    "facts_total": 0,
+    "hrr": "active",
+    "ok": true,
+    "state": "fetched"
+  },
+  "python": "/Users/hzuo/.hermes/hermes-agent/venv/bin/python"
+}
