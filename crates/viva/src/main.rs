@@ -26,6 +26,14 @@ fn main() -> ExitCode {
 
 fn run(args: &[String]) -> OfficeResult<()> {
     match args.first().map(String::as_str) {
+        // Bare `viva` IS the office: open the interactive workbench
+        // directly — the TUI process is THE active office host for this
+        // VIVA_HOME. The usage text stays reachable via `viva help`.
+        None => cmd_workbench(),
+        Some("help" | "--help" | "-h") => {
+            print_usage();
+            Ok(())
+        }
         Some("init") => cmd_init(),
         Some("doctor") => cmd_doctor(),
         Some("event") => cmd_event(args.get(1..).unwrap_or(&[])),
@@ -81,6 +89,14 @@ fn print_usage() {
         "viva — the Personal AI Office host
 
 USAGE:
+    viva
+        Open the interactive parallel-development workbench directly —
+        the TUI is THE active office host for this VIVA_HOME (needs a
+        real terminal; the same as `viva workbench`).
+
+    viva help
+        Print this usage text.
+
     viva init
         Create VIVA_HOME (default ~/.viva, override with $VIVA_HOME) and the
         office database, applying all registered migrations.
