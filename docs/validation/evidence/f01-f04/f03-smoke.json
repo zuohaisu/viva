@@ -1,38 +1,25 @@
 {
   "browser-chrome": {
-    "action_id": "cact-f646650412224603a6b1270b52d304a1-0",
     "action_output": {
-      "redacted": true,
-      "bytes": 852,
-      "fingerprint": "0dc5f27537864bb2"
+      "bytes": 877,
+      "fingerprint": "fee748e5483da545",
+      "redacted": true
     },
-    "actor_member_id": "mem-smoke1790651904",
-    "argv": [
-      "computer",
-      "list-windows",
-      "--app",
-      "Google Chrome",
-      "--json"
-    ],
     "foreground": false,
-    "grant_id": "grant-e7faa2940a8c473cbd2418256100c1c4",
     "post_state": {
-      "redacted": true,
-      "bytes": 3963,
-      "fingerprint": "889ba879a71041ed"
+      "bytes": 3971,
+      "fingerprint": "4a9ce64a0a36f894",
+      "redacted": true
     },
     "pre_state": {
-      "redacted": true,
-      "bytes": 3963,
-      "fingerprint": "ed963a23c356d6ce"
+      "bytes": 3971,
+      "fingerprint": "8b6aa296adbcc315",
+      "redacted": true
     },
     "reason": null,
-    "recorded_at": "2026-09-29T03:18:25.057838Z",
+    "recorded_at": "2026-09-29T04:10:29.220855Z",
     "state": "executed",
-    "target": "Google Chrome",
-    "task_id": "task-7322fdd6fbf645f5a7bdab8e28b17037",
-    "tool": "orca-computer",
-    "privacy_note": "raw tool snapshots removed post-push (QA finding N1: they inventoried every running application); verdict and the recorded_at/fingerprints are original"
+    "target": "Google Chrome"
   },
   "capabilities": [
     {
@@ -49,39 +36,25 @@
     }
   ],
   "native-finder": {
-    "action_id": "cact-55b26ab6fa5442b487b5d38c071c4649-1",
     "action_output": {
-      "redacted": true,
-      "bytes": 8155,
-      "fingerprint": "4e50bf2cd2ca0336"
+      "bytes": 10081,
+      "fingerprint": "56fbe3144dcdfeaa",
+      "redacted": true
     },
-    "actor_member_id": "mem-smoke1790651904",
-    "argv": [
-      "computer",
-      "get-app-state",
-      "--app",
-      "Finder",
-      "--json"
-    ],
     "foreground": false,
-    "grant_id": "grant-e7faa2940a8c473cbd2418256100c1c4",
     "post_state": {
-      "redacted": true,
-      "bytes": 3963,
-      "fingerprint": "a07e4ccf93f27411"
+      "bytes": 3971,
+      "fingerprint": "bffd50449c18ea8e",
+      "redacted": true
     },
     "pre_state": {
-      "redacted": true,
-      "bytes": 3963,
-      "fingerprint": "8b495855fc824076"
+      "bytes": 3971,
+      "fingerprint": "7255d0c761dabdca",
+      "redacted": true
     },
     "reason": null,
-    "recorded_at": "2026-09-29T03:18:25.634911Z",
+    "recorded_at": "2026-09-29T04:10:29.83608Z",
     "state": "executed",
-    "target": "Finder",
-    "task_id": "task-7322fdd6fbf645f5a7bdab8e28b17037",
-    "tool": "orca-computer",
-    "privacy_note": "raw tool snapshots removed post-push (QA finding N1: they inventoried every running application); verdict and the recorded_at/fingerprints are original"
-  },
-  "redaction_applied": "2026-09-29 — see privacy_note per task"
+    "target": "Finder"
+  }
 }

@@ -1,14 +1,14 @@
 {
   "run": {
-    "run_id": "wfrun-5d02e6490b0546cbaf7994756c56a96c",
-    "task_id": "task-38d5e5f96cbc47d4b22899e4a09e5cac",
-    "config_id": "wfcfg-d32e26426c174c8a8422a866d0fa521a",
+    "run_id": "wfrun-7862c1e5ea0e454ea186c76109e2319f",
+    "task_id": "task-fd07328d97fd4ed99972112974da6c34",
+    "config_id": "wfcfg-4247c61a803945f5b159c73cb02f165e",
     "status": "completed",
     "current_step": 5,
-    "head_sha": "45bda21ab6b4666b59f0ac9729df1aa3e6af9cf7",
+    "head_sha": "5ba7c7a8dc0e7691152d11404533f31fb04a2f16",
     "pause_reason": null,
-    "created_at": "2026-09-29T03:16:40.122363Z",
-    "updated_at": "2026-09-29T03:16:40.192035Z"
+    "created_at": "2026-09-29T04:10:05.744267Z",
+    "updated_at": "2026-09-29T04:10:05.813954Z"
   },
   "config": {
     "name": "delivery",
@@ -96,18 +96,18 @@
   },
   "records": [
     {
-      "record_id": "wfrec-0ae9e0bf62964823b9dddabd2bd70f70",
-      "run_id": "wfrun-5d02e6490b0546cbaf7994756c56a96c",
+      "record_id": "wfrec-6106e9a6b9c34180ad63d8e83541feed",
+      "run_id": "wfrun-7862c1e5ea0e454ea186c76109e2319f",
       "step_index": 0,
       "step_id": "implement",
       "role": "implementer",
-      "actor_member_id": "mem-impl1790651800",
+      "actor_member_id": "mem-impl1790655005",
       "outcome": "passed",
       "evidence": [
         {
           "kind": "implementation",
-          "head_sha": "45bda21ab6b4666b59f0ac9729df1aa3e6af9cf7",
-          "note": "ordering made deterministic; tests pass at this head",
+          "head_sha": "5ba7c7a8dc0e7691152d11404533f31fb04a2f16",
+          "note": "second-audit fixes: lease reconcile, task-scoped input grants, clean-tree anchoring, adapter path resolution",
           "grant_id": null,
           "references": []
         },
@@ -115,44 +115,44 @@
           "kind": "authorization",
           "head_sha": null,
           "note": "owner grant for this task",
-          "grant_id": "grant-8c72bca8b039443fb7c94aeed66bd7dd",
+          "grant_id": "grant-272ad4209db3468f8a0a1b60dc0037ec",
           "references": []
         }
       ],
-      "recorded_at": "2026-09-29T03:16:40.134736Z"
+      "recorded_at": "2026-09-29T04:10:05.751078Z"
     },
     {
-      "record_id": "wfrec-3c96114e0f2e4984ac7262db20240e3b",
-      "run_id": "wfrun-5d02e6490b0546cbaf7994756c56a96c",
+      "record_id": "wfrec-531e1fb94f2243d684a67efde3b5e104",
+      "run_id": "wfrun-7862c1e5ea0e454ea186c76109e2319f",
       "step_index": 2,
       "step_id": "verify",
       "role": "verifier",
-      "actor_member_id": "mem-qa1790651800",
+      "actor_member_id": "mem-qa1790655005",
       "outcome": "failed",
       "evidence": [
         {
           "kind": "verification",
-          "head_sha": "45bda21ab6b4666b59f0ac9729df1aa3e6af9cf7",
-          "note": "QA round 1: ordering assumption found in test fixtures",
+          "head_sha": "5ba7c7a8dc0e7691152d11404533f31fb04a2f16",
+          "note": "QA round 2 verdict: no-go — N1 privacy BLOCKER + N2-N7",
           "grant_id": null,
           "references": []
         }
       ],
-      "recorded_at": "2026-09-29T03:16:40.158492Z"
+      "recorded_at": "2026-09-29T04:10:05.777036Z"
     },
     {
-      "record_id": "wfrec-97867b4e399b4c7aadbc868997a68a3d",
-      "run_id": "wfrun-5d02e6490b0546cbaf7994756c56a96c",
+      "record_id": "wfrec-5c8daec8120744609fad089cedd1a476",
+      "run_id": "wfrun-7862c1e5ea0e454ea186c76109e2319f",
       "step_index": 1,
       "step_id": "fix",
       "role": "fixer",
-      "actor_member_id": "mem-impl1790651800",
+      "actor_member_id": "mem-impl1790655005",
       "outcome": "passed",
       "evidence": [
         {
           "kind": "fix",
-          "head_sha": "45bda21ab6b4666b59f0ac9729df1aa3e6af9cf7",
-          "note": "fix applied: sort before compare",
+          "head_sha": "5ba7c7a8dc0e7691152d11404533f31fb04a2f16",
+          "note": "N2-N7 fixed; N1 redacted + summarized evidence path",
           "grant_id": null,
           "references": []
         },
@@ -160,25 +160,25 @@
           "kind": "authorization",
           "head_sha": null,
           "note": "owner grant",
-          "grant_id": "grant-8c72bca8b039443fb7c94aeed66bd7dd",
+          "grant_id": "grant-272ad4209db3468f8a0a1b60dc0037ec",
           "references": []
         }
       ],
-      "recorded_at": "2026-09-29T03:16:40.161926Z"
+      "recorded_at": "2026-09-29T04:10:05.780829Z"
     },
     {
-      "record_id": "wfrec-84679651c2fa4d5294b6479dff8a6fd6",
-      "run_id": "wfrun-5d02e6490b0546cbaf7994756c56a96c",
+      "record_id": "wfrec-358b6aa494f44c3b87800f4f0a30af7c",
+      "run_id": "wfrun-7862c1e5ea0e454ea186c76109e2319f",
       "step_index": 2,
       "step_id": "verify",
       "role": "verifier",
-      "actor_member_id": "mem-qa1790651800",
+      "actor_member_id": "mem-qa1790655005",
       "outcome": "passed",
       "evidence": [
         {
           "kind": "verification",
-          "head_sha": "45bda21ab6b4666b59f0ac9729df1aa3e6af9cf7",
-          "note": "cargo test --workspace: all suites green at recorded head",
+          "head_sha": "5ba7c7a8dc0e7691152d11404533f31fb04a2f16",
+          "note": "cargo test --workspace 19 suites green; clippy -D warnings clean; fmt clean; f04 --ignored 5/5 on real provider",
           "grant_id": null,
           "references": []
         },
@@ -186,25 +186,25 @@
           "kind": "authorization",
           "head_sha": null,
           "note": "owner grant",
-          "grant_id": "grant-98571b77c10d4ff0907db0cb009e5398",
+          "grant_id": "grant-48331261705044a28b96ef70078f55a9",
           "references": []
         }
       ],
-      "recorded_at": "2026-09-29T03:16:40.16526Z"
+      "recorded_at": "2026-09-29T04:10:05.784368Z"
     },
     {
-      "record_id": "wfrec-30cc8eb0044f4f3e9a7c858c9a32ae57",
-      "run_id": "wfrun-5d02e6490b0546cbaf7994756c56a96c",
+      "record_id": "wfrec-5e2c5ba7904b4712b59d42669f8fe2df",
+      "run_id": "wfrun-7862c1e5ea0e454ea186c76109e2319f",
       "step_index": 3,
       "step_id": "review",
       "role": "reviewer",
-      "actor_member_id": "mem-qa1790651800",
+      "actor_member_id": "mem-qa1790655005",
       "outcome": "passed",
       "evidence": [
         {
           "kind": "review",
-          "head_sha": "45bda21ab6b4666b59f0ac9729df1aa3e6af9cf7",
-          "note": "independent QA re-review: findings addressed",
+          "head_sha": "5ba7c7a8dc0e7691152d11404533f31fb04a2f16",
+          "note": "QA round-2 confirmed 9 closures; N-findings addressed; N1 history rewrite pending owner decision",
           "grant_id": null,
           "references": []
         },
@@ -212,25 +212,25 @@
           "kind": "authorization",
           "head_sha": null,
           "note": "owner grant",
-          "grant_id": "grant-98571b77c10d4ff0907db0cb009e5398",
+          "grant_id": "grant-48331261705044a28b96ef70078f55a9",
           "references": []
         }
       ],
-      "recorded_at": "2026-09-29T03:16:40.1688Z"
+      "recorded_at": "2026-09-29T04:10:05.787931Z"
     },
     {
-      "record_id": "wfrec-c4bb2e94185349feb1aad2f52ff66695",
-      "run_id": "wfrun-5d02e6490b0546cbaf7994756c56a96c",
+      "record_id": "wfrec-56dc0b857b28481096be5f64aa13e171",
+      "run_id": "wfrun-7862c1e5ea0e454ea186c76109e2319f",
       "step_index": 4,
       "step_id": "deliver",
       "role": "deliverer",
-      "actor_member_id": "mem-deliver1790651800",
+      "actor_member_id": "mem-deliver1790655005",
       "outcome": "passed",
       "evidence": [
         {
           "kind": "delivery",
-          "head_sha": "45bda21ab6b4666b59f0ac9729df1aa3e6af9cf7",
-          "note": "PR #35 updated at recorded head; merge pending owner",
+          "head_sha": "5ba7c7a8dc0e7691152d11404533f31fb04a2f16",
+          "note": "PR #35 updated at this recorded head on a CLEAN tree; merge pending owner",
           "grant_id": null,
           "references": []
         },
@@ -238,11 +238,11 @@
           "kind": "authorization",
           "head_sha": null,
           "note": "owner instructed delivery via PR on this branch",
-          "grant_id": "grant-b788ae6042d843c8ad2b946e7ffa0d3a",
+          "grant_id": "grant-6f3f4fdbc2b24ac492d0f3ad08175477",
           "references": []
         }
       ],
-      "recorded_at": "2026-09-29T03:16:40.192035Z"
+      "recorded_at": "2026-09-29T04:10:05.813954Z"
     }
   ]
 }

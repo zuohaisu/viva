@@ -1,6 +1,7 @@
 # F01–F04 最终验收记录（issues #23 #24 #25 #26）
 
-验收日期：2026-09-29。本记录针对独立 QA 复审（REJECT @ f550171）的整改后状态，
+验收日期：2026-09-29（第二轮整改后更新）。本记录针对独立 QA 复审（REJECT @ f550171）及
+第二轮复审（CLOSED 9 · 4 项 N-finding · B 项披露清单）的整改后状态，
 全部证据为**本机真实运行**的落盘记录（`evidence/f01-f04/`），非模拟输出。
 证据生成环境：macOS (darwin 25.5.0 arm64)，worktree `worktrees` 对应分支
 `zuohaisu/dev5`。真实验证证据 JSON 的生成时间戳在文件内。
@@ -35,6 +36,26 @@
 | B2 f04 默认绿 | **已修**：5 个真实 provider 测试改 `#[ignore = "..."]`——CI 上显示为 ignored（可见、不计 PASS），本机以 `cargo test --test f04_memory -- --ignored` 真跑（5/5 通过），输出即证据 |
 | B4 拆 4 PR | **不修，理由**：本任务由仓库 owner 明确指示"每个 issue 单独 commit、4 个 issue 统一提交 PR"，owner 指示优先于 issue 模板；以各 issue 证据回链评论补偿 |
 
+## 第二轮复审处置（2026-09-29，N1–N7 + B 项）
+
+| 发现 | 处置 |
+| --- | --- |
+| N1（BLOCKER，隐私）| **已处置，历史改写待 owner 裁决**：仓库内证据文件已脱敏（verdict/fingerprint 保留，原文移除，commit 5ba7c7a 前身）；`viva tools computer smoke` 的证据输出永久改为摘要化（redacted + bytes + fingerprint），原始快照只留在本机私有 VIVA_HOME store——泄露路径已结构性关闭。⚠️ 已推送的 git 历史仍含原始转储（GitHub 端 blob），改写/接受由 owner 决定；候选命令已附于 PR。|
+| N2 迁移缺陷 | **已修**：`foreground_leases` 改为正规 v2 迁移（`IF NOT EXISTS` 同时保住 3570ae2 衍生库），v1 恢复原样 |
+| N3 租约焊死 | **已修**：租约行记录 holder pid，acquire 前清理死进程行（`kill -0` argv 数组探测）；崩溃进程不再永久占用输入道；有测试覆盖（幽灵行自愈 + 活持有者不被清） |
+| N4 computer_input 无 scope 放大 | **已修**：engine 层强制 `computer_input` grant 必须等于当前 task——office 级例外对该动作不存在承托物（QA 判断正确），无 scope 即拒绝为"不是全机许可证" |
+| N5 head 形式锚定 | **已修**：删除自由 `--head` 旗标（head 一律 rev-parse 解析）；start-run 拒绝脏工作树（tracked 未提交变更 = 同 SHA 不同内容）；resume 同样只经 checkout 解析；证据侧短 SHA 按 前缀归一化匹配。首轮 f01 证据即"绑在干净 SHA 上却含 1687 行未提交内容"的反面案例，本轮证据已在**提交后的干净树**上重跑（见下） |
+| N6 --ignored 假信号 | **已修**：宏改为 panic——`--ignored` 且无 provider 时是可见 FAIL（实测 5 FAILED），有 provider 时 5/5 真通过 |
+| N7 adapter 相对路径 | **已修**：解析顺序 env → 运行中二进制的祖先目录（打包布局）→ 编译期 checkout 路径；实测从 /tmp 运行 `viva memory status` 解析成功且探测为真 |
+| B 项（不挡合并）| 快赢已做：smoke 观察标记收紧为内容事实（bundleId/window）；maintenance 评审窗口出错也 end。其余按披露随 PR：重言核验为"机制已修、样例仍只读"；session host_pid 只写（一次性进程，无 daemon）；dedup 老库形状、hidden 四因合一、link 不向 provider 核验、截图不持久——均记录于本轮复审原文，接受为已披露限制 |
+
+第二轮证据全部在**提交后的干净树**（commit `5ba7c7a8…`）上经 CLI 真实重跑：
+F01 六步走查（含真实 verify 失败→修复→复验）；F02 提议→执行→归档 + 去重复跑；
+F03 双任务 executed 且证据文件经隐私检查（不含任何应用清单）；
+F04 隔离/独立 claim/归档/采纳/status 探测（HRR active）全链。
+
+## 历史记录（首轮整改，保留备查）
+
 ## 真实证据清单（evidence/f01-f04/）
 
 全部由 CLI/测试在本机真实运行产生；F01/F02/F04 使用临时 VIVA_HOME 与临时记忆库，
@@ -61,7 +82,7 @@ F03 冒烟为只读窗口检查，用户真实 `~/.hermes/memory_store.db` 在 F
 - `cargo test --workspace`：19 个测试目标全部通过，0 失败（含新增的
   principal 绑定、写侧隔离、owner-scoped exit、structural deliver 门、
   dedup generation、skill 停用生效、跨进程 lease 测试）。
-- `cargo test --test f04_memory -- --ignored`：5/5 真实 provider 测试通过。
+- `cargo test --test f04_memory -- --ignored`：5/5 真实 provider 测试通过（无 checkout 的机器上现在是可见 FAIL，不再是 5 个绿 no-op）。
 - `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets
   -- -D warnings`：通过。
 - `extensions/pi`：`npm test` 20/20、`tsc --noEmit` 通过。
