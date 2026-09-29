@@ -195,6 +195,31 @@ fn cli_lists_and_conditionally_releases_only_authorized_unknown_leases() {
         .status
         .success()
     );
+    let autonomous = cli(&[
+        "office",
+        "grant",
+        "--member",
+        member.as_str(),
+        "--task",
+        task.as_str(),
+        "--action",
+        "release_foreground_lease",
+        "--mode",
+        "ACT_AUTONOMOUSLY",
+    ]);
+    assert!(autonomous.status.success());
+    let autonomous: serde_json::Value = serde_json::from_slice(&autonomous.stdout).unwrap();
+    assert!(
+        !release(
+            acquired,
+            autonomous["grant_id"].as_str().unwrap(),
+            true,
+            task.as_str()
+        )
+        .status
+        .success(),
+        "break-glass release needs approval mode, never autonomous mode"
+    );
     let foreign_member = MemberId::new();
     let unauthorized = cli(&[
         "tools",

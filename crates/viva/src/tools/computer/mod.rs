@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::authority::{Actor, AuthorityEngine, CapabilityReport, Issuer};
+use crate::authority::{Actor, AuthorityEngine, CapabilityReport, GrantMode, Issuer};
 use crate::foundation::error::{OfficeError, OfficeResult};
 use crate::foundation::events::{self, NewEvent};
 use crate::foundation::ids::{MemberId, TaskId, utc_now};
@@ -417,9 +417,10 @@ impl<'a> ForegroundCoordinator<'a> {
         if grant.task_id.as_ref() != Some(task)
             || grant.principal_member_id.as_ref() != Some(member)
             || grant.issued_by != Issuer::User
+            || grant.mode != GrantMode::ActWithApproval
         {
             return Err(OfficeError::Validation(
-                "lease release needs an owner-issued grant naming this member and task".into(),
+                "lease release needs an owner-issued ACT_WITH_APPROVAL grant naming this member and task".into(),
             ));
         }
         // Take the writer lock before the final grant check: revocation in
