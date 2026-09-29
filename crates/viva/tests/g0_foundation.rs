@@ -116,7 +116,10 @@ fn help_prints_usage_and_exits_zero() {
             stdout.contains("viva — the Personal AI Office host"),
             "{args:?} stdout: {stdout}"
         );
-        assert!(stdout.contains("viva workbench"), "{args:?} stdout: {stdout}");
+        assert!(
+            stdout.contains("viva workbench"),
+            "{args:?} stdout: {stdout}"
+        );
         assert!(stdout.contains("viva help"), "{args:?} stdout: {stdout}");
     }
 }
