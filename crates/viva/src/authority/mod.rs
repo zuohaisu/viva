@@ -217,6 +217,7 @@ const DISPATCH_ACTIONS: &[&str] = &[
     "deliver_pr",
     "maintain_knowledge",
     "computer_input",
+    "release_foreground_lease",
 ];
 
 /// Read-class actions a plain chat identity may perform without any grant.

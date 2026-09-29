@@ -3,6 +3,18 @@
 > 以下第一、二轮记录为当时的证据快照，**不是当前合并许可**。第三轮独立 QA
 > 判定为不建议合并；本轮补丁的单测不替代独立复验、真实前台输入或 owner 合并决定。
 
+## 第五轮独立 QA 后续整改（R5-N1，待独立复验）
+
+旧两列表的非空租约经 v3 修复后无 PID，仍不得自动回收。现在可用 `viva tools computer lane` **只读列出全部**持有者、PID、标记及取得时间；它不触发租约 reconcile，但打开 Office 库时仍会应用未执行的版本化迁移（包括 v3）。确认原动作确已停止后，由持有该 task 的 owner-issued、指名成员、ACT_WITH_APPROVAL 的 `release_foreground_lease` grant 的成员执行：
+
+```text
+viva tools computer release-lease --task <lane 中的 task_id> \
+  --acquired-at <lane 中的 acquired_at> --member <member-id> \
+  --grant <grant-id> --reason "已核实旧动作停止；说明核查依据" --confirm
+```
+
+只有 PID 与标记都为 NULL 且取得时间未变的行可释放；活 PID 或行已变化均拒绝。删除与 append-only Office event 同事务提交，事件记录**成员/授权来源**和“已停止”为调用者断言，**不伪装成系统核验或 Haisu 亲自操作**。`--confirm` 本身不是身份认证；需事先由 owner 授予该成员针对这个 task 的 grant，且授权/核实过程仍由操作者负责。无合法 task ID、无法确认原动作已停、或无法取得授权时保持锁定，不应盲目改 SQLite。CLI 的同用户进程隔离不是 OS 沙箱；真实键鼠/焦点目标平台验收仍待完成。本轮仅临时库测试，未释放真实 Office 租约。
+
 ## 第四轮独立 QA 后续整改（待独立复验）
 
 - M-A：租约探针以 `kill(pid,0)` 的 errno 区分 ESRCH 与 EPERM；后者及其他不可判定结果不删除租约。出生标记确认已复用时仍可回收。无 PID 的旧两列表租约无法证明死亡，**不会自动清除**；操作者须先确认原前台动作已停，再人工处理该租约，不得在活持有者期间抢道。

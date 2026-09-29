@@ -44,6 +44,330 @@ fn store() -> Store {
 }
 
 #[test]
+fn cli_lists_and_conditionally_releases_only_authorized_unknown_leases() {
+    use std::process::Command;
+    let dir = tempfile::TempDir::new().unwrap();
+    let home = dir.path().join("office");
+    let cli = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_viva"))
+            .env("VIVA_HOME", &home)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(cli(&["init"]).status.success());
+    let task = TaskId::new();
+    let other = TaskId::new();
+    let acquired = "2020-01-01T00:00:00Z";
+    let conn = rusqlite::Connection::open(home.join("office.db")).unwrap();
+    conn.execute(
+        "INSERT INTO foreground_leases(task_id, acquired_at) VALUES (?1, ?2)",
+        rusqlite::params![task.as_str(), acquired],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO foreground_leases(task_id, host_pid, pid_start_marker, acquired_at)
+        VALUES (?1, ?2, 'live-marker', ?3)",
+        rusqlite::params![other.as_str(), std::process::id() as i64, acquired],
+    )
+    .unwrap();
+    drop(conn);
+    let lane = cli(&["tools", "computer", "lane"]);
+    assert!(
+        lane.status.success(),
+        "{}",
+        String::from_utf8_lossy(&lane.stderr)
+    );
+    let rows: serde_json::Value = serde_json::from_slice(&lane.stdout).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 2);
+    let unknown = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["task_id"] == task.as_str())
+        .unwrap();
+    assert_eq!(unknown["host_pid"], serde_json::Value::Null);
+    assert_eq!(unknown["acquired_at"], acquired);
+    let member = MemberId::new();
+    let grant = cli(&[
+        "office",
+        "grant",
+        "--member",
+        member.as_str(),
+        "--task",
+        task.as_str(),
+        "--action",
+        "release_foreground_lease",
+        "--mode",
+        "ACT_WITH_APPROVAL",
+    ]);
+    assert!(
+        grant.status.success(),
+        "{}",
+        String::from_utf8_lossy(&grant.stderr)
+    );
+    let grant_json: serde_json::Value = serde_json::from_slice(&grant.stdout).unwrap();
+    let grant_id = grant_json["grant_id"].as_str().unwrap();
+    let release = |at: &str, id: &str, confirm: bool, task_id: &str| {
+        let mut args = vec![
+            "tools",
+            "computer",
+            "release-lease",
+            "--task",
+            task_id,
+            "--member",
+            member.as_str(),
+            "--grant",
+            id,
+            "--acquired-at",
+            at,
+            "--reason",
+            "operator confirmed previous action stopped",
+        ];
+        if confirm {
+            args.push("--confirm");
+        }
+        cli(&args)
+    };
+    assert!(
+        !release(acquired, grant_id, false, task.as_str())
+            .status
+            .success()
+    );
+    assert!(
+        !release("wrong", grant_id, true, task.as_str())
+            .status
+            .success()
+    );
+    assert!(
+        !release(acquired, "grant-not-real", true, task.as_str())
+            .status
+            .success()
+    );
+    assert!(
+        !release(acquired, grant_id, true, other.as_str())
+            .status
+            .success()
+    );
+    let unscoped = cli(&[
+        "office",
+        "grant",
+        "--member",
+        member.as_str(),
+        "--action",
+        "release_foreground_lease",
+        "--mode",
+        "ACT_WITH_APPROVAL",
+    ]);
+    assert!(unscoped.status.success());
+    let unscoped: serde_json::Value = serde_json::from_slice(&unscoped.stdout).unwrap();
+    assert!(
+        !release(
+            acquired,
+            unscoped["grant_id"].as_str().unwrap(),
+            true,
+            task.as_str()
+        )
+        .status
+        .success()
+    );
+    let weak = cli(&[
+        "office",
+        "grant",
+        "--member",
+        member.as_str(),
+        "--task",
+        task.as_str(),
+        "--action",
+        "release_foreground_lease",
+        "--mode",
+        "PROPOSE",
+    ]);
+    assert!(weak.status.success());
+    let weak: serde_json::Value = serde_json::from_slice(&weak.stdout).unwrap();
+    assert!(
+        !release(
+            acquired,
+            weak["grant_id"].as_str().unwrap(),
+            true,
+            task.as_str()
+        )
+        .status
+        .success()
+    );
+    let foreign_member = MemberId::new();
+    let unauthorized = cli(&[
+        "tools",
+        "computer",
+        "release-lease",
+        "--task",
+        task.as_str(),
+        "--member",
+        foreign_member.as_str(),
+        "--grant",
+        grant_id,
+        "--acquired-at",
+        acquired,
+        "--reason",
+        "not my grant",
+        "--confirm",
+    ]);
+    assert!(!unauthorized.status.success());
+    let other_grant = cli(&[
+        "office",
+        "grant",
+        "--member",
+        member.as_str(),
+        "--task",
+        other.as_str(),
+        "--action",
+        "release_foreground_lease",
+        "--mode",
+        "ACT_WITH_APPROVAL",
+    ]);
+    assert!(other_grant.status.success());
+    let other_grant: serde_json::Value = serde_json::from_slice(&other_grant.stdout).unwrap();
+    assert!(
+        !release(
+            acquired,
+            other_grant["grant_id"].as_str().unwrap(),
+            true,
+            other.as_str()
+        )
+        .status
+        .success(),
+        "a real live holder cannot be released manually"
+    );
+    let success = release(acquired, grant_id, true, task.as_str());
+    assert!(
+        success.status.success(),
+        "{}",
+        String::from_utf8_lossy(&success.stderr)
+    );
+    assert!(
+        !release(acquired, grant_id, true, task.as_str())
+            .status
+            .success(),
+        "no replay"
+    );
+    let conn = rusqlite::Connection::open(home.join("office.db")).unwrap();
+    let rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM foreground_leases", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 1, "healthy lease still held");
+    let events: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM office_events WHERE kind='foreground_lease_released'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(events, 1, "exactly one appended audit event");
+    let (origin, payload): (String, String) = conn
+        .query_row(
+            "SELECT origin, payload FROM office_events WHERE kind='foreground_lease_released'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(
+        origin, "cli:member",
+        "a member action must not be reported as user"
+    );
+    assert_eq!(payload["actor_member_id"], member.as_str());
+    assert_eq!(payload["grant_id"], grant_id);
+    assert_eq!(
+        payload["previous_action_stopped"],
+        "asserted_by_caller_not_verified"
+    );
+}
+
+#[test]
+fn delegated_release_grant_cannot_clear_an_unknown_holder() {
+    let store = store();
+    let authority = AuthorityEngine::new(&store);
+    let task = TaskId::new();
+    let root = authority
+        .issue_root_grant(
+            Some(MemberId::new()),
+            Some(task.clone()),
+            vec!["release_foreground_lease".into()],
+            GrantMode::ActWithApproval,
+            None,
+        )
+        .unwrap();
+    let delegate = MemberId::new();
+    let child = authority
+        .delegate_grant(
+            &root.grant_id,
+            delegate.clone(),
+            vec!["release_foreground_lease".into()],
+            GrantMode::ActWithApproval,
+            None,
+        )
+        .unwrap();
+    let acquired = "2020-01-01T00:00:00Z";
+    store
+        .connection()
+        .execute(
+            "INSERT INTO foreground_leases(task_id, acquired_at) VALUES (?1, ?2)",
+            rusqlite::params![task.as_str(), acquired],
+        )
+        .unwrap();
+    let actor = Actor::Member {
+        member: delegate,
+        grant: Some(child.grant_id),
+    };
+    let err = ForegroundCoordinator::new(&store)
+        .release_unknown_lease(&task, acquired, "operator says stopped", &actor, &authority)
+        .unwrap_err();
+    assert!(err.to_string().contains("owner-issued"), "{err}");
+    assert_eq!(store.row_count("foreground_leases").unwrap(), 1);
+    assert_eq!(store.row_count("office_events").unwrap(), 0);
+}
+
+#[test]
+fn revoked_release_grant_records_denial_and_keeps_the_holder() {
+    let store = store();
+    let authority = AuthorityEngine::new(&store);
+    let task = TaskId::new();
+    let member = MemberId::new();
+    let grant = authority
+        .issue_root_grant(
+            Some(member.clone()),
+            Some(task.clone()),
+            vec!["release_foreground_lease".into()],
+            GrantMode::ActWithApproval,
+            None,
+        )
+        .unwrap();
+    authority
+        .revoke(&grant.grant_id, "owner withdrew release")
+        .unwrap();
+    store.connection().execute(
+        "INSERT INTO foreground_leases(task_id, acquired_at) VALUES (?1, '2020-01-01T00:00:00Z')",
+        [task.as_str()],
+    ).unwrap();
+    let actor = Actor::Member {
+        member,
+        grant: Some(grant.grant_id),
+    };
+    let err = ForegroundCoordinator::new(&store)
+        .release_unknown_lease(
+            &task,
+            "2020-01-01T00:00:00Z",
+            "operator says stopped",
+            &actor,
+            &authority,
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("revoked"), "{err}");
+    assert_eq!(store.row_count("foreground_leases").unwrap(), 1);
+    assert_eq!(store.row_count("grant_denials").unwrap(), 1);
+}
+
+#[test]
 fn disk_upgrade_repairs_registered_v2_two_column_lease_without_losing_holder() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("office.db");

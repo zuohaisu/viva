@@ -133,6 +133,16 @@ USAGE:
         private files only, do not publish. Never touches worktrees or
         historical data directories.
 
+    viva tools computer lane
+        List all foreground holders without reconciliation; opening the
+        office may still apply pending schema migrations.
+
+    viva tools computer release-lease --task <id> --acquired-at <timestamp> \
+      --member <id> --grant <id> --reason <text> --confirm
+        Release only an unknown-PID legacy holder after separately confirming
+        its original action stopped. Needs a live owner-issued task grant;
+        --confirm is an assertion, not proof of OS/process state.
+
     viva tools computer audit
         Probe the reused computer tools (orca computer, osascript) and
         record what is really available (read-only).
@@ -692,22 +702,91 @@ fn cmd_conversations(args: &[String]) -> OfficeResult<()> {
     Ok(())
 }
 
-/// `viva tools computer …` (F03) — audit the reused computer tools, or run
-/// the two controlled smoke tasks through the locate → act → verify chain.
-/// Everything here is a read-only inspection of real windows; input
-/// actions live behind the office's task-scoped grant path, never in chat.
+/// `viva tools computer …` (F03) — inspect/recover the foreground lane,
+/// audit reused tools, or run two controlled smoke tasks. Lease recovery
+/// needs an explicit task grant and operator assertion; smoke only inspects
+/// real windows. Input actions are never exposed to chat through this CLI.
 fn cmd_tools(args: &[String]) -> OfficeResult<()> {
     use std::str::FromStr as _;
 
     // args[0] is the tool family (`computer`); args[1..] its command.
     if args.first().map(String::as_str) != Some("computer") {
         return Err(OfficeError::Validation(
-            "usage: viva tools computer audit | viva tools computer smoke --task <id> \
-             --member <id> --grant <id>"
+            "usage: viva tools computer lane | audit | smoke --task <id> \
+             --member <id> --grant <id> | release-lease --task <id> --acquired-at <time> \
+             --member <id> --grant <id> --reason <text> --confirm"
                 .into(),
         ));
     }
     match args.get(1).map(String::as_str) {
+        Some("lane") => {
+            if args.len() != 2 {
+                return Err(OfficeError::Validation("lane accepts no flags".into()));
+            }
+            let store = open_office_store()?;
+            let rows = viva::tools::computer::ForegroundCoordinator::new(&store).leases()?;
+            println!("{}", serde_json::to_string_pretty(&rows)?);
+            Ok(())
+        }
+        Some("release-lease") => {
+            let mut named = std::collections::HashMap::new();
+            let mut confirm = false;
+            let mut i = 2;
+            while i < args.len() {
+                let flag = args[i].as_str();
+                if flag == "--confirm" {
+                    if confirm {
+                        return Err(OfficeError::Validation("duplicate --confirm".into()));
+                    }
+                    confirm = true;
+                    i += 1;
+                    continue;
+                }
+                if !["--task", "--acquired-at", "--member", "--grant", "--reason"].contains(&flag)
+                    || named.contains_key(flag)
+                {
+                    return Err(OfficeError::Validation(format!(
+                        "unexpected or duplicate release-lease flag `{flag}`"
+                    )));
+                }
+                i += 1;
+                let value = args
+                    .get(i)
+                    .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+                named.insert(flag, value.as_str());
+                i += 1;
+            }
+            if !confirm {
+                return Err(OfficeError::Validation(
+                    "release-lease requires --confirm after checking the original action stopped"
+                        .into(),
+                ));
+            }
+            let require = |flag| {
+                named
+                    .get(flag)
+                    .copied()
+                    .ok_or_else(|| OfficeError::Validation(format!("release-lease needs {flag}")))
+            };
+            let task = viva::foundation::ids::TaskId::from_str(require("--task")?)?;
+            let member = viva::foundation::ids::MemberId::from_str(require("--member")?)?;
+            let grant = viva::foundation::ids::GrantId::from_str(require("--grant")?)?;
+            let store = open_office_store()?;
+            let authority = viva::authority::AuthorityEngine::new(&store);
+            let actor = viva::authority::Actor::Member {
+                member,
+                grant: Some(grant),
+            };
+            viva::tools::computer::ForegroundCoordinator::new(&store).release_unknown_lease(
+                &task,
+                require("--acquired-at")?,
+                require("--reason")?,
+                &actor,
+                &authority,
+            )?;
+            println!("lease released for {} (operator assertion recorded)", task);
+            Ok(())
+        }
         Some("audit") => {
             let store = open_office_store()?;
             let engine = viva::tools::computer::ComputerEngine::new(&store);
@@ -791,7 +870,7 @@ fn cmd_tools(args: &[String]) -> OfficeResult<()> {
             Ok(())
         }
         other => Err(OfficeError::Validation(format!(
-            "unknown tools computer command `{}`; expected `audit` or `smoke`",
+            "unknown tools computer command `{}`; expected `lane`, `release-lease`, `audit` or `smoke`",
             other.unwrap_or("<missing>")
         ))),
     }

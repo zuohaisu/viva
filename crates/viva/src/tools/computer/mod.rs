@@ -31,8 +31,9 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::authority::{Actor, AuthorityEngine, CapabilityReport};
+use crate::authority::{Actor, AuthorityEngine, CapabilityReport, Issuer};
 use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::events::{self, NewEvent};
 use crate::foundation::ids::{MemberId, TaskId, utc_now};
 use crate::foundation::store::{DOMAIN_TOOLS_COMPUTER, MigrationRegistry, Store};
 
@@ -223,6 +224,16 @@ pub struct ForegroundCoordinator<'a> {
     acquire_timeout: std::time::Duration,
 }
 
+/// Read-only lane inventory. An unknown PID is NOT evidence that its
+/// original action has stopped; the caller must establish that separately.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ForegroundLeaseRecord {
+    pub task_id: String,
+    pub host_pid: Option<i64>,
+    pub pid_start_marker: Option<String>,
+    pub acquired_at: String,
+}
+
 /// Held lease; releasing happens on drop, so an early return can never
 /// leave the lane stuck.
 pub struct ForegroundLease<'c> {
@@ -354,6 +365,105 @@ impl<'a> ForegroundCoordinator<'a> {
             }
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
+    }
+
+    /// Every persisted holder, including impossible multi-row states.
+    /// Read-only: this never reconciles or silently releases a lease.
+    pub fn leases(&self) -> OfficeResult<Vec<ForegroundLeaseRecord>> {
+        let mut stmt = self.store.connection().prepare(
+            "SELECT task_id, host_pid, pid_start_marker, acquired_at
+             FROM foreground_leases ORDER BY task_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ForegroundLeaseRecord {
+                task_id: row.get(0)?,
+                host_pid: row.get(1)?,
+                pid_start_marker: row.get(2)?,
+                acquired_at: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Operator-confirmed release of an unidentifiable prerelease holder.
+    /// Never releases a known PID, even if it seems dead: reconciliation
+    /// already handles confirmed-dead holders. The requested acquisition
+    /// timestamp is an optimistic concurrency guard against replacement.
+    /// The member+grant is the actual request source; --confirm is a caller
+    /// assertion, not proof that an OS action stopped or user identity.
+    pub fn release_unknown_lease(
+        &self,
+        task: &TaskId,
+        acquired_at: &str,
+        reason: &str,
+        actor: &Actor,
+        authority: &AuthorityEngine<'_>,
+    ) -> OfficeResult<()> {
+        if acquired_at.trim().is_empty() || reason.trim().is_empty() {
+            return Err(OfficeError::Validation(
+                "lease release requires acquired-at and a nonempty reason".into(),
+            ));
+        }
+        let Actor::Member {
+            member,
+            grant: Some(grant_id),
+        } = actor
+        else {
+            return Err(OfficeError::Validation(
+                "lease release requires a named member and live task grant".into(),
+            ));
+        };
+        let grant = authority.require_grant(grant_id)?;
+        if grant.task_id.as_ref() != Some(task)
+            || grant.principal_member_id.as_ref() != Some(member)
+            || grant.issued_by != Issuer::User
+        {
+            return Err(OfficeError::Validation(
+                "lease release needs an owner-issued grant naming this member and task".into(),
+            ));
+        }
+        // Take the writer lock before the final grant check: revocation in
+        // another process cannot commit between authorization and deletion.
+        let tx = rusqlite::Transaction::new_unchecked(
+            self.store.connection(),
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        if let Err(denial) = authority.check(actor, "release_foreground_lease", Some(task))? {
+            tx.commit()?; // retain the authority engine's denial audit row
+            return Err(OfficeError::Validation(format!(
+                "lease release authorization rejected: {denial}"
+            )));
+        }
+        let deleted = tx.execute(
+            "DELETE FROM foreground_leases
+             WHERE task_id = ?1 AND acquired_at = ?2
+               AND host_pid IS NULL AND pid_start_marker IS NULL",
+            rusqlite::params![task.as_str(), acquired_at],
+        )?;
+        if deleted != 1 {
+            return Err(OfficeError::Validation(
+                "lease missing, changed, or has a known PID; no release occurred".into(),
+            ));
+        }
+        events::append_in(
+            &tx,
+            NewEvent {
+                domain: DOMAIN_TOOLS_COMPUTER,
+                kind: "foreground_lease_released".into(),
+                subject_type: "task".into(),
+                subject_id: task.as_str().into(),
+                origin: "cli:member".into(),
+                payload: serde_json::json!({
+                    "actor_member_id": member.as_str(),
+                    "grant_id": grant_id.as_str(),
+                    "acquired_at": acquired_at,
+                    "reason": reason,
+                    "previous_action_stopped": "asserted_by_caller_not_verified",
+                }),
+            },
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Who holds the lane right now (observability).
