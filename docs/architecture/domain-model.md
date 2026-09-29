@@ -1,6 +1,6 @@
 # Viva — Domain Model
 
-Status: canonical（对象与关系）· 记录版本：2026-09-27（AI Office 修订）· 裁决出处：`docs/decisions/0006`–`0010` · 本文是概念对象的唯一定义处（不含实现 schema；实现字段见 `docs/architecture/viva-transition.md` §7）
+Status: canonical（对象与关系）· 记录版本：2026-09-27（多成员协作修订）· 裁决出处：`docs/decisions/0006`–`0010` · 本文是概念对象的唯一定义处（不含实现 schema；实现字段见 `docs/architecture/viva-transition.md` §7）
 
 ## 1. 对象图（最小架构）
 

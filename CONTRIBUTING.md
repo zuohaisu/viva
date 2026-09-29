@@ -1,6 +1,6 @@
 # Contributing to Viva
 
-Viva is Haisu's local-first Personal AI Office. Repository-wide rules live in
+Viva is Haisu's local-first personal AI collaboration system. Repository-wide rules live in
 [AGENTS.md](AGENTS.md), the product charter in [IDEA.md](IDEA.md), and the
 architecture/migration record in
 [docs/architecture/viva-transition.md](docs/architecture/viva-transition.md).

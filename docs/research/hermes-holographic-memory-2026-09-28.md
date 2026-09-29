@@ -48,7 +48,7 @@ Bundled 代码能在缺 NumPy 时退回 FTS/Jaccard，HRR 关闭；不要把这�
 
 ## 对 Viva 的影响：设计推论，尚未实施
 
-1. 保留 Rust 宿主、Pi 首个对话宿主、SQLite 办公室状态裁决。Holographic 自己也用 SQLite，没有冲突；办公室数据库和记忆数据库职责不同，无需共用数据库文件。
+1. 保留 Rust 宿主、Pi 首个对话宿主、SQLite Viva 状态裁决。Holographic 自己也用 SQLite，没有冲突；Viva 状态数据库和记忆数据库职责不同，无需共用数据库文件。
 2. 优先复用用户实际使用的 Holographic 版本。检查过 bundled provider、handoff、community standalone 与 MCP 脚本；已知缺口是 Pi/其他 harness 接口、成员/项目作用域、可恢复退出和来源审计。最小适配应填这些缺口，不重写模型循环或 HRR。
 3. 接口可以是本地 helper/MCP 或 Pi 扩展；Rust 通过接口调用 Python 并不意味着主程序重新改回 Python。当前未裁决具体接口，也未证明需要独立常驻服务。
 4. 按成员与工作范围选择库或访问边界；共享检索需明确授权，不能把 category 当隔离。写入携带来源，归档保持可回看，反馈与读取分开。Viva 身份记录不由事实检索分数决定。

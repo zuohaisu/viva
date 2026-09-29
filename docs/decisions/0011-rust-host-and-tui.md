@@ -1,12 +1,12 @@
-# ADR 0011 — Rust 办公室宿主、Pi 对话宿主与 SQLite 状态存储
+# ADR 0011 — Rust 本地宿主、Pi 对话宿主与 SQLite 状态存储
 
 Status: **Accepted**（Rust/Pi：Haisu 显式裁决，2026-09-27；SQLite：2026-09-28）· Implementation: **已交付（2026-09-28，首版主链 PR #34）**：Rust 宿主（`crates/viva/`）、SQLite 状态层、Pi 对话宿主（`extensions/pi/`）均已实现并有验收测试；Python 运行时已于 V13 退役（`docs/validation/v13-python-retirement.md`）。真实 Pi 端到端与 Intel 平台验收保持 pending（见 V12 记录）。
 
-> 效力说明：以下三项均为用户裁决：Rust 办公室宿主；Pi 作为 Samuel 的首个默认对话宿主，以交互终端与小型扩展接入；SQLite + 文件保存办公室状态。Tokio + Ratatui + Crossterm 是随 Rust 方向记录的实施默认组合。本文是技术选型的唯一权威结论，历史研究只保留来源与讨论过程。
+> 效力说明：以下三项均为用户裁决：Rust 本地宿主；Pi 作为 Samuel 的首个默认对话宿主，以交互终端与小型扩展接入；SQLite + 文件保存 Viva 状态。Tokio + Ratatui + Crossterm 是随 Rust 方向记录的实施默认组合。本文是技术选型的唯一权威结论，历史研究只保留来源与讨论过程。
 
 ## Context
 
-Viva 是本地优先 Personal AI Office。成员身份、任务、授权与工作历史必须独立于模型、工具和进程存在（ADR 0006–0010）。用户故事需要：协调成员作为入口、多项目 workspace、谈话分叉、知识退出机制、模型与工具绑定、任务 worktree、可复用工作流、技能策展、维护，以及浏览器和原生应用操作。
+Viva 是本地优先个人 AI 协作系统。成员身份、任务、授权与工作历史必须独立于模型、工具和进程存在（ADR 0006–0010）。用户故事需要：协调成员作为入口、多项目 workspace、谈话分叉、知识退出机制、模型与工具绑定、任务 worktree、可复用工作流、技能策展、维护，以及浏览器和原生应用操作。
 
 首版以终端 TUI 为主。常态为一个或少量执行，偶尔在同一台机器上并发约 16 个 Agent；目标还包括内存较小的 Intel Mac。这是应用运行时负载，不是每轮开发或 CI 必须启动 16 个编译实例。未来桌面与 Windows 客户端只影响接口边界，本次不选择桌面框架。
 
@@ -18,27 +18,27 @@ Viva 是本地优先 Personal AI Office。成员身份、任务、授权与工�
 
 | 层 | 决定 | 范围 |
 | --- | --- | --- |
-| Office 宿主、CLI、执行监督 | **Rust** | 拥有成员/任务/执行/授权关系、恢复与资源生命周期 |
+| Viva 宿主、CLI、执行监督 | **Rust** | 拥有成员/任务/执行/授权关系、恢复与资源生命周期 |
 | 异步 I/O 与监督 | **Tokio** | 等待模型、工具和进程；阻塞工作与绘制分离，队列有界 |
-| 终端界面 | **Ratatui + Crossterm** | 一个终端渲染者，CLI/TUI 共用 Office 能力接口 |
+| 终端界面 | **Ratatui + Crossterm** | 一个终端渲染者，CLI/TUI 共用 Viva 能力接口 |
 | 首个默认对话宿主 | **Pi 交互终端 + 小型扩展** | 首版在 Viva 的终端中使用 Pi 自己的聊天界面；其他 harness 可替换，不自建 Agent 循环 |
 | Pi RPC/SDK | **未来可选，不是首版前提** | 只有统一聊天界面或更深集成的真实需求出现时再评估 |
-| 外部记忆 | **独立于 harness 接入** | Hermes Holographic 的公开实现已定位；用户实际版本与跨 harness 接入未验收，与办公室状态存储分开 |
-| 办公室状态存储 | **SQLite + 普通文件** | SQLite 保存结构化状态与关系/索引；文件保存技能、文档、原始会话与大型日志；尚未实施 |
+| 外部记忆 | **独立于 harness 接入** | Hermes Holographic 的公开实现已定位；用户实际版本与跨 harness 接入未验收，与 Viva 状态存储分开 |
+| Viva 状态存储 | **SQLite + 普通文件** | SQLite 保存结构化状态与关系/索引；文件保存技能、文档、原始会话与大型日志；尚未实施 |
 | 浏览器/原生应用操作 | **复用成熟能力，按 driver 接入** | Playwright、系统 API/小型 helper 是候选；具体方案待验证 |
 | Desktop / Windows | **未选型** | 保持 domain 与 surface、平台 driver 分离，无首版实现承诺 |
 
 用户从 terminal 启动 `viva`，程序留在 terminal 中运行。目标发行方式是对应平台的可执行程序，最终用户不需要安装 Rust 编译器；外部 Worker、浏览器及系统权限仍有各自前提。开发与 CI 需要 Rust 工具链，具体最低版本和依赖版本在实现时固定。
 
-Rust 决定的是 Office 宿主，不要求把 Pi、浏览器引擎、模型 SDK 或所有 helper 重写为 Rust。`Viva ≠ Samuel`，成员名与职责仍为配置数据。
+Rust 决定的是 Viva 宿主，不要求把 Pi、浏览器引擎、模型 SDK 或所有 helper 重写为 Rust。`Viva ≠ Samuel`，成员名与职责仍为配置数据。
 
 ### 2. 为什么选 Rust
 
-第一性需求是：让办公室的事实持续存在，以小且受控的本地运行时监督可替换工具，并让交互在外部任务等待或大量输出时保持响应。
+第一性需求是：让成员、任务与执行的事实持续存在，以小且受控的本地运行时监督可替换工具，并让交互在外部任务等待或大量输出时保持响应。
 
 Rust 的优势是显式所有权与资源生命周期、无需 tracing GC 的宿主、原生可执行文件，以及访问操作系统能力的路径。用户不以实现难度淘汰候选，因此可以接受 Rust 的开发与构建代价，换取宿主层对资源和边界的控制。这是工程选择，不是已测得的速度冠军。[Rust 所有权](https://doc.rust-lang.org/book/ch04-01-what-is-ownership.html)
 
-Pi 的轻量体验与可复用核心支持“复用 Agent 能力”，并不要求 Viva 的 Office 宿主也使用 TypeScript。反过来，采用 Rust 不证明 Viva 会比 Pi 或 Claude Code 更快：模型延迟、上下文量、工具调用、扩展加载、浏览器和外部 CLI 都可能主导任务耗时。当前没有 Viva 候选栈在目标 Intel Mac 上的同负载基准。
+Pi 的轻量体验与可复用核心支持“复用 Agent 能力”，并不要求 Viva 的本地宿主也使用 TypeScript。反过来，采用 Rust 不证明 Viva 会比 Pi 或 Claude Code 更快：模型延迟、上下文量、工具调用、扩展加载、浏览器和外部 CLI 都可能主导任务耗时。当前没有 Viva 候选栈在目标 Intel Mac 上的同负载基准。
 
 ### 3. 候选比较与代价
 
@@ -63,10 +63,10 @@ Python 实现只提供可参考的能力审计与行为证据，不约束 Rust �
 
 | 拟建/调整的部分 | 已检查的能力 | 需要填补的缺口 / 最小动作 |
 | --- | --- | --- |
-| Rust Office 宿主 | `src/viva/` 成员、Task、Execution、grant、恢复、知识注册表 | 按有效产品契约实现 Office；成员、任务、授权和历史独立于 Worker，内部结构可重设 |
+| Rust 本地宿主 | `src/viva/` 成员、Task、Execution、grant、恢复、知识注册表 | 按有效产品契约实现 Viva 的控制面；成员、任务、授权和历史独立于 Worker，内部结构可重设 |
 | Rust 执行监督 | `executions/runner.py`、Worker registry、外部 Agent CLI、Tokio process | 监督按需启动的进程，落实输出预算、取消、进程组退出与回收；不重写模型循环 |
-| Rust TUI / 终端承载 | 当前 Textual surface、Ratatui/Crossterm、Pi 交互 TUI、成熟 PTY/终端仿真能力 | Viva 做办公室导航与终端承载，Pi 做自己的聊天界面；先复用 PTY/终端仿真库，具体库待实现验证 |
-| Pi 小型扩展 | Pi 扩展事件/工具接口、现有 `viva office …` CLI、成员记录与 task brief | 注入成员与任务上下文，按 grant 调用办公室动作，保存交接引用；不重建 harness、存储或记忆系统 |
+| Rust TUI / 终端承载 | 当前 Textual surface、Ratatui/Crossterm、Pi 交互 TUI、成熟 PTY/终端仿真能力 | Viva 负责项目与任务导航及终端承载，Pi 做自己的聊天界面；先复用 PTY/终端仿真库，具体库待实现验证 |
+| Pi 小型扩展 | Pi 扩展事件/工具接口、现有 `viva office …` CLI、成员记录与 task brief | 注入成员与任务上下文，按 grant 调用受控动作，保存交接引用；不重建 harness、存储或记忆系统 |
 | Git/worktree | `worktrees/service.py`、Git、`gh`、现有 authority | 满足隔离与受保护动作的规则；复用 Git/gh 能力，Python 服务可直接替换 |
 | 脱敏与授权 | `core/redaction.py`、`permissions/authority.py`、grant ledger | Rust 路径覆盖有效授权与脱敏需求；可重写实现与测试，不能扩大权限 |
 | 计算机操作 driver | 浏览器自动化能力、macOS Accessibility/系统 API、现成 helper | 按实际任务验证后补最小适配；前台焦点/鼠标/键盘的动作序列须协调 |
@@ -80,7 +80,7 @@ Viva 拥有成员身份、Task、Execution 归属与状态、grant、workspace/p
 
 Samuel 的身份、职责与工作关系属于 Viva 的成员记录；长期记忆可以由独立的外部记忆系统承载；当下的对话、模型上下文与工具循环由当前 harness 承载。Pi、Codex 或其他 harness 是可替换的表达/执行工具，换工具不删除成员或其资产，也不承诺不同模型有完全相同的行为。名字与默认工具仍为配置数据，不能在代码中硬编码 Samuel 或要求所有成员使用 Pi。
 
-用户表示在 Hermes 中使用 Holographic。本文确认外部记忆与办公室状态存储分离。2026-09-28 的[源码研究](../research/hermes-holographic-memory-2026-09-28.md)已定位 Hermes bundled Holographic：本地 SQLite + FTS5 + Jaccard/HRR + 使用反馈；另有独立 handoff 和社区增强版，不能混用其能力声明。用户实际安装的版本和跨 harness 接入尚未验证，不能声称已集成。Viva 保存知识归属、来源、有效性及使用证据，并可关联外部记忆引用；不因引入外部服务就假装自动形成记忆。2026-09-28，用户批准 SQLite + 文件用于办公室状态；该决定不替代外部记忆系统，也不证明 Holographic 已接入。Bundled 实现的信任反馈不是事实真伪判断，硬删除不满足可恢复归档；成员/项目作用域、来源及退出活跃状态仍需受控适配。研究结果不新增后端或接口裁决。
+用户表示在 Hermes 中使用 Holographic。本文确认外部记忆与 Viva 状态存储分离。2026-09-28 的[源码研究](../research/hermes-holographic-memory-2026-09-28.md)已定位 Hermes bundled Holographic：本地 SQLite + FTS5 + Jaccard/HRR + 使用反馈；另有独立 handoff 和社区增强版，不能混用其能力声明。用户实际安装的版本和跨 harness 接入尚未验证，不能声称已集成。Viva 保存知识归属、来源、有效性及使用证据，并可关联外部记忆引用；不因引入外部服务就假装自动形成记忆。2026-09-28，用户批准 SQLite + 文件用于 Viva 状态；该决定不替代外部记忆系统，也不证明 Holographic 已接入。Bundled 实现的信任反馈不是事实真伪判断，硬删除不满足可恢复归档；成员/项目作用域、来源及退出活跃状态仍需受控适配。研究结果不新增后端或接口裁决。
 
 2026-09-28 的[记忆架构比较](../research/agent-memory-architecture-2026-09-28.md)进一步核查 OpenViking、Claude Code 与 MemGPT / 当前 Letta：提出有界工作上下文、分层导航、策展/有效性及混合检索，建议优先验证 OpenViking 成品。该建议不是记忆后端或插件默认行为的批准；尤其 Pi context takeover、自动写回、成员/项目映射及失效归档仍需受控验证。Rust / Pi / SQLite 已批准边界不变。
 
@@ -90,11 +90,11 @@ Samuel 的身份、职责与工作关系属于 Viva 的成员记录；长期记�
 
 开源有利于检查与修复，但选择 Pi 的直接依据是可复用的交互界面、会话分支及明确扩展接口。Pi 已提供扩展事件、工具注册和上下文修改能力；会话结构已有分支记录。是否完整满足 Viva 的谈话树 UX，仍需验收，不能把库能力视为产品已经交付。[Pi 扩展](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md)、[Pi 会话格式](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/session-format.md)
 
-小型 Pi 扩展只补已记录的 Office 接入缺口：开始会话时读取所绑定成员的资料、当前任务简报及授权范围内的相关记忆；工作中通过现有 Viva CLI 或经核实的受控接口查询/派发/跟进任务；在明确交接节点记录结果、未完成事项与原始记录引用。记忆写入按外部记忆系统及策展规则执行，不默认把每次退出或完整 transcript 自动晋升成长期记忆。该扩展可用 TypeScript 实现，不改变 Rust 宿主裁决。
+小型 Pi 扩展只补已记录的 Viva 接入缺口：开始会话时读取所绑定成员的资料、当前任务简报及授权范围内的相关记忆；工作中通过现有 Viva CLI 或经核实的受控接口查询/派发/跟进任务；在明确交接节点记录结果、未完成事项与原始记录引用。记忆写入按外部记忆系统及策展规则执行，不默认把每次退出或完整 transcript 自动晋升成长期记忆。该扩展可用 TypeScript 实现，不改变 Rust 宿主裁决。
 
-成员发起的办公室动作由 Viva 校验真实请求来源和 live grant；扩展不能把 worker 请求冒充用户、不能自行扩大权限。Pi 内部的文件/命令等工具仍需对应权限策略，扩展钩子与提示词都不能被宣称为 OS 沙箱或完整安全边界。
+成员发起的受控动作由 Viva 校验真实请求来源和 live grant；扩展不能把 worker 请求冒充用户、不能自行扩大权限。Pi 内部的文件/命令等工具仍需对应权限策略，扩展钩子与提示词都不能被宣称为 OS 沙箱或完整安全边界。
 
-提供终端并不足以判定任务完成：退出码不是开发完成、QA 通过或交付成功的证明。要支持自动跟进，必须由受控接口提交明确结果与证据，Office 根据其语义记录状态；终端输出只作为原始工作记录，不能靠 ANSI 屏幕文本猜出权威结论。
+提供终端并不足以判定任务完成：退出码不是开发完成、QA 通过或交付成功的证明。要支持自动跟进，必须由受控接口提交明确结果与证据，Viva 根据其语义记录状态；终端输出只作为原始工作记录，不能靠 ANSI 屏幕文本猜出权威结论。
 
 #### 5.3 PTY 与界面边界
 
@@ -106,7 +106,7 @@ Samuel 的身份、职责与工作关系属于 Viva 的成员记录；长期记�
 
 RPC/SDK 留作未来可选路径：出现统一自有聊天界面或更深自动化的真实需求时，才重新评估事件、取消、分叉、重连及持久化映射。本次批准交互终端接入，不同时批准 RPC 首版架构或共享 SDK 服务。[Pi RPC](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md)、[Pi SDK](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/sdk.md)
 
-一个 Office/TUI 可以监督多个按需启动的执行；16 个 Agent 不要求启动 16 个 Viva 办公室界面。交互 Worker 可以各有独立 PTY 与内部 TUI，其进程数量由工具能力决定，不保证共享一个运行时；后台终端状态与缓存同样需要预算。
+一个 Viva/TUI 可以监督多个按需启动的执行；16 个 Agent 不要求启动 16 个 Viva 界面。交互 Worker 可以各有独立 PTY 与内部 TUI，其进程数量由工具能力决定，不保证共享一个运行时；后台终端状态与缓存同样需要预算。
 
 ### 6. 关闭界面的语义
 
@@ -125,9 +125,9 @@ RPC/SDK 留作未来可选路径：出现统一自有聊天界面或更深自动
 - 定期维护只在 Viva 运行期间按策略执行。模型+工具组合须显式验证可用性，不静默换模型。
 - 沙箱按动作风险与授权选择，避免一刀切；沙箱、凭证访问和操作权限是不同维度。复用已认证工具需要验证其实际运行环境，语言不能绕过 OS 或外部工具限制。grant 不因“不用沙箱”而扩大。
 
-### 8. 办公室状态存储：SQLite + 普通文件
+### 8. Viva 状态存储：SQLite + 普通文件
 
-2026-09-28，Haisu 批准采用 SQLite。该裁决对应讨论中的“SQLite + 普通文件”方案，结构化办公室事实与大型/可编辑材料分开；不要求兼容旧 Python 文件格式，不引入独立数据库服务。
+2026-09-28，Haisu 批准采用 SQLite。该裁决对应讨论中的“SQLite + 普通文件”方案，Viva 的结构化事实与大型/可编辑材料分开；不要求兼容旧 Python 文件格式，不引入独立数据库服务。
 
 | 内容 | 权威来源 / 保存位置 |
 | --- | --- |
@@ -137,7 +137,7 @@ RPC/SDK 留作未来可选路径：出现统一自有聊天界面或更深自动
 | 知识归属、来源、有效/归档/撤回状态、使用证据及外部记忆引用 | SQLite；不自动生成记忆，不复制外部记忆系统的职责 |
 | `SKILL.md`、项目文档、附件、截图、大型执行日志、harness 原始会话文件 | 普通文件；SQLite 保存必要路径/索引，避免另一份可独立修改的正文 |
 
-每份事实只设一个权威来源，数据库保存关系与必要索引，文件保存对应正文/原始材料。办公室状态数据库默认放本机磁盘；另一台 Mac 可独立运行，不通过网络共享目录让两台机器共同打开同一个数据库。跨设备同步不是本次范围。
+每份事实只设一个权威来源，数据库保存关系与必要索引，文件保存对应正文/原始材料。Viva 状态数据库默认放本机磁盘；另一台 Mac 可独立运行，不通过网络共享目录让两台机器共同打开同一个数据库。跨设备同步不是本次范围。
 
 选择 SQLite 的理由是复用成熟事务与索引能力：授权使用、执行记录与 Task 状态等相关数据库变更可以在一个事务中提交。外部进程启动、harness 文件及数据库不能被宣称为一个原子事务；实施时需记录启动意图/结果，处理退出或崩溃后的对账与恢复。[SQLite 事务](https://www.sqlite.org/transactional.html)
 

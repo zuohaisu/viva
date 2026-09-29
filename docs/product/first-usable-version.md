@@ -1,4 +1,4 @@
-# Viva 首个可用版本：独立并行开发办公室
+# Viva 首个可用版本：独立并行开发环境
 
 Status: **Accepted product requirement / implementation pending** · 2026-09-28 · Owner: Haisu
 
@@ -6,9 +6,9 @@ Status: **Accepted product requirement / implementation pending** · 2026-09-28 
 
 ## 1. 使用入口与所有权
 
-从 Terminal.app/iTerm 等普通终端启动一次 Viva，进入同一个本地办公室。协调成员对话、多个 workspace/project、多个开发任务与它们的终端都在这间办公室内。切换项目只是导航，不新启 Office，也不改变正在执行任务的归属。
+从 Terminal.app/iTerm 等普通终端启动一次 Viva，进入同一个本地 Viva 实例。协调成员对话、多个 workspace/project、多个开发任务与它们的终端都由该实例管理。切换项目只是导航，不新启 Viva，也不改变正在执行任务的归属。
 
-- 同一 VIVA_HOME 由一个活跃 Office 拥有终端句柄；再次启动明确提示/定位已有实例，不重复启动同一任务。不同 workspace 不强制不同 Viva 进程。
+- 同一 VIVA_HOME 由一个活跃 Viva 宿主持有终端句柄；再次启动明确提示/定位已有实例，不重复启动同一任务。不同 workspace 不强制不同 Viva 进程。
 - 不依赖 Orca 安装、运行或 Orca CLI；不在每个 worktree 内再起一个 Viva。外部 Agent CLI 是 Viva 的子执行工具。
 - 协调对话可以没有 Task；开发任务拥有隔离 worktree。一个 Task/worktree 可以挂多个用途不同的终端（Agent、shell、测试），辅助 shell 由用户拥有，不捏造 AI 成员或第二套 Task。
 - 关闭 TUI 后暂停派发/维护并停止 owned 执行；保留 worktree、用户改动、任务结果和 harness 会话引用。重启对账后由用户明确继续，不自动重跑、拉起 daemon 或承诺原生 Agent 能从精确指令位置恢复。
@@ -18,7 +18,7 @@ Status: **Accepted product requirement / implementation pending** · 2026-09-28 
 | 用户动作 | 首版必须成立 | 交付职责 |
 | --- | --- | --- |
 | 打开仓库/项目、建并行任务 | 创建或发现并选择现有 worktree，显示路径/branch/任务归属；发现不等于接管或删除 | V02/V03/V08 |
-| 启动开发工具 | Pi 默认；其他已安装 Agent CLI 用显式 argv/cwd 启动，不要求都有 Pi 的办公室扩展 | V05/V07/V09 |
+| 启动开发工具 | Pi 默认；其他已安装 Agent CLI 用显式 argv/cwd 启动，不要求都有 Pi 的成员扩展 | V05/V07/V09 |
 | 同时开发多个任务 | 各写各 worktree；TUI 列出所有任务与终端；等待输入/运行/退出来源可解释 | V06/V14 |
 | 在 Agent/测试/shell 间操作 | 键盘选择、输入、resize、scrollback；同一 worktree 多终端，焦点不串 | V05/V06/V14 |
 | 检查代码与交付情况 | 真实 git status/diff、branch、PR/checks；可调用现有编辑器和普通 shell/gh，缺认证如实显示 | V08/V14 |

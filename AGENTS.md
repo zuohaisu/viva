@@ -1,13 +1,13 @@
 # Viva — Agent Working Charter
 
-Viva is Haisu's local-first **Personal AI Office**. Several persistent AI
-members work here; Viva is **not** an AI member — it is the office they work in.
+Viva is Haisu's local-first **personal AI collaboration system**. Several
+persistent AI members work through Viva; Viva is **not** an AI member.
 
 # Project North Star and Drift Guard
 
 This repository's North Star is:
 
-> Build Viva into the office where Haisu's AI members keep their continuity
+> Build Viva so Haisu's AI members keep their continuity
 > while working through tasks, worktrees, workers and cognitive engines — and
 > where the history of that work outlives every worker session.
 
@@ -24,7 +24,7 @@ The product charter is `IDEA.md`; the canonical product definition lives in
 `docs/product/` (vision.md first). Boundary-level decisions are `docs/decisions/`
 (ADR 0001–0011; several early ADRs are explicitly superseded — read the status
 line before relying on one). For host-language, TUI, Pi/member-host integration,
-Office storage, or Rust migration work, read the accepted target,
+Viva state storage, or Rust migration work, read the accepted target,
 direct-replacement policy and implementation status in
 `docs/decisions/0011-rust-host-and-tui.md`.
 The architecture and migration record is
@@ -37,7 +37,7 @@ Before starting research, planning, or implementation, emit one concise line in
 the working update:
 
 ```text
-[Goal check] This work advances Viva's <member/task/execution/office/knowledge/runtime> capability by <measurable evidence>.
+[Goal check] This work advances Viva's <member/task/execution/knowledge/runtime> capability by <measurable evidence>.
 ```
 
 If that sentence cannot be completed concretely, do not start the work.
@@ -64,7 +64,7 @@ the gap it fills (pattern and the current table: `docs/architecture/viva-transit
 `src/ticket_autopilot/` was **retired** on 2026-09-27 (ADR 0008). Do not
 reintroduce it, do not re-add ticket/Plane/run/QA-verdict objects, and do not
 recreate a fixed delivery pipeline and call it dynamic scheduling. The three
-capabilities that were still useful live in the Rust office
+capabilities that were still useful live in the Rust implementation
 (`crates/viva/src/git/`, `crates/viva/src/redaction/`,
 `crates/viva/src/authority/`) — change them there. The Python runtime was
 retired in V13 (issue #22); the Rust binary is the only `viva` entry. Historical run data (`~/.ticket-autopilot/`, `qa-verdict.json`,
@@ -132,7 +132,7 @@ then through a pull request and a merge into the remote default branch.
 ```text
 self-model     research on persistent Self  — Viva depends on nothing from it
 dsh-ai-soul    generic Soul/DSH reference   — Viva depends on nothing from it
-Viva           the local office/product
+Viva           the local collaboration product
 ```
 
 Viva implements only contracts the product needs now; extract shared cores only
@@ -177,7 +177,7 @@ Report what the tests and the real runs show, and name what was not run.
 
 ## Current Focus
 
-The office's minimal loop (members → tasks → executions → delegation →
+Viva's minimal loop (members → tasks → executions → delegation →
 recovery → knowledge/GitHub linkage) is implemented and tested. The next
 milestones grow it one coherent step at a time — structured workflows on top of
 Tasks, knowledge curation loops, and execution-driver integrations — each with

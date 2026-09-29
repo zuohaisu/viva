@@ -490,7 +490,7 @@ Phase 1 验收（docs/product/phase-1.md §5）：north-star loop（进入 works
 
 ---
 
-## 2026-09-27 — Reprioritization: 从"单 Resident 持续性层"到"多成员 AI Office"（accepted）
+## 2026-09-27 — Reprioritization: 从"单 Resident 持续性层"到"多成员 AI 协作"（accepted）
 
 ### Trigger
 
@@ -502,7 +502,7 @@ Haisu 的任务书明确取代了上一轮产品定义的六条约束：只围�
 
 ### Evidence
 
-- 新决策：`docs/decisions/0006`（多成员 AI Office）、`0007`（委派授权）、`0008`（Ticket Autopilot 退役）、`0009`（Workspace≠Project≠Repository≠Worktree≠Task）、`0010`（知识归属与复用证据）。
+- 新决策：`docs/decisions/0006`（多成员 AI 协作）、`0007`（委派授权）、`0008`（Ticket Autopilot 退役）、`0009`（Workspace≠Project≠Repository≠Worktree≠Task）、`0010`（知识归属与复用证据）。
 - 被取代的旧决策保留并标注：ADR 0001（部分）、0002、0003、0004 头部均有 Superseded + 原因；0005 保持 Proposed 且不受影响。
 - 实现：`src/viva/` 新增 `residents/{roles,engines}`、`projects/`、`tasks/`、`executions/`、`office/`、`knowledge/`、`github/`、`permissions/grants.py`；TUI 的全局 `_worker_running` 与完成事件归属 bug 一并修复。
 - 复用与退役：`worktrees/service.py`、`core/redaction.py`、`permissions/authority.py` 三个能力从 `src/ticket_autopilot/` 原地搬迁并保留验证；其余代码路径、固定流水线、Web 控制器、Plane 连接器与旧产品文档退役（`viva-transition.md` §4）。

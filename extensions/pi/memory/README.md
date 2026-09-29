@@ -1,6 +1,6 @@
 # External memory integration (F04, issue #26)
 
-Viva links the office's member/project namespace, provenance and
+Viva adds member/project scope, provenance and
 recoverable exit on top of the **real Holographic memory already running
 on this machine**. Nothing here re-implements FTS, HRR or storage.
 
@@ -39,14 +39,14 @@ layer (`crates/viva/src/memory/`) adds exactly those, on its own tables:
 
 ## Calling convention
 
-The Rust office spawns `extensions/pi/memory/memory_adapter.py` with the
+The Rust host spawns `extensions/pi/memory/memory_adapter.py` with the
 interpreter and paths from `AdapterConfig::from_env()`:
 
 | Env | Default | Meaning |
 | --- | --- | --- |
 | `VIVA_MEMORY_PYTHON` | `python3` | interpreter (use the checkout's `venv/bin/python` for the real plugin) |
 | `VIVA_HERMES_AGENT` | `~/.hermes/hermes-agent` | the checkout whose bundled provider is imported |
-| `VIVA_MEMORY_DB` | `VIVA_HOME/memory_store.db` when `VIVA_HOME` is set; otherwise `~/.hermes/memory_store.db` | Explicit override always wins; the resolved path is **always passed explicitly** to the adapter. Set `VIVA_MEMORY_DB` to opt into the existing Hermes store from an isolated office home. |
+| `VIVA_MEMORY_DB` | `VIVA_HOME/memory_store.db` when `VIVA_HOME` is set; otherwise `~/.hermes/memory_store.db` | Explicit override always wins; the resolved path is **always passed explicitly** to the adapter. Set `VIVA_MEMORY_DB` to opt into the existing Hermes store from an isolated Viva home. |
 | `VIVA_MEMORY_ADAPTER` | `extensions/pi/memory/memory_adapter.py` | adapter script path |
 
 CLI: `viva memory search | remember | archive | restore | status`.
@@ -67,4 +67,4 @@ CLI: `viva memory search | remember | archive | restore | status`.
   `unavailable` with a reason; nothing pretends to have remembered.
 - **Known retrieval boundary (verified):** recall is FTS-gated — exact
   terms and full CJK runs match; paraphrases and partial CJK substrings
-  do not. The office reports this honestly instead of faking recall.
+  do not. Viva reports this honestly instead of faking recall.

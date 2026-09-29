@@ -10,4 +10,4 @@ Status: **Historical / non-authoritative**
 - [Pi 技术栈与资源设计](pi-coding-agent-stack-2026-09-27.md)：能力复用与性能证据等级。
 - [计算机控制选型](computer-control-selection-2026-09-27.md)：平台接入、权限与共享桌面约束。
 
-快照来自本轮会话生成的本地研究文件；保留其历史用语，不将旧 Ticket Autopilot/单控制器推导套回当前 Office 产品。本文与三个快照仅用于追溯。
+快照来自本轮会话生成的本地研究文件；保留其历史用语，不将旧 Ticket Autopilot/单控制器推导套回当前 Viva 产品。本文与三个快照仅用于追溯。

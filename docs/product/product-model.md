@@ -1,6 +1,6 @@
 # Viva — Product Model
 
-Status: canonical（对象与关系）· 版本：2026-09-27（AI Office 修订）· 上游：`vision.md` · 下游：`architecture/domain-model.md`
+Status: canonical（对象与关系）· 版本：2026-09-27（多成员协作修订）· 上游：`vision.md` · 下游：`architecture/domain-model.md`
 
 本文回答：**Viva 由哪些对象组成、成员如何绑定模型与工具、任务如何分配、执行如何记录、协调如何工作、知识属于谁。** 效力说明：对象与关系来自 Haisu 的显式决定（ADR 0006–0010）；具体字段与实现细节是设计选择，可随实现演进。
 
@@ -91,7 +91,7 @@ Haisu ──grant（来源=user，范围=task+actions+mode）──► Samuel（
 | `personal_memory` | 成员 | 该成员参与的任务 | 描述这个成员自己的经验/偏好 |
 | `self_model_candidate` | 成员 | 同上 | 关于这个成员自己的假设（本轮只记录） |
 | `project_knowledge` | Project | 该项目的任务 | 删掉所有成员仍为真 |
-| `team_knowledge` | 团队 | 所有任务 | 办公室级协作方式 |
+| `team_knowledge` | 团队 | 所有任务 | 跨成员协作方式 |
 | `skill` | 团队（可绑项目） | 所有任务 | 可复用 + 可验证（SKILL.md） |
 
 纪律：条目必须带 provenance；**只有被后续执行实际使用过（`used_in` 非空）才算复用证据**；撤回留原因；没有自动晋升，也没有自动衰减（未实现，明说）。
@@ -100,7 +100,7 @@ Haisu ──grant（来源=user，范围=task+actions+mode）──► Samuel（
 
 | 旧裁决（已作废） | 现在 | 原因 |
 | --- | --- | --- |
-| Q1：Workspace 是导航第一层，Resident 不是导航目的地 | 成员是常驻底座，Workspace/Project 是语境；TUI 同时呈现两者 | 多成员办公室里"我在哪工作"与"谁在工作"是两个正交维度 |
+| Q1：Workspace 是导航第一层，Resident 不是导航目的地 | 成员是常驻底座，Workspace/Project 是语境；TUI 同时呈现两者 | 多成员协作时"我在哪工作"与"谁在工作"是两个正交维度 |
 | Q2：WorkerSession 隶属 Worktree、服务 Task | Execution 固定七元归属（含成员、模型、工具、授权） | 需要回答"谁在什么时候用什么做了什么、凭什么" |
 | Q3/Q5：知识两层分储（workspace/resident） | 四类归属：personal / project / team / skill | 需要 team 层，且要与 Project（≠Workspace）对齐 |
 | Q4：Experience 单位是 Event→Episode→Reflection→Distillate | 保持不变（reflection/distillate 仍是未实现阶段） | 本轮不实现自动反思 |

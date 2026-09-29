@@ -1,6 +1,6 @@
 # Viva — Temporal Model
 
-Status: canonical · 版本：2026-09-27（AI Office 修订）· 上游：`conceptual-architecture.md` §1 · 理论来源：`docs/research/self-model-relationship.md`、`docs/research/hermes.md` · 归属裁决：ADR 0010
+Status: canonical · 版本：2026-09-27（多成员协作修订）· 上游：`conceptual-architecture.md` §1 · 理论来源：`docs/research/self-model-relationship.md`、`docs/research/hermes.md` · 归属裁决：ADR 0010
 
 ## 1. 时间轴要回答的四个问题
 
@@ -56,7 +56,7 @@ Skill 晋升 / Self-Model 演化 / User-Model 演化（未实现）
 | `personal_memory` | 一个成员 | 该成员被指派的任务 | 它描述的是**这个成员的**经验/偏好 |
 | `self_model_candidate` | 一个成员 | 同上 | 它是关于**这个成员自己**的假设 |
 | `project_knowledge` | 一个 Project | 该项目的任务 | **删掉所有成员它仍然为真** |
-| `team_knowledge` | 团队 | 所有任务 | 它描述的是办公室的协作方式 |
+| `team_knowledge` | 团队 | 所有任务 | 它描述的是跨成员的协作方式 |
 | `skill` | 团队（可绑项目） | 所有任务 | 可复用 + 可验证的程序（SKILL.md） |
 
 共享边界是**默认私有**：个人记忆不会出现在其他成员的任务上下文里；项目知识不会泄漏到别的项目；只有 `team_knowledge` / `skill` 是默认共享层。`for_task(task)` 就是这个边界在代码里的实现。

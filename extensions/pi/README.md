@@ -1,21 +1,21 @@
 # @viva/pi-office-extension
 
-Viva office extension for the [Pi coding agent](https://github.com/earendil-works/pi)
-(V09, issue #18). It gives a Pi session the office context of the member it
-runs as — identity, current task brief — and controlled office actions over
+Viva member-context extension for the [Pi coding agent](https://github.com/earendil-works/pi)
+(V09, issue #18). It gives a Pi session the member/task context of the member it
+runs as — identity, current task brief — and controlled actions over
 the fixed `viva office …` CLI envelope.
 
 ## What it does
 
 - **Identity injection**: the Rust harness (`crates/viva/src/harness/pi/`)
-  launches `pi --extension <this file>` with office context in environment
+  launches `pi --extension <this file>` with member/task context in the environment
   variables. The extension surfaces that identity at session start. The
   member is configuration data; no member name is hard-coded here.
-- **Office query tools**: `viva_office_status` and `viva_office_task_brief`
-  read real office records (read-only).
+- **Status query tools**: `viva_office_status` and `viva_office_task_brief`
+  read real Viva records (read-only).
 - **Controlled dispatch**: `viva_office_dispatch` requires a live grant
   reference. Without one it refuses with a proposal to ask the user — chat
-  never self-authorizes, and the office's dispatch endpoint re-checks the
+  never self-authorizes, and Viva's dispatch endpoint re-checks the
   grant server-side at the moment of effect.
 - **Explicit handoff**: `viva_office_handoff` records a member-reported
   summary for the current task. It is stored as a fact ("member X reported
@@ -26,7 +26,7 @@ the fixed `viva office …` CLI envelope.
 - No external memory integration: it states plainly that no memory system
   is connected. No "remembers", no "learned", no fake Holographic.
 - No second chat engine, no agent loop: Pi keeps its own UI and loop.
-- Sessions started outside the office (no member identity in the
+- Sessions started outside Viva (no member identity in the
   environment) leave the extension inert — it registers nothing and claims
   nothing.
 
@@ -37,8 +37,8 @@ the fixed `viva office …` CLI envelope.
 | `VIVA_OFFICE_MEMBER_ID` | Member id of this session (required; without it the extension stays inert) |
 | `VIVA_OFFICE_MEMBER_NAME` | Display name at launch time (required) |
 | `VIVA_OFFICE_TASK_ID` | Attached task, when the session is task-scoped |
-| `VIVA_OFFICE_GRANT_ID` | Live per-task dispatch grant, when the office holds one |
-| `VIVA_HOME` | Office home the CLI calls operate on |
+| `VIVA_OFFICE_GRANT_ID` | Live per-task dispatch grant, when Viva holds one |
+| `VIVA_HOME` | Viva home the CLI calls operate on |
 | `VIVA_BIN` | `viva` binary override (tests) |
 
 ## Type notes (honest scope)

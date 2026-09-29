@@ -1,18 +1,18 @@
 # Viva — Project Charter
 
-Status: canonical · 版本：2026-09-27（AI Office 修订）· 取代 `IDEA.md` 早先的 "persistent habitat for a single resident" 表述（原因见 `docs/decisions/0006`）
+Status: canonical · 版本：2026-09-27（多成员协作修订）· 取代 `IDEA.md` 早先的 "persistent habitat for a single resident" 表述（原因见 `docs/decisions/0006`）
 
 ## North Star
 
 ```text
-Haisu's AI office should stay real over time:
-several AI members, each with its own role, history and knowledge;
+Haisu's AI members should keep their continuity over time:
+each member keeps its own role, history and knowledge;
 tasks that outlive any single worker session;
 executions whose attribution and authority are always recoverable;
 work that actually gets done through real tools.
 ```
 
-Viva 是 **Haisu 的本地优先 Personal AI Office**。Viva 不是 AI 成员，也不是单一 Agent 的 wrapper、只有 worktree 功能的工具或记忆数据库——它是成员在其中生活、工作、协作的地方。首个可用版本必须由 Viva 自己提供多 worktree 并行开发入口，不依赖 Orca.app；[投入使用门槛](docs/product/first-usable-version.md)明确了真实验收。
+Viva 是 **Haisu 的本地优先个人 AI 协作系统**。Viva 不是 AI 成员，也不是单一 Agent 的 wrapper、只有 worktree 功能的工具或记忆数据库——它让多个成员持续协作，并保留工作关系与历史。首个可用版本必须由 Viva 自己提供多 worktree 并行开发入口，不依赖 Orca.app；[投入使用门槛](docs/product/first-usable-version.md)明确了真实验收。
 
 ## 核心不变量
 
@@ -55,13 +55,13 @@ Viva Core  →  surfaces: CLI · TUI（本轮主界面）· Desktop（未来）
 Viva Core  →  capabilities: dispatch/execution · knowledge · recovery · github(只读)
 ```
 
-宿主与终端界面为 **Rust + Ratatui + Crossterm**（[ADR 0011](docs/decisions/0011-rust-host-and-tui.md)），已随首版交付（Python + Textual 实现已于 V13 退役）；Pi 是首个默认对话宿主，以交互终端与小型扩展接入（`extensions/pi/`）；成员身份与长期资产独立于 harness。办公室状态存储采用 SQLite + 普通文件，与外部记忆分开。外部记忆接入、自动反思与自我模型演化仍明确未实现。
+宿主与终端界面为 **Rust + Ratatui + Crossterm**（[ADR 0011](docs/decisions/0011-rust-host-and-tui.md)），已随首版交付（Python + Textual 实现已于 V13 退役）；Pi 是首个默认对话宿主，以交互终端与小型扩展接入（`extensions/pi/`）；成员身份与长期资产独立于 harness。Viva 状态存储采用 SQLite + 普通文件，与外部记忆分开。外部记忆接入、自动反思与自我模型演化仍明确未实现。
 
 Ticket Autopilot 曾是本仓库的产品主体，2026-09-27 已**退役**（ADR 0008）：其中被证明仍有用的三个能力（worktree 隔离、secret redaction、owner 授权）先搬进 Python 小模块、现由 Rust 承载（`crates/viva/src/git/`、`redaction/`、`authority/`）并保留验证；其余代码路径、固定流水线与旧产品文档被删除。历史运行数据未被删除。
 
 ## 进度定义
 
-进度不是功能数量、成员数量或文档数量。进度是**证据**：一间 AI 办公室能否再多撑住一个边界——多一个成员、多一个并行任务、一次重启、一次换模型、一次越权尝试——并且如实报告结果。
+进度不是功能数量、成员数量或文档数量。进度是**证据**：Viva 能否再多撑住一个边界——多一个成员、多一个并行任务、一次重启、一次换模型、一次越权尝试——并且如实报告结果。
 
 ## 诚实约束（不可协商）
 

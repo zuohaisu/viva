@@ -13,7 +13,7 @@ is that record.
   the TerminalHost slice is not published as an independent library —
   extracting it means carrying Orca's runner/cache/WSL coupling. Reuse
   would also import Orca's detach/disconnect-then-keep-running semantics,
-  which Viva must not keep (owned terminals stop with the office).
+  which Viva must not keep (owned terminals stop with the Viva host).
 - **portable-pty 0.9.0** (wezterm's pty layer, maintained, MIT): owns the
   pty/session discipline (setsid + controlling terminal on Unix), giving
   each session a real process group without hand-rolled tty ioctls.

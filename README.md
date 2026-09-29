@@ -1,12 +1,12 @@
 # Viva
 
-> **Viva is Haisu's local-first Personal AI Office.**
+> **Viva is Haisu's local-first personal AI collaboration system.**
 >
-> Several persistent AI members live and work here — each with its own role,
+> Several persistent AI members work through Viva — each with its own role,
 > history and knowledge — and drive real tools to get work done. Viva is not an
-> AI member: it is the office the members work in.
+> AI member: it preserves their working relationships and history.
 >
-> Customer Zero is **Haisu**; the office ships with no built-in personas.
+> Customer Zero is **Haisu**; Viva ships with no built-in personas.
 > `Samuel`, `Deven` and `Alice` are records you create — configuration data,
 > never hard-coded identity.
 >
@@ -21,38 +21,38 @@ raw event ≠ experience ≠ memory ≠ self-model ≠ identity
 Session dies. Resident persists.
 ```
 
-## What the Rust office does today
+## What Viva does today
 
 `viva` is a single native binary (Rust + SQLite). All facts live in
 `$VIVA_HOME` (default `~/.viva`, 0700); member names and model/tool bindings
 are configuration, and every completion claim carries recorded evidence.
 
-- **Foundation** — `viva init` creates the home and applies the full office
+- **Foundation** — `viva init` creates the home and applies the full Viva
   schema; `viva doctor` reports state, schema versions and table counts;
-  `viva event add/list` records and reloads office events across restarts.
-- **Active office control plane** — `viva office start` becomes the single
+  `viva event add/list` persists and reloads events across restarts.
+- **Active control plane** — `viva office start` becomes the single
   active host for the home (a second start refuses and names the running
   one) and serves a private Unix-socket channel. From any other process:
   `viva office status/dispatch/terminals/stop-terminal/result/handoff/shutdown`.
   Dispatch is grant-checked at the moment of effect, idempotent by request
   key, and launches a real PTY in the task's worktree. With no active
-  office, mutations are clean rejections — no daemon is ever started behind
+  host, mutations are clean rejections — no daemon is ever started behind
   your back. On a crash, the next host reconciles: interrupted launches and
   orphaned executions get honest recovery records; nothing is re-run,
   nothing is killed, finished tasks refuse re-dispatch.
-- **Parallel development workbench** — one office spans projects, tasks,
+- **Parallel development workbench** — one Viva instance spans projects, tasks,
   worktrees and terminals (see `crates/viva/src/tui/workbench/`): real git
   facts (branch/dirty/diff), purpose-terminals per worktree with focused
   keyboard input that never crosses neighbors, and a quit protocol that
   stops owned processes while preserving every worktree and record.
-- **Conversation metadata** — `viva conversations` keeps the office-owned
+- **Conversation metadata** — `viva conversations` keeps the Viva-owned
   tree: display names, fork hierarchy, write-once native session pointers,
   explicit task attachment, and cross-harness handoffs with declared
-  capability. The harness (Pi) owns the transcript; the office owns the tree.
+  capability. The harness (Pi) owns the transcript; Viva owns the tree.
 - **Pi as the default conversational host** — members meet in Pi's own UI
   inside a Viva terminal (`crates/viva/src/harness/pi/` +
   [extensions/pi/](extensions/pi/)). The extension injects the member's
-  office context and offers office queries, grant-controlled dispatch and
+  member/task context and offers status queries, grant-controlled dispatch and
   explicit handoff. It states plainly when no external memory is connected.
 - **Data preservation** — `viva data export --out <dir>` dumps every fact
   table read-only to JSON with a manifest. Historical Ticket Autopilot data
@@ -83,7 +83,7 @@ cargo install --path crates/viva    # or: cargo build --release
 viva init && viva doctor
 ```
 
-**Run the office:**
+**Run Viva:**
 
 ```bash
 viva office start        # the active host for this VIVA_HOME
@@ -92,9 +92,9 @@ viva office status       # from any second terminal/process
 
 ## Technology decision
 
-The approved target is **Rust + Ratatui/Crossterm** for the Office host and
+The approved target is **Rust + Ratatui/Crossterm** for the Viva host and
 terminal surface, **Pi + a small TypeScript extension** for member
-conversation, and **SQLite + ordinary files** for office state.
+conversation, and **SQLite + ordinary files** for Viva state.
 [ADR 0011](docs/decisions/0011-rust-host-and-tui.md) is the authoritative
 selection. The Python runtime was retired in V13
 ([retirement record](docs/validation/v13-python-retirement.md) maps every
@@ -126,7 +126,7 @@ crates/viva/src/
   office/       active host, control channel, reconciliation (V07)
   harness/      explicit launch combinations; Pi specialization (V09)
   tui/          shell, parallel-development workbench (V14), conversations
-extensions/pi/  the Pi office extension (TypeScript, independently tested)
+extensions/pi/  the Pi member extension (TypeScript, independently tested)
 ```
 
 ## Testing
@@ -142,7 +142,7 @@ cd extensions/pi && npm ci && npm run typecheck && npm test   # Pi extension
 Members and workers never gain repository-owner authority: no protected-branch
 pushes, no merges, no approving their own PR, no self-authorization — the
 vocabulary lives in `crates/viva/src/authority/` and protected actions are
-refused to every grant. Caller roles exist only because the office issued a
+refused to every grant. Caller roles exist only because Viva issued a
 channel; nothing self-declares. Every persisted artifact is private
 (0o600/0o700) and secret-redacted before it is written. Viva never reads,
 writes or migrates the historical `~/.ticket-autopilot/` state.
