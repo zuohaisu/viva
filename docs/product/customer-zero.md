@@ -60,7 +60,7 @@ Alice 以 `read_only` 模式进入同一任务的产出（同一个 worktree）�
 Deven 从 Claude 换到另一个模型。记录、历史事件、知识条目全在；新执行记录新的 model（`resident engine`；`test_scenario_7…`）。
 
 **S7 — 越权被拒绝且留痕**
-一个成员试图派发到它没有授权的任务（或试图用更宽的模式）。拒绝理由进入 grant ledger 与 journal，能被查（`test_scenario_8…`；`viva office grant`）。
+一个成员试图派发到它没有授权的任务（或试图用更宽的模式）。拒绝理由进入 grant ledger 与 journal，能被查（`test_scenario_8…`；`viva grant`）。
 
 **S8 — 换人接手**
 Deven 卡住/不收敛。`viva task brief <id>` 给出目标、约束、工作位置、已试方案与失败原因、已有产出、未完成项——换 Oliver 或 Alice 接着做。

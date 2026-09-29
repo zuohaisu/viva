@@ -1,14 +1,13 @@
 # @viva/pi-office-extension
 
 Viva member-context extension for the [Pi coding agent](https://github.com/earendil-works/pi)
-(V09, issue #18). It gives a Pi session the member/task context of the member it
-runs as — identity, current task brief — and controlled actions over
-the fixed `viva office …` CLI envelope.
+(V09, issue #18). It gives a Pi session its member identity and current task
+brief, and offers controlled actions through the `viva` CLI.
 
 ## What it does
 
 - **Identity injection**: the Rust harness (`crates/viva/src/harness/pi/`)
-  launches `pi --extension <this file>` with member/task context in the environment
+  launches `pi --extension <this file>` with member/task context in environment
   variables. The extension surfaces that identity at session start. The
   member is configuration data; no member name is hard-coded here.
 - **Status query tools**: `viva_office_status` and `viva_office_task_brief`

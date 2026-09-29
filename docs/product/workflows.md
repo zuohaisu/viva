@@ -39,7 +39,7 @@ continue（task brief 带着目标、约束、尝试、失败原因、产出、�
 ### W1 — 派发与并行执行（← S1）
 创建 Task → 分配给成员 → 各自在隔离 worktree 里真实并发。
 最低要求：Task 对象 + 成员分配 + 工作位置策略 + 执行注册表。
-实现：`viva task new`、`viva office dispatch`；`worktrees/location.py`；`executions/`。
+实现：`viva create-task`、`viva dispatch`；worktree 定位与执行注册表见 `crates/viva/src/`。
 
 ### W2 — 执行归属与界面无关（← S2）
 执行在启动时固定归属；切换成员/Workspace 只影响导航。

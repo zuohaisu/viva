@@ -69,7 +69,7 @@ reviewer 属于第二种：**review 同一个任务时仍然进入该任务的 w
 ```text
 Haisu ──grant（来源=user，范围=task+actions+mode）──► Samuel（coordinator）
                                                         │
-                        viva office dispatch --task … --to Deven
+                        viva dispatch --task … --to Deven
                                                         │  （花掉 grant）
                                                         ▼
                                         Execution(Deven, task, write)

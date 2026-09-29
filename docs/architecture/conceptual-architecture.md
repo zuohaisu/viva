@@ -23,7 +23,7 @@ Status: canonical · 版本：2026-09-27（多成员协作修订）· 上游：`
    · request.kind ∈ {user, worker}：界面上看到的来源与记录一致，不可冒充。
 
 ⑤ 协调成员的派发 / 观察 / 停止 / 取回
-   Coordinator Execution ──grant──► viva office dispatch|status|result|stop
+   Coordinator Execution ──grant──► viva dispatch|status|result|stop
    · 真实 CLI 调用（worker 是子进程，命令是它唯一能触达 Viva 的方式）
    · 子任务只能花父 grant 的子集（不变量 I7）；拒绝写入 authority.refused
    · 不是固定流水线：dispatch 的目标成员与任务由调用方决定

@@ -30,10 +30,10 @@ are configuration, and every completion claim carries recorded evidence.
 - **Foundation** — `viva init` creates the home and applies the full Viva
   schema; `viva doctor` reports state, schema versions and table counts;
   `viva event add/list` persists and reloads events across restarts.
-- **Active control plane** — `viva office start` becomes the single
+- **Active control plane** — `viva start` becomes the single
   active host for the home (a second start refuses and names the running
   one) and serves a private Unix-socket channel. From any other process:
-  `viva office status/dispatch/terminals/stop-terminal/result/handoff/shutdown`.
+  `viva status/dispatch/terminals/stop-terminal/result/handoff/shutdown`.
   Dispatch is grant-checked at the moment of effect, idempotent by request
   key, and launches a real PTY in the task's worktree. With no active
   host, mutations are clean rejections — no daemon is ever started behind
@@ -52,7 +52,7 @@ are configuration, and every completion claim carries recorded evidence.
 - **Pi as the default conversational host** — members meet in Pi's own UI
   inside a Viva terminal (`crates/viva/src/harness/pi/` +
   [extensions/pi/](extensions/pi/)). The extension injects the member's
-  member/task context and offers status queries, grant-controlled dispatch and
+  task context and offers status queries, grant-controlled dispatch and
   explicit handoff. It states plainly when no external memory is connected.
 - **Data preservation** — `viva data export --out <dir>` dumps every fact
   table read-only to JSON with a manifest. Historical Ticket Autopilot data
@@ -86,8 +86,8 @@ viva init && viva doctor
 **Run Viva:**
 
 ```bash
-viva office start        # the active host for this VIVA_HOME
-viva office status       # from any second terminal/process
+viva start               # the active host for this VIVA_HOME
+viva status              # from any second terminal/process
 ```
 
 ## Technology decision
