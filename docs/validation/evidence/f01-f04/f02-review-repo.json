@@ -1,0 +1,22 @@
+{
+  "already_proposed": 0,
+  "kind": "repo_review",
+  "notes": [],
+  "proposed": [
+    {
+      "created_at": "2026-09-29T04:10:28.489431Z",
+      "dedup_key": "repo_cleanliness:4b78e6c11b5a7621:0000",
+      "evidence": "`git status --porcelain` lists working-tree leftovers:\n?? leftover.tmp\n— a human decides; maintenance removes nothing",
+      "kind": "repo_cleanliness",
+      "proposal_id": "prop-b87a083f17464aa2891fcc9e8553d602",
+      "resolution_note": null,
+      "resolved_at": null,
+      "resolved_by": null,
+      "session_id": "maint-d58e3f7578a6484ab1f97c6d865db63b",
+      "status": "open",
+      "subject": "/var/folders/8k/cz3lc7yd3dq6gbdx5dbf_j8h0000gn/T/tmp.fCxyea7e2T",
+      "suggested_action": "human_review"
+    }
+  ],
+  "scan_id": "scan-d91e216ee5144fda9815956fc0e99133"
+}

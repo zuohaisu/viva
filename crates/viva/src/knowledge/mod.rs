@@ -566,7 +566,13 @@ impl<'a> KnowledgeRegistry<'a> {
                AND (scope = 'team'
                     OR (scope = 'personal' AND owner_member_id = ?1)
                     OR (scope = 'project' AND project_id IS NOT NULL AND project_id = ?2)
-                    OR scope = 'skill')
+                    -- A disabled skill is retired from selection: office
+                    -- state actually gates context injection. A skill-scope
+                    -- entry with no skills row (recorded directly) has no
+                    -- disable mechanism and stays selectable.
+                    OR (scope = 'skill' AND (item_id NOT IN (SELECT item_id FROM skills)
+                                             OR item_id IN (SELECT item_id FROM skills
+                                                            WHERE enabled = 1))))
              ORDER BY created_at, item_id"
         ))?;
         let rows = stmt.query_map(

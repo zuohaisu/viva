@@ -1,0 +1,60 @@
+{
+  "browser-chrome": {
+    "action_output": {
+      "bytes": 877,
+      "fingerprint": "fee748e5483da545",
+      "redacted": true
+    },
+    "foreground": false,
+    "post_state": {
+      "bytes": 3971,
+      "fingerprint": "4a9ce64a0a36f894",
+      "redacted": true
+    },
+    "pre_state": {
+      "bytes": 3971,
+      "fingerprint": "8b6aa296adbcc315",
+      "redacted": true
+    },
+    "reason": null,
+    "recorded_at": "2026-09-29T04:10:29.220855Z",
+    "state": "executed",
+    "target": "Google Chrome"
+  },
+  "capabilities": [
+    {
+      "adapter_evidence": "live probe succeeded",
+      "mode": "probe_ok",
+      "restriction_state": "enforced",
+      "tool": "orca-computer"
+    },
+    {
+      "adapter_evidence": "live probe succeeded",
+      "mode": "probe_ok",
+      "restriction_state": "enforced",
+      "tool": "osascript"
+    }
+  ],
+  "native-finder": {
+    "action_output": {
+      "bytes": 10081,
+      "fingerprint": "56fbe3144dcdfeaa",
+      "redacted": true
+    },
+    "foreground": false,
+    "post_state": {
+      "bytes": 3971,
+      "fingerprint": "bffd50449c18ea8e",
+      "redacted": true
+    },
+    "pre_state": {
+      "bytes": 3971,
+      "fingerprint": "7255d0c761dabdca",
+      "redacted": true
+    },
+    "reason": null,
+    "recorded_at": "2026-09-29T04:10:29.83608Z",
+    "state": "executed",
+    "target": "Finder"
+  }
+}

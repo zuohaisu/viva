@@ -192,6 +192,9 @@ test("the extension registers office tools and refuses unauthorized dispatch", a
     assert.deepEqual(
       [...registered.keys()].sort(),
       [
+        "viva_computer_audit",
+        "viva_memory_remember",
+        "viva_memory_search",
         "viva_office_dispatch",
         "viva_office_handoff",
         "viva_office_status",

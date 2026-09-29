@@ -33,6 +33,10 @@ fn run(args: &[String]) -> OfficeResult<()> {
         Some("conversations") => cmd_conversations(args.get(1..).unwrap_or(&[])),
         Some("workbench") => cmd_workbench(),
         Some("data") => cmd_data(args.get(1..).unwrap_or(&[])),
+        Some("tools") => cmd_tools(args.get(1..).unwrap_or(&[])),
+        Some("memory") => cmd_memory(args.get(1..).unwrap_or(&[])),
+        Some("workflow") => cmd_workflow(args.get(1..).unwrap_or(&[])),
+        Some("maintenance") => cmd_maintenance(args.get(1..).unwrap_or(&[])),
         Some("version" | "--version" | "-V") => {
             println!("viva {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -125,8 +129,74 @@ USAGE:
 
     viva data export --out <dir>
         Read-only export (dump) of every fact table in this VIVA_HOME to
-        JSON files plus a manifest. Never touches anything outside the
-        store — no worktrees, no historical data directories.
+        JSON files plus a manifest. RAW/UNREDACTED sensitive asset export:
+        private files only, do not publish. Never touches worktrees or
+        historical data directories.
+
+    viva tools computer lane
+        List all foreground holders without reconciliation; opening the
+        office may still apply pending schema migrations.
+
+    viva tools computer release-lease --task <id> --acquired-at <timestamp> \
+      --member <id> --grant <id> --reason <text> --confirm
+        Release only an unknown-PID legacy holder after separately confirming
+        its original action stopped. Needs a live owner-issued task grant;
+        --confirm is an assertion, not proof of OS/process state.
+
+    viva tools computer audit
+        Probe the reused computer tools (orca computer, osascript) and
+        record what is really available (read-only).
+
+    viva tools computer smoke --task <id> --member <id> --grant <id>
+        Run the two controlled smoke tasks (browser + native app) through
+        the locate → act → verify chain under the given task-scoped grant.
+        Read-only inspections; evidence rows are recorded either way.
+
+    viva memory search --member <id> [--project <id>] --query <text>
+        Search the linked external memory for one member's scope
+        (read-only). Unavailable stores say so; unclaimable hits are
+        counted, not silently mixed in.
+
+    viva memory remember --member <id> [--project <id>] --content <text>
+                         --source <provenance> [--category <c>] [--tags <t>]
+        Write one fact through the real provider with mandatory provenance.
+
+    viva memory archive|restore --fact <id> --reason <text>
+        Exit paths over the office link layer. Nothing here deletes.
+
+    viva memory status
+        Report which store/checkout the office is wired to — from a real
+        adapter round trip, not file existence.
+
+    viva workflow register --builtin <delivery|read-only-review> | --file <config.json>
+        Register a workflow configuration (data: steps, roles, evidence
+        requirements, retry budgets, transitions).
+
+    viva workflow start-run --task <id> --config <name> --cwd <dir>
+        Start a run bound to the REAL git head of --cwd (resolved via
+        rev-parse, never self-reported).
+
+    viva workflow record --run <id> --member <id> --pass|--fail --evidence <json>
+        Record one attempt of the current step. Evidence is a JSON array
+        of objects with kind, note and optional head_sha, grant_id and
+        references fields.
+
+    viva workflow status|history --run <id>
+        Progress (with the owning task's own status shown beside it) and
+        the full recoverable record.
+
+    viva workflow resume --run <id> --cwd <dir> | abort --run <id> --reason <text>
+        Resume a paused run (optionally rebinding to a new real head) or
+        abort it with a reason.
+
+    viva maintenance review-knowledge [--stale-days <n>]
+    viva maintenance review-worktrees | review-repo --repo <dir>
+    viva maintenance proposals
+    viva maintenance execute|dismiss --proposal <id> --grant <id> [--note <text>]
+        Run one bounded maintenance window (session opened and closed by
+        this command — no daemon). Execution and dismissal both require a
+        live maintain_knowledge grant; worktree and cleanliness findings
+        are human-review only.
 
     viva version"
     );
@@ -315,11 +385,13 @@ fn cmd_office(args: &[String]) -> OfficeResult<()> {
             Ok(())
         }
         Some("brief") => cmd_office_brief(args.get(1..).unwrap_or(&[])),
+        Some("create-task") => cmd_office_create_task(args.get(1..).unwrap_or(&[])),
+        Some("grant") => cmd_office_grant(args.get(1..).unwrap_or(&[])),
         Some("handoff") => cmd_office_handoff(&home, args.get(1..).unwrap_or(&[])),
         _ => {
             print_usage();
             Err(OfficeError::Validation(
-                "office needs start | status | dispatch | terminals | stop-terminal | result | brief | handoff | shutdown"
+                "office needs start | status | dispatch | terminals | stop-terminal | result | brief | create-task | grant | handoff | shutdown"
                     .into(),
             ))
         }
@@ -630,13 +702,750 @@ fn cmd_conversations(args: &[String]) -> OfficeResult<()> {
     Ok(())
 }
 
+/// `viva tools computer …` (F03) — inspect/recover the foreground lane,
+/// audit reused tools, or run two controlled smoke tasks. Lease recovery
+/// needs an explicit task grant and operator assertion; smoke only inspects
+/// real windows. Input actions are never exposed to chat through this CLI.
+fn cmd_tools(args: &[String]) -> OfficeResult<()> {
+    use std::str::FromStr as _;
+
+    // args[0] is the tool family (`computer`); args[1..] its command.
+    if args.first().map(String::as_str) != Some("computer") {
+        return Err(OfficeError::Validation(
+            "usage: viva tools computer lane | audit | smoke --task <id> \
+             --member <id> --grant <id> | release-lease --task <id> --acquired-at <time> \
+             --member <id> --grant <id> --reason <text> --confirm"
+                .into(),
+        ));
+    }
+    match args.get(1).map(String::as_str) {
+        Some("lane") => {
+            if args.len() != 2 {
+                return Err(OfficeError::Validation("lane accepts no flags".into()));
+            }
+            let store = open_office_store()?;
+            let rows = viva::tools::computer::ForegroundCoordinator::new(&store).leases()?;
+            println!("{}", serde_json::to_string_pretty(&rows)?);
+            Ok(())
+        }
+        Some("release-lease") => {
+            let mut named = std::collections::HashMap::new();
+            let mut confirm = false;
+            let mut i = 2;
+            while i < args.len() {
+                let flag = args[i].as_str();
+                if flag == "--confirm" {
+                    if confirm {
+                        return Err(OfficeError::Validation("duplicate --confirm".into()));
+                    }
+                    confirm = true;
+                    i += 1;
+                    continue;
+                }
+                if !["--task", "--acquired-at", "--member", "--grant", "--reason"].contains(&flag)
+                    || named.contains_key(flag)
+                {
+                    return Err(OfficeError::Validation(format!(
+                        "unexpected or duplicate release-lease flag `{flag}`"
+                    )));
+                }
+                i += 1;
+                let value = args
+                    .get(i)
+                    .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+                named.insert(flag, value.as_str());
+                i += 1;
+            }
+            if !confirm {
+                return Err(OfficeError::Validation(
+                    "release-lease requires --confirm after checking the original action stopped"
+                        .into(),
+                ));
+            }
+            let require = |flag| {
+                named
+                    .get(flag)
+                    .copied()
+                    .ok_or_else(|| OfficeError::Validation(format!("release-lease needs {flag}")))
+            };
+            let task = viva::foundation::ids::TaskId::from_str(require("--task")?)?;
+            let member = viva::foundation::ids::MemberId::from_str(require("--member")?)?;
+            let grant = viva::foundation::ids::GrantId::from_str(require("--grant")?)?;
+            let store = open_office_store()?;
+            let authority = viva::authority::AuthorityEngine::new(&store);
+            let actor = viva::authority::Actor::Member {
+                member,
+                grant: Some(grant),
+            };
+            viva::tools::computer::ForegroundCoordinator::new(&store).release_unknown_lease(
+                &task,
+                require("--acquired-at")?,
+                require("--reason")?,
+                &actor,
+                &authority,
+            )?;
+            println!("lease released for {} (operator assertion recorded)", task);
+            Ok(())
+        }
+        Some("audit") => {
+            let store = open_office_store()?;
+            let engine = viva::tools::computer::ComputerEngine::new(&store);
+            for report in engine.audit()? {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
+            Ok(())
+        }
+        Some("smoke") => {
+            let mut task_id = None;
+            let mut member_id = None;
+            let mut grant_id = None;
+            let mut i = 2;
+            while i < args.len() {
+                let flag = args[i].as_str();
+                i += 1;
+                let value = args
+                    .get(i)
+                    .cloned()
+                    .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+                match flag {
+                    "--task" => task_id = Some(value),
+                    "--member" => member_id = Some(value),
+                    "--grant" => grant_id = Some(value),
+                    other => {
+                        return Err(OfficeError::Validation(format!(
+                            "unknown smoke flag `{other}`"
+                        )));
+                    }
+                }
+                i += 1;
+            }
+            let (Some(task_id), Some(member_id), Some(grant_id)) = (task_id, member_id, grant_id)
+            else {
+                return Err(OfficeError::Validation(
+                    "usage: viva tools computer smoke --task <id> --member <id> --grant <id>"
+                        .into(),
+                ));
+            };
+            let task_id = viva::foundation::ids::TaskId::from_str(&task_id)?;
+            let member_id = viva::foundation::ids::MemberId::from_str(&member_id)?;
+            let grant_id = viva::foundation::ids::GrantId::from_str(&grant_id)?;
+
+            let store = open_office_store()?;
+            // Smoke evidence binds to a real office task, not an invented one.
+            viva::tasks::TaskRegistry::new(&store).require_task(&task_id)?;
+            let authority = viva::authority::AuthorityEngine::new(&store);
+            let actor = viva::authority::Actor::Member {
+                member: member_id,
+                grant: Some(grant_id),
+            };
+            let engine = viva::tools::computer::ComputerEngine::new(&store);
+            let reports = engine.audit()?;
+            let mut executed = 0;
+            let mut results = serde_json::Map::new();
+            for (name, spec) in viva::tools::computer::smoke_specs() {
+                let record = engine.execute(&authority, &actor, &task_id, &spec)?;
+                if record.state == viva::tools::computer::ActionState::Executed {
+                    executed += 1;
+                }
+                // The printed evidence SUMMARIZES the tool snapshots instead
+                // of dumping them: `orca` state output inventories every
+                // running application (names, bundle ids, pids) — machine-
+                // private content that must not flow into shareable files
+                // (QA finding N1). The full snapshots stay in this
+                // VIVA_HOME's private store (computer_actions); the
+                // summary keeps the verification facts.
+                results.insert(name, summarize_action(&record)?);
+            }
+            results.insert("capabilities".into(), serde_json::to_value(&reports)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::Value::Object(results))?
+            );
+            if executed < 2 {
+                return Err(OfficeError::Validation(format!(
+                    "smoke incomplete: {executed}/2 tasks executed — see the evidence \
+                     above for the honest state"
+                )));
+            }
+            Ok(())
+        }
+        other => Err(OfficeError::Validation(format!(
+            "unknown tools computer command `{}`; expected `lane`, `release-lease`, `audit` or `smoke`",
+            other.unwrap_or("<missing>")
+        ))),
+    }
+}
+
+/// A shareable summary of one computer action: verdict and verification
+/// facts, with the raw tool snapshots replaced by size + fingerprint.
+fn summarize_action(
+    record: &viva::tools::computer::ActionRecord,
+) -> OfficeResult<serde_json::Value> {
+    let digest = |text: &Option<String>| -> serde_json::Value {
+        match text {
+            None => serde_json::Value::Null,
+            Some(text) => serde_json::json!({
+                "redacted": true,
+                "bytes": text.len(),
+                "fingerprint": content_fingerprint(text),
+            }),
+        }
+    };
+    Ok(serde_json::json!({
+        "state": record.state,
+        "target": record.target,
+        "reason": record.reason,
+        "foreground": record.foreground,
+        "pre_state": digest(&record.pre_state),
+        "action_output": digest(&record.action_output),
+        "post_state": digest(&record.post_state),
+        "recorded_at": record.recorded_at,
+    }))
+}
+
+/// A stable local fingerprint (FNV-1a, hex) so two runs' snapshots can be
+/// told apart without carrying their content. Not cryptographic.
+fn content_fingerprint(text: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in text.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// `viva office create-task --goal <text>` — open one office task. This is
+/// an owner-side CLI: whoever runs the binary creates the task in their
+/// own VIVA_HOME.
+fn cmd_office_create_task(args: &[String]) -> OfficeResult<()> {
+    let mut goal = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--goal" => {
+                i += 1;
+                goal = args.get(i).cloned();
+            }
+            other => {
+                return Err(OfficeError::Validation(format!(
+                    "unknown create-task flag `{other}`"
+                )));
+            }
+        }
+        i += 1;
+    }
+    let goal = goal.ok_or_else(|| {
+        OfficeError::Validation("usage: viva office create-task --goal <text>".into())
+    })?;
+    let store = open_office_store()?;
+    let task =
+        viva::tasks::TaskRegistry::new(&store).create_task(goal, vec![], None, None, None)?;
+    println!("{}", serde_json::to_string_pretty(&task)?);
+    Ok(())
+}
+
+/// `viva office grant --member <id> --task <id> --action <a> --mode <m>
+/// [--expires <rfc3339>]` — an owner-side root grant (the CLI runner IS
+/// the user; the engine records issuer=user). Protected actions are
+/// refused by the engine itself.
+fn cmd_office_grant(args: &[String]) -> OfficeResult<()> {
+    use std::str::FromStr as _;
+    let mut member = None;
+    let mut task = None;
+    let mut action = None;
+    let mut mode = None;
+    let mut expires = None;
+    let mut i = 0;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        i += 1;
+        let value = args
+            .get(i)
+            .cloned()
+            .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+        match flag {
+            "--member" => member = Some(value),
+            "--task" => task = Some(value),
+            "--action" => action = Some(value),
+            "--mode" => mode = Some(value),
+            "--expires" => expires = Some(value),
+            other => {
+                return Err(OfficeError::Validation(format!(
+                    "unknown grant flag `{other}`"
+                )));
+            }
+        }
+        i += 1;
+    }
+    let member = member
+        .map(|m| viva::foundation::ids::MemberId::from_str(&m))
+        .transpose()?;
+    let task = task
+        .map(|t| viva::foundation::ids::TaskId::from_str(&t))
+        .transpose()?;
+    let action = action.ok_or_else(|| {
+        OfficeError::Validation(
+            "usage: viva office grant --member <id> --task <id> --action <a> --mode <m> \
+             [--expires <rfc3339>]"
+                .into(),
+        )
+    })?;
+    let mode = viva::authority::GrantMode::from_str_value(&mode.ok_or_else(|| {
+        OfficeError::Validation(
+            "--mode is required (READ | PROPOSE | ACT_WITH_APPROVAL | ACT_AUTONOMOUSLY)".into(),
+        )
+    })?)?;
+    let store = open_office_store()?;
+    let engine = viva::authority::AuthorityEngine::new(&store);
+    let grant = engine.issue_root_grant(member, task, vec![action], mode, expires)?;
+    println!("{}", serde_json::to_string_pretty(&grant)?);
+    Ok(())
+}
+
+/// `viva memory …` (F04) — the office's namespace/audit layer over the
+/// real external memory. Search/remember/archive all go through the
+/// office link layer: member scoping, provenance, usage evidence, and
+/// recoverable exit (no delete). The adapter subprocess always receives
+/// an explicit db path.
+fn cmd_memory(args: &[String]) -> OfficeResult<()> {
+    use std::str::FromStr as _;
+
+    let mut named: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut i = 1; // args[0] is the subcommand
+    while i < args.len() {
+        let flag = args[i].as_str();
+        i += 1;
+        let value = args
+            .get(i)
+            .cloned()
+            .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+        named.insert(flag.to_string(), value);
+        i += 1;
+    }
+    let get = |key: &str| named.get(key).cloned();
+    let require = |key: &str| -> OfficeResult<String> {
+        get(key).ok_or_else(|| OfficeError::Validation(format!("memory needs --{key}")))
+    };
+
+    let store = open_office_store()?;
+    let service = viva::memory::MemoryService::new(&store);
+    match args.first().map(String::as_str) {
+        Some("search") => {
+            let viewer = viva::foundation::ids::MemberId::from_str(&require("--member")?)?;
+            let project = get("--project")
+                .map(|p| viva::foundation::ids::ProjectId::from_str(&p))
+                .transpose()?;
+            let query = require("--query")?;
+            match service.search(&viewer, project.as_ref(), &query, 16 * 1024)? {
+                viva::memory::MemorySearch::Fetched {
+                    facts,
+                    hidden_unclaimable,
+                } => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "state": "fetched",
+                            "facts": facts,
+                            "hidden_unclaimable": hidden_unclaimable,
+                        }))?
+                    );
+                }
+                viva::memory::MemorySearch::Unavailable { reason } => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "state": "unavailable",
+                            "reason": reason,
+                        }))?
+                    );
+                }
+            }
+            Ok(())
+        }
+        Some("probe") => {
+            let viewer = viva::foundation::ids::MemberId::from_str(&require("--member")?)?;
+            let project = get("--project")
+                .map(|p| viva::foundation::ids::ProjectId::from_str(&p))
+                .transpose()?;
+            match service.probe(&viewer, project.as_ref(), &require("--entity")?, 16 * 1024)? {
+                viva::memory::MemorySearch::Fetched {
+                    facts,
+                    hidden_unclaimable,
+                } => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "state": "fetched",
+                            "facts": facts,
+                            "hidden_unclaimable": hidden_unclaimable,
+                        }))?
+                    );
+                }
+                viva::memory::MemorySearch::Unavailable { reason } => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "state": "unavailable",
+                            "reason": reason,
+                        }))?
+                    );
+                }
+            }
+            Ok(())
+        }
+        Some("link") => {
+            let member_id = viva::foundation::ids::MemberId::from_str(&require("--member")?)?;
+            let project = get("--project")
+                .map(|p| viva::foundation::ids::ProjectId::from_str(&p))
+                .transpose()?;
+            let fact_id: i64 = require("--fact")?.parse().map_err(|_| {
+                OfficeError::Validation("--fact must be the external fact's integer id".into())
+            })?;
+            let link =
+                service.link_fact(fact_id, &member_id, project.as_ref(), &require("--source")?)?;
+            println!("{}", serde_json::to_string_pretty(&link)?);
+            Ok(())
+        }
+        Some("remember") => {
+            let member_id = viva::foundation::ids::MemberId::from_str(&require("--member")?)?;
+            let project = get("--project")
+                .map(|p| viva::foundation::ids::ProjectId::from_str(&p))
+                .transpose()?;
+            let link = service.remember(
+                &member_id,
+                project.as_ref(),
+                &require("--content")?,
+                &require("--source")?,
+                &get("--category").unwrap_or_else(|| "general".into()),
+                &get("--tags").unwrap_or_default(),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&link)?);
+            Ok(())
+        }
+        Some(cmd @ ("archive" | "restore")) => {
+            let fact_id: i64 = require("--fact")?.parse().map_err(|_| {
+                OfficeError::Validation("--fact must be the external fact's integer id".into())
+            })?;
+            let member_id = viva::foundation::ids::MemberId::from_str(&require("--member")?)?;
+            let grant = get("--grant")
+                .map(|g| viva::foundation::ids::GrantId::from_str(&g))
+                .transpose()?;
+            let actor = viva::authority::Actor::Member {
+                member: member_id,
+                grant,
+            };
+            let authority = viva::authority::AuthorityEngine::new(&store);
+            let link = if cmd == "archive" {
+                service.archive(fact_id, &require("--reason")?, &actor, &authority)?
+            } else {
+                service.restore(fact_id, &require("--reason")?, &actor, &authority)?
+            };
+            println!("{}", serde_json::to_string_pretty(&link)?);
+            Ok(())
+        }
+        Some("status") => {
+            let config = viva::memory::AdapterConfig::from_env();
+            // A real probe, not a file-existence promise: run the adapter's
+            // status command (read-only) and report what actually answered.
+            let probe = match service.probe_adapter_status() {
+                Ok(answer) => answer,
+                Err(err) => serde_json::json!({
+                    "ok": false,
+                    "state": "unavailable",
+                    "error": err.to_string(),
+                }),
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "python": config.python.display().to_string(),
+                    "adapter": config.adapter_script.display().to_string(),
+                    "adapter_present": config.adapter_script.is_file(),
+                    "agent_dir": config.agent_dir.display().to_string(),
+                    "agent_dir_present": config.agent_dir.is_dir(),
+                    "db_path": config.db_path.display().to_string(),
+                    "probe": probe,
+                }))?
+            );
+            Ok(())
+        }
+        _ => Err(OfficeError::Validation(
+            "memory needs search | probe | link | remember | archive | restore | status".into(),
+        )),
+    }
+}
+
+/// `viva workflow …` (F01) — the reachable entry for delivery workflows.
+/// The run head is anchored to the REAL git head of the given directory
+/// (rev-parse through the office's git runner), never self-reported.
+/// `status` always shows the owning task's own status beside the run's
+/// process progress: the run records process facts, the task keeps the
+/// delivery state, and completion stays an appended task outcome.
+fn cmd_workflow(args: &[String]) -> OfficeResult<()> {
+    use std::str::FromStr as _;
+
+    let mut named: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut flags: Vec<String> = Vec::new();
+    let mut i = 1; // args[0] is the subcommand
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--pass" || arg == "--fail" {
+            // Boolean outcome flags take no value.
+            flags.push(arg.to_string());
+        } else if let Some(flag) = arg.strip_prefix("--") {
+            i += 1;
+            let value = args
+                .get(i)
+                .cloned()
+                .ok_or_else(|| OfficeError::Validation(format!("flag {arg} needs a value")))?;
+            named.insert(flag.to_string(), value);
+        } else {
+            flags.push(arg.to_string());
+        }
+        i += 1;
+    }
+    let get = |key: &str| named.get(key).cloned();
+    let require = |key: &str| -> OfficeResult<String> {
+        get(key).ok_or_else(|| OfficeError::Validation(format!("workflow needs --{key}")))
+    };
+
+    let store = open_office_store()?;
+    let engine = viva::workflows::WorkflowEngine::new(&store);
+    let resolve_head = |cwd: &str| -> OfficeResult<String> {
+        let runner = viva::git::cli::CliRunner::default();
+        let path = std::path::Path::new(cwd);
+        // A SHA is only an honest content anchor when tracked files match
+        // it. Apply the same gate at start and every resume (QA R3-N8).
+        let status = runner
+            .run(
+                "git",
+                path,
+                &["status", "--porcelain", "--untracked-files=no"],
+            )
+            .map_err(|failure| {
+                OfficeError::Validation(format!("git status failed in {cwd}: {failure}"))
+            })?;
+        if !status.success() || !status.stdout.trim().is_empty() {
+            return Err(OfficeError::Validation(format!(
+                "refusing to anchor a run in a dirty worktree ({cwd}) — uncommitted \
+                 tracked changes mean \"verified at this head\" would be a claim about \
+                 content the SHA does not name; commit first"
+            )));
+        }
+        viva::git::cli::head_sha(&runner, path)
+    };
+    match args.first().map(String::as_str) {
+        Some("register") => {
+            let config = if let Some(builtin) = get("builtin") {
+                match builtin.as_str() {
+                    "delivery" => viva::workflows::WorkflowConfig::delivery_default(),
+                    "read-only-review" => {
+                        viva::workflows::WorkflowConfig::read_only_review_default()
+                    }
+                    other => {
+                        return Err(OfficeError::Validation(format!(
+                            "unknown builtin config `{other}` (delivery | read-only-review)"
+                        )));
+                    }
+                }
+            } else {
+                let file = require("file")?;
+                let text = std::fs::read_to_string(&file)?;
+                serde_json::from_str(&text)?
+            };
+            let config_id = engine.register_config(&config)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "config_id": config_id,
+                    "name": config.name,
+                    "steps": config.steps.len(),
+                }))?
+            );
+            Ok(())
+        }
+        Some("start-run") => {
+            let task_id = viva::foundation::ids::TaskId::from_str(&require("task")?)?;
+            let cwd = require("cwd")?;
+            let head = resolve_head(&cwd)?;
+            let run = engine.start_run(&task_id, &require("config")?, head)?;
+            println!("{}", serde_json::to_string_pretty(&run)?);
+            Ok(())
+        }
+        Some("record") => {
+            let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
+            let passed = match flags.first().map(String::as_str) {
+                Some("--pass") => true,
+                Some("--fail") => false,
+                other => {
+                    return Err(OfficeError::Validation(format!(
+                        "record needs --pass or --fail (got {other:?})"
+                    )));
+                }
+            };
+            let evidence_json = require("evidence")?;
+            let evidence: Vec<viva::workflows::StepEvidence> =
+                serde_json::from_str(&evidence_json)?;
+            let advance = engine.record_step_result(&require("run")?, &member, passed, evidence)?;
+            println!("{}", serde_json::to_string_pretty(&advance)?);
+            Ok(())
+        }
+        Some("resume") => {
+            // A paused run may only resume against a clean checkout, even
+            // when its head has not changed. No unverified no-cwd bypass.
+            let new_head = resolve_head(&require("cwd")?)?;
+            let run = engine.resume_paused(&require("run")?, Some(new_head))?;
+            println!("{}", serde_json::to_string_pretty(&run)?);
+            Ok(())
+        }
+        Some("abort") => {
+            engine.abort_run(&require("run")?, require("reason")?)?;
+            println!("aborted");
+            Ok(())
+        }
+        Some("status" | "history") => {
+            let history = engine.run_history(&require("run")?)?;
+            if args.first().map(String::as_str) == Some("status") {
+                let tasks = viva::tasks::TaskRegistry::new(&store);
+                let task = tasks.require_task(&history.run.task_id)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "run": history.run,
+                        // Delivery state lives on the task; the run's
+                        // status is process progress only.
+                        "task_status": task.status.as_str(),
+                        "current_step": history.config.steps.get(history.run.current_step),
+                    }))?
+                );
+            } else {
+                println!("{}", serde_json::to_string_pretty(&history)?);
+            }
+            Ok(())
+        }
+        _ => Err(OfficeError::Validation(
+            "workflow needs register | start-run | record | resume | abort | status | history"
+                .into(),
+        )),
+    }
+}
+
+/// `viva maintenance …` (F02) — the reachable entry for runtime knowledge
+/// review and repository maintenance. Each review command opens one
+/// bounded session and closes it: maintenance runs only inside such a
+/// window, never as a daemon.
+fn cmd_maintenance(args: &[String]) -> OfficeResult<()> {
+    use std::str::FromStr as _;
+
+    let mut named: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut i = 1;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        i += 1;
+        let value = args
+            .get(i)
+            .cloned()
+            .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+        named.insert(flag.to_string(), value);
+        i += 1;
+    }
+    let get = |key: &str| named.get(&format!("--{key}")).cloned();
+    let require = |key: &str| -> OfficeResult<String> {
+        get(key).ok_or_else(|| OfficeError::Validation(format!("maintenance needs --{key}")))
+    };
+    let print_report = |report: &viva::maintenance::ScanReport| -> OfficeResult<()> {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "scan_id": report.scan_id,
+                "kind": report.kind,
+                "proposed": report.proposed,
+                "already_proposed": report.already_proposed,
+                "notes": report.notes,
+            }))?
+        );
+        Ok(())
+    };
+
+    let store = open_office_store()?;
+    let maintenance = viva::maintenance::MaintenanceService::new(&store);
+    match args.first().map(String::as_str) {
+        Some("review-knowledge") => {
+            let stale_days: u32 = match get("stale-days") {
+                Some(text) => text
+                    .parse()
+                    .map_err(|_| {
+                        OfficeError::Validation("--stale-days must be a number".to_string())
+                    })?,
+                None => 180,
+            };
+            let registry = viva::knowledge::KnowledgeRegistry::new(&store);
+            let session = viva::maintenance::MaintenanceSession::open(&store)?;
+            // The window closes even when the scan errors — no leaked rows.
+            let outcome = maintenance.review_knowledge(&session, &registry, stale_days);
+            session.end(&store)?;
+            print_report(&outcome?)
+        }
+        Some("review-worktrees") => {
+            let protected = viva::git::worktrees::ProtectedRefs::new(Vec::new());
+            let service = viva::git::worktrees::WorktreeService::new(&store, protected);
+            let records = service.all_records()?;
+            let session = viva::maintenance::MaintenanceSession::open(&store)?;
+            let outcome = maintenance.review_worktrees(&session, &records);
+            session.end(&store)?;
+            print_report(&outcome?)
+        }
+        Some("review-repo") => {
+            let repo = require("repo")?;
+            let session = viva::maintenance::MaintenanceSession::open(&store)?;
+            let outcome = maintenance.review_repo(&session, std::path::Path::new(&repo));
+            session.end(&store)?;
+            print_report(&outcome?)
+        }
+        Some("proposals") => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&maintenance.open_proposals()?)?
+            );
+            Ok(())
+        }
+        Some(cmd @ ("execute" | "dismiss")) => {
+            let actor = viva::authority::Actor::Member {
+                member: viva::foundation::ids::MemberId::from_str(&require("member")?)?,
+                grant: Some(viva::foundation::ids::GrantId::from_str(&require("grant")?)?),
+            };
+            let authority = viva::authority::AuthorityEngine::new(&store);
+            let note = get("note").unwrap_or_default();
+            let proposal = if cmd == "execute" {
+                let registry = viva::knowledge::KnowledgeRegistry::new(&store);
+                maintenance.execute_proposal(
+                    &require("proposal")?,
+                    &actor,
+                    &authority,
+                    &registry,
+                    note,
+                )?
+            } else {
+                maintenance.dismiss_proposal(&require("proposal")?, &actor, &authority, note)?
+            };
+            println!("{}", serde_json::to_string_pretty(&proposal)?);
+            Ok(())
+        }
+        _ => Err(OfficeError::Validation(
+            "maintenance needs review-knowledge | review-worktrees | review-repo | proposals | execute | dismiss"
+                .into(),
+        )),
+    }
+}
+
 /// `viva data export --out <dir>` — read-only asset inventory and dump
 /// (V13): every user table in this VIVA_HOME goes to one JSON file per
 /// table plus a manifest. This is an export for inspection and preserve,
 /// not a restorable backup: there is no schema migration or import path.
 /// The database is opened READ-ONLY and nothing outside the store is
 /// touched: no worktrees, no historical Ticket Autopilot data, no other
-/// agents' homes.
+/// agents' homes. This is a RAW asset export, not a privacy-safe artifact;
+/// owner-only output permissions and manifest flags make that explicit.
 fn cmd_data(args: &[String]) -> OfficeResult<()> {
     match args.first().map(String::as_str) {
         Some("export") => cmd_data_export(args.get(1..).unwrap_or(&[])),
@@ -686,9 +1495,22 @@ fn cmd_data_export(args: &[String]) -> OfficeResult<()> {
     }
     let conn =
         rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    // Only after the store is verified do we create the output directory,
-    // so a failed export leaves no litter behind.
-    std::fs::create_dir_all(&out_path)?;
+    // Create a new private directory, never widen or overwrite an existing
+    // location. The export keeps raw facts for preservation, including
+    // machine-private audit data; it is not safe to commit/share.
+    if let Some(parent) = out_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(&out_path)?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir(&out_path)?;
+    eprintln!("warning: raw, unredacted office export; keep this private and do not publish it");
 
     let mut tables: Vec<String> = {
         let mut stmt = conn.prepare(
@@ -709,6 +1531,17 @@ fn cmd_data_export(args: &[String]) -> OfficeResult<()> {
         serde_json::Value::String(home.display().to_string()),
     );
     manifest.insert("read_only".into(), serde_json::Value::Bool(true));
+    manifest.insert("redacted".into(), serde_json::Value::Bool(false));
+    manifest.insert(
+        "contains_sensitive_data".into(),
+        serde_json::Value::Bool(true),
+    );
+    manifest.insert(
+        "safety_notice".into(),
+        serde_json::Value::String(
+            "RAW asset export; may contain credentials and private computer evidence; do not publish".into(),
+        ),
+    );
     let mut table_rows = serde_json::Map::new();
     tables.sort();
     for table in &tables {
@@ -738,13 +1571,29 @@ fn cmd_data_export(args: &[String]) -> OfficeResult<()> {
         }
         table_rows.insert(table.clone(), serde_json::Value::from(list.len() as i64));
         let file = out_path.join(format!("{table}.json"));
-        std::fs::write(&file, serde_json::to_string_pretty(&list)?)?;
+        write_private_export_json(&file, &serde_json::Value::Array(list))?;
     }
     manifest.insert("tables".into(), serde_json::Value::Object(table_rows));
-    std::fs::write(
-        out_path.join("manifest.json"),
-        serde_json::to_string_pretty(&serde_json::Value::Object(manifest))?,
+    write_private_export_json(
+        &out_path.join("manifest.json"),
+        &serde_json::Value::Object(manifest),
     )?;
     println!("exported {} tables to {}", tables.len(), out_path.display());
+    Ok(())
+}
+
+fn write_private_export_json(
+    path: &std::path::Path,
+    value: &serde_json::Value,
+) -> OfficeResult<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    serde_json::to_writer_pretty(file, value)?;
     Ok(())
 }

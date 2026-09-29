@@ -1,0 +1,22 @@
+{
+  "already_proposed": 0,
+  "kind": "knowledge_review",
+  "notes": [],
+  "proposed": [
+    {
+      "created_at": "2026-09-29T04:10:28.437298Z",
+      "dedup_key": "stale_knowledge:know-stale0001:0000",
+      "evidence": "active since 2026-01-01T00:00:00Z with no update since 2026-01-01T00:00:00Z (stale threshold 180 days); provenance: imported from the 2026-05 ops review",
+      "kind": "stale_knowledge",
+      "proposal_id": "prop-b06f1ed906db4ee6b959884c961cd8ad",
+      "resolution_note": null,
+      "resolved_at": null,
+      "resolved_by": null,
+      "session_id": "maint-e20b74818e9d46c4b5358f55f71e74aa",
+      "status": "open",
+      "subject": "know-stale0001",
+      "suggested_action": "archive_knowledge"
+    }
+  ],
+  "scan_id": "scan-ea968bec776145ee83ea880b5194ce84"
+}

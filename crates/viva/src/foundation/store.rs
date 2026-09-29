@@ -55,6 +55,10 @@ pub const DOMAIN_AUTHORITY: Domain = Domain::new("authority");
 pub const DOMAIN_GIT: Domain = Domain::new("git");
 pub const DOMAIN_CONVERSATIONS: Domain = Domain::new("conversations");
 pub const DOMAIN_KNOWLEDGE: Domain = Domain::new("knowledge");
+pub const DOMAIN_WORKFLOWS: Domain = Domain::new("workflows");
+pub const DOMAIN_MAINTENANCE: Domain = Domain::new("maintenance");
+pub const DOMAIN_TOOLS_COMPUTER: Domain = Domain::new("tools_computer");
+pub const DOMAIN_MEMORY: Domain = Domain::new("memory");
 
 /// Every domain V01 knows about; used by the CLI to validate event domains.
 pub const KNOWN_DOMAINS: &[Domain] = &[
@@ -66,6 +70,10 @@ pub const KNOWN_DOMAINS: &[Domain] = &[
     DOMAIN_GIT,
     DOMAIN_CONVERSATIONS,
     DOMAIN_KNOWLEDGE,
+    DOMAIN_WORKFLOWS,
+    DOMAIN_MAINTENANCE,
+    DOMAIN_TOOLS_COMPUTER,
+    DOMAIN_MEMORY,
 ];
 
 /// Map a domain name read from the database back to a `Domain`. Known domains
@@ -85,6 +93,9 @@ pub struct Migration {
     pub version: u32,
     pub name: &'static str,
     pub sql: &'static str,
+    /// Schema-dependent upgrades run inside the same versioned transaction.
+    /// SQL alone cannot conditionally ADD a column to an already existing table.
+    pub apply: Option<fn(&rusqlite::Transaction<'_>) -> OfficeResult<()>>,
 }
 
 /// Registry under construction; validated by [`MigrationRegistry::freeze`].
@@ -113,6 +124,26 @@ impl MigrationRegistry {
             version,
             name,
             sql,
+            apply: None,
+        });
+        self
+    }
+
+    /// A versioned, transactional migration needing schema inspection.
+    #[must_use]
+    pub fn register_fn(
+        mut self,
+        domain: Domain,
+        version: u32,
+        name: &'static str,
+        apply: fn(&rusqlite::Transaction<'_>) -> OfficeResult<()>,
+    ) -> Self {
+        self.migrations.push(Migration {
+            domain,
+            version,
+            name,
+            sql: "",
+            apply: Some(apply),
         });
         self
     }
@@ -364,7 +395,26 @@ impl Store {
             let tx = self
                 .conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            tx.execute_batch(migration.sql)?;
+            tx.execute_batch(migration.sql).map_err(|err| {
+                if migration.domain == DOMAIN_MAINTENANCE
+                    && migration.version == 2
+                    && matches!(&err, rusqlite::Error::SqliteFailure(inner, _)
+                        if inner.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE)
+                {
+                    OfficeError::Migration(format!(
+                        "maintenance v2 could not backfill conflicting proposal keys ({err}); \
+                         no proposal was changed. Stop the office, preserve the database with \
+                         SQLite backup, then inspect both proposals and resolve the key conflict \
+                         as described in docs/validation/f01-f04-acceptance.md. A private raw \
+                         inventory is available via `viva data export --out <dir>`"
+                    ))
+                } else {
+                    err.into()
+                }
+            })?;
+            if let Some(apply) = migration.apply {
+                apply(&tx)?;
+            }
             tx.execute(
                 "INSERT INTO schema_migrations(domain, version, name, applied_at) VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![migration.domain.as_str(), migration.version as i64, migration.name, utc_now()],
