@@ -18,7 +18,9 @@ Usage:
         [--bin-arm64 PATH] [--bin-x64 PATH] [--out DIR]
 
 Binaries default to the cargo release layout for the matching targets;
-the version defaults to the workspace package version.
+the version defaults to the workspace package version. Staging works from
+a fresh checkout: template `bin/` directories are created as needed
+(git does not track empty directories).
 """
 
 from __future__ import annotations
@@ -107,6 +109,9 @@ def main() -> None:
     staged = {}
     for pkg_name, binary in binaries.items():
         dst = stage(version, HERE / pkg_name, args.out)
+        # The template bin/ dirs are empty and git does not track empty
+        # directories — a fresh checkout (CI) has no bin/ at all.
+        (dst / "bin").mkdir(parents=True, exist_ok=True)
         shutil.copy2(binary, dst / "bin" / "viva")
         (dst / "bin" / "viva").chmod(0o755)
         staged[pkg_name] = dst
