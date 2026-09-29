@@ -122,6 +122,8 @@ pub struct AdapterConfig {
 impl AdapterConfig {
     /// Environment-driven defaults. `VIVA_MEMORY_PYTHON`,
     /// `VIVA_HERMES_AGENT`, `VIVA_MEMORY_DB`, `VIVA_MEMORY_ADAPTER`.
+    /// When VIVA_HOME is set, an unpinned provider DB lives inside that
+    /// isolated home; without it, keep the user's existing Hermes default.
     ///
     /// When the python is not pinned by env, the checkout's own venv is
     /// preferred: the bundled plugin package imports YAML tooling that a
@@ -150,7 +152,15 @@ impl AdapterConfig {
             python,
             adapter_script: resolve_adapter_script(),
             agent_dir,
-            db_path: env_path("VIVA_MEMORY_DB", "~/.hermes/memory_store.db"),
+            db_path: std::env::var_os("VIVA_MEMORY_DB")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    if std::env::var("VIVA_HOME").is_ok_and(|v| !v.is_empty()) {
+                        crate::foundation::paths::viva_home(None).join("memory_store.db")
+                    } else {
+                        PathBuf::from(home).join(".hermes/memory_store.db")
+                    }
+                }),
         }
     }
 }

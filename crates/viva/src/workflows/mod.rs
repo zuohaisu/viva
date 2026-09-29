@@ -886,6 +886,15 @@ impl<'a> WorkflowEngine<'a> {
                 OfficeError::Validation(format!("authorization grant id invalid: {err}"))
             })?;
             let engine = AuthorityEngine::new(self.store);
+            // An office-wide grant may authorize other actions, but cannot
+            // attest that THIS task was authorized for a dispatch step.
+            let grant = engine.require_grant(&grant_id)?;
+            if grant.task_id.as_ref() != Some(&run.task_id) {
+                return Err(OfficeError::Validation(format!(
+                    "step `{}` authorization rejected: grant must name this run's task",
+                    step.step_id
+                )));
+            }
             let decision = engine.check(
                 &Actor::Member {
                     member: actor.clone(),

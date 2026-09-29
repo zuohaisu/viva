@@ -42,6 +42,30 @@ fn store() -> Store {
     Store::open_in_memory(&frozen()).expect("store")
 }
 
+#[test]
+fn cli_memory_default_store_is_isolated_by_viva_home() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let home = dir.path().join("office");
+    // `status` opens only the isolated office and probes only its derived
+    // memory path. It must not inspect the user's Hermes database.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_viva"))
+        .env("VIVA_HOME", &home)
+        .env_remove("VIVA_MEMORY_DB")
+        .args(["memory", "status"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let status: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        status["db_path"],
+        home.join("memory_store.db").to_str().unwrap()
+    );
+}
+
 /// Locate the REAL implementation on this machine, with a TEMP db. Returns
 /// None when the checkout/venv/adapter is not present.
 fn real_adapter() -> Option<AdapterConfig> {

@@ -51,6 +51,53 @@ fn store() -> Store {
     Store::open_in_memory(&frozen()).expect("store")
 }
 
+#[test]
+fn v1_proposals_migrate_without_reproposing_dismissed_or_open_subjects() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("office.db");
+    let old = Store::open(&path, &frozen()).unwrap();
+    old.connection().execute_batch(
+        "INSERT INTO maintenance_sessions VALUES ('session', 1, '2020-01-01T00:00:00Z', NULL);
+         INSERT INTO maintenance_scans(scan_id, session_id, kind, started_at)
+         VALUES ('scan', 'session', 'knowledge_review', '2020-01-01T00:00:00Z');
+         INSERT INTO maintenance_proposals(proposal_id, session_id, scan_id, dedup_key, kind, subject,
+             evidence, suggested_action, status, created_at)
+         VALUES ('p1', 'session', 'scan', 'stale_knowledge:old', 'stale_knowledge', 'old',
+             'evidence', 'archive_knowledge', 'dismissed', '2020-01-01T00:00:00Z'),
+                ('p2', 'session', 'scan', 'idle_skill:open:0000', 'idle_skill', 'open',
+             'evidence', 'disable_skill', 'open', '2020-01-01T00:00:00Z');"
+    ).unwrap();
+    drop(old);
+    let upgraded = viva::maintenance::register_migrations(MigrationRegistry::new().register(
+        DOMAIN_FOUNDATION,
+        1,
+        "foundation v1",
+        FOUNDATION_V1_SQL,
+    ))
+    .freeze()
+    .unwrap();
+    let store = Store::open(&path, &upgraded).unwrap();
+    let rows: Vec<(String, String)> = store
+        .connection()
+        .prepare("SELECT proposal_id, dedup_key FROM maintenance_proposals ORDER BY proposal_id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("p1".into(), "stale_knowledge:old:0000".into()),
+            ("p2".into(), "idle_skill:open:0000".into())
+        ]
+    );
+    let version: i64 = store.connection().query_row(
+        "SELECT version FROM schema_migrations WHERE domain='maintenance' ORDER BY version DESC LIMIT 1",
+        [], |r| r.get(0)).unwrap();
+    assert_eq!(version, 2);
+}
+
 fn write_body(dir: &Path, name: &str, content: &str) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, content).expect("write body");

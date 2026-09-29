@@ -91,6 +91,166 @@ fn auth_evidence(grant_id: &str) -> StepEvidence {
     StepEvidence::new("authorization", "owner grant issued for this task").with_grant(grant_id)
 }
 
+#[test]
+fn unscoped_grant_cannot_authorize_a_task_workflow() {
+    let store = store();
+    let engine = WorkflowEngine::new(&store);
+    let authority = AuthorityEngine::new(&store);
+    let task = a_task(&store);
+    let member = MemberId::new();
+    engine
+        .register_config(&WorkflowConfig::delivery_default())
+        .unwrap();
+    let run = engine.start_run(&task, "delivery", HEAD_A).unwrap();
+    let unscoped = authority
+        .issue_root_grant(
+            Some(member.clone()),
+            None,
+            vec!["dispatch_delegated".into()],
+            GrantMode::ActWithApproval,
+            None,
+        )
+        .unwrap();
+    let items = vec![
+        evidence("implementation", HEAD_A, "done"),
+        auth_evidence(unscoped.grant_id.as_str()),
+    ];
+    let err = engine
+        .record_step_result(&run.run_id, &member, true, items)
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("must name this run's task"),
+        "{err}"
+    );
+    assert!(engine.run_history(&run.run_id).unwrap().records.is_empty());
+    let scoped = dispatch_grant(&authority, &member, &task);
+    engine
+        .record_step_result(
+            &run.run_id,
+            &member,
+            true,
+            vec![
+                evidence("implementation", HEAD_A, "done"),
+                auth_evidence(scoped.as_str()),
+            ],
+        )
+        .unwrap();
+}
+
+#[test]
+fn cli_resume_rejects_dirty_checkout_and_missing_cwd() {
+    use std::process::Command;
+    let dir = tempfile::TempDir::new().unwrap();
+    let home = dir.path().join("office");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    std::fs::write(repo.join("file.txt"), "clean").unwrap();
+    git(&["add", "file.txt"]);
+    git(&[
+        "-c",
+        "user.email=test@example.invalid",
+        "-c",
+        "user.name=Test",
+        "commit",
+        "-qm",
+        "fixture",
+    ]);
+    let cli = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_viva"))
+            .env("VIVA_HOME", &home)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let json = |args: &[&str]| -> serde_json::Value {
+        let out = cli(args);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let task = json(&["office", "create-task", "--goal", "fixture"]);
+    let task = task["task_id"].as_str().unwrap();
+    json(&["workflow", "register", "--builtin", "read-only-review"]);
+    let run = json(&[
+        "workflow",
+        "start-run",
+        "--task",
+        task,
+        "--config",
+        "read-only-review",
+        "--cwd",
+        repo.to_str().unwrap(),
+    ]);
+    let run = run["run_id"].as_str().unwrap();
+    for _ in 0..2 {
+        json(&[
+            "workflow",
+            "record",
+            "--run",
+            run,
+            "--member",
+            MemberId::new().as_str(),
+            "--fail",
+            "--evidence",
+            "[]",
+        ]);
+    }
+    let no_cwd = cli(&["workflow", "resume", "--run", run]);
+    assert!(!no_cwd.status.success());
+    std::fs::write(repo.join("file.txt"), "dirty").unwrap();
+    let dirty = cli(&[
+        "workflow",
+        "resume",
+        "--run",
+        run,
+        "--cwd",
+        repo.to_str().unwrap(),
+    ]);
+    assert!(!dirty.status.success());
+    assert!(String::from_utf8_lossy(&dirty.stderr).contains("dirty worktree"));
+    assert_eq!(
+        json(&["workflow", "status", "--run", run])["run"]["status"],
+        "paused"
+    );
+    git(&["add", "file.txt"]);
+    git(&[
+        "-c",
+        "user.email=test@example.invalid",
+        "-c",
+        "user.name=Test",
+        "commit",
+        "-qm",
+        "fix",
+    ]);
+    assert_eq!(
+        json(&[
+            "workflow",
+            "resume",
+            "--run",
+            run,
+            "--cwd",
+            repo.to_str().unwrap()
+        ])["status"],
+        "running"
+    );
+}
+
 /// Acceptance: "一张真实低风险任务走完实现→验证→独立复核→必要修复→授权 PR，
 /// 过程记录可恢复". The verify step really fails once, routes through the
 /// bounded fix step, re-earns verification, passes independent review, and

@@ -46,7 +46,7 @@ interpreter and paths from `AdapterConfig::from_env()`:
 | --- | --- | --- |
 | `VIVA_MEMORY_PYTHON` | `python3` | interpreter (use the checkout's `venv/bin/python` for the real plugin) |
 | `VIVA_HERMES_AGENT` | `~/.hermes/hermes-agent` | the checkout whose bundled provider is imported |
-| `VIVA_MEMORY_DB` | `~/.hermes/memory_store.db` | the store path, **always passed explicitly** |
+| `VIVA_MEMORY_DB` | `VIVA_HOME/memory_store.db` when `VIVA_HOME` is set; otherwise `~/.hermes/memory_store.db` | Explicit override always wins; the resolved path is **always passed explicitly** to the adapter. Set `VIVA_MEMORY_DB` to opt into the existing Hermes store from an isolated office home. |
 | `VIVA_MEMORY_ADAPTER` | `extensions/pi/memory/memory_adapter.py` | adapter script path |
 
 CLI: `viva memory search | remember | archive | restore | status`.

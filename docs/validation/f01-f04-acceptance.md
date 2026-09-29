@@ -1,4 +1,18 @@
-# F01–F04 最终验收记录（issues #23 #24 #25 #26）
+# F01–F04 验收记录（issues #23 #24 #25 #26）
+
+> 以下第一、二轮记录为当时的证据快照，**不是当前合并许可**。第三轮独立 QA
+> 判定为不建议合并；本轮补丁的单测不替代独立复验、真实前台输入或 owner 合并决定。
+
+## 第三轮独立 QA 后续整改（2026-09-29，待独立复验）
+
+- R3-N8：`start-run` / `resume --cwd` 共用 tracked-tree 干净树检查，resume 必须给 cwd；临时仓库 CLI 回归覆盖 dirty、缺 cwd、提交后恢复。仍有 Git status 与 rev-parse 之间的 TOCTOU；untracked/ignored 文件不纳入 head 证明。
+- R3-N9：dispatch 类 workflow pass 的 grant 必须显式绑定本 run 的 task；无 task 的 office-wide grant 不能充当 per-task 授权。office-wide grant 对其他动作的既有语义不变。
+- R3-N10：跨进程 SQLite 租约按 OS 进程出生标记核对 PID；旧无标记行仅在 PID 消失或当前进程的运行时长短于该行已持有时长（加两秒容差，说明 PID 被回收）时回收；健康持有者不会仅因超过时限而被抢占。macOS `ps lstart` 精度为秒，极端同秒 PID 回收/系统探针异常仍需目标平台验证。现有 smoke 全是 `foreground:false`，无真实键鼠/焦点生产 spec；#25 前台互斥只能称单机测试机制，**不能称已做目标平台端到端验收**。
+- R3-N11：maintenance v2 迁移给旧裸 dedup key 补 `:0000`，保留 proposal 主键、状态、人审结论；已带代际后缀的库保持原样。用从 v1 升级的临时数据库验算。
+- R3-N13：设置 VIVA_HOME 而不设置 VIVA_MEMORY_DB 时，provider 路径默认落在 VIVA_HOME 内；没有 VIVA_HOME 的日常默认仍是用户 Hermes 库。临时 home CLI status 回归验证路径，未对真实记忆库写入。
+- 仍未修：B5/R3-N12 外部 fact 采纳无 provider 存在性核验、B4 session host_pid 生命周期、B6 停用技能路径分叉及 head TOCTOU；不能将 link 视为已验证的事实存在证明。
+- N1：已推送的 **1d0ca4c 与 6f2a4e4** 均包含机器私有应用清单；当前工作树证据已去除清单，但远端 Git 历史 blob 仍可访问。这里只披露 commit 标识，不复制应用名或原文；是否改写历史或接受残留由 owner 决定，本补丁不 force-push。
+- QA 自行披露的两处真实库写入：先前 `viva doctor` 给真实 `~/.viva/office.db` 应用了空表 migration；QA 的 `remember` 探针在真实 `~/.hermes/memory_store.db` 创建了 fact_id=28。**本次未操作这两处数据**。是否 archive fact 28 或清理空表，待 owner 精确授权；不可把 VIVA_HOME 隔离补丁说成已消除既有污染。
 
 验收日期：2026-09-29（第二轮整改后更新）。本记录针对独立 QA 复审（REJECT @ f550171）及
 第二轮复审（CLOSED 9 · 4 项 N-finding · B 项披露清单）的整改后状态，

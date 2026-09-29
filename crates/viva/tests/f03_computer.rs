@@ -630,3 +630,61 @@ fn stale_lease_from_a_dead_process_self_heals() {
         "a live holder keeps the lane"
     );
 }
+
+#[test]
+fn recycled_pid_and_aged_legacy_leases_cannot_wedge_the_lane() {
+    let store = store();
+    let coordinator = ForegroundCoordinator::new(&store);
+    let pid = std::process::id() as i64;
+    // A still-alive PID recycled from a crashed holder must not count as
+    // its birth identity. No sleep, no dependency on OS PID reuse timing.
+    store
+        .connection()
+        .execute(
+            "INSERT INTO foreground_leases(task_id, host_pid, pid_start_marker, acquired_at)
+         VALUES ('recycled', ?1, 'not-this-process', '2020-01-01T00:00:00Z')",
+            [pid],
+        )
+        .unwrap();
+    let lease = coordinator.acquire_foreground("new-owner").unwrap();
+    assert_eq!(coordinator.holder().unwrap().as_deref(), Some("new-owner"));
+    let marker: String = store
+        .connection()
+        .query_row(
+            "SELECT pid_start_marker FROM foreground_leases WHERE task_id='new-owner'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!marker.is_empty());
+    drop(lease);
+    // v2's original markerless row can be recovered when its recorded
+    // age exceeds this PID's actual process age (PID reuse).
+    store
+        .connection()
+        .execute(
+            "INSERT INTO foreground_leases(task_id, host_pid, acquired_at)
+         VALUES ('legacy', ?1, '2020-01-01T00:00:00Z')",
+            [pid],
+        )
+        .unwrap();
+    let lease = coordinator.acquire_foreground("after-legacy").unwrap();
+    assert_eq!(lease.task_id, "after-legacy");
+    drop(lease);
+    // A live legacy holder with a current acquisition timestamp must not
+    // be stolen merely because its birth marker was absent.
+    store
+        .connection()
+        .execute(
+            "INSERT INTO foreground_leases(task_id, host_pid, acquired_at)
+         VALUES ('legacy-live', ?1, ?2)",
+            rusqlite::params![pid, viva::foundation::ids::utc_now()],
+        )
+        .unwrap();
+    assert!(
+        coordinator
+            .try_acquire_foreground("waiter")
+            .unwrap()
+            .is_none()
+    );
+}

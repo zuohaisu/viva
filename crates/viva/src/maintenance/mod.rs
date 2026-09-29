@@ -39,7 +39,14 @@ use crate::knowledge::KnowledgeRegistry;
 
 /// Register the `maintenance` domain migrations (F02's namespace).
 pub fn register_migrations(registry: MigrationRegistry) -> MigrationRegistry {
-    registry.register(DOMAIN_MAINTENANCE, 1, "maintenance v1", MAINTENANCE_V1_SQL)
+    registry
+        .register(DOMAIN_MAINTENANCE, 1, "maintenance v1", MAINTENANCE_V1_SQL)
+        .register(
+            DOMAIN_MAINTENANCE,
+            2,
+            "maintenance v2 proposal generations",
+            MAINTENANCE_V2_SQL,
+        )
 }
 
 pub const MAINTENANCE_V1_SQL: &str = r#"
@@ -85,6 +92,15 @@ CREATE TABLE maintenance_proposals (
     resolved_by      TEXT,
     resolution_note  TEXT
 );
+"#;
+
+/// v1 proposals used an unversioned key. Preserve their identities and
+/// statuses while mapping them to generation zero; future executed cycles
+/// alone advance the generation. A key collision aborts the migration rather
+/// than silently duplicating or discarding a human decision.
+pub const MAINTENANCE_V2_SQL: &str = r#"
+UPDATE maintenance_proposals SET dedup_key = dedup_key || ':0000'
+WHERE dedup_key NOT GLOB '*:[0-9][0-9][0-9][0-9]';
 "#;
 
 // ---------------------------------------------------------------------------

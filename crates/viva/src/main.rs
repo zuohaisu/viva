@@ -174,7 +174,7 @@ USAGE:
         Progress (with the owning task's own status shown beside it) and
         the full recoverable record.
 
-    viva workflow resume --run <id> [--cwd <dir>] | abort --run <id> --reason <text>
+    viva workflow resume --run <id> --cwd <dir> | abort --run <id> --reason <text>
         Resume a paused run (optionally rebinding to a new real head) or
         abort it with a reason.
 
@@ -1133,8 +1133,26 @@ fn cmd_workflow(args: &[String]) -> OfficeResult<()> {
     let engine = viva::workflows::WorkflowEngine::new(&store);
     let resolve_head = |cwd: &str| -> OfficeResult<String> {
         let runner = viva::git::cli::CliRunner::default();
-        let head = viva::git::cli::head_sha(&runner, std::path::Path::new(cwd))?;
-        Ok(head)
+        let path = std::path::Path::new(cwd);
+        // A SHA is only an honest content anchor when tracked files match
+        // it. Apply the same gate at start and every resume (QA R3-N8).
+        let status = runner
+            .run(
+                "git",
+                path,
+                &["status", "--porcelain", "--untracked-files=no"],
+            )
+            .map_err(|failure| {
+                OfficeError::Validation(format!("git status failed in {cwd}: {failure}"))
+            })?;
+        if !status.success() || !status.stdout.trim().is_empty() {
+            return Err(OfficeError::Validation(format!(
+                "refusing to anchor a run in a dirty worktree ({cwd}) — uncommitted \
+                 tracked changes mean \"verified at this head\" would be a claim about \
+                 content the SHA does not name; commit first"
+            )));
+        }
+        viva::git::cli::head_sha(&runner, path)
     };
     match args.first().map(String::as_str) {
         Some("register") => {
@@ -1169,26 +1187,6 @@ fn cmd_workflow(args: &[String]) -> OfficeResult<()> {
         Some("start-run") => {
             let task_id = viva::foundation::ids::TaskId::from_str(&require("task")?)?;
             let cwd = require("cwd")?;
-            let path = std::path::Path::new(&cwd);
-            // The head is only an honest anchor while the tree matches it:
-            // refuse uncommitted TRACKED changes (untracked scratch files
-            // do not alter the recorded content — QA finding N5).
-            let status = viva::git::cli::CliRunner::default()
-                .run(
-                    "git",
-                    path,
-                    &["status", "--porcelain", "--untracked-files=no"],
-                )
-                .map_err(|failure| {
-                    OfficeError::Validation(format!("git status failed in {cwd}: {failure}"))
-                })?;
-            if !status.success() || !status.stdout.trim().is_empty() {
-                return Err(OfficeError::Validation(format!(
-                    "refusing to anchor a run in a dirty worktree ({cwd}) — uncommitted \
-                     tracked changes mean \"verified at this head\" would be a claim about \
-                     content the SHA does not name; commit or stash first"
-                )));
-            }
             let head = resolve_head(&cwd)?;
             let run = engine.start_run(&task_id, &require("config")?, head)?;
             println!("{}", serde_json::to_string_pretty(&run)?);
@@ -1213,9 +1211,10 @@ fn cmd_workflow(args: &[String]) -> OfficeResult<()> {
             Ok(())
         }
         Some("resume") => {
-            // Rebind only through a real checkout too — no free-form head.
-            let new_head = get("cwd").map(|cwd| resolve_head(&cwd)).transpose()?;
-            let run = engine.resume_paused(&require("run")?, new_head)?;
+            // A paused run may only resume against a clean checkout, even
+            // when its head has not changed. No unverified no-cwd bypass.
+            let new_head = resolve_head(&require("cwd")?)?;
+            let run = engine.resume_paused(&require("run")?, Some(new_head))?;
             println!("{}", serde_json::to_string_pretty(&run)?);
             Ok(())
         }

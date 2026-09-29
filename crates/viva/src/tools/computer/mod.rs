@@ -28,6 +28,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use crate::authority::{Actor, AuthorityEngine, CapabilityReport};
 use crate::foundation::error::{OfficeError, OfficeResult};
@@ -184,6 +186,7 @@ pub struct ForegroundCoordinator<'a> {
 pub struct ForegroundLease<'c> {
     coordinator: &'c ForegroundCoordinator<'c>,
     pub task_id: String,
+    acquired_at: String,
 }
 
 impl std::fmt::Debug for ForegroundLease<'_> {
@@ -197,8 +200,8 @@ impl Drop for ForegroundLease<'_> {
         // Best-effort release; the row is keyed by task so a crashed
         // process cannot be impersonated by a later holder.
         let _ = self.coordinator.store.connection().execute(
-            "DELETE FROM foreground_leases WHERE task_id = ?1",
-            [&self.task_id],
+            "DELETE FROM foreground_leases WHERE task_id = ?1 AND host_pid = ?2 AND acquired_at = ?3",
+            rusqlite::params![self.task_id, std::process::id() as i64, self.acquired_at],
         );
     }
 }
@@ -217,26 +220,40 @@ impl<'a> ForegroundCoordinator<'a> {
     ///
     /// Before the exclusivity check, stale rows are reconciled: a lease
     /// whose holder pid is gone (crashed process — Drop never ran) is
-    /// removed, so a crash cannot wedge the input lane until a manual
-    /// DELETE (QA finding). Liveness is `kill -0` via argv array — no
-    /// shell string.
+    /// removed. A process birth marker prevents PID reuse from pinning a
+    /// dead holder. For legacy markerless rows the recorded acquisition
+    /// time is compared to the OS process age; never steal a live holder
+    /// solely because its action ran long.
     pub fn try_acquire_foreground(
         &self,
         task_id: &str,
     ) -> OfficeResult<Option<ForegroundLease<'_>>> {
         let tx = self.store.transaction()?;
         {
-            let rows: Vec<(String, Option<i64>)> = {
-                let mut stmt = tx.prepare("SELECT task_id, host_pid FROM foreground_leases")?;
-                let mapped = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            let rows: Vec<(String, Option<i64>, Option<String>, String)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT task_id, host_pid, pid_start_marker, acquired_at FROM foreground_leases",
+                )?;
+                let mapped = stmt.query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?;
                 mapped.collect::<Result<Vec<_>, _>>()?
             };
-            for (held_task, pid) in rows {
-                let alive = match pid {
-                    Some(pid) => pid_is_alive(pid),
-                    None => false,
+            for (held_task, pid, marker, acquired_at) in rows {
+                let live = pid.is_some_and(pid_is_alive);
+                let stale = match (pid, marker.as_deref()) {
+                    (Some(pid), Some(marker)) => {
+                        // If the OS cannot inspect a live holder, fail
+                        // closed: do not steal its keyboard lane.
+                        !live || process_start_marker(pid).is_some_and(|now| now != marker)
+                    }
+                    // Older rows never wrote a marker. Recover only when
+                    // this PID's present process is younger than the row;
+                    // an old live holder is not taken just for being old.
+                    (Some(pid), None) => !live || legacy_pid_recycled(pid, &acquired_at),
+                    _ => true,
                 };
-                if !alive {
+                if stale {
                     tx.execute(
                         "DELETE FROM foreground_leases WHERE task_id = ?1",
                         [&held_task],
@@ -249,9 +266,17 @@ impl<'a> ForegroundCoordinator<'a> {
             drop(tx);
             return Ok(None);
         }
+        let pid = std::process::id() as i64;
+        let marker = process_start_marker(pid).ok_or_else(|| {
+            OfficeError::Validation(
+                "cannot identify foreground holder process; refusing input".into(),
+            )
+        })?;
+        let acquired_at = utc_now();
         let insert = tx.execute(
-            "INSERT INTO foreground_leases(task_id, host_pid, acquired_at) VALUES (?1, ?2, ?3)",
-            rusqlite::params![task_id, std::process::id() as i64, utc_now()],
+            "INSERT INTO foreground_leases(task_id, host_pid, pid_start_marker, acquired_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![task_id, pid, marker, acquired_at],
         );
         if let Err(err) = insert {
             drop(tx);
@@ -264,6 +289,7 @@ impl<'a> ForegroundCoordinator<'a> {
         Ok(Some(ForegroundLease {
             coordinator: self,
             task_id: task_id.to_string(),
+            acquired_at,
         }))
     }
 
@@ -312,6 +338,74 @@ fn pid_is_alive(pid: i64) -> bool {
         .output()
         .map(|out| out.status.success())
         .unwrap_or(false)
+}
+
+/// The OS birth identity, not a timestamp invented by Viva. On Linux the
+/// proc stat start tick is stable for the life of the PID. On macOS `ps`
+/// reports the process start date (seconds resolution); if inspection fails
+/// we refuse to acquire rather than pretending to own the foreground.
+fn process_start_marker(pid: i64) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let after_comm = stat.rsplit_once(") ")?.1;
+        return after_comm.split_whitespace().nth(19).map(str::to_string);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let output = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "lstart="])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let marker = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!marker.is_empty()).then_some(marker)
+    }
+}
+
+fn legacy_pid_recycled(pid: i64, acquired_at: &str) -> bool {
+    let Ok(then) = OffsetDateTime::parse(acquired_at, &Rfc3339) else {
+        return false; // malformed legacy evidence: fail closed
+    };
+    let age = OffsetDateTime::now_utc() - then;
+    let Ok(out) = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "etime="])
+        .output()
+    else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let Some(elapsed) = parse_elapsed(text.trim()) else {
+        return false;
+    };
+    // ps elapsed has second precision: do not steal a holder when a PID
+    // was recycled in the same few seconds as acquisition.
+    age > elapsed + time::Duration::seconds(2)
+}
+
+fn parse_elapsed(text: &str) -> Option<time::Duration> {
+    let (days, clock) = match text.split_once('-') {
+        Some((days, clock)) => (days.parse::<i64>().ok()?, clock),
+        None => (0, text),
+    };
+    let parts: Vec<i64> = clock
+        .split(':')
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    let (hours, minutes, seconds) = match parts.as_slice() {
+        [minutes, seconds] => (0, *minutes, *seconds),
+        [hours, minutes, seconds] => (*hours, *minutes, *seconds),
+        _ => return None,
+    };
+    Some(time::Duration::seconds(
+        days * 86400 + hours * 3600 + minutes * 60 + seconds,
+    ))
 }
 
 // ---------------------------------------------------------------------------
