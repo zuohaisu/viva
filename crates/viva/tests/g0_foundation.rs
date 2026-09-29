@@ -104,6 +104,23 @@ fn binary_writes_an_event_and_reloads_it_after_restart() {
     );
 }
 
+#[test]
+fn help_prints_usage_and_exits_zero() {
+    // The explicit help paths must stay usable now that bare `viva`
+    // opens the workbench TUI instead of printing usage.
+    let home = TempDir::new().expect("temp viva home");
+    for args in [&["help"][..], &["--help"][..], &["-h"][..]] {
+        let (ok, stdout, stderr) = run_viva(home.path(), args);
+        assert!(ok, "{args:?} must exit 0: {stderr}");
+        assert!(
+            stdout.contains("viva — the Personal AI Office host"),
+            "{args:?} stdout: {stdout}"
+        );
+        assert!(stdout.contains("viva workbench"), "{args:?} stdout: {stdout}");
+        assert!(stdout.contains("viva help"), "{args:?} stdout: {stdout}");
+    }
+}
+
 /// The G0 cross-interface test: one office flow across every frozen
 /// interface, reloaded after a full reopen.
 #[test]

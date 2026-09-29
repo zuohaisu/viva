@@ -147,6 +147,28 @@ fn the_workbench_entry_exists_and_fails_honestly_without_a_tty() {
 }
 
 #[test]
+fn bare_viva_opens_the_workbench_and_fails_honestly_without_a_tty() {
+    // Bare `viva` (no subcommand) is the workbench entry: typing `viva`
+    // in a real terminal opens the TUI directly. Without a terminal it
+    // must fail exactly like `viva workbench` — loudly, never
+    // half-running against a pipe.
+    let out = Command::new(env!("CARGO_BIN_EXE_viva"))
+        .env(
+            "VIVA_HOME",
+            std::env::temp_dir().join("viva-bare-viva-tty-test"),
+        )
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("viva runs");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a piped stdin must not silently pass: {stderr}"
+    );
+    assert!(stderr.contains("interactive terminal"), "got: {stderr}");
+}
+
+#[test]
 fn workbench_spans_projects_tasks_worktrees_with_real_git_facts() {
     let b = bench();
     let repo_a = repo_with_origin(b._dir.path(), "alpha");
