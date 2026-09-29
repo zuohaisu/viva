@@ -1050,7 +1050,7 @@ pub fn send_request(home: &Path, request: OfficeRequest) -> OfficeResult<OfficeR
     let socket_path = home.join(OFFICE_SOCKET_NAME);
     if !socket_path.exists() {
         return Err(OfficeError::Validation(format!(
-            "no active office in {} (mutation rejected; start one with `viva office start`)",
+            "no active office in {} (mutation rejected; start one with `viva start`)",
             home.display()
         )));
     }

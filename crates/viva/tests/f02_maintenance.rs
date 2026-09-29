@@ -262,7 +262,7 @@ fn knowledge_review_is_repeatable_without_duplicates() {
 }
 
 /// An office-wide ACT grant covering maintenance (the shape an owner
-/// issues through `viva office grant`).
+/// issues through `viva grant`).
 fn granted_actor(authority: &AuthorityEngine<'_>) -> Actor {
     let member = MemberId::new();
     let grant = authority

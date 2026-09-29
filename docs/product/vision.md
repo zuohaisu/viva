@@ -105,7 +105,7 @@ Viva 的存在就是把这些变成**办公室的资产**：成员持续存在�
 - 多成员 + 角色/模型/工具配置，换模型保留历史与知识，不可用时报错不替换；
 - Workspace / Project / Repository / Worktree / Task 对象与 `task brief` 交接简报；
 - 执行注册表：并发、隔离 worktree、归属固定、停止互不影响、重启后如实恢复；
-- 委派授权：grant 的来源/范围/父子关系，越权拒绝并留原因；协调成员真实调用 `viva office …`；
+- 委派授权：grant 的来源/范围/父子关系，越权拒绝并留原因；协调成员真实调用 `viva …`；
 - GitHub 只读关联（issue/PR/checks/review 证据）；
 - 知识四类归属 + 复用证据；experience journal（append-only、脱敏）。
 

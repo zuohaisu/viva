@@ -451,7 +451,7 @@ fn crash_restart_reconciles_without_rerunning_finished_work() {
 
     // Real host binary, really killed.
     let mut child = Command::new(env!("CARGO_BIN_EXE_viva"))
-        .args(["office", "start"])
+        .args(["start"])
         .env("VIVA_HOME", &home)
         .stdout(Stdio::null())
         .stderr(Stdio::null())

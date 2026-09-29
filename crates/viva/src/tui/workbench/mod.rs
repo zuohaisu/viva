@@ -835,7 +835,7 @@ pub fn run(shared: std::sync::Arc<crate::office::OfficeShared>) -> OfficeResult<
     if !stdin_is_tty {
         return Err(crate::foundation::OfficeError::Validation(
             "viva workbench needs an interactive terminal (stdin is not a tty); \
-             use `viva office start` for the headless host"
+             use `viva start` for the headless host"
                 .into(),
         ));
     }

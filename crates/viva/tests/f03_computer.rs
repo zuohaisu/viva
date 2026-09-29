@@ -90,7 +90,6 @@ fn cli_lists_and_conditionally_releases_only_authorized_unknown_leases() {
     assert_eq!(unknown["acquired_at"], acquired);
     let member = MemberId::new();
     let grant = cli(&[
-        "office",
         "grant",
         "--member",
         member.as_str(),
@@ -150,7 +149,6 @@ fn cli_lists_and_conditionally_releases_only_authorized_unknown_leases() {
             .success()
     );
     let unscoped = cli(&[
-        "office",
         "grant",
         "--member",
         member.as_str(),
@@ -172,7 +170,6 @@ fn cli_lists_and_conditionally_releases_only_authorized_unknown_leases() {
         .success()
     );
     let weak = cli(&[
-        "office",
         "grant",
         "--member",
         member.as_str(),
@@ -196,7 +193,6 @@ fn cli_lists_and_conditionally_releases_only_authorized_unknown_leases() {
         .success()
     );
     let autonomous = cli(&[
-        "office",
         "grant",
         "--member",
         member.as_str(),
@@ -239,7 +235,6 @@ fn cli_lists_and_conditionally_releases_only_authorized_unknown_leases() {
     ]);
     assert!(!unauthorized.status.success());
     let other_grant = cli(&[
-        "office",
         "grant",
         "--member",
         member.as_str(),
