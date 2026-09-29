@@ -349,7 +349,7 @@ fn process_start_marker(pid: i64) -> Option<String> {
     {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         let after_comm = stat.rsplit_once(") ")?.1;
-        return after_comm.split_whitespace().nth(19).map(str::to_string);
+        after_comm.split_whitespace().nth(19).map(str::to_string)
     }
     #[cfg(not(target_os = "linux"))]
     {
