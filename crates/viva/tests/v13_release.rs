@@ -47,7 +47,7 @@ fn clean_home_boot_and_data_export_roundtrip() {
     );
     assert_eq!(code, 0, "event add failed: {err}");
 
-    let export = dir.path().join("export");
+    let export = dir.path().join("nested").join("export");
     let (code, _out, err) = viva(
         &home,
         &["data", "export", "--out", export.to_str().unwrap()],
@@ -60,6 +60,11 @@ fn clean_home_boot_and_data_export_roundtrip() {
     )
     .expect("manifest json");
     assert_eq!(manifest["read_only"], serde_json::Value::Bool(true));
+    assert_eq!(
+        manifest["redacted"], false,
+        "the asset-preservation export must warn that it contains raw data"
+    );
+    assert_eq!(manifest["contains_sensitive_data"], true);
     let tables = manifest["tables"].as_object().expect("table map");
     assert!(
         tables.contains_key("office_events") && tables.contains_key("members"),
@@ -75,6 +80,21 @@ fn clean_home_boot_and_data_export_roundtrip() {
         1,
         "the exported fact is present"
     );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&export).unwrap().permissions().mode() & 0o077,
+            0
+        );
+        for entry in std::fs::read_dir(&export).unwrap() {
+            assert_eq!(
+                entry.unwrap().metadata().unwrap().permissions().mode() & 0o077,
+                0
+            );
+        }
+    }
 
     // The export must not have mutated the store: doctor still opens it and
     // the event is still exactly once.

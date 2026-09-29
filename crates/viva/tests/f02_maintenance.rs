@@ -52,6 +52,41 @@ fn store() -> Store {
 }
 
 #[test]
+fn conflicting_legacy_keys_fail_with_recovery_guidance_and_preserve_rows() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("office.db");
+    let old = Store::open(&path, &frozen()).unwrap();
+    old.connection()
+        .execute_batch(
+            "INSERT INTO maintenance_sessions VALUES ('session', 1, '2020-01-01T00:00:00Z', NULL);
+         INSERT INTO maintenance_scans(scan_id, session_id, kind, started_at)
+         VALUES ('scan', 'session', 'knowledge_review', '2020-01-01T00:00:00Z');
+         INSERT INTO maintenance_proposals(proposal_id, session_id, scan_id, dedup_key, kind,
+             subject, evidence, suggested_action, status, created_at)
+         VALUES ('p1', 'session', 'scan', 'idle_skill:sk-a', 'idle_skill', 'sk-a',
+                 'evidence', 'disable_skill', 'open', '2020-01-01T00:00:00Z'),
+                ('p2', 'session', 'scan', 'idle_skill:sk-a:0000', 'idle_skill', 'sk-a',
+                 'evidence', 'disable_skill', 'dismissed', '2020-01-01T00:00:00Z');",
+        )
+        .unwrap();
+    drop(old);
+    let registry = viva::maintenance::register_migrations(MigrationRegistry::new().register(
+        DOMAIN_FOUNDATION,
+        1,
+        "foundation v1",
+        FOUNDATION_V1_SQL,
+    ))
+    .freeze()
+    .unwrap();
+    let err = Store::open(&path, &registry)
+        .err()
+        .expect("conflict must not discard a decision");
+    assert!(err.to_string().contains("data export"), "{err}");
+    let old = Store::open(&path, &frozen()).unwrap();
+    assert_eq!(old.row_count("maintenance_proposals").unwrap(), 2);
+}
+
+#[test]
 fn v1_proposals_migrate_without_reproposing_dismissed_or_open_subjects() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("office.db");

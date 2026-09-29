@@ -51,6 +51,12 @@ pub fn register_migrations(registry: MigrationRegistry) -> MigrationRegistry {
             "tools computer v2 foreground lease",
             TOOLS_COMPUTER_V2_SQL,
         )
+        .register_fn(
+            DOMAIN_TOOLS_COMPUTER,
+            3,
+            "tools computer v3 repair legacy lease shape",
+            repair_lease_shape,
+        )
 }
 
 pub const TOOLS_COMPUTER_V1_SQL: &str = r#"
@@ -88,8 +94,9 @@ CREATE TABLE computer_actions (
 /// v2 moves the foreground lease into its own table — registered as a real
 /// migration so every store picks it up on the next open. (The first
 /// attempt edited v1 in place, which stores that had already applied v1
-/// would never see again — QA finding.) IF NOT EXISTS also keeps
-/// branch-derived stores that already carry the table healthy.
+/// would never see again — QA finding.) An earlier branch already
+/// carried a two-column table: IF NOT EXISTS did NOT add the missing
+/// columns. v3 inspects and repairs that already-registered shape.
 pub const TOOLS_COMPUTER_V2_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS foreground_leases (
     task_id          TEXT PRIMARY KEY,
@@ -98,6 +105,41 @@ CREATE TABLE IF NOT EXISTS foreground_leases (
     acquired_at      TEXT NOT NULL
 );
 "#;
+
+/// Preserve every lease row while repairing the two-column prerelease table.
+/// v2 is already registered on disk and cannot be edited to fix old homes.
+/// An unknown legacy holder has no PID: reconciliation must fail closed.
+fn repair_lease_shape(tx: &rusqlite::Transaction<'_>) -> OfficeResult<()> {
+    let columns: Vec<String> = {
+        let mut stmt = tx.prepare("PRAGMA table_info(foreground_leases)")?;
+        stmt.query_map([], |row| row.get(1))?
+            .collect::<Result<_, _>>()?
+    };
+    if ["task_id", "host_pid", "pid_start_marker", "acquired_at"]
+        .iter()
+        .all(|name| columns.iter().any(|column| column == name))
+    {
+        return Ok(()); // healthy v2; preserve live PID/marker evidence
+    }
+    if columns != ["task_id", "acquired_at"] {
+        return Err(OfficeError::Migration(format!(
+            "foreground_leases has unsupported columns {columns:?}; refusing to lose lease ownership"
+        )));
+    }
+    tx.execute_batch(
+        "CREATE TABLE foreground_leases_v3 (
+            task_id TEXT PRIMARY KEY,
+            host_pid INTEGER,
+            pid_start_marker TEXT,
+            acquired_at TEXT NOT NULL
+         );
+         INSERT INTO foreground_leases_v3(task_id, acquired_at)
+             SELECT task_id, acquired_at FROM foreground_leases;
+         DROP TABLE foreground_leases;
+         ALTER TABLE foreground_leases_v3 RENAME TO foreground_leases;",
+    )?;
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // Tool runner (the only seam between the office and the real tools)
@@ -240,18 +282,20 @@ impl<'a> ForegroundCoordinator<'a> {
                 mapped.collect::<Result<Vec<_>, _>>()?
             };
             for (held_task, pid, marker, acquired_at) in rows {
-                let live = pid.is_some_and(pid_is_alive);
-                let stale = match (pid, marker.as_deref()) {
-                    (Some(pid), Some(marker)) => {
-                        // If the OS cannot inspect a live holder, fail
-                        // closed: do not steal its keyboard lane.
-                        !live || process_start_marker(pid).is_some_and(|now| now != marker)
+                let live = pid.map(pid_liveness);
+                let stale = match (pid, marker.as_deref(), live) {
+                    (Some(pid), Some(marker), Some(liveness)) => {
+                        marked_lease_stale(liveness, marker, process_start_marker(pid).as_deref())
                     }
                     // Older rows never wrote a marker. Recover only when
-                    // this PID's present process is younger than the row;
-                    // an old live holder is not taken just for being old.
-                    (Some(pid), None) => !live || legacy_pid_recycled(pid, &acquired_at),
-                    _ => true,
+                    // confirmed dead or when this PID's present process is
+                    // provably younger than the row.
+                    (Some(pid), None, Some(liveness)) => {
+                        liveness == ProcessLiveness::Dead || legacy_pid_recycled(pid, &acquired_at)
+                    }
+                    // Two-column legacy rows have no holder identity. Do
+                    // not delete them and risk typing over a live action.
+                    _ => false,
                 };
                 if stale {
                     tx.execute(
@@ -263,7 +307,7 @@ impl<'a> ForegroundCoordinator<'a> {
         }
         let held: i64 = tx.query_row("SELECT COUNT(*) FROM foreground_leases", [], |r| r.get(0))?;
         if held > 0 {
-            drop(tx);
+            tx.commit()?; // keep confirmed stale-row cleanup even when another holder remains
             return Ok(None);
         }
         let pid = std::process::id() as i64;
@@ -325,19 +369,45 @@ impl<'a> ForegroundCoordinator<'a> {
     }
 }
 
-/// Liveness probe for a lease holder: `kill -0 <pid>` via argv array.
-/// A missing process fails; a live one (even one we cannot signal)
-/// succeeds with exit 0.
-fn pid_is_alive(pid: i64) -> bool {
-    if pid <= 1 {
-        return false;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessLiveness {
+    Alive,
+    Dead,
+    Unknown,
+}
+
+fn marked_lease_stale(live: ProcessLiveness, stored: &str, observed: Option<&str>) -> bool {
+    live == ProcessLiveness::Dead || observed.is_some_and(|now| now != stored)
+}
+
+/// `kill(pid, 0)` distinguishes ESRCH (confirmed gone) from EPERM (alive
+/// but inaccessible). All other errors fail closed, never release input.
+#[cfg(unix)]
+fn classify_kill_errno(errno: Option<i32>) -> ProcessLiveness {
+    match errno {
+        Some(libc::ESRCH) => ProcessLiveness::Dead,
+        _ => ProcessLiveness::Unknown, // EPERM and other inconclusive failures
     }
-    std::process::Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+}
+
+fn pid_liveness(pid: i64) -> ProcessLiveness {
+    if pid <= 1 || pid > i32::MAX as i64 {
+        return ProcessLiveness::Unknown;
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 asks the kernel only for existence/permission;
+        // it does not send a signal or mutate the target process.
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+            ProcessLiveness::Alive
+        } else {
+            classify_kill_errno(std::io::Error::last_os_error().raw_os_error())
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        ProcessLiveness::Unknown
+    }
 }
 
 /// The OS birth identity, not a timestamp invented by Viva. On Linux the
@@ -945,6 +1015,42 @@ fn map_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActionRecord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uninspectable_holder_is_not_stolen_but_recycled_pid_is() {
+        assert!(!marked_lease_stale(
+            ProcessLiveness::Unknown,
+            "original",
+            Some("original")
+        ));
+        assert!(!marked_lease_stale(
+            ProcessLiveness::Unknown,
+            "original",
+            None
+        ));
+        assert!(marked_lease_stale(
+            ProcessLiveness::Unknown,
+            "original",
+            Some("replacement")
+        ));
+        assert!(marked_lease_stale(ProcessLiveness::Dead, "original", None));
+        assert_eq!(
+            pid_liveness(std::process::id() as i64),
+            ProcessLiveness::Alive
+        );
+        assert_eq!(pid_liveness(i64::MAX), ProcessLiveness::Unknown);
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                classify_kill_errno(Some(libc::EPERM)),
+                ProcessLiveness::Unknown
+            );
+            assert_eq!(
+                classify_kill_errno(Some(libc::ESRCH)),
+                ProcessLiveness::Dead
+            );
+        }
+    }
 
     #[test]
     fn foreground_lane_serializes_and_reads_do_not_queue() {

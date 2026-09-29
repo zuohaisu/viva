@@ -19,20 +19,35 @@ use viva::tools::computer::{
 };
 
 fn frozen() -> viva::foundation::store::FrozenMigrations {
-    MigrationRegistry::new()
-        .register(DOMAIN_FOUNDATION, 1, "foundation v1", FOUNDATION_V1_SQL)
-        .register(
-            DOMAIN_TASKS_EXECUTIONS,
-            1,
-            "tasks and executions v1",
-            viva::tasks::TASKS_EXECUTIONS_V1_SQL,
-        )
-        .register(
-            DOMAIN_AUTHORITY,
-            1,
-            "authority v1",
-            viva::authority::AUTHORITY_V1_SQL,
-        )
+    viva::tools::computer::register_migrations(
+        MigrationRegistry::new()
+            .register(DOMAIN_FOUNDATION, 1, "foundation v1", FOUNDATION_V1_SQL)
+            .register(
+                DOMAIN_TASKS_EXECUTIONS,
+                1,
+                "tasks and executions v1",
+                viva::tasks::TASKS_EXECUTIONS_V1_SQL,
+            )
+            .register(
+                DOMAIN_AUTHORITY,
+                1,
+                "authority v1",
+                viva::authority::AUTHORITY_V1_SQL,
+            ),
+    )
+    .freeze()
+    .expect("registry")
+}
+
+fn store() -> Store {
+    Store::open_in_memory(&frozen()).expect("store")
+}
+
+#[test]
+fn disk_upgrade_repairs_registered_v2_two_column_lease_without_losing_holder() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("office.db");
+    let old = MigrationRegistry::new()
         .register(
             DOMAIN_TOOLS_COMPUTER,
             1,
@@ -46,11 +61,100 @@ fn frozen() -> viva::foundation::store::FrozenMigrations {
             viva::tools::computer::TOOLS_COMPUTER_V2_SQL,
         )
         .freeze()
-        .expect("registry")
+        .unwrap();
+    let store = Store::open(&path, &old).unwrap();
+    store
+        .connection()
+        .execute_batch(
+            "DROP TABLE foreground_leases;
+         CREATE TABLE foreground_leases(task_id TEXT PRIMARY KEY, acquired_at TEXT NOT NULL);
+         INSERT INTO foreground_leases VALUES ('legacy-holder', '2020-01-01T00:00:00Z');",
+        )
+        .unwrap();
+    drop(store);
+    let upgraded =
+        Store::open(&path, &frozen()).expect("new version repairs already-registered bad shape");
+    let (pid, marker, acquired): (Option<i64>, Option<String>, String) = upgraded.connection()
+        .query_row("SELECT host_pid, pid_start_marker, acquired_at FROM foreground_leases WHERE task_id='legacy-holder'", [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+    assert_eq!(
+        (pid, marker, acquired.as_str()),
+        (None, None, "2020-01-01T00:00:00Z")
+    );
+    assert!(
+        ForegroundCoordinator::new(&upgraded)
+            .try_acquire_foreground("other")
+            .unwrap()
+            .is_none(),
+        "a holder without a known pid must not be silently stolen"
+    );
+    drop(upgraded);
+    let reopened = Store::open(&path, &frozen()).unwrap();
+    assert_eq!(reopened.row_count("foreground_leases").unwrap(), 1);
 }
 
-fn store() -> Store {
-    Store::open_in_memory(&frozen()).expect("store")
+#[test]
+fn disk_upgrade_keeps_healthy_live_holder_marker() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("office.db");
+    let old = MigrationRegistry::new()
+        .register(
+            DOMAIN_TOOLS_COMPUTER,
+            1,
+            "tools computer v1",
+            viva::tools::computer::TOOLS_COMPUTER_V1_SQL,
+        )
+        .register(
+            DOMAIN_TOOLS_COMPUTER,
+            2,
+            "tools computer v2 foreground lease",
+            viva::tools::computer::TOOLS_COMPUTER_V2_SQL,
+        )
+        .freeze()
+        .unwrap();
+    let store = Store::open(&path, &old).unwrap();
+    store
+        .connection()
+        .execute(
+            "INSERT INTO foreground_leases(task_id, host_pid, pid_start_marker, acquired_at)
+         VALUES ('live', ?1, 'sentinel-marker', '2020-01-01T00:00:00Z')",
+            [std::process::id() as i64],
+        )
+        .unwrap();
+    drop(store);
+    let upgraded = Store::open(&path, &frozen()).unwrap();
+    let row: (i64, String) = upgraded
+        .connection()
+        .query_row(
+            "SELECT host_pid, pid_start_marker FROM foreground_leases WHERE task_id='live'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(row, (std::process::id() as i64, "sentinel-marker".into()));
+}
+
+#[test]
+fn stale_cleanup_commits_even_when_a_live_lease_still_blocks_the_lane() {
+    let store = store();
+    let coordinator = ForegroundCoordinator::new(&store);
+    let _live = coordinator.acquire_foreground("live").unwrap();
+    store
+        .connection()
+        .execute(
+            "INSERT INTO foreground_leases(task_id, host_pid, acquired_at)
+         VALUES ('stale', 65543, '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+    assert!(
+        coordinator
+            .try_acquire_foreground("waiting")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(store.row_count("foreground_leases").unwrap(), 1);
+    assert_eq!(coordinator.holder().unwrap().as_deref(), Some("live"));
 }
 
 /// A scripted runner: answers by argv marker, counts real action

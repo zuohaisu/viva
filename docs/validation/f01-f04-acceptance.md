@@ -3,6 +3,14 @@
 > 以下第一、二轮记录为当时的证据快照，**不是当前合并许可**。第三轮独立 QA
 > 判定为不建议合并；本轮补丁的单测不替代独立复验、真实前台输入或 owner 合并决定。
 
+## 第四轮独立 QA 后续整改（待独立复验）
+
+- M-A：租约探针以 `kill(pid,0)` 的 errno 区分 ESRCH 与 EPERM；后者及其他不可判定结果不删除租约。出生标记确认已复用时仍可回收。无 PID 的旧两列表租约无法证明死亡，**不会自动清除**；操作者须先确认原前台动作已停，再人工处理该租约，不得在活持有者期间抢道。
+- tools_computer v2 已登记不能重写：新增 v3 条件迁移，把旧两列表经建新表→复制→替换升级成四列，保留 task_id/acquired_at；已有健康四列保持原行和 PID 标记。临时文件库模拟“已登记 v2 但旧表仍两列”升级、重开、持有者不被抢占。
+- M-B：`viva data export` 是资产保全用的**原样未脱敏**导出；manifest 显式 `redacted:false`、`contains_sensitive_data:true` 并显示警告，Unix 上新建 0700 目录、0600 文件，拒绝覆盖。导出产物不得提交或分享；标记与私有权限不等于脱敏。
+- R4-N1 冲突处理：maintenance v2 的历史 UPDATE 不改写（已登记）。若裸键 X 和 X:0000 并存，迁移保留数据并给出备份/诊断提示，而不是静默丢弃人审决定。**操作者路径**：先停止 Office，使用 SQLite backup（包括 WAL 中尚未 checkpoint 的更改）保全数据库；可通过 `viva data export --out <仅本人可访问的目录>` 查看原始提案（注意是敏感原文），核对冲突行的 proposal_id、status、resolution_note，再由 owner 决定哪条承载该主题代际零。若两条都要保留，可在备份后对裸键的特定 proposal_id 在 SQLite 事务内改名为 `X:legacy:<proposal_id>`（迁移会再加 `:0000`），保留原状态与主键；重开 `viva doctor` 验证。不要自动合并或删除人审记录。此为人工处置指南，**没有对用户真实库执行**。
+- #25 的真实前台输入/目标平台并发验收仍未进行；本轮的安全机制及文件库回归不等于产品判据通过。
+
 ## 第三轮独立 QA 后续整改（2026-09-29，待独立复验）
 
 - R3-N8：`start-run` / `resume --cwd` 共用 tracked-tree 干净树检查，resume 必须给 cwd；临时仓库 CLI 回归覆盖 dirty、缺 cwd、提交后恢复。仍有 Git status 与 rev-parse 之间的 TOCTOU；untracked/ignored 文件不纳入 head 证明。

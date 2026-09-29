@@ -129,8 +129,9 @@ USAGE:
 
     viva data export --out <dir>
         Read-only export (dump) of every fact table in this VIVA_HOME to
-        JSON files plus a manifest. Never touches anything outside the
-        store — no worktrees, no historical data directories.
+        JSON files plus a manifest. RAW/UNREDACTED sensitive asset export:
+        private files only, do not publish. Never touches worktrees or
+        historical data directories.
 
     viva tools computer audit
         Probe the reused computer tools (orca computer, osascript) and
@@ -1364,7 +1365,8 @@ fn cmd_maintenance(args: &[String]) -> OfficeResult<()> {
 /// not a restorable backup: there is no schema migration or import path.
 /// The database is opened READ-ONLY and nothing outside the store is
 /// touched: no worktrees, no historical Ticket Autopilot data, no other
-/// agents' homes.
+/// agents' homes. This is a RAW asset export, not a privacy-safe artifact;
+/// owner-only output permissions and manifest flags make that explicit.
 fn cmd_data(args: &[String]) -> OfficeResult<()> {
     match args.first().map(String::as_str) {
         Some("export") => cmd_data_export(args.get(1..).unwrap_or(&[])),
@@ -1414,9 +1416,22 @@ fn cmd_data_export(args: &[String]) -> OfficeResult<()> {
     }
     let conn =
         rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    // Only after the store is verified do we create the output directory,
-    // so a failed export leaves no litter behind.
-    std::fs::create_dir_all(&out_path)?;
+    // Create a new private directory, never widen or overwrite an existing
+    // location. The export keeps raw facts for preservation, including
+    // machine-private audit data; it is not safe to commit/share.
+    if let Some(parent) = out_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(&out_path)?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir(&out_path)?;
+    eprintln!("warning: raw, unredacted office export; keep this private and do not publish it");
 
     let mut tables: Vec<String> = {
         let mut stmt = conn.prepare(
@@ -1437,6 +1452,17 @@ fn cmd_data_export(args: &[String]) -> OfficeResult<()> {
         serde_json::Value::String(home.display().to_string()),
     );
     manifest.insert("read_only".into(), serde_json::Value::Bool(true));
+    manifest.insert("redacted".into(), serde_json::Value::Bool(false));
+    manifest.insert(
+        "contains_sensitive_data".into(),
+        serde_json::Value::Bool(true),
+    );
+    manifest.insert(
+        "safety_notice".into(),
+        serde_json::Value::String(
+            "RAW asset export; may contain credentials and private computer evidence; do not publish".into(),
+        ),
+    );
     let mut table_rows = serde_json::Map::new();
     tables.sort();
     for table in &tables {
@@ -1466,13 +1492,29 @@ fn cmd_data_export(args: &[String]) -> OfficeResult<()> {
         }
         table_rows.insert(table.clone(), serde_json::Value::from(list.len() as i64));
         let file = out_path.join(format!("{table}.json"));
-        std::fs::write(&file, serde_json::to_string_pretty(&list)?)?;
+        write_private_export_json(&file, &serde_json::Value::Array(list))?;
     }
     manifest.insert("tables".into(), serde_json::Value::Object(table_rows));
-    std::fs::write(
-        out_path.join("manifest.json"),
-        serde_json::to_string_pretty(&serde_json::Value::Object(manifest))?,
+    write_private_export_json(
+        &out_path.join("manifest.json"),
+        &serde_json::Value::Object(manifest),
     )?;
     println!("exported {} tables to {}", tables.len(), out_path.display());
+    Ok(())
+}
+
+fn write_private_export_json(
+    path: &std::path::Path,
+    value: &serde_json::Value,
+) -> OfficeResult<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    serde_json::to_writer_pretty(file, value)?;
     Ok(())
 }
