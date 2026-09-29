@@ -36,12 +36,19 @@ use crate::foundation::store::{DOMAIN_TOOLS_COMPUTER, MigrationRegistry, Store};
 
 /// Register the `tools_computer` domain migrations (F03's namespace).
 pub fn register_migrations(registry: MigrationRegistry) -> MigrationRegistry {
-    registry.register(
-        DOMAIN_TOOLS_COMPUTER,
-        1,
-        "tools computer v1",
-        TOOLS_COMPUTER_V1_SQL,
-    )
+    registry
+        .register(
+            DOMAIN_TOOLS_COMPUTER,
+            1,
+            "tools computer v1",
+            TOOLS_COMPUTER_V1_SQL,
+        )
+        .register(
+            DOMAIN_TOOLS_COMPUTER,
+            2,
+            "tools computer v2 foreground lease",
+            TOOLS_COMPUTER_V2_SQL,
+        )
 }
 
 pub const TOOLS_COMPUTER_V1_SQL: &str = r#"
@@ -74,14 +81,19 @@ CREATE TABLE computer_actions (
     foreground      INTEGER NOT NULL CHECK (foreground IN (0, 1)),
     recorded_at     TEXT NOT NULL
 );
+"#;
 
--- The single foreground input lane. Backed by the office store itself so
--- the exclusion holds across processes (two `viva` invocations share the
--- database file), not just across threads of one process (QA finding:
--- an in-process Mutex could not coordinate separate CLI runs).
-CREATE TABLE foreground_leases (
-    task_id     TEXT PRIMARY KEY,
-    acquired_at TEXT NOT NULL
+/// v2 moves the foreground lease into its own table — registered as a real
+/// migration so every store picks it up on the next open. (The first
+/// attempt edited v1 in place, which stores that had already applied v1
+/// would never see again — QA finding.) IF NOT EXISTS also keeps
+/// branch-derived stores that already carry the table healthy.
+pub const TOOLS_COMPUTER_V2_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS foreground_leases (
+    task_id          TEXT PRIMARY KEY,
+    host_pid         INTEGER,
+    pid_start_marker TEXT,
+    acquired_at      TEXT NOT NULL
 );
 "#;
 
@@ -202,19 +214,44 @@ impl<'a> ForegroundCoordinator<'a> {
     /// Take the lane only if it is free, in one transactional step. The
     /// write transaction is the cross-process gate: only one writer can
     /// insert while the table is empty.
+    ///
+    /// Before the exclusivity check, stale rows are reconciled: a lease
+    /// whose holder pid is gone (crashed process — Drop never ran) is
+    /// removed, so a crash cannot wedge the input lane until a manual
+    /// DELETE (QA finding). Liveness is `kill -0` via argv array — no
+    /// shell string.
     pub fn try_acquire_foreground(
         &self,
         task_id: &str,
     ) -> OfficeResult<Option<ForegroundLease<'_>>> {
         let tx = self.store.transaction()?;
+        {
+            let rows: Vec<(String, Option<i64>)> = {
+                let mut stmt = tx.prepare("SELECT task_id, host_pid FROM foreground_leases")?;
+                let mapped = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                mapped.collect::<Result<Vec<_>, _>>()?
+            };
+            for (held_task, pid) in rows {
+                let alive = match pid {
+                    Some(pid) => pid_is_alive(pid),
+                    None => false,
+                };
+                if !alive {
+                    tx.execute(
+                        "DELETE FROM foreground_leases WHERE task_id = ?1",
+                        [&held_task],
+                    )?;
+                }
+            }
+        }
         let held: i64 = tx.query_row("SELECT COUNT(*) FROM foreground_leases", [], |r| r.get(0))?;
         if held > 0 {
             drop(tx);
             return Ok(None);
         }
         let insert = tx.execute(
-            "INSERT INTO foreground_leases(task_id, acquired_at) VALUES (?1, ?2)",
-            rusqlite::params![task_id, utc_now()],
+            "INSERT INTO foreground_leases(task_id, host_pid, acquired_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![task_id, std::process::id() as i64, utc_now()],
         );
         if let Err(err) = insert {
             drop(tx);
@@ -260,6 +297,21 @@ impl<'a> ForegroundCoordinator<'a> {
             .optional()?;
         Ok(row)
     }
+}
+
+/// Liveness probe for a lease holder: `kill -0 <pid>` via argv array.
+/// A missing process fails; a live one (even one we cannot signal)
+/// succeeds with exit 0.
+fn pid_is_alive(pid: i64) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -375,7 +427,7 @@ pub fn smoke_specs() -> Vec<(String, ActionSpec)> {
                     "--json".into(),
                 ],
                 expect_post: "Google Chrome".into(),
-                expect_action_output: Some("windows".into()),
+                expect_action_output: Some("com.google.Chrome".into()),
                 foreground: false,
             },
         ),
@@ -394,7 +446,7 @@ pub fn smoke_specs() -> Vec<(String, ActionSpec)> {
                     "--json".into(),
                 ],
                 expect_post: "Finder".into(),
-                expect_action_output: Some("snapshot".into()),
+                expect_action_output: Some("window".into()),
                 foreground: false,
             },
         ),
@@ -539,6 +591,38 @@ impl<'a> ComputerEngine<'a> {
             }
         };
         let _ = authorized;
+        // A computer_input grant must name its task. The authority engine
+        // only cross-checks grants that carry a scope, so an unscoped
+        // (task_id = NULL) grant would otherwise serve ANY task — a
+        // whole-machine license in disguise (QA finding N4). Unlike
+        // office-wide maintenance actions, nothing depends on unscoped
+        // computer_input, so the narrower rule is enforced here.
+        if let Some(gid) = &grant_id {
+            let grant = authority.require_grant(gid)?;
+            if grant.task_id.as_ref() != Some(task_id) {
+                let record = self.record(ActionRecord {
+                    action_id: new_action_id(),
+                    task_id: Some(task_id.clone()),
+                    actor_member_id: member,
+                    grant_id: Some(gid.to_string()),
+                    tool: spec.tool.to_string(),
+                    target: spec.target.clone(),
+                    argv: spec.argv.clone(),
+                    state: ActionState::Refused,
+                    reason: Some(
+                        "computer_input grants must be scoped to the task they authorize — \
+                         an unscoped grant is not a whole-machine license"
+                            .into(),
+                    ),
+                    pre_state: None,
+                    action_output: None,
+                    post_state: None,
+                    foreground: spec.foreground,
+                    recorded_at: utc_now(),
+                })?;
+                return Ok(record);
+            }
+        }
 
         // Foreground actions take the single input lane; reads don't.
         // The coordinator is a per-call view over the shared store — the
@@ -776,6 +860,12 @@ mod tests {
                 1,
                 "tools computer v1",
                 TOOLS_COMPUTER_V1_SQL,
+            )
+            .register(
+                crate::foundation::store::DOMAIN_TOOLS_COMPUTER,
+                2,
+                "tools computer v2 foreground lease",
+                TOOLS_COMPUTER_V2_SQL,
             )
             .freeze()
             .expect("registry");

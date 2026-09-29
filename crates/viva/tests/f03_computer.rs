@@ -39,6 +39,12 @@ fn frozen() -> viva::foundation::store::FrozenMigrations {
             "tools computer v1",
             viva::tools::computer::TOOLS_COMPUTER_V1_SQL,
         )
+        .register(
+            DOMAIN_TOOLS_COMPUTER,
+            2,
+            "tools computer v2 foreground lease",
+            viva::tools::computer::TOOLS_COMPUTER_V2_SQL,
+        )
         .freeze()
         .expect("registry")
 }
@@ -535,4 +541,92 @@ impl ToolRunner for SharedRunner {
     fn run(&self, program: &str, argv: &[String]) -> Result<String, ToolFailure> {
         self.0.run(program, argv)
     }
+}
+
+/// QA N4: a computer_input grant WITHOUT a task scope is refused even
+/// though the authority engine's cross-task check passes NULL-scope grants
+/// through — an unscoped input grant is not a whole-machine license.
+#[test]
+fn unscoped_computer_input_grants_are_refused() {
+    let store = store();
+    let authority = AuthorityEngine::new(&store);
+    let task = TaskId::new();
+    let runner = Arc::new(
+        ScriptedRunner::new()
+            .respond("list-apps", APP_LIST)
+            .respond("get-app-state", FINDER_STATE),
+    );
+    let engine = ComputerEngine::with_runner(&store, Box::new(SharedRunner(Arc::clone(&runner))));
+
+    let member = MemberId::new();
+    let unscoped = authority
+        .issue_root_grant(
+            Some(member.clone()),
+            None,
+            vec!["computer_input".into()],
+            GrantMode::ActAutonomously,
+            None,
+        )
+        .expect("unscoped grant");
+    let actor = Actor::Member {
+        member,
+        grant: Some(unscoped.grant_id),
+    };
+    let record = engine
+        .execute(&authority, &actor, &task, &spec("Finder", false))
+        .expect("refusal recorded");
+    assert_eq!(record.state, ActionState::Refused);
+    assert!(
+        record
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("whole-machine license"),
+        "got: {:?}",
+        record.reason
+    );
+    assert_eq!(runner.action_runs(), 0, "no action ran");
+}
+
+/// QA N3: a lease row left by a DEAD process reconciles itself on the
+/// next acquire — a crash cannot wedge the input lane until a manual
+/// DELETE.
+#[test]
+fn stale_lease_from_a_dead_process_self_heals() {
+    let store = store();
+    let coordinator = ForegroundCoordinator::new(&store);
+    store
+        .connection()
+        .execute(
+            "INSERT INTO foreground_leases(task_id, host_pid, acquired_at)
+             VALUES ('ghost-task', ?1, '2020-01-01T00:00:00Z')",
+            [65543], // effectively never a live pid of ours
+        )
+        .expect("seed stale lease");
+    assert_eq!(
+        coordinator.holder().expect("holder").as_deref(),
+        Some("ghost-task"),
+        "the stale row is visible before reconciliation"
+    );
+
+    // A live task acquires: the dead holder's row is removed first.
+    let lease = coordinator
+        .acquire_foreground("task-live")
+        .expect("the lane self-heals");
+    assert_eq!(lease.task_id, "task-live");
+    assert_eq!(
+        coordinator.holder().expect("holder").as_deref(),
+        Some("task-live")
+    );
+
+    // A row held by THIS live process is respected (not reconciled away).
+    drop(lease);
+    let _lease2 = coordinator
+        .acquire_foreground("task-live2")
+        .expect("acquire");
+    let other = coordinator.try_acquire_foreground("task-b");
+    assert!(
+        other.expect("try").is_none(),
+        "a live holder keeps the lane"
+    );
 }

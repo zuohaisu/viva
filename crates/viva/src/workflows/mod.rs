@@ -715,7 +715,7 @@ impl<'a> WorkflowEngine<'a> {
         for item in &evidence {
             if let Some(head) = &item.head_sha {
                 let head = validate_head_sha(head)?;
-                if head != run.head_sha {
+                if !same_commit(&head, &run.head_sha) {
                     return Err(OfficeError::Validation(format!(
                         "evidence for step `{}` was bound to head {head}, but run `{}` is \
                          bound to {} — results only apply to the head they were produced on",
@@ -1046,6 +1046,13 @@ fn validate_head_sha(head_sha: impl Into<String>) -> OfficeResult<String> {
         )));
     }
     Ok(trimmed.to_string())
+}
+
+/// Two SHA strings name the same commit when one is a prefix of the other
+/// (short vs full form); both must already be hex of sane length.
+fn same_commit(a: &str, b: &str) -> bool {
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    long.get(..short.len()) == Some(short)
 }
 
 fn map_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRun> {

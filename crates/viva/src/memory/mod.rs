@@ -148,14 +148,40 @@ impl AdapterConfig {
         };
         Self {
             python,
-            adapter_script: env_path(
-                "VIVA_MEMORY_ADAPTER",
-                "extensions/pi/memory/memory_adapter.py",
-            ),
+            adapter_script: resolve_adapter_script(),
             agent_dir,
             db_path: env_path("VIVA_MEMORY_DB", "~/.hermes/memory_store.db"),
         }
     }
+}
+
+/// Find the adapter script without depending on the caller's cwd (a bare
+/// relative default dies the moment `viva` runs anywhere else — QA
+/// finding N7). Resolution order: `VIVA_MEMORY_ADAPTER`, then the running
+/// binary's ancestor directories (packaged layouts put `extensions/` next
+/// to the binary or its parent), then the compile-time checkout path as a
+/// dev fallback. Returns the first existing file; if nothing exists, the
+/// env/relative default is kept so the eventual "not found" names
+/// something recognizable.
+fn resolve_adapter_script() -> PathBuf {
+    let relative = PathBuf::from("extensions/pi/memory/memory_adapter.py");
+    if let Ok(from_env) = std::env::var("VIVA_MEMORY_ADAPTER") {
+        return PathBuf::from(from_env);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        for dir in exe.ancestors().skip(1) {
+            let candidate = dir.join(&relative);
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    let dev_checkout = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../extensions/pi/memory/memory_adapter.py");
+    if dev_checkout.is_file() {
+        return dev_checkout;
+    }
+    relative
 }
 
 // ---------------------------------------------------------------------------

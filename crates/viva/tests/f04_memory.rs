@@ -87,12 +87,15 @@ fn real_adapter() -> Option<AdapterConfig> {
 macro_rules! real_service {
     ($store:ident, $service:ident) => {
         let Some(adapter) = real_adapter() else {
-            eprintln!(
-                "SKIPPED (no real Holographic checkout): set VIVA_HERMES_AGENT and \
-                 VIVA_MEMORY_PYTHON to run this test for real — a skipped run is not \
-                 evidence"
+            // Under `cargo test -- --ignored` a silent early-return would
+            // look like green tests with no real evidence (QA finding N6):
+            // an ignored test that cannot find its provider must be a
+            // VISIBLE failure, not a pass.
+            panic!(
+                "real Holographic checkout not found — these tests produce real evidence \
+                 only on a machine with the checkout; set VIVA_HERMES_AGENT and \
+                 VIVA_MEMORY_PYTHON, or run without --ignored"
             );
-            return;
         };
         let $store = store();
         let $service = MemoryService::with_adapter(&$store, adapter);

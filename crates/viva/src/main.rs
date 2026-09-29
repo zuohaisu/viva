@@ -767,7 +767,14 @@ fn cmd_tools(args: &[String]) -> OfficeResult<()> {
                 if record.state == viva::tools::computer::ActionState::Executed {
                     executed += 1;
                 }
-                results.insert(name, serde_json::to_value(&record)?);
+                // The printed evidence SUMMARIZES the tool snapshots instead
+                // of dumping them: `orca` state output inventories every
+                // running application (names, bundle ids, pids) — machine-
+                // private content that must not flow into shareable files
+                // (QA finding N1). The full snapshots stay in this
+                // VIVA_HOME's private store (computer_actions); the
+                // summary keeps the verification facts.
+                results.insert(name, summarize_action(&record)?);
             }
             results.insert("capabilities".into(), serde_json::to_value(&reports)?);
             println!(
@@ -787,6 +794,44 @@ fn cmd_tools(args: &[String]) -> OfficeResult<()> {
             other.unwrap_or("<missing>")
         ))),
     }
+}
+
+/// A shareable summary of one computer action: verdict and verification
+/// facts, with the raw tool snapshots replaced by size + fingerprint.
+fn summarize_action(
+    record: &viva::tools::computer::ActionRecord,
+) -> OfficeResult<serde_json::Value> {
+    let digest = |text: &Option<String>| -> serde_json::Value {
+        match text {
+            None => serde_json::Value::Null,
+            Some(text) => serde_json::json!({
+                "redacted": true,
+                "bytes": text.len(),
+                "fingerprint": content_fingerprint(text),
+            }),
+        }
+    };
+    Ok(serde_json::json!({
+        "state": record.state,
+        "target": record.target,
+        "reason": record.reason,
+        "foreground": record.foreground,
+        "pre_state": digest(&record.pre_state),
+        "action_output": digest(&record.action_output),
+        "post_state": digest(&record.post_state),
+        "recorded_at": record.recorded_at,
+    }))
+}
+
+/// A stable local fingerprint (FNV-1a, hex) so two runs' snapshots can be
+/// told apart without carrying their content. Not cryptographic.
+fn content_fingerprint(text: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in text.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 /// `viva office create-task --goal <text>` — open one office task. This is
@@ -1123,10 +1168,28 @@ fn cmd_workflow(args: &[String]) -> OfficeResult<()> {
         }
         Some("start-run") => {
             let task_id = viva::foundation::ids::TaskId::from_str(&require("task")?)?;
-            let head = match get("head") {
-                Some(explicit) => explicit,
-                None => resolve_head(&require("cwd")?)?,
-            };
+            let cwd = require("cwd")?;
+            let path = std::path::Path::new(&cwd);
+            // The head is only an honest anchor while the tree matches it:
+            // refuse uncommitted TRACKED changes (untracked scratch files
+            // do not alter the recorded content — QA finding N5).
+            let status = viva::git::cli::CliRunner::default()
+                .run(
+                    "git",
+                    path,
+                    &["status", "--porcelain", "--untracked-files=no"],
+                )
+                .map_err(|failure| {
+                    OfficeError::Validation(format!("git status failed in {cwd}: {failure}"))
+                })?;
+            if !status.success() || !status.stdout.trim().is_empty() {
+                return Err(OfficeError::Validation(format!(
+                    "refusing to anchor a run in a dirty worktree ({cwd}) — uncommitted \
+                     tracked changes mean \"verified at this head\" would be a claim about \
+                     content the SHA does not name; commit or stash first"
+                )));
+            }
+            let head = resolve_head(&cwd)?;
             let run = engine.start_run(&task_id, &require("config")?, head)?;
             println!("{}", serde_json::to_string_pretty(&run)?);
             Ok(())
@@ -1150,10 +1213,8 @@ fn cmd_workflow(args: &[String]) -> OfficeResult<()> {
             Ok(())
         }
         Some("resume") => {
-            let new_head = match get("cwd") {
-                Some(cwd) => Some(resolve_head(&cwd)?),
-                None => get("head"),
-            };
+            // Rebind only through a real checkout too — no free-form head.
+            let new_head = get("cwd").map(|cwd| resolve_head(&cwd)).transpose()?;
             let run = engine.resume_paused(&require("run")?, new_head)?;
             println!("{}", serde_json::to_string_pretty(&run)?);
             Ok(())
@@ -1241,25 +1302,26 @@ fn cmd_maintenance(args: &[String]) -> OfficeResult<()> {
             };
             let registry = viva::knowledge::KnowledgeRegistry::new(&store);
             let session = viva::maintenance::MaintenanceSession::open(&store)?;
-            let report = maintenance.review_knowledge(&session, &registry, stale_days)?;
+            // The window closes even when the scan errors — no leaked rows.
+            let outcome = maintenance.review_knowledge(&session, &registry, stale_days);
             session.end(&store)?;
-            print_report(&report)
+            print_report(&outcome?)
         }
         Some("review-worktrees") => {
             let protected = viva::git::worktrees::ProtectedRefs::new(Vec::new());
             let service = viva::git::worktrees::WorktreeService::new(&store, protected);
             let records = service.all_records()?;
             let session = viva::maintenance::MaintenanceSession::open(&store)?;
-            let report = maintenance.review_worktrees(&session, &records)?;
+            let outcome = maintenance.review_worktrees(&session, &records);
             session.end(&store)?;
-            print_report(&report)
+            print_report(&outcome?)
         }
         Some("review-repo") => {
             let repo = require("repo")?;
             let session = viva::maintenance::MaintenanceSession::open(&store)?;
-            let report = maintenance.review_repo(&session, std::path::Path::new(&repo))?;
+            let outcome = maintenance.review_repo(&session, std::path::Path::new(&repo));
             session.end(&store)?;
-            print_report(&report)
+            print_report(&outcome?)
         }
         Some("proposals") => {
             println!(
