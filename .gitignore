@@ -68,3 +68,4 @@ sandbox/*
 
 # Rust build artifacts (workspace target dir)
 /target
+packaging/npm/dist/

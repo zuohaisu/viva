@@ -1,0 +1,25 @@
+{
+  "name": "@zuohaisu/viva-darwin-x64",
+  "version": "0.0.0-set-by-prepare",
+  "description": "macOS x64 (Intel) prebuilt binary for viva, the Personal AI Office host",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zuohaisu/viva.git"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
