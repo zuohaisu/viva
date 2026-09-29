@@ -37,7 +37,12 @@ fn run(args: &[String]) -> OfficeResult<()> {
         Some("init") => cmd_init(),
         Some("doctor") => cmd_doctor(),
         Some("event") => cmd_event(args.get(1..).unwrap_or(&[])),
-        Some("office") => cmd_office(args.get(1..).unwrap_or(&[])),
+        // The daily control plane is top-level — `viva start`, `viva
+        // status`, ... — with no `office` namespace to type through.
+        Some(
+            "start" | "status" | "dispatch" | "terminals" | "stop-terminal" | "result" | "shutdown"
+            | "brief" | "create-task" | "grant" | "handoff",
+        ) => cmd_office(args),
         Some("conversations") => cmd_conversations(args.get(1..).unwrap_or(&[])),
         Some("workbench") => cmd_workbench(),
         Some("data") => cmd_data(args.get(1..).unwrap_or(&[])),
@@ -110,29 +115,34 @@ USAGE:
     viva event list [limit]
         List the most recent office events (default 20).
 
-    viva office start
+    viva start
         Become the active office host for this VIVA_HOME (one per home).
-        Serves the control channel until `viva office shutdown` arrives.
+        Serves the control channel until `viva shutdown` arrives.
 
-    viva office status
+    viva status
         Office snapshot. Uses the live channel when a host is active, and
         falls back to offline store reads otherwise (read-only by design).
 
-    viva office dispatch --task <id> --member <id> --grant <id>
+    viva dispatch --task <id> --member <id> --grant <id>
         --request-key <key> --cwd <dir> -- argv...
         Dispatch one task execution under a grant over the real channel.
         Idempotent by --request-key: a retry never spawns twice.
 
-    viva office terminals
+    viva terminals
         List terminals registered by the active host.
 
-    viva office stop-terminal <terminal-id>
+    viva stop-terminal <terminal-id>
         Stop one terminal (its process group only).
 
-    viva office result <task-id>
+    viva result <task-id>
         Show the results recorded for a task.
 
-    viva office shutdown
+    viva create-task --goal <text> | viva grant --member <id>
+        --task <id> --action <a> --mode <m> | viva brief <task-id> |
+        viva handoff --task <id> --member <id> --summary <text>
+        Task, grant, brief and handoff management.
+
+    viva shutdown
         Ask the active host to stop dispatch, stop owned terminals, persist
         the handoff and release the channel.
 
@@ -373,7 +383,7 @@ fn cmd_office(args: &[String]) -> OfficeResult<()> {
         Some("terminals") => cmd_office_query(&home, viva::office::OfficeRequestKind::TerminalList),
         Some("stop-terminal") => {
             let terminal_id = args.get(1).ok_or_else(|| {
-                OfficeError::Validation("usage: viva office stop-terminal <terminal-id>".into())
+                OfficeError::Validation("usage: viva stop-terminal <terminal-id>".into())
             })?;
             cmd_office_query(
                 &home,
@@ -383,9 +393,9 @@ fn cmd_office(args: &[String]) -> OfficeResult<()> {
             )
         }
         Some("result") => {
-            let task_id = args.get(1).ok_or_else(|| {
-                OfficeError::Validation("usage: viva office result <task-id>".into())
-            })?;
+            let task_id = args
+                .get(1)
+                .ok_or_else(|| OfficeError::Validation("usage: viva result <task-id>".into()))?;
             cmd_office_query(
                 &home,
                 viva::office::OfficeRequestKind::TaskResults {
@@ -407,19 +417,19 @@ fn cmd_office(args: &[String]) -> OfficeResult<()> {
         _ => {
             print_usage();
             Err(OfficeError::Validation(
-                "office needs start | status | dispatch | terminals | stop-terminal | result | brief | create-task | grant | handoff | shutdown"
+                "viva needs start | status | dispatch | terminals | stop-terminal | result | brief | create-task | grant | handoff | shutdown"
                     .into(),
             ))
         }
     }
 }
 
-/// `viva office brief <task-id>` — offline, read-only task brief from the
+/// `viva brief <task-id>` — offline, read-only task brief from the
 /// store (the extension's context-entry endpoint).
 fn cmd_office_brief(args: &[String]) -> OfficeResult<()> {
     let task_id = args
         .first()
-        .ok_or_else(|| OfficeError::Validation("usage: viva office brief <task-id>".into()))?;
+        .ok_or_else(|| OfficeError::Validation("usage: viva brief <task-id>".into()))?;
     let task_id = viva::foundation::ids::TaskId::from_str(task_id)?;
     let home = viva::foundation::paths::viva_home(None);
     let db = viva::foundation::paths::database_path(&home);
@@ -437,7 +447,7 @@ fn cmd_office_brief(args: &[String]) -> OfficeResult<()> {
     Ok(())
 }
 
-/// `viva office handoff --task <id> --member <id> --summary <text>` —
+/// `viva handoff --task <id> --member <id> --summary <text>` —
 /// records a member-reported handoff over the live channel. A member
 /// report is a fact about who said what; it never completes a task.
 fn cmd_office_handoff(home: &std::path::Path, args: &[String]) -> OfficeResult<()> {
@@ -466,7 +476,7 @@ fn cmd_office_handoff(home: &std::path::Path, args: &[String]) -> OfficeResult<(
     }
     let (Some(task_id), Some(member_id), Some(summary)) = (task_id, member_id, summary) else {
         return Err(OfficeError::Validation(
-            "usage: viva office handoff --task <id> --member <id> --summary <text>".into(),
+            "usage: viva handoff --task <id> --member <id> --summary <text>".into(),
         ));
     };
     let response = viva::office::send_request(
@@ -556,7 +566,7 @@ fn cmd_office_dispatch(home: &std::path::Path, args: &[String]) -> OfficeResult<
         (task_id, member_id, grant_id, request_key, cwd)
     else {
         return Err(OfficeError::Validation(
-            "usage: viva office dispatch --task <id> --member <id> --grant <id> \
+            "usage: viva dispatch --task <id> --member <id> --grant <id> \
              --request-key <key> --cwd <dir> [--worktree <id>] -- argv..."
                 .into(),
         ));
@@ -930,7 +940,7 @@ fn content_fingerprint(text: &str) -> String {
     format!("{hash:016x}")
 }
 
-/// `viva office create-task --goal <text>` — open one office task. This is
+/// `viva create-task --goal <text>` — open one office task. This is
 /// an owner-side CLI: whoever runs the binary creates the task in their
 /// own VIVA_HOME.
 fn cmd_office_create_task(args: &[String]) -> OfficeResult<()> {
@@ -950,9 +960,8 @@ fn cmd_office_create_task(args: &[String]) -> OfficeResult<()> {
         }
         i += 1;
     }
-    let goal = goal.ok_or_else(|| {
-        OfficeError::Validation("usage: viva office create-task --goal <text>".into())
-    })?;
+    let goal = goal
+        .ok_or_else(|| OfficeError::Validation("usage: viva create-task --goal <text>".into()))?;
     let store = open_office_store()?;
     let task =
         viva::tasks::TaskRegistry::new(&store).create_task(goal, vec![], None, None, None)?;
@@ -960,7 +969,7 @@ fn cmd_office_create_task(args: &[String]) -> OfficeResult<()> {
     Ok(())
 }
 
-/// `viva office grant --member <id> --task <id> --action <a> --mode <m>
+/// `viva grant --member <id> --task <id> --action <a> --mode <m>
 /// [--expires <rfc3339>]` — an owner-side root grant (the CLI runner IS
 /// the user; the engine records issuer=user). Protected actions are
 /// refused by the engine itself.
@@ -1001,7 +1010,7 @@ fn cmd_office_grant(args: &[String]) -> OfficeResult<()> {
         .transpose()?;
     let action = action.ok_or_else(|| {
         OfficeError::Validation(
-            "usage: viva office grant --member <id> --task <id> --action <a> --mode <m> \
+            "usage: viva grant --member <id> --task <id> --action <a> --mode <m> \
              [--expires <rfc3339>]"
                 .into(),
         )

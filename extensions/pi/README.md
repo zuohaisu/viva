@@ -3,7 +3,7 @@
 Viva office extension for the [Pi coding agent](https://github.com/earendil-works/pi)
 (V09, issue #18). It gives a Pi session the office context of the member it
 runs as — identity, current task brief — and controlled office actions over
-the fixed `viva office …` CLI envelope.
+the fixed `viva` CLI envelope.
 
 ## What it does
 

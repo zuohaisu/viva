@@ -184,7 +184,7 @@ fn cli_resume_rejects_dirty_checkout_and_missing_cwd() {
         );
         serde_json::from_slice(&out.stdout).unwrap()
     };
-    let task = json(&["office", "create-task", "--goal", "fixture"]);
+    let task = json(&["create-task", "--goal", "fixture"]);
     let task = task["task_id"].as_str().unwrap();
     json(&["workflow", "register", "--builtin", "read-only-review"]);
     let run = json(&[
