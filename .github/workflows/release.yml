@@ -68,7 +68,8 @@ jobs:
             viva-${{ matrix.name }}.tar.gz.sha256
 
   # A GitHub Release is created only for tag pushes; artifacts carry the
-  # checksums. Publishing to a package registry is intentionally not done.
+  # checksums. The npm channel (@zuohaisu/viva) publishes the same bits —
+  # see packaging/npm/README.md.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
@@ -88,3 +89,56 @@ jobs:
             viva-macos-arm64.tar.gz.sha256
             viva-macos-intel.tar.gz
             viva-macos-intel.tar.gz.sha256
+
+  # npm channel: publish @zuohaisu/viva + platform packages from the exact
+  # bits that went into the GitHub release (binaries are extracted from the
+  # released tarballs, never rebuilt). Platform packages go first so the
+  # wrapper's optionalDependencies resolve; the wrapper goes last.
+  npm-publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org/
+
+      - name: Download released artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Extract the release binaries
+        shell: bash
+        run: |
+          tar -xzf viva-macos-arm64.tar.gz
+          tar -xzf viva-macos-intel.tar.gz
+          test -x viva-macos-arm64/viva
+          test -x viva-macos-intel/viva
+
+      - name: Stage the npm packages
+        shell: bash
+        run: |
+          python3 packaging/npm/prepare-packages.py \
+            --version "${GITHUB_REF_NAME#v}" \
+            --bin-arm64 viva-macos-arm64/viva \
+            --bin-x64 viva-macos-intel/viva
+
+      - name: Publish to npm (skips honestly without NPM_TOKEN)
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "npm publish skipped: the NPM_TOKEN secret is not set"
+            exit 0
+          fi
+          set -e
+          for pkg in viva-darwin-arm64 viva-darwin-x64 viva; do
+            npm publish "packaging/npm/dist/$pkg" --access public
+          done

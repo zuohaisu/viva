@@ -1,0 +1,32 @@
+{
+  "name": "@zuohaisu/viva",
+  "version": "0.0.0-set-by-prepare",
+  "description": "viva — the Personal AI Office host (prebuilt macOS binary; the package name is the delivery channel, the command stays `viva`).",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zuohaisu/viva.git"
+  },
+  "bin": {
+    "viva": "bin/viva.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@zuohaisu/viva-darwin-arm64": "0.0.0-set-by-prepare",
+    "@zuohaisu/viva-darwin-x64": "0.0.0-set-by-prepare"
+  },
+  "files": [
+    "bin"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "office",
+    "local-first"
+  ]
+}

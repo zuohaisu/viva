@@ -76,6 +76,12 @@ from the [releases page](https://github.com/zuohaisu/viva/releases), unpack,
 and run `./viva`. Each artifact ships with a sha256 checksum and includes the
 Pi extension sources and licenses.
 
+**With npm (prebuilt binary; needs Node ≥ 18):**
+
+```bash
+npm i -g @zuohaisu/viva    # installs the `viva` command
+```
+
 **From source:**
 
 ```bash
