@@ -1,6 +1,6 @@
 # Herdr 架构与功能映射研究：Viva 终端运行时的对齐、冲突与裁决点
 
-Status: planning evidence; official docs/API/source metadata inspected, no herdr source line-by-line audit, nothing built or benchmarked. Date: 2026-10-01.
+Status: planning evidence; official docs/API/source metadata inspected, no herdr source line-by-line audit, nothing built or benchmarked. Route decision: **A 原生实现**（2026-10-01，Haisu 裁决，见 §5/§6）. Date: 2026-10-01.
 
 [Goal check] This work advances Viva's runtime capability by mapping herdr's full feature surface onto Viva's user stories and naming the exact ADR conflicts and decision points a "herdr-like Viva" requires.
 
@@ -59,18 +59,43 @@ Status: planning evidence; official docs/API/source metadata inspected, no herdr
 - **路线 B：包一层 herdr**。Viva 做控制面（成员/任务/授权/记录不变），经 herdr 的 CLI/socket API 把它当作被监督的终端运行时；最短路径获得完整 herdr 体验。代价：必须修订 ADR 0011 §6 的无常驻 daemon 裁决（herdr server 常驻是其前提）；引入第三方二进制运行时依赖（版本固定、Apache-2.0 notice、升级受 herdr 节奏约束）；且经 ANSI 屏幕拿到的 agent 状态仍不能当 Viva 的权威证据。
 - **路线 C：fork/vendor herdr 源码**。Apache-2.0 允许；能力最全。代价：从此维护约 30 万行外部快速迭代代码，与宪章"不为保留而保留、按缺口最小实现"相反，长期成本三路线最高。
 
-本文不替用户选路线；第 5 节列出必须由 Haisu 裁决的问题。
+本文不替用户选路线；第 5 节列出必须由 Haisu 裁决的问题（2026-10-01 已裁决，见 §5）。
 
-## 5. 需要 Haisu 裁决的问题
+## 5. Haisu 的裁决（2026-10-01 记录）
 
-1. **是否修订 ADR 0011 §6**，允许常驻运行时（detach/attach、跨重启恢复）？不修订则 herdr 的灵魂功能整体出局，路线 A 的"像 herdr"只能限定在"前台运行期间的多 pane 体验"。
-2. **范围裁剪**：SSH 多机、插件（已排除）、主题音效、图片渲染是否属于"都要实现"？建议明确排除并把"都要"锚定到 §3 表格的功能域。
-3. **路线选择**：A / B / C（或 A 先行、B 作为过渡验证）。
-4. **agent 状态的定位**：无论哪条路线，屏幕推断状态只能做展示层；验收、派发与恢复继续走受控接口。建议写进对应切片的验收记录。
-5. **若走 B**：第三方二进制依赖政策（固定版本、许可 notice、其升级节奏与 Viva 发行的关系）需要一条新的小裁决。
+2026-10-01，Haisu 对 §4 的路线选择裁决：**路线 A——原生实现，读 herdr 学思路，自己实现**。该裁决同时给出其余各问的答案，均为路线 A 定义的直接推论；若后续推翻应在此追加记录，不回写历史：
 
-## 6. 已验证与未验证
+1. **ADR 0011 §6 不修订**：无常驻 daemon 的裁决保持。herdr 的 detach/attach 与跨重启活恢复不在路线 A 范围内；"像 herdr"限定为前台运行期间的多 pane 体验，加上 §6 语义的重启恢复（恢复事实与归属，恢复动作显式触发）。
+2. **范围锚定**："都要实现"锚定到 §3 表中与 Viva 北极星相关的功能域：多 pane 布局、worktree 分组展示、agent 状态展示层、无头固定尺寸终端。SSH 多机、插件、主题音效、图片渲染、自更新通道按长尾排除，不进切片。
+3. **路线**：A（本条即裁决本身）。
+4. **agent 状态定位**：屏幕推断仅作展示层；验收、派发与恢复继续走受控接口（ADR 0011 §5.2），写进对应切片的验收记录。
+5. **第三方二进制依赖政策**：随路线 B 出局，不适用。
+
+## 6. 路线 A 的执行含义与切片序列
+
+路线 A 的证据基线：herdr 的价值是"哪些能力组合成立"的活样本，不是代码来源。Viva 带走的是思路——session→workspace→tab→pane 的导航树、五态 agent 展示、检测分层的谨慎（进程树识别优先、屏幕规则兜底、集成钩子权威）、按功能域拆配置——全部可不经其代码独立实现；实现落在 Viva 既有领域模型（成员/任务/执行/授权）之上，不照搬 herdr 的 pane 中心模型。
+
+切片序列（建议作为 [V14 issue #27](https://github.com/zuohaisu/viva/issues/27) 的子问题拆分，与已关闭的 V05/V06/V07/V08 能力衔接）：
+
+1. **多 pane 布局引擎**（`tui/`）：pane 树（分割/焦点切换/zoom），多终端快照同屏的绘制预算（V06 目前单焦点 pane）。验收：≥3 个真实终端 + 1 个 shell，切换、resize、邻居互不影响。
+2. **worktree 分组工作台**（`git/` + `tui/`）：V08 的 worktree 服务以分组行呈现，行上挂 create/open 动作；remove 仍走人工授权，charter 的 worktree 生命周期规则不因 UI 好用而放宽。验收：对真实仓库展示 ≥3 个 worktree 并可进入。
+3. **agent 状态展示层**（`terminal/` + `tui/`）：第一层做前台进程树识别（herdr 同思路的 Rust 最小实现）；屏幕规则仅作有界实验并在 UI 标注 unverified。验收：对 1–2 个真实 agent CLI 展示 working/blocked/done，且与受控接口记录的执行状态并列呈现、不互相冒充。
+4. **无头固定尺寸终端**（`terminal/`）：供编排使用的固定 cols/rows 会话，快照可编程读取。验收：无 UI 也能创建、读快照、按策略停止。
+5. **重启恢复（ADR 0011 §6 语义）**：重启后恢复事实与归属，恢复动作显式触发（Pi 原生 resume 属 V09/V10 交界，不在此片承诺）。验收：重启不丢归属、不重跑已完成任务。
+
+每一片走标准 worktree→PR 流程；V12 的 16 路并发资源门槛不变——多 pane 不等于 16 个常驻渲染，绘制仍走 V06 的"缓存快照、单渲染者"纪律。
+
+## 7. 许可与归属合规
+
+路线 A 的合规基线是零复制：读 herdr 学思路、自己实现，不触发 Apache-2.0 的任何声明义务（permissive 许可也不要求 clean-room 流程）。红线沿用 [Orca 审计已立规则](orca-reuse-audit-2026-09-28.md)：实际复制代码及实质性材料时须保留其版权与许可声明，另行保留第三方许可，Viva 的 MIT 不代替这些声明。
+
+- 若未来任何切片出现逐字/近似逐字复制（代码、注释、测试用例、规则表结构）：该 PR 必须同时引入 `THIRD_PARTY_NOTICES.md`（组件、版本/commit、许可证、来源链接）并在 README 加致谢节。herdr 无 NOTICE 文件（2026-10-01 核实），NOTICE 随附义务为空。
+- 若引用其检测规则表（`distribution/agent-detection/*.toml`）的实质内容，视为实质性材料复制，按上一条处理；自建规则表配自测样例不触发。
+- `@zuohaisu/viva` npm 分发若将来捆绑任何第三方二进制，发行包内须随附对应许可文本。
+- 不以 "herdr" 名称或商标为 Viva 背书（Apache-2.0 §6）；本文档这类事实性来源说明不受限。
+
+## 8. 已验证与未验证
 
 已验证：herdr 官方站点与 docs 的功能面（2026-10-01 实时抓取：agent guide、agents、session-state、configuration、socket-api）；GitHub API 元数据（Apache-2.0、约 41.6k stars、Rust 主导、HEAD `347f9c9` 固定）；`src/` 与 vendored 规模实测；Cargo.toml 依赖栈实读；Viva 侧 terminal/tui/git 模块现状（源码头注释实读）与 ADR 0011 全文。
 
-未验证：herdr 源码逐行审计（本文止于官方文档 + Cargo.toml + API 元数据层，未读其 pane/检测/恢复的具体实现，也未本地运行 herdr）；官方文档与二进制实际行为的逐项对照；路线 A/B/C 的成本估算为研究级判断，非实测数据；herdr 检测矩阵对具体 agent 版本的实际准确率；其 vendored ghostty-vt 与 Viva 现用 vt100 crate 的行为差异。研究工件不构成实现、验收 PASS 或性能证据。
+未验证：herdr 源码逐行审计（本文止于官方文档 + Cargo.toml + API 元数据层，未读其 pane/检测/恢复的具体实现，也未本地运行 herdr）；官方文档与二进制实际行为的逐项对照；路线 A/B/C 的成本估算为研究级判断，非实测数据；§6 切片序列为建议，未经 issue 拆分、排期或任何实现；herdr 检测矩阵对具体 agent 版本的实际准确率；其 vendored ghostty-vt 与 Viva 现用 vt100 crate 的行为差异。研究工件不构成实现、验收 PASS 或性能证据。
