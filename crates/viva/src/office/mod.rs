@@ -697,6 +697,18 @@ fn handle_request(
         } => {
             agent_content_submit(&shared, terminal_id.as_deref(), kind, content, source_ref.as_deref())
         }
+        OfficeRequestKind::AgentPrompt {
+            terminal_id,
+            prompt,
+        } => agent_prompt(&shared, &terminal_id, &prompt),
+        OfficeRequestKind::AgentWait {
+            terminal_id,
+            status,
+            timeout_secs,
+        } => agent_wait(&shared, &terminal_id, &status, *timeout_secs),
+        OfficeRequestKind::EventsFeed { since_seq, limit } => {
+            events_feed(&shared, *since_seq, *limit)
+        }
     }
 }
 
@@ -720,6 +732,8 @@ fn is_member_gated_kind(kind: &OfficeRequestKind) -> bool {
             | OfficeRequestKind::Handoff { .. }
             | OfficeRequestKind::AgentReport { .. }
             | OfficeRequestKind::AgentContentSubmit { .. }
+            | OfficeRequestKind::AgentPrompt { .. }
+            | OfficeRequestKind::AgentWait { .. }
             | OfficeRequestKind::Shutdown
     )
 }
@@ -807,6 +821,8 @@ fn authorize_socket_request(shared: &OfficeShared, request: &OfficeRequest) -> O
             OfficeRequestKind::Dispatch { .. } => "dispatch_delegated",
             OfficeRequestKind::AgentReport { .. } => "agent_report",
             OfficeRequestKind::AgentContentSubmit { .. } => "agent_content",
+            OfficeRequestKind::AgentPrompt { .. } => "agent_prompt",
+            OfficeRequestKind::AgentWait { .. } => SOCKET_CONTROL_ACTION,
             _ => SOCKET_CONTROL_ACTION,
         };
         if !grant.actions.iter().any(|a| a == action_needed) {
@@ -1216,6 +1232,168 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash
+}
+
+// ---------------------------------------------------------------------------
+// Orchestration primitives (S5, issue #47; ADR 0012 decision 4)
+// ---------------------------------------------------------------------------
+
+/// `agent.prompt`: text to the agent's stdin, audited. The prompt is a
+/// keystroke-level act - reaching the child's stdin proves nothing about
+/// the agent's understanding (that is what the status reports and the
+/// content intake are for).
+fn agent_prompt(shared: &OfficeShared, terminal_id: &str, prompt: &str) -> OfficeResult<serde_json::Value> {
+    let terminal_id = TerminalId::from_str(terminal_id)?;
+    if prompt.is_empty() {
+        return Err(OfficeError::Validation(
+            "an empty prompt is not a prompt; the channel moves real material".into(),
+        ));
+    }
+    if prompt.len() > 256 * 1024 {
+        return Err(OfficeError::Validation(
+            "prompt exceeds the 256 KiB bound; split it".into(),
+        ));
+    }
+    let handle = shared
+        .terminals
+        .handle(&terminal_id)?
+        .ok_or_else(|| OfficeError::NotFound {
+            entity: "terminal",
+            id: terminal_id.to_string(),
+        })?;
+    handle.input(prompt.as_bytes())?;
+    let store = shared.store.lock().expect("office store");
+    crate::foundation::events::append(
+        &store,
+        crate::foundation::events::NewEvent {
+            domain: DOMAIN_OFFICE_HOST,
+            kind: "agent_prompt_sent".into(),
+            subject_type: "terminal".into(),
+            subject_id: terminal_id.to_string(),
+            origin: "office_host".into(),
+            payload: serde_json::json!({
+                "bytes": prompt.len(),
+                "digest_fnv1a_64": format!("{:016x}", fnv1a_64(prompt.as_bytes())),
+            }),
+        },
+    )?;
+    Ok(serde_json::json!({
+        "sent": true,
+        "bytes": prompt.len(),
+        "note": "delivered to the child's stdin; the agent's understanding is a separate question",
+    }))
+}
+
+/// `agent.wait`: poll the status board until the terminal's AUTHORITATIVE
+/// record matches the requested state, or the timeout passes. The wait
+/// runs on this host (the orchestrator may disconnect; the outcome is
+/// audited either way and reachable through the events feed).
+fn agent_wait(
+    shared: &OfficeShared,
+    terminal_id: &str,
+    status: &str,
+    timeout_secs: u64,
+) -> OfficeResult<serde_json::Value> {
+    let terminal_id = TerminalId::from_str(terminal_id)?;
+    let wanted = crate::agents::AgentStatus::parse(status)?;
+    let timeout = Duration::from_secs(timeout_secs.min(300));
+    shared
+        .terminals
+        .handle(&terminal_id)?
+        .ok_or_else(|| OfficeError::NotFound {
+            entity: "terminal",
+            id: terminal_id.to_string(),
+        })?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        let matched = shared
+            .agent_board
+            .project(&terminal_id.to_string())
+            .into_iter()
+            .find(|record| {
+                record.source == crate::agents::StatusSource::ControlledReport
+                    && record.status == wanted
+            });
+        if let Some(record) = matched {
+            let store = shared.store.lock().expect("office store");
+            crate::foundation::events::append(
+                &store,
+                crate::foundation::events::NewEvent {
+                    domain: DOMAIN_OFFICE_HOST,
+                    kind: "agent_wait_matched".into(),
+                    subject_type: "terminal".into(),
+                    subject_id: terminal_id.to_string(),
+                    origin: "office_host".into(),
+                    payload: serde_json::json!({
+                        "status": wanted.as_str(),
+                        "detail": record.detail,
+                    }),
+                },
+            )?;
+            return Ok(serde_json::json!({
+                "matched": true,
+                "status": wanted.as_str(),
+                "updated_at": record.updated_at,
+                "detail": record.detail,
+            }));
+        }
+        if Instant::now() >= deadline {
+            let store = shared.store.lock().expect("office store");
+            crate::foundation::events::append(
+                &store,
+                crate::foundation::events::NewEvent {
+                    domain: DOMAIN_OFFICE_HOST,
+                    kind: "agent_wait_timeout".into(),
+                    subject_type: "terminal".into(),
+                    subject_id: terminal_id.to_string(),
+                    origin: "office_host".into(),
+                    payload: serde_json::json!({ "status": wanted.as_str() }),
+                },
+            )?;
+            return Ok(serde_json::json!({
+                "matched": false,
+                "status": wanted.as_str(),
+                "timeout_secs": timeout.as_secs(),
+            }));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// The durable event feed: office events after a sequence number. This is
+/// how a disconnected orchestrator catches up - reconnect and ask again
+/// with the last seq you saw.
+fn events_feed(shared: &OfficeShared, since_seq: u64, limit: u32) -> OfficeResult<serde_json::Value> {
+    let limit = limit.clamp(1, 500);
+    let store = shared.store.lock().expect("office store");
+    let mut stmt = store.connection().prepare(
+        "SELECT seq, event_id, occurred_at, domain, kind, subject_type, subject_id, origin, payload
+         FROM office_events WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![since_seq as i64, limit], |row| {
+        Ok(serde_json::json!({
+            "seq": row.get::<_, i64>(0)?,
+            "event_id": row.get::<_, String>(1)?,
+            "occurred_at": row.get::<_, String>(2)?,
+            "domain": row.get::<_, String>(3)?,
+            "kind": row.get::<_, String>(4)?,
+            "subject_type": row.get::<_, String>(5)?,
+            "subject_id": row.get::<_, String>(6)?,
+            "origin": row.get::<_, String>(7)?,
+            "payload": serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(8)?)
+                .unwrap_or(serde_json::Value::Null),
+        }))
+    })?;
+    let events: Vec<serde_json::Value> = rows.collect::<Result<Vec<_>, _>>()?;
+    let last_seq = events
+        .last()
+        .and_then(|event| event.get("seq").and_then(|s| s.as_u64()))
+        .unwrap_or(since_seq);
+    Ok(serde_json::json!({
+        "events": events,
+        "last_seq": last_seq,
+        "note": "reconnect with your last seen seq to continue the stream",
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -2959,6 +3137,219 @@ mod s4_agent_status_tests {
             )
             .expect("audit");
         assert_eq!(audited, 1);
+        host.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod s5_orchestration_tests {
+    use super::*;
+    use crate::office::OfficeClient;
+    use std::time::{Duration, Instant};
+
+    struct RunningHost {
+        dir: tempfile::TempDir,
+        home: std::path::PathBuf,
+        server: std::thread::JoinHandle<()>,
+    }
+
+    fn start_host() -> RunningHost {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let host = OfficeHost::open(&home).expect("host");
+        let server = host.serve_background();
+        let socket = home.join(OFFICE_SOCKET_NAME);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !socket.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        RunningHost { dir, home, server }
+    }
+
+    impl RunningHost {
+        fn client(&self) -> OfficeClient {
+            OfficeClient::connect(&self.home).expect("client")
+        }
+        fn shutdown(self) {
+            if let Ok(mut client) = OfficeClient::connect(&self.home) {
+                let _ = client.call(OfficeRequestKind::Shutdown);
+            }
+            let _ = self.server.join();
+            drop(self.dir);
+        }
+    }
+
+    fn grant_for(home: &std::path::Path, actions: &[&str]) -> String {
+        let store = Store::open(
+            &crate::foundation::paths::database_path(home),
+            office_migrations(),
+        )
+        .expect("store");
+        crate::authority::AuthorityEngine::new(&store)
+            .issue_root_grant(
+                None,
+                None,
+                actions.iter().map(|s| s.to_string()).collect(),
+                crate::authority::GrantMode::ActAutonomously,
+                None,
+            )
+            .expect("grant")
+            .grant_id
+            .to_string()
+    }
+
+    /// The full orchestrator flow: create pane -> prompt -> wait -> read
+    /// the outcome from the durable event feed. Grant-gated, audited,
+    /// zero bypasses.
+    #[test]
+    fn orchestrator_flow_create_prompt_wait_and_event_feed() {
+        let host = start_host();
+        let mut client = host.client();
+        let report_grant = grant_for(&host.home, &["agent_report"]);
+        let prompt_grant = grant_for(&host.home, &["agent_prompt"]);
+
+        // 1. create a pane running cat (echoes everything).
+        let created = client
+            .call(OfficeRequestKind::TerminalCreate {
+                argv: vec!["/bin/sh".into(), "-c".into(), "echo ready-marker; cat".into()],
+                cwd: host.home.display().to_string(),
+                env: vec![],
+                cols: 80,
+                rows: 24,
+                purpose: "orchestrated agent".into(),
+                worktree_id: None,
+                owner: "agent_cli".into(),
+            })
+            .expect("create pane");
+        let terminal_id = created
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .expect("terminal id")
+            .to_string();
+
+        // 2. report a state (as the agent itself would), then prompt.
+        let mut report = new_request(OfficeRequestKind::AgentReport {
+            terminal_id: terminal_id.clone(),
+            agent: "codex".into(),
+            status: "blocked".into(),
+            detail: "needs a decision".into(),
+        });
+        report.grant = Some(report_grant.clone());
+        client.call_request(report).expect("report");
+
+        let mut prompt = new_request(OfficeRequestKind::AgentPrompt {
+            terminal_id: terminal_id.clone(),
+            prompt: "echo orchestrated-prompt\n".into(),
+        });
+        prompt.grant = Some(prompt_grant.clone());
+        let prompt_response = client.call_request(prompt).expect("prompt");
+        assert_eq!(prompt_response.get("sent").and_then(|v| v.as_bool()), Some(true));
+
+        // 3. wait for the blocked status: already matched, returns fast.
+        let mut wait = new_request(OfficeRequestKind::AgentWait {
+            terminal_id: terminal_id.clone(),
+            status: "blocked".into(),
+            timeout_secs: 2,
+        });
+        wait.grant = Some(prompt_grant);
+        let waited = client
+            .call_with_timeout(wait.kind.clone(), Duration::from_secs(10))
+            .expect("wait");
+        assert_eq!(waited.get("matched").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(waited.get("status").and_then(|v| v.as_str()), Some("blocked"));
+
+        // 4. the durable event feed names every step of the flow.
+        let feed = client
+            .call(OfficeRequestKind::EventsFeed { since_seq: 0, limit: 200 })
+            .expect("feed");
+        let kinds: Vec<String> = feed
+            .get("events")
+            .and_then(|v| v.as_array())
+            .expect("events")
+            .iter()
+            .filter_map(|event| event.get("kind").and_then(|k| k.as_str()).map(str::to_string))
+            .collect();
+        for expected in ["agent_status_reported", "agent_prompt_sent", "agent_wait_matched"] {
+            assert!(
+                kinds.iter().any(|k| k == expected),
+                "the feed must contain {expected}: {kinds:?}"
+            );
+        }
+
+        // 5. reconnect semantics: a feed since the last seen seq returns
+        // only newer events.
+        let last_seq = feed.get("last_seq").and_then(|v| v.as_u64()).expect("last seq");
+        let fresh = client
+            .call(OfficeRequestKind::EventsFeed { since_seq: last_seq, limit: 100 })
+            .expect("feed since");
+        assert!(
+            fresh.get("events").and_then(|v| v.as_array()).expect("events").is_empty()
+                || fresh.get("events").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0) <= 1,
+            "the catch-up feed is bounded to newer events"
+        );
+        host.shutdown();
+    }
+
+    /// A wait that never matches times out honestly, audited, and a
+    /// prompt without a grant is refused.
+    #[test]
+    fn wait_timeout_and_prompt_without_grant_are_honest() {
+        let host = start_host();
+        let mut client = host.client();
+        let created = client
+            .call(OfficeRequestKind::TerminalCreate {
+                argv: vec!["/bin/sh".into(), "-c".into(), "cat".into()],
+                cwd: host.home.display().to_string(),
+                env: vec![],
+                cols: 80,
+                rows: 24,
+                purpose: "timeout probe".into(),
+                worktree_id: None,
+                owner: "agent_cli".into(),
+            })
+            .expect("create");
+        let terminal_id = created
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .expect("terminal id")
+            .to_string();
+
+        // Nothing ever reports `done`: the wait times out, audited.
+        let mut wait = new_request(OfficeRequestKind::AgentWait {
+            terminal_id: terminal_id.clone(),
+            status: "done".into(),
+            timeout_secs: 1,
+        });
+        wait.grant = Some(grant_for(&host.home, &["terminal_control"]));
+        let waited = client
+            .call_with_timeout(wait.kind.clone(), Duration::from_secs(10))
+            .expect("wait");
+        assert_eq!(waited.get("matched").and_then(|v| v.as_bool()), Some(false));
+
+        // A member-attributed prompt without a grant: refused.
+        let mut prompt = new_request(OfficeRequestKind::AgentPrompt {
+            terminal_id: terminal_id.clone(),
+            prompt: "you there?".into(),
+        });
+        prompt.member = Some("member-00000000-0000-0000-0000-000000000000".into());
+        let err = client.call_request(prompt).expect_err("must deny");
+        assert!(err.to_string().contains("denied"), "{err}");
+
+        let store = Store::open(
+            &crate::foundation::paths::database_path(&host.home),
+            office_migrations(),
+        )
+        .expect("store");
+        let timeouts: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM office_events WHERE kind = 'agent_wait_timeout'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("timeout audit");
+        assert!(timeouts >= 1, "the timeout is audited");
         host.shutdown();
     }
 }

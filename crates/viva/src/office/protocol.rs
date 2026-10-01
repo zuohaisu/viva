@@ -161,6 +161,34 @@ pub enum OfficeRequestKind {
         #[serde(default)]
         source_ref: Option<String>,
     },
+    /// Send a prompt to an agent's terminal (S5, issue #47): the text goes
+    /// to the child's stdin as-is and the send is audited. Member-attributed
+    /// calls need a live grant carrying `agent_prompt`.
+    AgentPrompt {
+        terminal_id: String,
+        prompt: String,
+    },
+    /// Wait, server-side, until the terminal's AUTHORITATIVE agent status
+    /// matches (or the timeout passes). The wait runs on the host thread -
+    /// the orchestrator may disconnect; the outcome is audited either way
+    /// and readable from the events feed. Member-attributed calls need a
+    /// grant carrying `terminal_control`.
+    AgentWait {
+        terminal_id: String,
+        /// working | blocked | done | idle | unknown
+        status: String,
+        #[serde(default = "default_wait_timeout")]
+        timeout_secs: u64,
+    },
+    /// The office event stream since a sequence number (S5): the durable,
+    /// reconnectable feed. A client that disconnects re-subscribes with its
+    /// last seen seq and misses nothing.
+    EventsFeed {
+        #[serde(default)]
+        since_seq: u64,
+        #[serde(default = "default_feed_limit")]
+        limit: u32,
+    },
     /// Ask the host to shut down gracefully: stop new dispatch, stop owned
     /// terminals, persist the handoff, release the channel.
     Shutdown,
@@ -174,6 +202,14 @@ pub enum OfficeRequestKind {
 
 fn default_cols() -> u16 {
     80
+}
+
+fn default_wait_timeout() -> u64 {
+    30
+}
+
+fn default_feed_limit() -> u32 {
+    100
 }
 
 fn default_rows() -> u16 {

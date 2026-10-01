@@ -120,6 +120,21 @@ impl OfficeClient {
     pub fn round_trip_raw(&mut self, request: &OfficeRequest) -> OfficeResult<OfficeResponse> {
         round_trip(&mut self.stream, request)
     }
+
+    /// One request with a longer read timeout - `agent.wait` runs
+    /// server-side for up to its timeout, so the client's socket read must
+    /// tolerate the silence.
+    pub fn call_with_timeout(
+        &mut self,
+        kind: OfficeRequestKind,
+        read_timeout: std::time::Duration,
+    ) -> OfficeResult<serde_json::Value> {
+        self.stream.set_read_timeout(Some(read_timeout))?;
+        let result = self.call(kind);
+        self.stream
+            .set_read_timeout(Some(crate::office::protocol::IO_TIMEOUT))?;
+        result
+    }
 }
 
 /// Spawn `viva server` detached: its own process group (so this client's

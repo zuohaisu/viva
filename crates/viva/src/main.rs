@@ -45,6 +45,8 @@ fn run(args: &[String]) -> OfficeResult<()> {
             | "brief" | "create-task" | "grant" | "handoff",
         ) => cmd_office(args),
         Some("terminal") => cmd_terminal(args.get(1..).unwrap_or(&[])),
+        Some("agent") => cmd_agent(args.get(1..).unwrap_or(&[])),
+        Some("events") => cmd_events(args.get(1..).unwrap_or(&[])),
         Some("conversations") => cmd_conversations(args.get(1..).unwrap_or(&[])),
         Some("workbench") => cmd_workbench(),
         Some("data") => cmd_data(args.get(1..).unwrap_or(&[])),
@@ -94,6 +96,103 @@ fn cmd_workbench() -> OfficeResult<()> {
         home.display()
     );
     viva::tui::workbench::run_client(client)
+}
+
+/// `viva agent prompt|wait` and `viva events` (S5, issue #47): the
+/// orchestration primitives, reachable from the CLI envelope. Agents call
+/// these with --member/--grant so the socket gate can authorize them; a
+/// bare human caller acts as the owner.
+fn cmd_agent(args: &[String]) -> OfficeResult<()> {
+    let home = viva::foundation::paths::viva_home(None);
+    viva::foundation::paths::ensure_private_dir(&home)?;
+    let mut client = viva::office::OfficeClient::ensure_server(&home)?;
+    let mut named: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut i = 1;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        if !flag.starts_with("--") {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let value = args
+            .get(i)
+            .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+        named.insert(flag.trim_start_matches("--").to_string(), value.clone());
+        i += 1;
+    }
+    let get = |key: &str| named.get(key).cloned();
+    let require = |key: &str| -> OfficeResult<String> {
+        get(key).ok_or_else(|| OfficeError::Validation(format!("agent needs --{key}")))
+    };
+    let wait_timeout = get("timeout").and_then(|t| t.parse::<u64>().ok());
+    let kind = match args.first().map(String::as_str) {
+        Some("prompt") => viva::office::OfficeRequestKind::AgentPrompt {
+            terminal_id: require("terminal")?,
+            prompt: require("text")?,
+        },
+        Some("wait") => viva::office::OfficeRequestKind::AgentWait {
+            terminal_id: require("terminal")?,
+            status: require("status")?,
+            timeout_secs: wait_timeout.unwrap_or(30),
+        },
+        _ => return Err(OfficeError::Validation("agent needs prompt | wait".into())),
+    };
+    let mut request = viva::office::new_request(kind);
+    request.member = get("member");
+    request.grant = get("grant");
+    let response = if let viva::office::OfficeRequestKind::AgentWait { timeout_secs, .. } =
+        &request.kind
+    {
+        client.call_with_timeout(
+            request.kind.clone(),
+            std::time::Duration::from_secs(timeout_secs + 15),
+        )?
+    } else {
+        client.call_request(request)?
+    };
+    println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
+}
+
+/// `viva events [--since <seq>] [--limit <n>]` — the durable event feed
+/// (S5): an orchestrator reconnects with its last seen seq.
+fn cmd_events(args: &[String]) -> OfficeResult<()> {
+    let home = viva::foundation::paths::viva_home(None);
+    let mut client = viva::office::OfficeClient::ensure_server(&home)?;
+    let mut since = 0u64;
+    let mut limit = 100u32;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--since" => {
+                i += 1;
+                since = args
+                    .get(i)
+                    .ok_or_else(|| OfficeError::Validation("--since needs a value".into()))?
+                    .parse()
+                    .map_err(|_| OfficeError::Validation("--since must be a number".into()))?;
+            }
+            "--limit" => {
+                i += 1;
+                limit = args
+                    .get(i)
+                    .ok_or_else(|| OfficeError::Validation("--limit needs a value".into()))?
+                    .parse()
+                    .map_err(|_| OfficeError::Validation("--limit must be a number".into()))?;
+            }
+            other => {
+                return Err(OfficeError::Validation(format!(
+                    "unknown events flag `{other}`"
+                )));
+            }
+        }
+        i += 1;
+    }
+    let response =
+        client.call(viva::office::OfficeRequestKind::EventsFeed { since_seq: since, limit })?;
+    println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
 }
 
 /// `viva terminal …` — headless terminal control over the resident server:
