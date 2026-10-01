@@ -23,7 +23,10 @@ use serde_json::Value;
 use crate::foundation::error::{OfficeError, OfficeResult};
 
 /// Current wire-protocol version. A bump is a coordinated contract change.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// v2 (ADR 0012 / issue #43): the resident-server split adds headless
+/// terminal creation/resize, the workbench view/diff projections, and the
+/// per-request grant field; client and server ship in one binary.
+pub const PROTOCOL_VERSION: u32 = 2;
 /// Hard bound on one framed message (request or response), in bytes.
 pub const MAX_MESSAGE_BYTES: usize = 256 * 1024;
 /// Per-read timeout on the socket; a silent peer cannot hold a thread.
@@ -35,6 +38,18 @@ pub struct OfficeRequest {
     pub request_id: String,
     pub version: u32,
     pub kind: OfficeRequestKind,
+    /// Optional live-grant reference carried by the caller. Any presented
+    /// grant is validated by the host before the request runs; an invalid,
+    /// revoked or expired one is rejected and audited (ADR 0012 decision 4:
+    /// grant semantics extend to the socket layer). Absent means the
+    /// OS-authenticated owner (same-uid peer) acts as the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<String>,
+    /// Optional member attribution. A member-attributed mutating request
+    /// must carry a live grant whose principal matches; the host rejects
+    /// and audits anything else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member: Option<String>,
 }
 
 /// The office-level request vocabulary. Read-only kinds are answerable from
@@ -68,6 +83,35 @@ pub enum OfficeRequestKind {
     },
     /// Stop one terminal (its process group only — never the neighbors).
     TerminalStop { terminal_id: String },
+    /// Create one terminal in the resident server. This is the headless
+    /// and workbench spawn path: fixed sizes are allowed, and the owner is
+    /// limited to user-owned kinds — an execution-owned terminal can only
+    /// come from Dispatch, so a socket client can never fake one.
+    TerminalCreate {
+        argv: Vec<String>,
+        cwd: String,
+        #[serde(default)]
+        env: Vec<(String, String)>,
+        #[serde(default = "default_cols")]
+        cols: u16,
+        #[serde(default = "default_rows")]
+        rows: u16,
+        purpose: String,
+        worktree_id: Option<String>,
+        /// `user_shell` | `agent_cli` | `test_run`.
+        owner: String,
+    },
+    /// Resize one terminal's PTY.
+    TerminalResize {
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    /// The workbench projection: projects, worktrees (+real dirty state),
+    /// tasks, terminals (+live state) and needs-attention markers.
+    WorkbenchView,
+    /// The real bounded diff of one worktree against HEAD.
+    WorkbenchDiff { worktree_id: String },
     /// Results recorded for a task (process facts, QA conclusions, PR/CI).
     TaskResults { task_id: String },
     /// Record one member's explicit handoff summary for a task. A
@@ -81,6 +125,14 @@ pub enum OfficeRequestKind {
     /// Ask the host to shut down gracefully: stop new dispatch, stop owned
     /// terminals, persist the handoff, release the channel.
     Shutdown,
+}
+
+fn default_cols() -> u16 {
+    80
+}
+
+fn default_rows() -> u16 {
+    24
 }
 
 /// One response, correlated by request id.
@@ -177,7 +229,21 @@ pub fn new_request(kind: OfficeRequestKind) -> OfficeRequest {
         request_id: format!("req-{}", uuid::Uuid::new_v4().simple()),
         version: PROTOCOL_VERSION,
         kind,
+        grant: None,
+        member: None,
     }
+}
+
+/// Attach a live-grant reference (and optional member attribution) to a
+/// request under construction.
+pub fn with_grant(
+    mut request: OfficeRequest,
+    grant: impl Into<String>,
+    member: Option<String>,
+) -> OfficeRequest {
+    request.grant = Some(grant.into());
+    request.member = member;
+    request
 }
 
 #[cfg(test)]

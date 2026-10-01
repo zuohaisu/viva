@@ -1,4 +1,6 @@
-//! The active Office host and its control plane (V07, issue #16).
+//! The active Office host and its control plane (V07, issue #16), now the
+//! resident-server side of the client/server split (V14 S1, issue #43;
+//! ADR 0012).
 //!
 //! One `VIVA_HOME` has at most one active Office host. The host owns the
 //! private Unix-socket control channel (`office.sock` inside the 0700 home),
@@ -6,6 +8,11 @@
 //! releases the channel on exit. A second `office start` refuses and names
 //! the running host; a stale socket left by a crashed host is claimed with
 //! an explicit recovery record.
+//!
+//! Since ADR 0012 the host is the resident runtime: clients (the workbench
+//! TUI, headless CLI) may detach at any time while the host keeps every
+//! terminal running. What stops the terminals is an explicit `viva
+//! shutdown` — or the pause semantics S6 layers on top.
 //!
 //! Failure-recoverable composition: dispatch walks the V03 launch protocol
 //! (intent → confirm → exit), so every step survives a crash between
@@ -16,15 +23,18 @@
 //! re-run, and no orphan process is killed automatically (its pid start
 //! marker is recorded instead — pid reuse cannot hit it).
 //!
-//! Mutations require the live channel; with no active office the client
-//! rejects cleanly and never starts a background daemon. Read-only status
-//! is answerable offline from the store by design.
+//! Authorization (ADR 0012 decision 4): the socket lives in the 0700 home
+//! and accepts same-uid peers only; grant semantics extend to the wire —
+//! any presented grant is validated, member-attributed mutations need a
+//! live grant, and every denial is appended to the office event log.
 
+mod client;
 mod protocol;
 
+pub use client::OfficeClient;
 pub use protocol::{
     MAX_MESSAGE_BYTES, OfficeRequest, OfficeRequestKind, OfficeResponse, PROTOCOL_VERSION,
-    new_request, read_message, round_trip, write_message,
+    new_request, read_message, round_trip, with_grant, write_message,
 };
 
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -561,6 +571,9 @@ fn handle_request(
     shared: Arc<OfficeShared>,
     request: &OfficeRequest,
 ) -> OfficeResult<serde_json::Value> {
+    // The socket authorization gate (ADR 0012 decision 4, issue #43):
+    // grant semantics extend to every request before any handler runs.
+    authorize_socket_request(&shared, request)?;
     match &request.kind {
         OfficeRequestKind::Ping => Ok(serde_json::json!({
             "pid": std::process::id(),
@@ -594,6 +607,33 @@ fn handle_request(
             bytes_hex,
         } => terminal_input(&shared, terminal_id, bytes_hex),
         OfficeRequestKind::TerminalStop { terminal_id } => terminal_stop(&shared, terminal_id),
+        OfficeRequestKind::TerminalCreate {
+            argv,
+            cwd,
+            env,
+            cols,
+            rows,
+            purpose,
+            worktree_id,
+            owner,
+        } => terminal_create(
+            &shared,
+            argv,
+            Path::new(cwd),
+            env,
+            *cols,
+            *rows,
+            purpose,
+            worktree_id.as_deref(),
+            owner,
+        ),
+        OfficeRequestKind::TerminalResize {
+            terminal_id,
+            cols,
+            rows,
+        } => terminal_resize(&shared, terminal_id, *cols, *rows),
+        OfficeRequestKind::WorkbenchView => workbench_view(&shared),
+        OfficeRequestKind::WorkbenchDiff { worktree_id } => workbench_diff(&shared, worktree_id),
         OfficeRequestKind::TaskResults { task_id } => task_results(&shared, task_id),
         OfficeRequestKind::Handoff {
             task_id,
@@ -602,6 +642,245 @@ fn handle_request(
         } => handoff(&shared, task_id, member_id, summary),
         OfficeRequestKind::Shutdown => Ok(serde_json::json!({"shutting_down": true})),
     }
+}
+
+/// Actions a member-attributed mutating request can carry over the socket.
+/// The vocabulary is the grants' own `actions` field (free-form strings the
+/// issuer chose); this constant only names the action the socket gate
+/// demands. Dispatch keeps its stricter `dispatch_delegated` checks.
+const SOCKET_CONTROL_ACTION: &str = "terminal_control";
+
+/// Kinds that change state and therefore need authorization when they are
+/// member-attributed. Read-only kinds and the OS-authenticated owner path
+/// (no member attribution) are not gated beyond grant validation below.
+fn is_member_gated_kind(kind: &OfficeRequestKind) -> bool {
+    matches!(
+        kind,
+        OfficeRequestKind::Dispatch { .. }
+            | OfficeRequestKind::TerminalCreate { .. }
+            | OfficeRequestKind::TerminalInput { .. }
+            | OfficeRequestKind::TerminalResize { .. }
+            | OfficeRequestKind::TerminalStop { .. }
+            | OfficeRequestKind::Handoff { .. }
+            | OfficeRequestKind::Shutdown
+    )
+}
+
+/// The socket authorization gate. Rules, in order:
+/// 1. A presented grant must resolve to a real, live, unexpired grant.
+///    Anything else is a rejection WITH an audit event — the refusal is a
+///    recorded fact, never a silent socket close.
+/// 2. A member-attributed mutating request needs that live grant, and its
+///    principal must be the attributed member; `terminal_control` must be
+///    in the grant's actions. Dispatch additionally enforces its own
+///    delegated-dispatch checks in its handler.
+/// 3. With no member attribution, the peer is the OS-authenticated owner
+///    (same-uid, enforced at accept time) acting as the user.
+fn authorize_socket_request(shared: &OfficeShared, request: &OfficeRequest) -> OfficeResult<()> {
+    let Some(grant_text) = &request.grant else {
+        // No grant presented. Owner path is fine; a member-attributed
+        // mutating request without any grant is exactly the "未携带有效
+        // grant" case the socket gate exists for.
+        if request.member.is_some() && is_member_gated_kind(&request.kind) {
+            return Err(audit_grant_denial(
+                shared,
+                request,
+                "member-attributed mutating request carried no grant",
+            ));
+        }
+        return Ok(());
+    };
+
+    // The store lock is scoped: the audit path below needs it too, and a
+    // Mutex is not reentrant — holding it across the audit deadlocks the
+    // connection thread until the client's read timeout fires.
+    let verdict = {
+        let store = shared.store.lock().expect("office store");
+        let authority = AuthorityEngine::new(&store);
+        (|| -> OfficeResult<crate::authority::Grant> {
+            let grant_id = GrantId::from_str(grant_text)?;
+            let grant = authority.require_grant(&grant_id)?;
+            if grant.status != crate::authority::GrantStatus::Live {
+                return Err(OfficeError::Validation(format!(
+                    "grant `{grant_text}` is not live (status: {:?})",
+                    grant.status
+                )));
+            }
+            if let Some(expires_at) = &grant.expires_at {
+                if expires_at.as_str() <= utc_now().as_str() {
+                    return Err(OfficeError::Validation(format!(
+                        "grant `{grant_text}` expired at {expires_at}"
+                    )));
+                }
+            }
+            if let Some(member_text) = &request.member {
+                if let Some(principal) = &grant.principal_member_id {
+                    if principal.to_string() != *member_text {
+                        return Err(OfficeError::Validation(format!(
+                            "grant `{grant_text}` belongs to member `{principal}`, not `{member_text}`; \
+                             grants are not transferable between members"
+                        )));
+                    }
+                }
+            }
+            Ok(grant)
+        })()
+    };
+    let grant = match verdict {
+        Ok(grant) => grant,
+        Err(err) => {
+            let denial = audit_grant_denial(shared, request, &err.to_string());
+            return Err(denial);
+        }
+    };
+
+    // Member-attributed mutations: the grant must name the socket control
+    // action (dispatch is further checked in its handler; shutdown is an
+    // owner action no member grant may carry).
+    if request.member.is_some() && is_member_gated_kind(&request.kind) {
+        if matches!(request.kind, OfficeRequestKind::Shutdown) {
+            return Err(audit_grant_denial(
+                shared,
+                request,
+                "shutdown is an owner action; member grants cannot carry it",
+            ));
+        }
+        let action_needed = match request.kind {
+            OfficeRequestKind::Dispatch { .. } => "dispatch_delegated",
+            _ => SOCKET_CONTROL_ACTION,
+        };
+        if !grant.actions.iter().any(|a| a == action_needed) {
+            return Err(audit_grant_denial(
+                shared,
+                request,
+                &format!(
+                    "grant `{grant_text}` does not authorize `{action_needed}` (actions: {:?})",
+                    grant.actions
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Record one socket-grant denial as an append-only office event and return
+/// the matching error for the caller.
+fn audit_grant_denial(shared: &OfficeShared, request: &OfficeRequest, reason: &str) -> OfficeError {
+    let store = shared.store.lock().expect("office store");
+    let payload = serde_json::json!({
+        "kind": format!("{:?}", std::mem::discriminant(&request.kind)),
+        "method": serde_json::to_string(&request.kind).unwrap_or_default(),
+        "grant": request.grant,
+        "member": request.member,
+        "reason": reason,
+    });
+    let _ = crate::foundation::events::append(
+        &store,
+        crate::foundation::events::NewEvent {
+            domain: DOMAIN_OFFICE_HOST,
+            kind: "socket_grant_denied".into(),
+            subject_type: "socket_request".into(),
+            subject_id: request.request_id.clone(),
+            origin: "office_host".into(),
+            payload,
+        },
+    );
+    OfficeError::Validation(format!("socket request denied: {reason}"))
+}
+
+/// Spawn one terminal in the resident server: the headless path (fixed
+/// sizes, no UI) and the workbench path. The owner is restricted to
+/// user-owned kinds here; only Dispatch can create an execution-owned
+/// terminal, so a socket client can never fake member attribution.
+fn terminal_create(
+    shared: &OfficeShared,
+    argv: &[String],
+    cwd: &Path,
+    env: &[(String, String)],
+    cols: u16,
+    rows: u16,
+    purpose: &str,
+    worktree_id: Option<&str>,
+    owner_text: &str,
+) -> OfficeResult<serde_json::Value> {
+    let owner = match owner_text {
+        "user_shell" => TerminalOwner::UserShell,
+        "agent_cli" => TerminalOwner::AgentCli,
+        "test_run" => TerminalOwner::TestRun,
+        other => {
+            return Err(OfficeError::Validation(format!(
+                "terminal owner `{other}` is not spawnable over the socket; \
+                 use user_shell | agent_cli | test_run (execution-owned terminals \
+                 come only from dispatch)"
+            )));
+        }
+    };
+    let mut spec = crate::terminal::TerminalSpec::new(argv.to_vec(), cwd.to_path_buf())?;
+    spec.env = env.to_vec();
+    spec.cols = cols;
+    spec.rows = rows;
+    spec.validate()?;
+    let worktree = worktree_id
+        .map(WorktreeId::from_str)
+        .transpose()?;
+    let store = shared.store.lock().expect("office store");
+    let (terminal_id, handle) = shared.terminals.spawn(
+        spec,
+        owner,
+        worktree,
+        purpose.to_string(),
+        None,
+        Some(&store),
+    )?;
+    Ok(serde_json::json!({
+        "terminal_id": terminal_id.to_string(),
+        "pid": handle.pid(),
+        "cols": cols,
+        "rows": rows,
+    }))
+}
+
+fn terminal_resize(
+    shared: &OfficeShared,
+    terminal_id: &str,
+    cols: u16,
+    rows: u16,
+) -> OfficeResult<serde_json::Value> {
+    let terminal_id = TerminalId::from_str(terminal_id)?;
+    let handle = shared
+        .terminals
+        .handle(&terminal_id)?
+        .ok_or_else(|| OfficeError::NotFound {
+            entity: "terminal",
+            id: terminal_id.to_string(),
+        })?;
+    handle.resize(cols, rows)?;
+    Ok(serde_json::json!({"resized": true, "cols": cols, "rows": rows}))
+}
+
+/// The workbench projection over the real registries — the same assembly
+/// the in-process workbench used, now served to attach clients.
+fn workbench_view(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
+    let store = shared.store.lock().expect("office store");
+    let model = crate::tui::workbench::assemble_view(&store, &shared.terminals)?;
+    serde_json::to_value(&model).map_err(|e| OfficeError::Validation(format!("view: {e}")))
+}
+
+fn workbench_diff(shared: &OfficeShared, worktree_id: &str) -> OfficeResult<serde_json::Value> {
+    let worktree_id = WorktreeId::from_str(worktree_id)?;
+    let store = shared.store.lock().expect("office store");
+    let service = crate::git::worktrees::WorktreeService::new(
+        &store,
+        crate::git::worktrees::ProtectedRefs::new(vec![]),
+    );
+    let record = service.record(&worktree_id)?.ok_or_else(|| {
+        OfficeError::NotFound {
+            entity: "worktree",
+            id: worktree_id.to_string(),
+        }
+    })?;
+    let diff = service.worktree_diff(&record.worktree_path, 64 * 1024)?;
+    Ok(serde_json::json!({ "worktree_id": worktree_id.to_string(), "diff": diff }))
 }
 
 fn status(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
@@ -1143,4 +1422,277 @@ fn hex_decode(text: &str) -> OfficeResult<Vec<u8>> {
 
 pub fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+// ---------------------------------------------------------------------------
+// S1 integration tests (issue #43): the resident-server split behaviors
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod server_split_tests {
+    use super::*;
+    use crate::office::OfficeClient;
+    use std::time::{Duration, Instant};
+
+    struct RunningHost {
+        dir: tempfile::TempDir,
+        home: std::path::PathBuf,
+        server: std::thread::JoinHandle<()>,
+    }
+
+    fn start_host() -> RunningHost {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).expect("home dir");
+        let host = OfficeHost::open(&home).expect("host claims the slot");
+        let server = host.serve_background();
+        let socket = home.join(OFFICE_SOCKET_NAME);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !socket.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(socket.exists(), "host socket never appeared");
+        RunningHost { dir, home, server }
+    }
+
+    impl RunningHost {
+        fn client(&self) -> OfficeClient {
+            OfficeClient::connect(&self.home).expect("client connects")
+        }
+
+        /// Real teardown: explicit shutdown stops owned terminals and ends
+        /// the serve loop BEFORE the temp home disappears.
+        fn shutdown(self) {
+            if let Ok(mut client) = OfficeClient::connect(&self.home) {
+                let _ = client.call(OfficeRequestKind::Shutdown);
+            }
+            let _ = self.server.join();
+            drop(self.dir);
+        }
+    }
+
+    fn create_terminal(
+        client: &mut OfficeClient,
+        home: &std::path::Path,
+        argv: &[&str],
+        purpose: &str,
+    ) -> String {
+        let response = client
+            .call(OfficeRequestKind::TerminalCreate {
+                argv: argv.iter().map(|s| s.to_string()).collect(),
+                cwd: home.display().to_string(),
+                env: vec![],
+                cols: 100,
+                rows: 30,
+                purpose: purpose.to_string(),
+                worktree_id: None,
+                owner: "user_shell".into(),
+            })
+            .expect("terminal create");
+        response
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .expect("terminal id")
+            .to_string()
+    }
+
+    fn wait_for_output(client: &mut OfficeClient, terminal_id: &str, needle: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Ok(view) = client.call(OfficeRequestKind::TerminalSnapshot {
+                terminal_id: terminal_id.to_string(),
+            }) {
+                if format!("{view}").contains(needle) {
+                    return true;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    /// Headless fixed-size terminal over the socket: create → snapshot
+    /// (fixed size honored) → output visible → input echoed → stop.
+    #[test]
+    fn headless_terminal_create_snapshot_input_stop() {
+        let host = start_host();
+        let mut client = host.client();
+        let terminal_id = create_terminal(
+            &mut client,
+            &host.home,
+            &["/bin/sh", "-c", "echo ready-marker; cat"],
+            "headless test session",
+        );
+        assert!(wait_for_output(&mut client, &terminal_id, "ready-marker"));
+
+        let view = client
+            .call(OfficeRequestKind::TerminalSnapshot {
+                terminal_id: terminal_id.clone(),
+            })
+            .expect("snapshot");
+        assert_eq!(view.get("cols").and_then(|v| v.as_u64()), Some(100));
+        assert_eq!(view.get("rows").and_then(|v| v.as_u64()), Some(30));
+
+        client
+            .call(OfficeRequestKind::TerminalInput {
+                terminal_id: terminal_id.clone(),
+                bytes_hex: hex_encode(b"echo typed-marker\n"),
+            })
+            .expect("input");
+        assert!(wait_for_output(&mut client, &terminal_id, "typed-marker"));
+
+        client
+            .call(OfficeRequestKind::TerminalStop {
+                terminal_id: terminal_id.clone(),
+            })
+            .expect("stop");
+        host.shutdown();
+    }
+
+    /// Detach (client exit) leaves the server and its terminals running;
+    /// a fresh attach sees the same terminal with its scrollback intact.
+    #[test]
+    fn detach_keeps_terminals_and_reattach_restores_the_view() {
+        let host = start_host();
+        let terminal_id = {
+            let mut client = host.client();
+            let id = create_terminal(
+                &mut client,
+                &host.home,
+                &["/bin/sh", "-c", "echo detach-marker; sleep 30"],
+                "detach test",
+            );
+            assert!(wait_for_output(&mut client, &id, "detach-marker"));
+            id
+        }; // client dropped here = detach
+
+        let mut reattached = host.client();
+        let list = reattached
+            .call(OfficeRequestKind::TerminalList)
+            .expect("list after detach");
+        assert!(
+            format!("{list}").contains(&terminal_id),
+            "the terminal survived the client detach: {list}"
+        );
+        assert!(
+            wait_for_output(&mut reattached, &terminal_id, "detach-marker"),
+            "scrollback is restored from server-held state"
+        );
+        host.shutdown();
+    }
+
+    /// Stopping one terminal never touches the neighbor (V05 discipline
+    /// exercised over the socket).
+    #[test]
+    fn stopping_one_terminal_spares_the_neighbor() {
+        let host = start_host();
+        let mut client = host.client();
+        let a = create_terminal(
+            &mut client,
+            &host.home,
+            &["/bin/sh", "-c", "echo a-marker; sleep 30"],
+            "neighbor a",
+        );
+        let b = create_terminal(
+            &mut client,
+            &host.home,
+            &["/bin/sh", "-c", "echo b-marker; sleep 30"],
+            "neighbor b",
+        );
+        client
+            .call(OfficeRequestKind::TerminalStop {
+                terminal_id: a.clone(),
+            })
+            .expect("stop a");
+        // b still answers a snapshot (its handle is alive server-side).
+        let view = client
+            .call(OfficeRequestKind::TerminalSnapshot {
+                terminal_id: b.clone(),
+            })
+            .expect("neighbor survives");
+        assert!(format!("{view}").contains("b-marker") || wait_for_output(&mut client, &b, "b-marker"));
+        host.shutdown();
+    }
+
+    /// An invalid grant is rejected AND audited (office_events keeps the
+    /// refusal — the denial is a recorded fact, not a silent close).
+    #[test]
+    fn invalid_grant_is_rejected_and_audited() {
+        let host = start_host();
+        let mut client = host.client();
+        let mut request = new_request(OfficeRequestKind::TerminalCreate {
+            argv: vec!["/bin/sh".into()],
+            cwd: host.home.display().to_string(),
+            env: vec![],
+            cols: 80,
+            rows: 24,
+            purpose: "should be denied".into(),
+            worktree_id: None,
+            owner: "user_shell".into(),
+        });
+        request.grant = Some("grant-does-not-exist".into());
+        let err = client
+            .call_request(request)
+            .expect_err("an unknown grant must be denied");
+        assert!(err.to_string().contains("denied"), "got: {err}");
+
+        let store = Store::open(
+            &crate::foundation::paths::database_path(&host.home),
+            office_migrations(),
+        )
+        .expect("audit store");
+        let denials: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM office_events WHERE kind = 'socket_grant_denied'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("audit count");
+        assert!(denials >= 1, "the denial must be audited, got {denials}");
+        host.shutdown();
+    }
+
+    /// A member-attributed mutation without any grant is the exact
+    /// "未携带有效 grant" case: rejected and audited.
+    #[test]
+    fn member_attributed_mutation_without_grant_is_denied() {
+        let host = start_host();
+        let mut client = host.client();
+        let mut request = new_request(OfficeRequestKind::TerminalCreate {
+            argv: vec!["/bin/sh".into()],
+            cwd: host.home.display().to_string(),
+            env: vec![],
+            cols: 80,
+            rows: 24,
+            purpose: "member without grant".into(),
+            worktree_id: None,
+            owner: "agent_cli".into(),
+        });
+        request.member = Some("member-00000000-0000-0000-0000-000000000000".into());
+        let err = client
+            .call_request(request)
+            .expect_err("member mutation without grant must be denied");
+        assert!(err.to_string().contains("denied"), "got: {err}");
+        host.shutdown();
+    }
+
+    /// The workbench view projection serves real registries' facts.
+    #[test]
+    fn workbench_view_serves_the_projection() {
+        let host = start_host();
+        let mut client = host.client();
+        let view = client
+            .call(OfficeRequestKind::WorkbenchView)
+            .expect("view");
+        for key in ["projects", "worktrees", "tasks", "terminals", "attention"] {
+            assert!(view.get(key).is_some(), "view misses `{key}`: {view}");
+        }
+        // The model survives a client-side round trip through the same
+        // serde shape the workbench view renders.
+        let model: crate::tui::workbench::WorkbenchModel =
+            serde_json::from_value(view).expect("model decode");
+        assert!(model.terminals.is_empty());
+        host.shutdown();
+    }
 }

@@ -26,9 +26,10 @@ fn main() -> ExitCode {
 
 fn run(args: &[String]) -> OfficeResult<()> {
     match args.first().map(String::as_str) {
-        // Bare `viva` IS the office: open the interactive workbench
-        // directly — the TUI process is THE active office host for this
-        // VIVA_HOME. The usage text stays reachable via `viva help`.
+        // Bare `viva` IS the workbench: attach as a client of the resident
+        // office server (auto-starting one when none runs). The TUI is a
+        // detachable view now — `q` detaches, the server keeps every
+        // terminal alive (ADR 0012 / issue #43). Usage: `viva help`.
         None => cmd_workbench(),
         Some("help" | "--help" | "-h") => {
             print_usage();
@@ -40,9 +41,10 @@ fn run(args: &[String]) -> OfficeResult<()> {
         // The daily control plane is top-level — `viva start`, `viva
         // status`, ... — with no `office` namespace to type through.
         Some(
-            "start" | "status" | "dispatch" | "terminals" | "stop-terminal" | "result" | "shutdown"
+            "start" | "server" | "status" | "dispatch" | "terminals" | "stop-terminal" | "result" | "shutdown"
             | "brief" | "create-task" | "grant" | "handoff",
         ) => cmd_office(args),
+        Some("terminal") => cmd_terminal(args.get(1..).unwrap_or(&[])),
         Some("conversations") => cmd_conversations(args.get(1..).unwrap_or(&[])),
         Some("workbench") => cmd_workbench(),
         Some("data") => cmd_data(args.get(1..).unwrap_or(&[])),
@@ -63,30 +65,137 @@ fn run(args: &[String]) -> OfficeResult<()> {
     }
 }
 
-/// `viva workbench` — the interactive parallel-development workbench, as
-/// THE active office host for this VIVA_HOME. One process owns the store,
-/// the terminals and the UI; `q` really stops owned terminals, joins the
-/// exit watchers, persists the handoff and restores the terminal.
+/// `viva workbench` — the interactive parallel-development workbench, run
+/// as a CLIENT of the resident office server. If no healthy server answers,
+/// one is spawned detached first (its own process group, log in
+/// `server.log`). `q` detaches the client; the server keeps every terminal
+/// running until an explicit `viva shutdown` (ADR 0012, issue #43).
 fn cmd_workbench() -> OfficeResult<()> {
     let home = viva::foundation::paths::viva_home(None);
-    viva::foundation::paths::ensure_private_dir(&home)?;
-    let host = viva::office::OfficeHost::open(&home)?;
-    let shared = host.shared();
+    let client = viva::office::OfficeClient::ensure_server(&home)?;
     eprintln!(
-        "workbench: office host {} active (pid {}) — home {}",
-        shared.host_id,
-        std::process::id(),
+        "workbench: attached to the resident office server — `q` detaches, \
+         the server keeps running (`viva shutdown` stops it); home {}",
         home.display()
     );
-    let server = host.serve_background();
-    let result = viva::tui::workbench::run(std::sync::Arc::clone(&shared));
-    // Whatever the loop's outcome, the serve loop must end and the channel
-    // must be released (run() already shut the office down on `q`).
-    shared
-        .stopping
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    let _ = server.join();
-    result
+    viva::tui::workbench::run_client(client)
+}
+
+/// `viva terminal …` — headless terminal control over the resident server:
+/// create fixed-size sessions, read snapshots, resize, stop. No UI needed;
+/// a resident server is auto-started when none runs (issue #43).
+fn cmd_terminal(args: &[String]) -> OfficeResult<()> {
+    let home = viva::foundation::paths::viva_home(None);
+    viva::foundation::paths::ensure_private_dir(&home)?;
+    let mut client = viva::office::OfficeClient::ensure_server(&home)?;
+    match args.first().map(String::as_str) {
+        Some("create") => {
+            let mut cols: u16 = 80;
+            let mut rows: u16 = 24;
+            let mut cwd: Option<String> = None;
+            let mut purpose: Option<String> = None;
+            let mut owner = "user_shell".to_string();
+            let mut argv: Vec<String> = Vec::new();
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--cols" | "--rows" | "--cwd" | "--purpose" | "--owner" => {
+                        let flag = args[i].trim_start_matches('-').to_string();
+                        i += 1;
+                        let value = args.get(i).ok_or_else(|| {
+                            OfficeError::Validation(format!("flag --{flag} needs a value"))
+                        })?;
+                        match flag.as_str() {
+                            "cols" => cols = value.parse().map_err(|_| {
+                                OfficeError::Validation("--cols must be a number".into())
+                            })?,
+                            "rows" => rows = value.parse().map_err(|_| {
+                                OfficeError::Validation("--rows must be a number".into())
+                            })?,
+                            "cwd" => cwd = Some(value.clone()),
+                            "purpose" => purpose = Some(value.clone()),
+                            "owner" => owner = value.clone(),
+                            _ => unreachable!("flag names checked above"),
+                        }
+                    }
+                    "--" => {
+                        argv = args[i + 1..].to_vec();
+                        break;
+                    }
+                    other => {
+                        return Err(OfficeError::Validation(format!(
+                            "unknown terminal create flag `{other}`"
+                        )));
+                    }
+                }
+                i += 1;
+            }
+            if argv.is_empty() {
+                return Err(OfficeError::Validation(
+                    "terminal create needs an explicit argv after `--`".into(),
+                ));
+            }
+            let cwd = cwd
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            let response = client.call(
+                viva::office::OfficeRequestKind::TerminalCreate {
+                    argv,
+                    cwd: cwd.display().to_string(),
+                    env: vec![],
+                    cols,
+                    rows,
+                    purpose: purpose.unwrap_or_else(|| "headless session".into()),
+                    worktree_id: None,
+                    owner,
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+            Ok(())
+        }
+        Some("snapshot") => {
+            let terminal_id = args.get(1).ok_or_else(|| {
+                OfficeError::Validation("usage: viva terminal snapshot <terminal-id>".into())
+            })?;
+            let response = client.call(viva::office::OfficeRequestKind::TerminalSnapshot {
+                terminal_id: terminal_id.clone(),
+            })?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+            Ok(())
+        }
+        Some("resize") => {
+            let terminal_id = args.get(1).ok_or_else(|| {
+                OfficeError::Validation("usage: viva terminal resize <terminal-id> --cols N --rows N".into())
+            })?;
+            let mut named = std::collections::HashMap::new();
+            let mut i = 2;
+            while i < args.len() {
+                let flag = args[i].as_str();
+                i += 1;
+                let value = args
+                    .get(i)
+                    .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+                named.insert(flag.to_string(), value.clone());
+                i += 1;
+            }
+            let cols: u16 = named.get("--cols").ok_or_else(|| {
+                OfficeError::Validation("resize needs --cols".into())
+            })?.parse().map_err(|_| OfficeError::Validation("--cols must be a number".into()))?;
+            let rows: u16 = named.get("--rows").ok_or_else(|| {
+                OfficeError::Validation("resize needs --rows".into())
+            })?.parse().map_err(|_| OfficeError::Validation("--rows must be a number".into()))?;
+            let response = client.call(viva::office::OfficeRequestKind::TerminalResize {
+                terminal_id: terminal_id.clone(),
+                cols,
+                rows,
+            })?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+            Ok(())
+        }
+        _ => Err(OfficeError::Validation(
+            "terminal needs create | snapshot | resize (stop via `viva stop-terminal`)".into(),
+        )),
+    }
 }
 
 fn print_usage() {
@@ -95,9 +204,9 @@ fn print_usage() {
 
 USAGE:
     viva
-        Open the interactive parallel-development workbench directly —
-        the TUI is THE active office host for this VIVA_HOME (needs a
-        real terminal; the same as `viva workbench`).
+        Attach the interactive parallel-development workbench to the
+        resident office server (one is spawned detached when none runs).
+        `q` detaches the client; the server keeps every terminal running.
 
     viva help
         Print this usage text.
@@ -115,9 +224,10 @@ USAGE:
     viva event list [limit]
         List the most recent office events (default 20).
 
-    viva start
-        Become the active office host for this VIVA_HOME (one per home).
-        Serves the control channel until `viva shutdown` arrives.
+    viva server
+        Run the resident office server in the foreground (the same as
+        `viva start`): owns the store, every terminal and the control
+        channel until `viva shutdown` arrives. Clients may detach freely.
 
     viva status
         Office snapshot. Uses the live channel when a host is active, and
@@ -131,6 +241,17 @@ USAGE:
     viva terminals
         List terminals registered by the active host.
 
+    viva terminal create [--cols N] [--rows N] [--cwd dir] [--purpose text] \
+      [--owner user_shell|agent_cli|test_run] -- argv...
+        Create one terminal in the resident server (headless — no UI
+        needed). The server is auto-started when none runs.
+
+    viva terminal snapshot <terminal-id>
+        Dump one terminal's visible grid and scrollback (JSON).
+
+    viva terminal resize <terminal-id> --cols N --rows N
+        Resize one terminal's PTY.
+
     viva stop-terminal <terminal-id>
         Stop one terminal (its process group only).
 
@@ -143,15 +264,15 @@ USAGE:
         Task, grant, brief and handoff management.
 
     viva shutdown
-        Ask the active host to stop dispatch, stop owned terminals, persist
-        the handoff and release the channel.
+        Ask the resident server to stop dispatch, stop owned terminals,
+        persist the handoff and release the channel.
 
     viva conversations <create|fork|rename|set-native|attach-task|detach-task|archive|tree|handoff> [flags]
         Conversation metadata (office-owned tree; the harness owns the transcript).
 
     viva workbench
-        Run the interactive parallel-development workbench as THE active
-        office host for this VIVA_HOME (needs a real terminal).
+        Same as bare `viva`: attach the interactive workbench to the
+        resident server.
 
     viva data export --out <dir>
         Read-only export (dump) of every fact table in this VIVA_HOME to
@@ -377,7 +498,7 @@ fn parse_domain(name: &str) -> OfficeResult<viva::foundation::store::Domain> {
 fn cmd_office(args: &[String]) -> OfficeResult<()> {
     let home = viva::foundation::paths::viva_home(None);
     match args.first().map(String::as_str) {
-        Some("start") => cmd_office_start(&home),
+        Some("server" | "start") => cmd_office_start(&home),
         Some("status") => cmd_office_status(&home),
         Some("dispatch") => cmd_office_dispatch(&home, args.get(1..).unwrap_or(&[])),
         Some("terminals") => cmd_office_query(&home, viva::office::OfficeRequestKind::TerminalList),

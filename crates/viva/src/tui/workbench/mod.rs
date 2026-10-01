@@ -1,6 +1,12 @@
 //! The parallel-development workbench (V14, issue #27): one office spanning
 //! many projects, tasks and worktrees, with real terminals per worktree.
 //!
+//! Since the resident-server split (S1, issue #43; ADR 0012) this module is
+//! the CLIENT: facts arrive as `WorkbenchView` projections over the control
+//! channel, actions go back as requests, and `q` detaches while the server
+//! keeps every terminal running. The server side of the projections lives
+//! in [`assemble_view`], called by the office host.
+//!
 //! Composition rules (this module only combines; the domains stay theirs):
 //! - Facts come from the existing registries (projects/tasks V02–V03,
 //!   worktrees V08, terminals V05). Lists, dirty flags and needs-attention
@@ -12,9 +18,8 @@
 //!   execution.
 //! - Diffs and status are real git facts, read-only; editing is delegated
 //!   to the user's own editor — the workbench builds no code editor.
-//! - Quit is the office protocol: owned terminals are stopped, worktree
-//!   contents and records are left exactly as they are, and nothing is
-//!   re-run when the office reopens.
+//! - Quit is a detach: worktree contents and records are left exactly as
+//!   they are, nothing is re-run when the client reattaches.
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
@@ -23,8 +28,6 @@ use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
-use std::str::FromStr as _;
-
 use crate::foundation::error::OfficeResult;
 use crate::terminal::TerminalSnapshot;
 
@@ -32,14 +35,14 @@ use crate::terminal::TerminalSnapshot;
 // Projections (read-only facts assembled by the store-backed source)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProjectRow {
     pub project_id: String,
     pub name: String,
     pub repo_path: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorktreeRow {
     pub worktree_id: String,
     pub project_id: String,
@@ -53,14 +56,14 @@ pub struct WorktreeRow {
     pub source: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TaskRow {
     pub task_id: String,
     pub goal: String,
     pub status: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalRow {
     pub terminal_id: String,
     pub worktree_id: Option<String>,
@@ -73,14 +76,16 @@ pub struct TerminalRow {
 /// A needs-attention marker: a fact recorded by the office that a human
 /// should look at (a failed execution, an unresolved launch). Projections
 /// only — the workbench never decides what to do about them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AttentionMarker {
     pub kind: String,
     pub detail: String,
 }
 
-/// The workbench snapshot the view renders.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// The workbench snapshot the view renders. Serialized over the control
+/// channel since the client/server split (#43): the server assembles it
+/// from the real registries, the client renders it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkbenchModel {
     pub projects: Vec<ProjectRow>,
     pub worktrees: Vec<WorktreeRow>,
@@ -106,8 +111,8 @@ pub enum Focus {
 pub enum KeyOutcome {
     Handled,
     Ignored,
-    /// The user asked to quit; the run loop must stop owned terminals,
-    /// persist state, and restore the physical terminal.
+    /// The user asked to quit; the client run loop detaches from the
+    /// resident server (the server keeps running — ADR 0012).
     QuitRequested,
     /// Terminal-mode: these bytes belong to the focused terminal's stdin.
     Forward(Vec<u8>),
@@ -151,7 +156,7 @@ impl WorkbenchApp {
             terminal_mode: None,
             terminal_view: None,
             diff_view: None,
-            status_line: "1-4 panes · Tab cycle · Enter terminal · d diff · s stop · r refresh · Esc releases · q quit".into(),
+            status_line: "1-4 panes · Tab cycle · Enter terminal · d diff · s stop · r refresh · Esc releases · q detach".into(),
             quit_requested: false,
         }
     }
@@ -366,14 +371,26 @@ impl WorkbenchApp {
         frame.render_widget(Paragraph::new(header), chunks[0]);
 
         if let (Some(view), Some(_id)) = (&self.terminal_view, &self.terminal_mode) {
+            // Bottom-anchored: scrollback above the live grid, clipped to
+            // what fits — a reattached client sees the server-kept history.
             let mut lines: Vec<Line> = view
-                .visible
+                .scrollback
                 .iter()
+                .chain(view.visible.iter())
                 .map(|row| Line::from(row.clone()))
                 .collect();
+            let max_lines = chunks[1].height.saturating_sub(2) as usize;
+            if lines.len() > max_lines {
+                let skip = lines.len() - max_lines;
+                lines.drain(..skip);
+            }
             lines.push(Line::from(format!(
-                "— {}×{} · scrollback capped: {} · output bytes: {} —",
-                view.cols, view.rows, view.scrollback_capped, view.total_output_bytes
+                "— {}×{} · scrollback: {} lines{} · output bytes: {} —",
+                view.cols,
+                view.rows,
+                view.scrollback.len(),
+                if view.scrollback_capped { " (capped)" } else { "" },
+                view.total_output_bytes
             )));
             frame.render_widget(
                 Paragraph::new(lines).block(
@@ -817,15 +834,34 @@ fn owner_label(owner: &crate::foundation::records::TerminalOwner) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// The product entry: run the workbench as THE active office host
+// Server-side assembly (called by the resident host for WorkbenchView)
 // ---------------------------------------------------------------------------
 
-/// Run the interactive workbench on this terminal. The caller has already
-/// opened the office host (`OfficeHost::open`) and runs its serve loop on
-/// a background thread; this loop owns the UI and, on quit, performs the
-/// real office shutdown (stop owned terminals, join watchers, persist the
-/// handoff, release the channel) before restoring the physical terminal.
-pub fn run(shared: std::sync::Arc<crate::office::OfficeShared>) -> OfficeResult<()> {
+/// Assemble the workbench model from the real registries. This is what the
+/// resident host serves for `WorkbenchView` requests; the client renders it
+/// verbatim and owns no second source of these facts.
+pub fn assemble_view(
+    store: &crate::foundation::store::Store,
+    terminals: &crate::terminal::TerminalRegistry,
+) -> OfficeResult<WorkbenchModel> {
+    let workbench = WorkbenchStore {
+        store,
+        terminals,
+        protected: crate::git::worktrees::ProtectedRefs::new(vec![]),
+    };
+    workbench.refresh()
+}
+
+// ---------------------------------------------------------------------------
+// The product entry: run the workbench as a CLIENT of the resident server
+// ---------------------------------------------------------------------------
+
+/// Run the interactive workbench as a client of the resident office server
+/// (ADR 0012, issue #43). All facts arrive as [`WorkbenchView`] projections
+/// over the control channel; all actions go back as requests. `q` DETACHES:
+/// the client exits, the server keeps every terminal running, and a later
+/// attach restores the same view from server-held state.
+pub fn run_client(mut client: crate::office::OfficeClient) -> OfficeResult<()> {
     // Honest gate: a workbench without a real terminal cannot work. Fail
     // loudly instead of half-working against a pipe.
     #[cfg(unix)]
@@ -835,29 +871,46 @@ pub fn run(shared: std::sync::Arc<crate::office::OfficeShared>) -> OfficeResult<
     if !stdin_is_tty {
         return Err(crate::foundation::OfficeError::Validation(
             "viva workbench needs an interactive terminal (stdin is not a tty); \
-             use `viva start` for the headless host"
+             use `viva server` for the headless host and `viva terminal` for headless \
+             terminals"
                 .into(),
         ));
     }
 
     let guard = crate::tui::TerminalGuard::enter()?;
-    let result = run_inner(shared);
+    let result = run_client_inner(&mut client);
     drop(guard); // raw mode off + main screen back on EVERY path
     result
 }
 
-fn run_inner(shared: std::sync::Arc<crate::office::OfficeShared>) -> OfficeResult<()> {
+fn run_client_inner(client: &mut crate::office::OfficeClient) -> OfficeResult<()> {
     use ratatui::crossterm::event::{self, Event, KeyEventKind};
     let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
     let mut terminal = ratatui::Terminal::new(backend)
         .map_err(|e| crate::foundation::OfficeError::Io(std::io::Error::other(e.to_string())))?;
 
     let mut app = WorkbenchApp::new();
-    let quit = loop {
-        // Refresh from the real registries (never inside draw).
-        match refresh_app(&shared, &mut app) {
-            Ok(()) => {}
-            Err(err) => app.set_status(format!("data error: {err}")),
+    loop {
+        // Refresh from the server projection (never inside draw).
+        match client.call(crate::office::OfficeRequestKind::WorkbenchView) {
+            Ok(value) => match serde_json::from_value::<WorkbenchModel>(value) {
+                Ok(model) => app.set_model(model),
+                Err(err) => app.set_status(format!("view decode error: {err}")),
+            },
+            Err(err) => app.set_status(format!("server error: {err}")),
+        }
+        // A focused terminal's view is a live server snapshot, scrollback
+        // included — this is what a reattached client sees again.
+        if let Some(id) = app.terminal_mode().map(str::to_string) {
+            match client.call(crate::office::OfficeRequestKind::TerminalSnapshot {
+                terminal_id: id.clone(),
+            }) {
+                Ok(value) => match serde_json::from_value::<TerminalSnapshot>(value) {
+                    Ok(view) => app.set_terminal_view(Some(view)),
+                    Err(err) => app.set_status(format!("snapshot decode error: {err}")),
+                },
+                Err(err) => app.set_status(format!("snapshot error: {err}")),
+            }
         }
         terminal.draw(|frame| app.draw(frame)).map_err(|e| {
             crate::foundation::OfficeError::Io(std::io::Error::other(e.to_string()))
@@ -878,51 +931,32 @@ fn run_inner(shared: std::sync::Arc<crate::office::OfficeShared>) -> OfficeResul
             continue;
         }
         match app.on_key(key) {
-            KeyOutcome::QuitRequested => break true,
+            // Detach, not shutdown: the resident server keeps running.
+            KeyOutcome::QuitRequested => break,
             KeyOutcome::Action(action) => {
-                if let Err(err) = apply_action(&shared, &mut app, action) {
+                if let Err(err) = apply_client_action(client, &mut app, action) {
                     app.set_status(format!("action failed: {err}"));
                 }
             }
             KeyOutcome::Forward(bytes) => {
                 if let Some(id) = app.terminal_mode().map(str::to_string) {
-                    if let Ok(terminal_id) = crate::foundation::ids::TerminalId::from_str(&id) {
-                        if let Ok(Some(handle)) = shared.terminals.handle(&terminal_id) {
-                            handle.input(&bytes)?;
-                        }
+                    if let Err(err) = client.call(crate::office::OfficeRequestKind::TerminalInput {
+                        terminal_id: id,
+                        bytes_hex: crate::office::hex_encode(&bytes),
+                    }) {
+                        app.set_status(format!("input failed: {err}"));
                     }
                 }
             }
             KeyOutcome::Handled | KeyOutcome::Ignored => {}
         }
-    };
-    if quit {
-        // The quit protocol, really: stop owned terminals, join exit
-        // watchers, persist the handoff, release the channel.
-        crate::office::OfficeHost::shutdown_shared(&shared)?;
     }
-    // Ask the serve loop to finish (its own shutdown is idempotent).
-    shared
-        .stopping
-        .store(true, std::sync::atomic::Ordering::SeqCst);
     Ok(())
 }
 
-/// Pull a fresh model from the real registries into the app.
-fn refresh_app(shared: &crate::office::OfficeShared, app: &mut WorkbenchApp) -> OfficeResult<()> {
-    let store = shared.store.lock().expect("office store");
-    let workbench = WorkbenchStore {
-        store: &store,
-        terminals: &shared.terminals,
-        protected: crate::git::worktrees::ProtectedRefs::new(vec![]),
-    };
-    app.set_model(workbench.refresh()?);
-    Ok(())
-}
-
-/// Execute one workbench action against the owning registries.
-fn apply_action(
-    shared: &crate::office::OfficeShared,
+/// Execute one workbench action against the resident server.
+fn apply_client_action(
+    client: &mut crate::office::OfficeClient,
     app: &mut WorkbenchApp,
     action: WorkbenchAction,
 ) -> OfficeResult<()> {
@@ -932,42 +966,25 @@ fn apply_action(
             Ok(())
         }
         WorkbenchAction::StopTerminal(id) => {
-            let terminal_id = crate::foundation::ids::TerminalId::from_str(&id)?;
-            let store = shared.store.lock().expect("office store");
-            let workbench = WorkbenchStore {
-                store: &store,
-                terminals: &shared.terminals,
-                protected: crate::git::worktrees::ProtectedRefs::new(vec![]),
-            };
-            workbench.stop_terminal(&terminal_id)?;
+            client.call(crate::office::OfficeRequestKind::TerminalStop {
+                terminal_id: id.clone(),
+            })?;
             app.set_status(format!("terminal {id} stopped"));
             Ok(())
         }
         WorkbenchAction::ShowDiff(worktree_id) => {
-            let worktree_id_parsed = crate::foundation::ids::WorktreeId::from_str(&worktree_id)?;
-            let store = shared.store.lock().expect("office store");
-            let workbench = WorkbenchStore {
-                store: &store,
-                terminals: &shared.terminals,
-                protected: crate::git::worktrees::ProtectedRefs::new(vec![]),
-            };
-            let record = crate::git::worktrees::WorktreeService::new(
-                &store,
-                crate::git::worktrees::ProtectedRefs::new(vec![]),
-            )
-            .record(&worktree_id_parsed)?
-            .ok_or_else(|| crate::foundation::OfficeError::NotFound {
-                entity: "worktree",
-                id: worktree_id.clone(),
+            let value = client.call(crate::office::OfficeRequestKind::WorkbenchDiff {
+                worktree_id: worktree_id.clone(),
             })?;
-            let diff = workbench.worktree_diff(&record.worktree_path, 64 * 1024)?;
+            let diff = value
+                .get("diff")
+                .and_then(|d| d.as_str())
+                .unwrap_or("")
+                .to_string();
             app.set_diff_view(Some(diff));
             Ok(())
         }
-        WorkbenchAction::Refresh => {
-            refresh_app(shared, app)?;
-            Ok(())
-        }
+        WorkbenchAction::Refresh => Ok(()), // the loop refreshes every cycle
     }
 }
 
