@@ -71,6 +71,21 @@ fn run(args: &[String]) -> OfficeResult<()> {
 /// `server.log`). `q` detaches the client; the server keeps every terminal
 /// running until an explicit `viva shutdown` (ADR 0012, issue #43).
 fn cmd_workbench() -> OfficeResult<()> {
+    // Honest gate BEFORE any server is started: a workbench without a real
+    // terminal cannot work, and auto-starting a resident server for a call
+    // that must fail would leak a runtime.
+    #[cfg(unix)]
+    let stdin_is_tty = unsafe { libc::isatty(0) == 1 };
+    #[cfg(not(unix))]
+    let stdin_is_tty = true;
+    if !stdin_is_tty {
+        return Err(OfficeError::Validation(
+            "viva workbench needs an interactive terminal (stdin is not a tty); \
+             use `viva server` for the headless host and `viva terminal` for headless \
+             terminals"
+                .into(),
+        ));
+    }
     let home = viva::foundation::paths::viva_home(None);
     let client = viva::office::OfficeClient::ensure_server(&home)?;
     eprintln!(
@@ -498,7 +513,11 @@ fn parse_domain(name: &str) -> OfficeResult<viva::foundation::store::Domain> {
 fn cmd_office(args: &[String]) -> OfficeResult<()> {
     let home = viva::foundation::paths::viva_home(None);
     match args.first().map(String::as_str) {
-        Some("server" | "start") => cmd_office_start(&home),
+        Some("server" | "start") => {
+            let resume = args.get(1).map(String::as_str) == Some("--resume");
+            cmd_office_start(&home, resume)
+        }
+        Some("server-restart") => cmd_server_restart(&home),
         Some("status") => cmd_office_status(&home),
         Some("dispatch") => cmd_office_dispatch(&home, args.get(1..).unwrap_or(&[])),
         Some("terminals") => cmd_office_query(&home, viva::office::OfficeRequestKind::TerminalList),
@@ -611,7 +630,19 @@ fn cmd_office_handoff(home: &std::path::Path, args: &[String]) -> OfficeResult<(
     print_office_response(&response)
 }
 
-fn cmd_office_start(home: &std::path::Path) -> OfficeResult<()> {
+fn cmd_office_start(home: &std::path::Path, resume: bool) -> OfficeResult<()> {
+    if resume {
+        // Live-handoff resume (S3): adopt the transferred terminals and
+        // serve. Blocks until this host is shut down.
+        eprintln!(
+            "office host (pid {}) resuming from live handoff — home {}",
+            std::process::id(),
+            home.display()
+        );
+        viva::office::resume_server(home)?;
+        eprintln!("resumed host released the control channel");
+        return Ok(());
+    }
     let host = viva::office::OfficeHost::open(home)?;
     eprintln!(
         "office host {} active (pid {}) — home {}",
@@ -621,6 +652,20 @@ fn cmd_office_start(home: &std::path::Path) -> OfficeResult<()> {
     );
     host.serve()?;
     eprintln!("office host released the control channel");
+    Ok(())
+}
+
+/// `viva server-restart` — upgrade path: the running server transfers its
+/// live terminals to a freshly spawned resumed server (S3, issue #45).
+fn cmd_server_restart(home: &std::path::Path) -> OfficeResult<()> {
+    let new_pid = viva::office::restart_server(home)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "restarted": true,
+            "new_pid": new_pid,
+        }))?
+    );
     Ok(())
 }
 

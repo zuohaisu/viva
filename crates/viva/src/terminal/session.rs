@@ -1,30 +1,39 @@
 //! One supervised PTY session: spawn, input, resize, snapshot, stop, wait.
 //!
 //! Lifecycle (issue #14): every session runs in its own process group / PTY
-//! session (portable-pty uses `setsid` + controlling terminal on Unix, so
-//! the child's pgid equals its pid and a group signal reaches the whole
-//! tree). Stop is graceful-first (SIGTERM to the group), escalates on
-//! timeout (SIGKILL to the group) and is confirmed by an actual reap.
+//! session (`setsid` + controlling terminal on Unix, so the child's pgid
+//! equals its pid and a group signal reaches the whole tree). Stop is
+//! graceful-first (SIGTERM to the group), escalates on timeout (SIGKILL to
+//! the group) and is confirmed by an actual reap.
 //!
 //! Race discipline: all state transitions run under one mutex; the reader
 //! thread never reaps. Once `wait`/`stop` has reaped the child, the state
 //! is `Exited` and no signal is ever sent again — so a stop/wait/exit race
 //! can neither double-reap nor overwrite the recorded conclusion, and no
-//! signal can hit a recycled pid (the pid is only signalled while our child
-//! handle is still unreaped).
+//! signal can hit a recycled pid (the pid is only signalled while the
+//! session is still unreaped).
 //!
 //! Memory bounds: the emulation grid + scrollback ring is capped
 //! (`SCROLLBACK_LINES`); the raw output is preserved by streaming it to the
 //! optional disk log (byte-level redacted, full ANSI fidelity) with an
 //! optional size cap. Dropping escape bytes from the transcript is never
 //! done — bounded memory must not fake the log.
+//!
+//! Live handoff (V14 S3, issue #45; ADR 0012 decision 2): the PTY backend
+//! is owned (`terminal/pty.rs`) so the master fd is real and transferable.
+//! An adopted session runs on an fd received from the previous server: the
+//! child is no longer OUR child, so liveness is `kill(pid, 0)` against the
+//! recorded start marker's pid and the exit STATUS is honestly unobservable
+//! (code `None`) — the handoff manifest carries the old session's
+//! scrollback as history so the pane keeps its past above the live grid.
 
 use std::io::Read as _;
+use std::io::Write as _;
+use std::os::fd::FromRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use portable_pty::{CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use vt100::Parser;
 
@@ -33,6 +42,7 @@ use crate::foundation::ids::TerminalId;
 use crate::foundation::records::{TerminalEvent, TerminalEventKind, TerminalOwner};
 use crate::foundation::store::Store;
 use crate::redaction::ByteRedactor;
+use crate::terminal::pty::{spawn_child, OwnedMaster};
 
 /// Grid + scrollback cap: memory stays bounded no matter what the child
 /// prints; the disk log keeps the full stream.
@@ -95,7 +105,9 @@ impl TerminalSpec {
 }
 
 /// How the session ended. `via` names the path honestly: a clean child exit,
-/// a graceful group stop, or the forced escalation.
+/// a graceful group stop, or the forced escalation. For an ADOPTED session
+/// the exit code is unobservable (`code: None`, `signal: None`) — the fact
+/// of the exit is recorded, its status is not guessed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalExit {
     pub code: Option<i32>,
@@ -234,15 +246,19 @@ enum SessionState {
 }
 
 /// Lifecycle state plus the child slot, guarded by ONE mutex. Every
-/// operation under the core lock is non-blocking (`try_wait` only) — no
-/// lock is ever held while waiting on an external event. That is the
-/// structural property that makes stop/wait/exit races safe: a stop can
+/// operation under the core lock is non-blocking (a `try_wait`-style check
+/// only) — no lock is ever held while waiting on an external event. That is
+/// the structural property that makes stop/wait/exit races safe: a stop can
 /// always acquire the lock and signal, and no ABBA lock cycle can close.
 struct SessionCore {
     state: SessionState,
     /// Set once stop() escalates to SIGKILL; drives exit attribution.
     escalated: bool,
-    child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+    /// Our own child (spawn path): reaped via non-blocking waitpid.
+    child: Option<std::process::Child>,
+    /// An adopted session's pid (handoff path): NOT our child, so liveness
+    /// is `kill(pid, 0)` and the exit status is unobservable.
+    adopted_pid: Option<u32>,
 }
 
 struct SessionShared {
@@ -251,15 +267,22 @@ struct SessionShared {
     core: Mutex<SessionCore>,
     total_output_bytes: AtomicU64,
     eof_seen: AtomicBool,
+    /// History text carried across a live handoff: the old session's
+    /// scrollback, shown above the live grid. Empty for spawned sessions.
+    history: Vec<String>,
+    /// Live handoff (issue #45): set when this server gives the session up.
+    /// The reader exits on the next poll tick instead of racing the new
+    /// server's reader for the same bytes.
+    reader_detached: AtomicBool,
+    reader_gone: AtomicBool,
 }
 
 /// Handle to one live terminal session. Cloneable; all operations are
-/// thread-safe. Not `Send`-reaped implicitly: dropping the last handle
-/// reaps the child in the background without killing it (leaked handles
-/// never kill unowned processes).
+/// thread-safe. Dropping the last handle reaps the child in the background
+/// without killing it (leaked handles never kill unowned processes).
 pub struct TerminalHandle {
     shared: Arc<SessionShared>,
-    master: Mutex<Option<Box<dyn MasterPty + Send>>>,
+    master: Mutex<Option<OwnedMaster>>,
     pid: Option<u32>,
     /// `(pid, argv0, spawned_at)` — the start marker recorded beside the pid
     /// so a later process with the same pid can never be mistaken for this
@@ -276,55 +299,38 @@ impl TerminalHandle {
         disk_log: Option<Arc<DiskLog>>,
     ) -> OfficeResult<Self> {
         spec.validate()?;
-        let pair = portable_pty::native_pty_system()
-            .openpty(PtySize {
-                rows: spec.rows,
-                cols: spec.cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| OfficeError::Io(std::io::Error::other(e.to_string())))?;
-
-        let mut cmd = CommandBuilder::new(&spec.argv[0]);
-        for arg in &spec.argv[1..] {
-            cmd.arg(arg);
+        let (master, slave_fd) = OwnedMaster::open(spec)?;
+        let child = spawn_child(spec, slave_fd)?;
+        // The parent's slave reference is done: the child owns its dups.
+        #[cfg(unix)]
+        unsafe {
+            libc::close(slave_fd);
         }
-        cmd.cwd(&spec.cwd);
-        cmd.env("TERM", "xterm-256color");
-        for (key, value) in &spec.env {
-            cmd.env(key, value);
-        }
-
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .map_err(|e| OfficeError::Io(std::io::Error::other(e.to_string())))?;
-        let pid = child.process_id();
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|e| OfficeError::Io(std::io::Error::other(e.to_string())))?;
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|e| OfficeError::Io(std::io::Error::other(e.to_string())))?;
+        let pid = child.id();
+        let writer_fd = master.dup()?;
+        let reader_fd = master.dup()?;
 
         let shared = Arc::new(SessionShared {
             parser: Mutex::new(Parser::new(spec.rows, spec.cols, SCROLLBACK_LINES)),
-            writer: Mutex::new(writer),
+            // SAFETY: fresh dup of our own master fd, owned by the writer.
+            writer: Mutex::new(Box::new(unsafe { std::fs::File::from_raw_fd(writer_fd) })),
             core: Mutex::new(SessionCore {
                 state: SessionState::Running,
                 escalated: false,
                 child: Some(child),
+                adopted_pid: None,
             }),
             total_output_bytes: AtomicU64::new(0),
             eof_seen: AtomicBool::new(false),
+            history: Vec::new(),
+            reader_detached: AtomicBool::new(false),
+            reader_gone: AtomicBool::new(false),
         });
 
         let handle = Self {
             shared,
-            master: Mutex::new(Some(pair.master)),
-            pid,
+            master: Mutex::new(Some(master)),
+            pid: Some(pid),
             pid_start_marker: format!(
                 "pid={pid:?} argv0={} spawned_at={}",
                 spec.argv[0],
@@ -332,47 +338,82 @@ impl TerminalHandle {
             ),
             disk_log,
         };
-
-        // Reader thread: raw output → emulator (bounded ring) + disk log
-        // (byte-redacted). Never reaps; never kills. EOF only marks the
-        // pipe closed.
-        let shared = Arc::downgrade(&handle.shared);
-        let log = handle.disk_log.clone();
-        std::thread::spawn(move || {
-            let mut reader = reader;
-            let mut buf = [0u8; READ_CHUNK];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        let Some(shared) = shared.upgrade() else {
-                            break;
-                        };
-                        shared
-                            .total_output_bytes
-                            .fetch_add(n as u64, Ordering::SeqCst);
-                        if let Ok(mut parser) = shared.parser.lock() {
-                            parser.process(&buf[..n]);
-                        }
-                        if let Some(log) = &log {
-                            log.write_raw(&buf[..n]);
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            if let Some(shared) = shared.upgrade() {
-                shared.eof_seen.store(true, Ordering::SeqCst);
-                if let Some(log) = &log {
-                    log.finish();
-                }
-            }
-        });
+        spawn_reader(&handle.shared, reader_fd, handle.disk_log.clone());
 
         // The spawn event carries the ownership boundary: only a
         // member-execution terminal carries an execution id.
         let _ = owner;
         Ok(handle)
+    }
+
+    /// Adopt a session transferred by live handoff: an existing master fd
+    /// (received via SCM_RIGHTS), the child's pid + start marker from the
+    /// manifest, and the old session's scrollback as history. The child is
+    /// not ours, so exits are detected by liveness and their status is
+    /// honestly unobservable.
+    #[allow(clippy::too_many_arguments)]
+    pub fn adopt(
+        master_fd: std::os::fd::RawFd,
+        pid: u32,
+        pid_start_marker: String,
+        cols: u16,
+        rows: u16,
+        history: Vec<String>,
+        disk_log: Option<Arc<DiskLog>>,
+    ) -> OfficeResult<Self> {
+        if cols == 0 || rows == 0 {
+            return Err(OfficeError::Validation(
+                "terminal size must be at least 1x1".into(),
+            ));
+        }
+        // SAFETY: the received fd is a valid open master transferred to us;
+        // the sender keeps its own reference until the ack.
+        let master = unsafe { OwnedMaster::from_received(master_fd) };
+        let writer_fd = master.dup()?;
+        let reader_fd = master.dup()?;
+
+        let shared = Arc::new(SessionShared {
+            parser: Mutex::new(Parser::new(rows, cols, SCROLLBACK_LINES)),
+            // SAFETY: fresh dup of the received master fd.
+            writer: Mutex::new(Box::new(unsafe { std::fs::File::from_raw_fd(writer_fd) })),
+            core: Mutex::new(SessionCore {
+                state: SessionState::Running,
+                escalated: false,
+                child: None,
+                adopted_pid: Some(pid),
+            }),
+            total_output_bytes: AtomicU64::new(0),
+            eof_seen: AtomicBool::new(false),
+            history,
+            reader_detached: AtomicBool::new(false),
+            reader_gone: AtomicBool::new(false),
+        });
+        let handle = Self {
+            shared,
+            master: Mutex::new(Some(master)),
+            pid: Some(pid),
+            pid_start_marker,
+            disk_log,
+        };
+        spawn_reader(&handle.shared, reader_fd, handle.disk_log.clone());
+
+        // Nudge a repaint: a resize down and back sends SIGWINCH to the
+        // child's foreground group, so full-screen programs (the agents'
+        // TUIs) redraw their screens on the fresh emulator.
+        if rows > 1 {
+            let _ = handle.resize(cols, rows - 1);
+            let _ = handle.resize(cols, rows);
+        }
+        Ok(handle)
+    }
+
+    /// A duplicate of the master fd for live-handoff transfer. The
+    /// original stays owned by this session until it is dropped.
+    pub fn master_fd_for_transfer(&self) -> OfficeResult<Option<std::os::fd::RawFd>> {
+        match self.master.lock().expect("pty master").as_ref() {
+            Some(master) => Ok(Some(master.dup()?)),
+            None => Ok(None),
+        }
     }
 
     /// Record lifecycle facts into the foundation `terminal_events` slice.
@@ -411,14 +452,7 @@ impl TerminalHandle {
             ));
         }
         if let Some(master) = self.master.lock().expect("pty master").as_ref() {
-            master
-                .resize(PtySize {
-                    rows,
-                    cols,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                })
-                .map_err(|e| OfficeError::Io(std::io::Error::other(e.to_string())))?;
+            master.resize(cols, rows)?;
         }
         if let Ok(mut parser) = self.shared.parser.lock() {
             parser.screen_mut().set_size(rows, cols);
@@ -428,6 +462,7 @@ impl TerminalHandle {
 
     /// Snapshot the live grid + bounded scrollback. The scrollback read
     /// temporarily moves the emulator's view; the live offset is restored.
+    /// Handoff history (if any) leads the scrollback window.
     pub fn snapshot(&self) -> OfficeResult<TerminalSnapshot> {
         let mut parser = self.shared.parser.lock().expect("pty parser");
         let (rows, cols) = parser.screen().size();
@@ -435,13 +470,13 @@ impl TerminalHandle {
         // drops the oldest lines once full — the bound is structural.
         parser.screen_mut().set_scrollback(usize::MAX);
         let retained = parser.screen().scrollback();
-        let scrollback_capped = retained >= SCROLLBACK_LINES;
+        let parser_capped = retained >= SCROLLBACK_LINES;
         // The scrollback window adjacent to the live grid (what a user
         // scrolls to first), capped at one grid height.
         parser
             .screen_mut()
             .set_scrollback(retained.min(rows as usize));
-        let scrollback: Vec<String> = parser
+        let parser_scrollback: Vec<String> = parser
             .screen()
             .rows(0, cols)
             .map(|line| line.trim_end().to_string())
@@ -453,12 +488,22 @@ impl TerminalHandle {
             .rows(0, cols)
             .map(|line| line.trim_end().to_string())
             .collect();
+        drop(parser);
+
+        let history = &self.shared.history;
+        let mut scrollback = history.clone();
+        scrollback.extend(parser_scrollback);
+        // The bound stays structural: trim the oldest lines.
+        let overflow = scrollback.len().saturating_sub(SCROLLBACK_LINES);
+        if overflow > 0 {
+            scrollback.drain(..overflow);
+        }
         Ok(TerminalSnapshot {
             cols,
             rows,
             visible,
+            scrollback_capped: parser_capped || overflow > 0,
             scrollback,
-            scrollback_capped,
             total_output_bytes: self.shared.total_output_bytes.load(Ordering::SeqCst),
             log_truncated: self
                 .disk_log
@@ -477,7 +522,7 @@ impl TerminalHandle {
     }
 
     /// Non-blocking exit check. All reap discipline lives here: the core
-    /// lock is held only across the non-blocking `try_wait`, never across a
+    /// lock is held only across the non-blocking check, never across a
     /// blocking wait, so a concurrent stop() can always run its
     /// signal/escalation protocol and no lock cycle can deadlock.
     pub fn try_wait(&self) -> OfficeResult<Option<TerminalExit>> {
@@ -524,7 +569,7 @@ impl TerminalHandle {
                 return Ok(exit);
             }
             if Instant::now() >= deadline {
-                // Escalate: KILL the group, then confirm by reaping.
+                // Escalate: KILL the group, then confirm.
                 {
                     let mut core = self.shared.core.lock().expect("session core");
                     if let SessionState::Exited(exit) = core.state.clone() {
@@ -553,8 +598,8 @@ impl TerminalHandle {
             if let Some(pid) = self.pid {
                 let pgid = -(pid as i32);
                 // The negative pid targets the whole process group. Signals
-                // are only ever sent while the child handle is unreaped, so
-                // a recycled pid cannot be hit.
+                // are only ever sent while the session is unreaped, so a
+                // recycled pid cannot be hit.
                 unsafe {
                     libc::kill(pgid, sig);
                 }
@@ -565,15 +610,124 @@ impl TerminalHandle {
             let _ = sig;
         }
     }
+
+/// Stop this server's reader for the session (live-handoff step): blocks
+/// until the reader thread has exited, so the transferred fd's bytes are
+/// contended by nobody. Called by the OLD server before it acks.
+pub fn detach_reader(&self) {
+    self.shared.reader_detached.store(true, Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !self.shared.reader_gone.load(Ordering::SeqCst) {
+        if Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+}
+
+/// Reader thread: raw output → emulator (bounded ring) + disk log
+/// (byte-redacted). Never reaps; never kills. EOF/error only marks the
+/// stream closed.
+fn spawn_reader(
+    shared: &Arc<SessionShared>,
+    reader_fd: std::os::fd::RawFd,
+    log: Option<Arc<DiskLog>>,
+) {
+    // SAFETY: fresh dup of our own master fd, owned by this thread.
+    let mut reader = unsafe { std::fs::File::from_raw_fd(reader_fd) };
+    let shared = Arc::downgrade(shared);
+    std::thread::spawn(move || {
+        let mut buf = [0u8; READ_CHUNK];
+        loop {
+            // Poll with a tick instead of an unconditional blocking read:
+            // a live handoff must STOP this reader before the transfer ack
+            // (two readers on one master would split the child's bytes).
+            #[cfg(unix)]
+            {
+                let mut poll_fd = libc::pollfd {
+                    fd: reader_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: one pollfd for our own fd, 100ms tick.
+                let ready = unsafe { libc::poll(&mut poll_fd, 1, 100) };
+                if ready == 0 {
+                    let Some(shared) = shared.upgrade() else {
+                        break;
+                    };
+                    if shared.reader_detached.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    continue;
+                }
+                if ready < 0 {
+                    break;
+                }
+            }
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let Some(shared) = shared.upgrade() else {
+                        break;
+                    };
+                    shared
+                        .total_output_bytes
+                        .fetch_add(n as u64, Ordering::SeqCst);
+                    if let Ok(mut parser) = shared.parser.lock() {
+                        parser.process(&buf[..n]);
+                    }
+                    if let Some(log) = &log {
+                        log.write_raw(&buf[..n]);
+                    }
+                }
+                Err(_) => break,
+            }
+            let Some(shared) = shared.upgrade() else {
+                break;
+            };
+            if shared.reader_detached.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+        if let Some(shared) = shared.upgrade() {
+            shared.eof_seen.store(true, Ordering::SeqCst);
+            shared.reader_gone.store(true, Ordering::SeqCst);
+            if let Some(log) = &log {
+                log.finish();
+            }
+        }
+    });
 }
 
 /// Reap the child if it has exited. Called ONLY with the core lock held
-/// and ONLY across non-blocking work (portable-pty's `try_wait` is a
-/// WNOHANG-style check). Attribution: a reap after escalation is the
-/// forced kill's conclusion; after a stop request (pre-escalation) it is
-/// the graceful stop's; otherwise the child's own exit.
+/// and ONLY across non-blocking work. Attribution: a reap after escalation
+/// is the forced kill's conclusion; after a stop request (pre-escalation)
+/// it is the graceful stop's; otherwise the child's own exit.
 fn reap_under_lock(core: &mut SessionCore) -> OfficeResult<Option<TerminalExit>> {
     if let SessionState::Exited(exit) = core.state.clone() {
+        return Ok(Some(exit));
+    }
+    if let Some(pid) = core.adopted_pid {
+        // Adopted (handoff) session: not our child — liveness via
+        // kill(pid, 0); the exit STATUS is unobservable and never guessed.
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+        if alive {
+            return Ok(None);
+        }
+        let via = if core.escalated {
+            ExitVia::ForcedKill
+        } else if core.state == SessionState::Stopping {
+            ExitVia::GracefulStop
+        } else {
+            ExitVia::ChildExit
+        };
+        let exit = TerminalExit {
+            code: None,
+            signal: None,
+            via,
+        };
+        core.state = SessionState::Exited(exit.clone());
         return Ok(Some(exit));
     }
     let Some(child) = core.child.as_mut() else {
@@ -592,7 +746,7 @@ fn reap_under_lock(core: &mut SessionCore) -> OfficeResult<Option<TerminalExit>>
     } else {
         ExitVia::ChildExit
     };
-    let exit = exit_from(status, via);
+    let exit = exit_from_status(&status, via);
     core.state = SessionState::Exited(exit.clone());
     core.child = None;
     Ok(Some(exit))
@@ -622,17 +776,30 @@ impl Drop for TerminalHandle {
     }
 }
 
-/// Normalize portable-pty's `ExitStatus` into the office's honest exit
-/// record: the exit code, or the signal name when the process was killed.
-fn exit_from(status: portable_pty::ExitStatus, via: ExitVia) -> TerminalExit {
+/// Normalize the OS exit status into the office's honest exit record: the
+/// exit code, or the signal name when the process was killed.
+fn exit_from_status(status: &std::process::ExitStatus, via: ExitVia) -> TerminalExit {
+    use std::os::unix::process::ExitStatusExt as _;
+    let signal_number = status.signal();
     TerminalExit {
-        code: if status.signal().is_some() {
+        code: if signal_number.is_some() {
             None
         } else {
-            Some(status.exit_code() as i32)
+            Some(status.code().unwrap_or(-1))
         },
-        signal: status.signal().map(str::to_string),
+        signal: signal_number.map(signal_name),
         via,
+    }
+}
+
+fn signal_name(number: i32) -> String {
+    match number {
+        1 => "SIGHUP".into(),
+        2 => "SIGINT".into(),
+        3 => "SIGQUIT".into(),
+        9 => "SIGKILL".into(),
+        15 => "SIGTERM".into(),
+        other => format!("signal-{other}"),
     }
 }
 

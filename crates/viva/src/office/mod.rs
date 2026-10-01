@@ -29,9 +29,11 @@
 //! live grant, and every denial is appended to the office event log.
 
 mod client;
+mod handoff;
 mod protocol;
 
-pub use client::OfficeClient;
+pub use client::{OfficeClient, restart_server};
+pub use handoff::{HandoffEntry, HandoffManifest};
 pub use protocol::{
     MAX_MESSAGE_BYTES, OfficeRequest, OfficeRequestKind, OfficeResponse, PROTOCOL_VERSION,
     new_request, read_message, round_trip, with_grant, write_message,
@@ -42,7 +44,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::authority::{Actor, AuthorityEngine};
 use crate::foundation::error::{OfficeError, OfficeResult};
@@ -78,6 +80,12 @@ CREATE TABLE office_recovery_events (
 
 /// Socket file name inside `VIVA_HOME`.
 pub const OFFICE_SOCKET_NAME: &str = "office.sock";
+/// Rendezvous socket for a live handoff (created by the restarting host,
+/// connected by the resumed host) — also inside `VIVA_HOME`.
+pub const HANDOFF_SOCKET_NAME: &str = "handoff.sock";
+/// How long the resumed server waits for the old host to release the
+/// control socket, and how long the old host waits for the resumed one.
+const HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The full office composition: every delivered domain, registered in one
 /// frozen set. This is the lane-A composition V01 left to V07.
@@ -129,6 +137,11 @@ pub struct OfficeShared {
     pub terminals: TerminalRegistry,
     pub channels: Mutex<crate::foundation::envelope::ChannelRegistry>,
     pub stopping: AtomicBool,
+    /// Set once a live handoff completed: the serve loop exits WITHOUT
+    /// stopping terminals (they now belong to the resumed server).
+    pub transferred: AtomicBool,
+    /// The rendezvous listener for an in-progress handoff, if any.
+    handoff_listener: Mutex<Option<UnixListener>>,
     /// Exit-watchers for dispatched executions. The graceful shutdown
     /// joins them BEFORE writing its handoff record — otherwise the
     /// process exit would die with the process and the next host would
@@ -197,6 +210,8 @@ impl OfficeHost {
             terminals: TerminalRegistry::new(),
             channels: Mutex::new(crate::foundation::envelope::ChannelRegistry::new()),
             stopping: AtomicBool::new(false),
+            transferred: AtomicBool::new(false),
+            handoff_listener: Mutex::new(None),
             watchers: Mutex::new(Vec::new()),
         });
         Ok(Self { shared, listener })
@@ -367,29 +382,38 @@ impl OfficeHost {
     /// persist the handoff and release the channel. Also the workbench
     /// quit path (D6: QuitRequested is really consumed).
     pub fn shutdown_shared(shared: &OfficeShared) -> OfficeResult<()> {
-        let terminal_count = {
+        // Live-handoff exit: the terminals were transferred to the resumed
+        // server and are NOT ours to stop — record the handoff and leave
+        // every process running.
+        let transferred = shared.transferred.load(Ordering::SeqCst);
+        let mut terminal_count = 0usize;
+        if !transferred {
             let store = shared.store.lock().expect("office store");
             let terminals = shared.terminals.list();
-            let terminal_count = terminals.len();
+            terminal_count = terminals.len();
             for entry in terminals {
                 let _ =
                     shared
                         .terminals
                         .stop(&entry.terminal_id, StopPolicy::default(), Some(&store));
             }
-            terminal_count
-        };
+            drop(store);
+        }
         // Join watchers WITHOUT holding the store lock: each watcher needs
         // it to record its exit. A watcher cannot hang: the stop above made
-        // its child exit, so `wait` returns promptly.
-        let watchers: Vec<std::thread::JoinHandle<()>> = shared
-            .watchers
-            .lock()
-            .expect("watcher registry")
-            .drain(..)
-            .collect();
-        for watcher in watchers {
-            let _ = watcher.join();
+        // its child exit, so `wait` returns promptly. (A transferred host
+        // leaves its watchers to die with the process; exit supervision for
+        // adopted terminals is the resumed server's.)
+        if !transferred {
+            let watchers: Vec<std::thread::JoinHandle<()>> = shared
+                .watchers
+                .lock()
+                .expect("watcher registry")
+                .drain(..)
+                .collect();
+            for watcher in watchers {
+                let _ = watcher.join();
+            }
         }
         let store = shared.store.lock().expect("office store");
         store.connection().execute(
@@ -397,17 +421,22 @@ impl OfficeHost {
              WHERE host_id = ?1 AND exited_at IS NULL",
             rusqlite::params![shared.host_id, utc_now()],
         )?;
+        let note = if transferred {
+            "live handoff: terminals transferred to the resumed server, no process stopped"
+        } else {
+            "host stopped owned terminal(s) and recorded their exits; state persisted for the next host"
+        };
         record_recovery(
             &store,
             &shared.host_id,
-            "graceful_handoff",
-            &format!(
-                "host stopped {} owned terminal(s) and recorded their exits; state persisted for the next host",
-                terminal_count
-            ),
+            if transferred { "graceful_handoff_after_transfer" } else { "graceful_handoff" },
+            &format!("{note} ({terminal_count} terminal(s) were hosted here)"),
         )?;
         drop(store);
         let _ = std::fs::remove_file(&shared.socket_path);
+        if transferred {
+            let _ = std::fs::remove_file(shared.home.join(HANDOFF_SOCKET_NAME));
+        }
         Ok(())
     }
 
@@ -649,6 +678,7 @@ fn handle_request(
             summary,
         } => handoff(&shared, task_id, member_id, summary),
         OfficeRequestKind::Shutdown => Ok(serde_json::json!({"shutting_down": true})),
+        OfficeRequestKind::ServerRestart => begin_server_restart(&shared),
     }
 }
 
@@ -959,6 +989,310 @@ fn worktree_create_for_task(
     );
     let record = service.create_task_worktree(&repo_root, &base, &task_id, &branch)?;
     serde_json::to_value(&record).map_err(|e| OfficeError::Validation(format!("record: {e}")))
+}
+
+// ---------------------------------------------------------------------------
+// Live handoff (S3, issue #45; ADR 0012 decision 2)
+// ---------------------------------------------------------------------------
+
+/// `ServerRestart` step 1: bind the rendezvous socket, hand its path back
+/// to the caller, and perform the transfer on a background thread. The
+/// response goes out immediately — the CLI then starts the resumed server,
+/// which connects to the rendezvous socket. On any transfer failure the
+/// host keeps serving (nothing was given away: fd passing duplicates).
+fn begin_server_restart(shared: &Arc<OfficeShared>) -> OfficeResult<serde_json::Value> {
+    let handoff_path = shared.home.join(HANDOFF_SOCKET_NAME);
+    {
+        let mut slot = shared.handoff_listener.lock().expect("handoff slot");
+        if slot.is_some() {
+            return Err(OfficeError::Validation(
+                "a server restart is already in progress; connect to its handoff socket                  or wait for the timeout"
+                    .into(),
+            ));
+        }
+        let _ = std::fs::remove_file(&handoff_path);
+        let listener = UnixListener::bind(&handoff_path)?;
+        *slot = Some(listener);
+    }
+    let listener = shared
+        .handoff_listener
+        .lock()
+        .expect("handoff slot")
+        .take()
+        .expect("just stored");
+    let shared = Arc::clone(shared);
+    let response_path = handoff_path.display().to_string();
+    std::thread::spawn(move || perform_handoff(shared, listener, handoff_path));
+    Ok(serde_json::json!({
+        "state": "handoff_ready",
+        "handoff_socket": response_path,
+        "timeout_secs": HANDOFF_TIMEOUT.as_secs(),
+    }))
+}
+
+/// The transfer itself. Collects every LIVE terminal (manifest + master fd
+/// duplicate), sends them to the resumed server, and on the ack marks this
+/// host `transferred` so its exit keeps every process running. Any failure
+/// cleans the rendezvous socket up and leaves the host fully serving.
+fn perform_handoff(
+    shared: Arc<OfficeShared>,
+    listener: UnixListener,
+    handoff_path: std::path::PathBuf,
+) {
+    let outcome = (|| -> OfficeResult<usize> {
+        // Collect BEFORE accepting so the sender-side snapshot is one
+        // consistent set.
+        let mut entries = Vec::new();
+        let mut fds = Vec::new();
+        for entry in shared.terminals.list() {
+            let handle = match shared.terminals.handle(&entry.terminal_id).ok().flatten() {
+                Some(handle) => handle,
+                None => continue,
+            };
+            // Exited sessions carry nothing worth transferring.
+            if handle.try_wait().ok().flatten().is_some() {
+                continue;
+            }
+            let Some(fd) = handle.master_fd_for_transfer()? else {
+                continue;
+            };
+            let snapshot = handle.snapshot()?;
+            entries.push(HandoffEntry {
+                terminal_id: entry.terminal_id.to_string(),
+                owner: owner_label(&entry.owner),
+                worktree_id: entry.worktree_id.map(|w| w.to_string()),
+                purpose: entry.purpose,
+                pid: handle.pid().unwrap_or(0),
+                pid_start_marker: handle.pid_start_marker.clone(),
+                cols: snapshot.cols,
+                rows: snapshot.rows,
+                history: snapshot.scrollback,
+            });
+            fds.push(fd);
+        }
+
+        // Stop OUR readers first: two readers on one master would split
+        // the child's bytes between the old and the new server. The ack is
+        // sent only after every old reader has exited.
+        for (entry, _) in entries.iter().zip(&fds) {
+            if let Ok(Some(handle)) = shared
+                .terminals
+                .handle(&TerminalId::from_str(&entry.terminal_id).expect("entry id"))
+            {
+                handle.detach_reader();
+            }
+        }
+
+        // Wait, bounded, for the resumed server to connect. On timeout the
+        // dups are closed and nothing happened.
+        let _ = listener.set_nonblocking(true);
+        let deadline = Instant::now() + HANDOFF_TIMEOUT;
+        let stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    // The polled listener passes O_NONBLOCK to the accepted
+                    // socket on BSD/macOS — restore blocking mode or the
+                    // manifest write turns into EAGAIN.
+                    stream.set_nonblocking(false)?;
+                    break stream;
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        for fd in &fds {
+                            #[cfg(unix)]
+                            unsafe {
+                                libc::close(*fd);
+                            }
+                        }
+                        return Err(OfficeError::Validation(
+                            "no resumed server connected within the handoff timeout".into(),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(e) => return Err(OfficeError::Io(e)),
+            }
+        };
+        let mut stream = stream;
+        let send_result = handoff::send_entries(
+            &mut stream,
+            &HandoffManifest {
+                protocol: handoff::HANDOFF_PROTOCOL,
+                host_id: shared.host_id.clone(),
+                entries: entries.clone(),
+            },
+            &fds,
+        );
+        if let Err(err) = send_result {
+            for fd in &fds {
+                #[cfg(unix)]
+                unsafe {
+                    libc::close(*fd);
+                }
+            }
+            return Err(err);
+        }
+        Ok(entries.len())
+    })();
+
+    match outcome {
+        Ok(count) => {
+            let store = shared.store.lock().expect("office store");
+            let _ = record_recovery(
+                &store,
+                &shared.host_id,
+                "live_handoff_out",
+                &format!(
+                    "{count} live terminal(s) transferred to the resumed server; \
+                     dispatches arriving during the handoff window were not transferred \
+                     and are recorded by the next reconciliation"
+                ),
+            );
+            drop(store);
+            shared.transferred.store(true, Ordering::SeqCst);
+            shared.stopping.store(true, Ordering::SeqCst);
+        }
+        Err(err) => {
+            let store = shared.store.lock().expect("office store");
+            let _ = record_recovery(
+                &store,
+                &shared.host_id,
+                "live_handoff_failed",
+                &format!(
+                    "the transfer did not complete ({err}); this host continues serving \
+                     every terminal — the type-1 fallback, no process touched"
+                ),
+            );
+            let _ = std::fs::remove_file(&handoff_path);
+        }
+    }
+}
+
+/// The resumed server's side (`viva server --resume`): connect to the
+/// rendezvous socket, adopt every transferred session under its ORIGINAL
+/// terminal identity, wait for the old host to release the control socket,
+/// then claim and serve as usual.
+pub fn resume_server(home: &Path) -> OfficeResult<()> {
+    crate::foundation::paths::ensure_private_dir(home)?;
+    let handoff_path = home.join(HANDOFF_SOCKET_NAME);
+    // The old host creates the rendezvous in its ServerRestart handler;
+    // poll for it (the CLI starts this process right after that response).
+    let deadline = Instant::now() + HANDOFF_TIMEOUT;
+    let stream = loop {
+        if handoff_path.exists() {
+            if let Ok(stream) = UnixStream::connect(&handoff_path) {
+                break stream;
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(OfficeError::Validation(format!(
+                "no handoff socket appeared at {} within {HANDOFF_TIMEOUT:?}",
+                handoff_path.display()
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let (manifest, fds) = handoff::receive_entries(&stream)?;
+    drop(stream);
+
+    // Wait for the old host to release the control socket, then claim it.
+    // (The transferred fds stay open the whole time — the kernel buffers
+    // the children's output in the meantime.)
+    let office_sock = home.join(OFFICE_SOCKET_NAME);
+    let deadline = Instant::now() + HANDOFF_TIMEOUT;
+    while office_sock.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if office_sock.exists() {
+        for fd in fds {
+            #[cfg(unix)]
+            unsafe {
+                libc::close(fd);
+            }
+        }
+        return Err(OfficeError::Validation(
+            "the old host never released the control socket; the handoff was abandoned              (the old host's recovery records name what happened)"
+                .into(),
+        ));
+    }
+    let host = OfficeHost::open(home)?;
+    {
+        let shared = host.shared();
+        let store = shared.store.lock().expect("office store");
+        for (entry, fd) in manifest.entries.iter().zip(fds) {
+            let adopt = (|| -> OfficeResult<()> {
+                let terminal_id = TerminalId::from_str(&entry.terminal_id)?;
+                let owner = owner_from_label(&entry.owner)?;
+                let worktree = entry
+                    .worktree_id
+                    .as_deref()
+                    .map(WorktreeId::from_str)
+                    .transpose()?;
+                shared.terminals.adopt(
+                    terminal_id,
+                    owner,
+                    worktree,
+                    entry.purpose.clone(),
+                    fd,
+                    entry.pid,
+                    entry.pid_start_marker.clone(),
+                    entry.cols,
+                    entry.rows,
+                    entry.history.clone(),
+                    None,
+                )
+            })();
+            if let Err(err) = adopt {
+                // One failed adoption is that terminal's type-1 fallback:
+                // its pid is unaccounted, nothing is signalled.
+                let _ = record_recovery(
+                    &store,
+                    &shared.host_id,
+                    "live_handoff_adopt_failed",
+                    &format!(
+                        "terminal `{}` could not be adopted ({err}); its pid {} is \
+                         unaccounted and was not signalled",
+                        entry.terminal_id, entry.pid
+                    ),
+                );
+            }
+        }
+        let _ = record_recovery(
+            &store,
+            &shared.host_id,
+            "live_handoff_in",
+            &format!(
+                "adopted {} transferred terminal(s) from host `{}`; the transfer \
+                 preserved their identity and history",
+                manifest.entries.len(),
+                manifest.host_id
+            ),
+        );
+    }
+    eprintln!(
+        "office: resumed with {} transferred terminal(s)",
+        manifest.entries.len()
+    );
+    host.serve()
+}
+
+/// Parse an owner label back into its typed value (the inverse of
+/// [`owner_label`]; labels are host-issued, never client-declared).
+fn owner_from_label(text: &str) -> OfficeResult<TerminalOwner> {
+    use std::str::FromStr as _;
+    if let Some(execution) = text.strip_prefix("member_execution:") {
+        return Ok(TerminalOwner::MemberExecution(
+            crate::foundation::ids::ExecutionId::from_str(execution)?,
+        ));
+    }
+    match text {
+        "user_shell" => Ok(TerminalOwner::UserShell),
+        "agent_cli" => Ok(TerminalOwner::AgentCli),
+        "test_run" => Ok(TerminalOwner::TestRun),
+        other => Err(OfficeError::Validation(format!(
+            "unknown terminal owner label `{other}`"
+        ))),
+    }
 }
 
 fn status(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
@@ -1964,5 +2298,147 @@ mod s2_workbench_tests {
             })
             .expect("stop shell");
         host.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod s3_handoff_tests {
+    use super::*;
+    use crate::office::OfficeClient;
+    use std::time::{Duration, Instant};
+
+    fn wait_for_output(client: &mut OfficeClient, terminal_id: &str, needle: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Ok(view) = client.call(OfficeRequestKind::TerminalSnapshot {
+                terminal_id: terminal_id.to_string(),
+            }) {
+                if format!("{view}").contains(needle) {
+                    return true;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    /// The issue #45 acceptance path, end to end: a running terminal
+    /// survives a server restart WITHOUT being stopped — same terminal id,
+    /// its history intact, still accepting input — and the old host exits
+    /// gracefully with recovery records naming the transfer.
+    #[test]
+    fn live_handoff_transfers_terminals_across_a_server_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let host = OfficeHost::open(&home).expect("host");
+        let server = host.serve_background();
+        let socket = home.join(OFFICE_SOCKET_NAME);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !socket.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // One live terminal: output marker, then stay alive.
+        let mut client = OfficeClient::connect(&home).expect("first client");
+        let created = client
+            .call(OfficeRequestKind::TerminalCreate {
+                argv: vec!["/bin/sh".into(), "-c".into(), "echo handoff-marker; cat".into()],
+                cwd: home.display().to_string(),
+                env: vec![],
+                cols: 90,
+                rows: 25,
+                purpose: "pre-restart session".into(),
+                worktree_id: None,
+                owner: "user_shell".into(),
+            })
+            .expect("create");
+        let terminal_id = created
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .expect("terminal id")
+            .to_string();
+        assert!(wait_for_output(&mut client, &terminal_id, "handoff-marker"));
+
+        // Begin the restart: the response names the rendezvous socket.
+        let response = client.call(OfficeRequestKind::ServerRestart).expect("restart");
+        assert_eq!(
+            response.get("state").and_then(|v| v.as_str()),
+            Some("handoff_ready")
+        );
+        drop(client);
+
+        // The resumed server runs in-process (the real binary does exactly
+        // this in its own process via `viva server --resume`).
+        let resume_home = home.clone();
+        let resume_thread = std::thread::spawn(move || resume_server(&resume_home));
+
+        // The old host transfers, then exits gracefully WITHOUT stopping
+        // the terminal.
+        server.join().expect("old host exits cleanly");
+
+        // The resumed host answers on the same control socket.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut client2 = loop {
+            if let Ok(client) = OfficeClient::connect(&home) {
+                break client;
+            }
+            assert!(Instant::now() < deadline, "the resumed host never answered");
+            std::thread::sleep(Duration::from_millis(100));
+        };
+
+        // Same terminal identity, preserved history, live input.
+        let list = client2
+            .call(OfficeRequestKind::TerminalList)
+            .expect("list after restart");
+        assert!(
+            format!("{list}").contains(&terminal_id),
+            "terminal identity survived the restart: {list}"
+        );
+        assert!(
+            wait_for_output(&mut client2, &terminal_id, "handoff-marker"),
+            "history is preserved across the handoff"
+        );
+        client2
+            .call(OfficeRequestKind::TerminalInput {
+                terminal_id: terminal_id.clone(),
+                bytes_hex: hex_encode(b"echo post-restart-marker\n"),
+            })
+            .expect("input after restart");
+        assert!(
+            wait_for_output(&mut client2, &terminal_id, "post-restart-marker"),
+            "the session is still live and interactive"
+        );
+
+        // Recovery records name both sides of the transfer.
+        {
+            let store = Store::open(
+                &crate::foundation::paths::database_path(&home),
+                office_migrations(),
+            )
+            .expect("store");
+            let out: i64 = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM office_recovery_events WHERE kind = 'live_handoff_out'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("out record");
+            let inn: i64 = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM office_recovery_events WHERE kind = 'live_handoff_in'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("in record");
+            assert!(out >= 1 && inn >= 1, "both transfer sides are recorded");
+        }
+
+        // Clean teardown: the resumed host shuts down like any other.
+        client2.call(OfficeRequestKind::Shutdown).expect("shutdown");
+        resume_thread.join().expect("resumed host ends cleanly");
+        drop(dir);
     }
 }

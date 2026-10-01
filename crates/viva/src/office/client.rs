@@ -78,7 +78,7 @@ impl OfficeClient {
                 }
             }
         }
-        spawn_detached_server(home)?;
+        spawn_detached_server(home, &[])?;
         let deadline = Instant::now() + SERVER_START_TIMEOUT;
         loop {
             if socket_path.exists() {
@@ -126,7 +126,7 @@ impl OfficeClient {
 /// death signals nothing), stdin dropped, stdout+stderr appended to
 /// `server.log` in the 0700 home. Returns once the spawn is handed to the
 /// OS — readiness is the caller's polling job.
-fn spawn_detached_server(home: &Path) -> OfficeResult<()> {
+fn spawn_detached_server(home: &Path, extra_args: &[&str]) -> OfficeResult<()> {
     let exe = std::env::current_exe()?;
     let log_path = home.join("server.log");
     let log = std::fs::OpenOptions::new()
@@ -137,6 +137,7 @@ fn spawn_detached_server(home: &Path) -> OfficeResult<()> {
     let mut command = Command::new(exe);
     command
         .arg("server")
+        .args(extra_args)
         .stdin(std::process::Stdio::null())
         .stdout(log)
         .stderr(err_log)
@@ -152,4 +153,45 @@ fn spawn_detached_server(home: &Path) -> OfficeResult<()> {
         .spawn()
         .map_err(|e| OfficeError::Validation(format!("failed to spawn the resident server: {e}")))?;
     Ok(())
+}
+
+/// A live-handoff restart (S3, issue #45): ask the running server to begin
+/// the handoff, spawn the resumed server detached, and wait until a new
+/// host answers on the control socket. Returns the new host's pid.
+pub fn restart_server(home: &Path) -> OfficeResult<u32> {
+    crate::foundation::paths::ensure_private_dir(home)?;
+    // The OLD server must be running; a restart never spawns anything.
+    let mut client = OfficeClient::connect(home)?;
+    let response = client.call(OfficeRequestKind::ServerRestart)?;
+    let handoff_socket = response
+        .get("handoff_socket")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            OfficeError::Validation("restart response carried no handoff socket".into())
+        })?
+        .to_string();
+    let _ = handoff_socket; // the resumed server finds it under the home
+    drop(client);
+
+    spawn_detached_server(home, &["--resume"])?;
+
+    // Wait for the new host to answer. The old host leaves after the ack;
+    // the resumed one binds the same socket path.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Ok(mut client) = OfficeClient::connect(home) {
+            if let Ok(status) = client.call(OfficeRequestKind::Ping) {
+                if let Some(pid) = status.get("pid").and_then(|p| p.as_u64()) {
+                    return Ok(pid as u32);
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(OfficeError::Validation(
+                "the resumed server did not answer within 30s; see server.log and the                  recovery records"
+                    .into(),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
 }

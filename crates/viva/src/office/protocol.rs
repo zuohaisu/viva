@@ -139,6 +139,12 @@ pub enum OfficeRequestKind {
     /// Ask the host to shut down gracefully: stop new dispatch, stop owned
     /// terminals, persist the handoff, release the channel.
     Shutdown,
+    /// Begin a live handoff (S3, issue #45): the host binds `handoff.sock`
+    /// and answers with its path. The resumed server connects, receives
+    /// every live PTY master fd + manifest, and takes over; the old host
+    /// exits only after a full ack. On any failure the old host keeps
+    /// serving — the type-1 fallback, with zero interruption.
+    ServerRestart,
 }
 
 fn default_cols() -> u16 {
