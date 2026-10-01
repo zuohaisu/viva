@@ -48,6 +48,8 @@ fn run(args: &[String]) -> OfficeResult<()> {
         Some("terminal") => cmd_terminal(args.get(1..).unwrap_or(&[])),
         Some("agent") => cmd_agent(args.get(1..).unwrap_or(&[])),
         Some("events") => cmd_events(args.get(1..).unwrap_or(&[])),
+        Some("sync") => cmd_sync(args.get(1..).unwrap_or(&[])),
+        Some("recovery") => cmd_recovery(args.get(1..).unwrap_or(&[])),
         Some("conversations") => cmd_conversations(args.get(1..).unwrap_or(&[])),
         Some("workbench") => cmd_workbench(),
         Some("data") => cmd_data(args.get(1..).unwrap_or(&[])),
@@ -205,6 +207,95 @@ fn parse_events_args(args: &[String]) -> OfficeResult<(u64, u32)> {
         i += 1;
     }
     Ok((since, limit))
+}
+
+/// `viva sync …` (V15-4): the auto_pull switch and manual cycles.
+fn cmd_sync(args: &[String]) -> OfficeResult<()> {
+    let home = viva::foundation::paths::viva_home(None);
+    let mut client = viva::office::OfficeClient::ensure_server(&home)?;
+    match args.first().map(String::as_str) {
+        Some("now") | None => {
+            let response = client.call(viva::office::OfficeRequestKind::SyncNow)?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Some("auto-pull") => {
+            let on = match args.get(1).map(String::as_str) {
+                Some("on") => true,
+                Some("off") => false,
+                other => {
+                    return Err(OfficeError::Validation(format!(
+                        "auto-pull needs on|off (got {other:?})"
+                    )));
+                }
+            };
+            let response = client.call(viva::office::OfficeRequestKind::SetAutoPull { on })?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Some("status") => {
+            let response = client.call(viva::office::OfficeRequestKind::WorkbenchView)?;
+            let note = response.get("sync_note").cloned().unwrap_or_default();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "auto_pull": response.get("auto_pull"),
+                    "last_sync": note,
+                }))?
+            );
+        }
+        _ => {
+            return Err(OfficeError::Validation(
+                "sync needs now | auto-pull | status".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `viva recovery …` (V15-5): the rate-limit recovery plans.
+fn cmd_recovery(args: &[String]) -> OfficeResult<()> {
+    let home = viva::foundation::paths::viva_home(None);
+    let mut client = viva::office::OfficeClient::ensure_server(&home)?;
+    let mut named: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut i = 1;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        if !flag.starts_with("--") {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let value = args
+            .get(i)
+            .cloned()
+            .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+        named.insert(flag.trim_start_matches("--").to_string(), value);
+        i += 1;
+    }
+    let get = |key: &str| named.get(key).cloned();
+    let kind = match args.first().map(String::as_str) {
+        Some("list") => viva::office::OfficeRequestKind::RecoveryList,
+        Some("schedule") => viva::office::OfficeRequestKind::RecoverySchedule {
+            terminal_id: get("terminal")
+                .ok_or_else(|| OfficeError::Validation("schedule needs --terminal".into()))?,
+            reset_at: get("at")
+                .ok_or_else(|| OfficeError::Validation("schedule needs --at <rfc3339>".into()))?,
+            task_id: get("task"),
+        },
+        Some("cancel") => viva::office::OfficeRequestKind::RecoveryCancel {
+            plan_id: get("id")
+                .ok_or_else(|| OfficeError::Validation("cancel needs --id".into()))?
+                .parse()
+                .map_err(|_| OfficeError::Validation("--id must be a number".into()))?,
+        },
+        _ => {
+            return Err(OfficeError::Validation(
+                "recovery needs list | schedule | cancel".into(),
+            ));
+        }
+    };
+    let response = client.call(kind)?;
+    println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
 }
 
 /// `viva terminal …` — headless terminal control over the resident server:
@@ -396,6 +487,16 @@ USAGE:
         --task <id> --action <a> --mode <m> | viva brief <task-id> |
         viva handoff --task <id> --member <id> --summary <text>
         Task, grant, brief and handoff management.
+
+    viva sync now | viva sync auto-pull on|off | viva sync status
+        V15-4: run one sync cycle now; toggle the auto_pull switch
+        (default off — main checkout fast-forward only); show state.
+
+    viva recovery list
+    viva recovery schedule --terminal <id> --at <rfc3339> [--task <id>]
+    viva recovery cancel --id <n>
+        V15-5: rate-limit recovery plans — schedule a wakeup that prompts
+        the agent to continue, list, or cancel.
 
     viva server-restart
         Upgrade path: hand every live terminal to a freshly spawned

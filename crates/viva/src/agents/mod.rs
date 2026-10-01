@@ -51,6 +51,9 @@ pub enum AgentStatus {
     Blocked,
     Done,
     Idle,
+    /// The agent hit a usage limit; recovery is scheduled only when a
+    /// reset time is supplied with the report (V15-5).
+    RateLimited,
     Unknown,
 }
 
@@ -61,6 +64,7 @@ impl AgentStatus {
             AgentStatus::Blocked => "blocked",
             AgentStatus::Done => "done",
             AgentStatus::Idle => "idle",
+            AgentStatus::RateLimited => "rate_limited",
             AgentStatus::Unknown => "unknown",
         }
     }
@@ -71,6 +75,7 @@ impl AgentStatus {
             "blocked" => Ok(AgentStatus::Blocked),
             "done" => Ok(AgentStatus::Done),
             "idle" => Ok(AgentStatus::Idle),
+            "rate_limited" => Ok(AgentStatus::RateLimited),
             "unknown" => Ok(AgentStatus::Unknown),
             other => Err(crate::foundation::error::OfficeError::Validation(format!(
                 "unknown agent status `{other}`"

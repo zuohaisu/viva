@@ -90,6 +90,24 @@ CREATE TABLE office_settings (
 );
 "#;
 
+/// The office_host v3 slice: rate-limit recovery plans (V15-5). A plan is
+/// created by a `rate_limited` report WITH a reset time (or the owner via
+/// the CLI); it fires by prompting the terminal to continue, and every
+/// outcome is audited.
+pub const OFFICE_HOST_V3_SQL: &str = r#"
+CREATE TABLE recovery_plans (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    terminal_id TEXT NOT NULL,
+    task_id     TEXT,
+    reset_at    TEXT NOT NULL,
+    action      TEXT NOT NULL DEFAULT 'resume_prompt',
+    state       TEXT NOT NULL DEFAULT 'scheduled'
+                CHECK (state IN ('scheduled','fired','cancelled','expired')),
+    created_at  TEXT NOT NULL,
+    fired_at    TEXT
+);
+"#;
+
 /// Socket file name inside `VIVA_HOME`.
 pub const OFFICE_SOCKET_NAME: &str = "office.sock";
 /// Rendezvous socket for a live handoff (created by the restarting host,
@@ -139,6 +157,12 @@ pub fn office_migrations() -> &'static crate::foundation::store::FrozenMigration
             "office host v2 (settings)",
             OFFICE_HOST_V2_SQL,
         );
+        let registry = registry.register(
+            DOMAIN_OFFICE_HOST,
+            3,
+            "office host v3 (recovery plans)",
+            OFFICE_HOST_V3_SQL,
+        );
         registry
             .register(DOMAIN_OFFICE_HOST, 1, "office host v1", OFFICE_HOST_V1_SQL)
             .freeze()
@@ -166,6 +190,14 @@ pub struct OfficeShared {
     /// Paused (S6): no NEW dispatch, no maintenance cycles; running
     /// executions are untouched. Owner-controlled, explicitly.
     pub paused: AtomicBool,
+    /// V15-2: cached PR status per worktree (60s TTL; gh is external).
+    pub pr_cache:
+        Mutex<std::collections::HashMap<String, (Instant, Option<crate::git::pr::PrInfo>)>>,
+    /// V15-4: the last automatic sync cycle and its human summary.
+    pub last_sync: Mutex<Option<Instant>>,
+    pub last_sync_note: Mutex<Option<String>>,
+    /// V15-5: recovery sweep throttle (at most once a second).
+    pub last_recovery_sweep: Mutex<Option<Instant>>,
     /// Exit-watchers for dispatched executions. The graceful shutdown
     /// joins them BEFORE writing its handoff record — otherwise the
     /// process exit would die with the process and the next host would
@@ -247,6 +279,10 @@ impl OfficeHost {
             handoff_listener: Mutex::new(None),
             agent_board: crate::agents::AgentStatusBoard::new(),
             paused: AtomicBool::new(persisted_pause),
+            pr_cache: Mutex::new(std::collections::HashMap::new()),
+            last_sync: Mutex::new(None),
+            last_sync_note: Mutex::new(None),
+            last_recovery_sweep: Mutex::new(None),
             watchers: Mutex::new(Vec::new()),
         });
         Ok(Self { shared, listener })
@@ -379,6 +415,24 @@ impl OfficeHost {
                 )?;
             }
         }
+        // V15-5: plans whose reset time passed while no host was running
+        // are marked expired — recorded, never executed blindly.
+        let expired = store.connection().execute(
+            "UPDATE recovery_plans SET state = 'expired', fired_at = ?2
+             WHERE state = 'scheduled' AND reset_at <= ?1",
+            rusqlite::params![now, now],
+        )?;
+        if expired > 0 {
+            record_recovery(
+                store,
+                new_host_id,
+                "recovery_plan_expired",
+                &format!(
+                    "{expired} scheduled recovery plan(s) were overdue when this host \
+                     started; marked expired and not executed blindly"
+                ),
+            )?;
+        }
         Ok(new_host_id.to_string())
     }
 
@@ -392,6 +446,7 @@ impl OfficeHost {
             if shared.stopping.load(Ordering::SeqCst) {
                 break;
             }
+            sweep_recovery_plans(&shared);
             match listener.accept() {
                 Ok((stream, _)) => {
                     // Channel authentication (issue #16 requires it): the
@@ -717,7 +772,7 @@ fn handle_request(
             cols,
             rows,
         } => terminal_resize(&shared, terminal_id, *cols, *rows),
-        OfficeRequestKind::WorkbenchView => workbench_view(&shared),
+        OfficeRequestKind::WorkbenchView => workbench_view(Arc::clone(&shared)),
         OfficeRequestKind::WorkbenchDiff { worktree_id } => workbench_diff(&shared, worktree_id),
         OfficeRequestKind::WorkbenchLayout { layout_json } => {
             workbench_layout(&shared, layout_json.as_deref())
@@ -743,12 +798,40 @@ fn handle_request(
         OfficeRequestKind::Pause => pause_server(&shared, true),
         OfficeRequestKind::Resume => pause_server(&shared, false),
         OfficeRequestKind::ServerRestart => begin_server_restart(&shared),
+        OfficeRequestKind::WorktreeFiles { worktree_id } => worktree_files(&shared, worktree_id),
+        OfficeRequestKind::WorktreeFileContent { worktree_id, path } => {
+            worktree_file_content(&shared, worktree_id, path)
+        }
+        OfficeRequestKind::WorktreeCleanup { worktree_id } => {
+            worktree_cleanup(&shared, worktree_id)
+        }
+        OfficeRequestKind::AgentHandoff {
+            worktree_id,
+            to_agent,
+        } => agent_handoff(&shared, worktree_id, to_agent),
+        OfficeRequestKind::SyncNow => sync_now(&shared),
+        OfficeRequestKind::SetAutoPull { on } => set_auto_pull(&shared, *on),
+        OfficeRequestKind::RecoveryList => recovery_list(&shared),
+        OfficeRequestKind::RecoverySchedule {
+            terminal_id,
+            reset_at,
+            task_id,
+        } => recovery_schedule(&shared, terminal_id, reset_at, task_id.as_deref()),
+        OfficeRequestKind::RecoveryCancel { plan_id } => recovery_cancel(&shared, *plan_id),
         OfficeRequestKind::AgentReport {
             terminal_id,
             agent,
             status,
             detail,
-        } => agent_report(&shared, terminal_id, agent, status, detail),
+            reset_at,
+        } => agent_report(
+            &shared,
+            terminal_id,
+            agent,
+            status,
+            detail,
+            reset_at.as_deref(),
+        ),
         OfficeRequestKind::AgentContentSubmit {
             terminal_id,
             kind,
@@ -801,6 +884,12 @@ fn is_member_gated_kind(kind: &OfficeRequestKind) -> bool {
             | OfficeRequestKind::Pause
             | OfficeRequestKind::Resume
             | OfficeRequestKind::Shutdown { .. }
+            | OfficeRequestKind::WorktreeCleanup { .. }
+            | OfficeRequestKind::AgentHandoff { .. }
+            | OfficeRequestKind::SyncNow
+            | OfficeRequestKind::SetAutoPull { .. }
+            | OfficeRequestKind::RecoverySchedule { .. }
+            | OfficeRequestKind::RecoveryCancel { .. }
     )
 }
 
@@ -892,6 +981,12 @@ fn authorize_socket_request(shared: &OfficeShared, request: &OfficeRequest) -> O
             OfficeRequestKind::Dispatch { .. } => "dispatch_delegated",
             OfficeRequestKind::AgentReport { .. } => "agent_report",
             OfficeRequestKind::AgentContentSubmit { .. } => "agent_content",
+            OfficeRequestKind::WorktreeCleanup { .. } => SOCKET_CONTROL_ACTION,
+            OfficeRequestKind::AgentHandoff { .. } => SOCKET_CONTROL_ACTION,
+            OfficeRequestKind::SyncNow => SOCKET_CONTROL_ACTION,
+            OfficeRequestKind::SetAutoPull { .. } => SOCKET_CONTROL_ACTION,
+            OfficeRequestKind::RecoverySchedule { .. } => SOCKET_CONTROL_ACTION,
+            OfficeRequestKind::RecoveryCancel { .. } => SOCKET_CONTROL_ACTION,
             OfficeRequestKind::AgentPrompt { .. } => "agent_prompt",
             OfficeRequestKind::AgentWait { .. } => SOCKET_CONTROL_ACTION,
             _ => SOCKET_CONTROL_ACTION,
@@ -1007,7 +1102,15 @@ fn terminal_resize(
 
 /// The workbench projection over the real registries — the same assembly
 /// the in-process workbench used, now served to attach clients.
-fn workbench_view(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
+fn workbench_view(shared: Arc<OfficeShared>) -> OfficeResult<serde_json::Value> {
+    // V15-4: the automatic sync cycle runs off-thread (network git must
+    // never block the view); the TTL/pause checks happen before spawning.
+    if auto_sync_due(&shared) {
+        let background = Arc::clone(&shared);
+        std::thread::spawn(move || {
+            let _ = auto_sync_all(&background, false);
+        });
+    }
     let store = shared.store.lock().expect("office store");
     let mut model = crate::tui::workbench::assemble_view(&store, &shared.terminals)?;
 
@@ -1042,6 +1145,68 @@ fn workbench_view(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
             };
         };
         row.agent_status = shared.agent_board.project(&row.terminal_id);
+    }
+
+    // V15-4 switch + note surface on the model.
+    model.auto_pull = read_auto_pull(&store);
+    model.sync_note = shared.last_sync_note.lock().expect("sync note").clone();
+
+    // V15-2/V15-4 row enrichment. The worktree records are collected UNDER
+    // the store lock; the slow probes (gh network calls, rev-list) run
+    // AFTER it is dropped — the office keeps answering while enriching.
+    let mut records: Vec<(String, crate::git::worktrees::TaskWorktreeRecord)> = Vec::new();
+    {
+        let service = crate::git::worktrees::WorktreeService::new(
+            &store,
+            crate::git::worktrees::ProtectedRefs::new(vec![]),
+        );
+        for row in &model.worktrees {
+            if let Ok(wid) = crate::foundation::ids::WorktreeId::from_str(&row.worktree_id) {
+                if let Some(record) = service.record(&wid).ok().flatten() {
+                    records.push((row.worktree_id.clone(), record));
+                }
+            }
+        }
+    }
+    drop(store);
+
+    use std::collections::hash_map::Entry;
+    for row in &mut model.worktrees {
+        let Some((_, record)) = records.iter().find(|(id, _)| id == &row.worktree_id) else {
+            continue;
+        };
+        if let Ok(Some((behind, ahead))) = crate::git::sync::ahead_behind(
+            &record.worktree_path,
+            &record.branch,
+            &crate::git::cli::CliRunner::default(),
+        ) {
+            row.behind = Some(behind);
+            row.ahead = Some(ahead);
+        }
+        let mut cache = shared.pr_cache.lock().expect("pr cache");
+        let info = match cache.entry(row.worktree_id.clone()) {
+            Entry::Occupied(mut occupied) => {
+                let (at, info) = occupied.get_mut();
+                if at.elapsed() < Duration::from_secs(60) {
+                    info.clone()
+                } else {
+                    let fresh =
+                        crate::git::pr::pr_status_for_branch(&record.repo_root, &record.branch);
+                    *at = Instant::now();
+                    *info = fresh.clone();
+                    fresh
+                }
+            }
+            Entry::Vacant(vacant) => {
+                let fresh = crate::git::pr::pr_status_for_branch(&record.repo_root, &record.branch);
+                vacant.insert((Instant::now(), fresh.clone()));
+                fresh
+            }
+        };
+        drop(cache);
+        if let Some(pr) = info {
+            row.pr_state = Some(pr.state);
+        }
     }
 
     serde_json::to_value(&model).map_err(|e| OfficeError::Validation(format!("view: {e}")))
@@ -1219,6 +1384,7 @@ fn agent_report(
     agent: &str,
     status: &str,
     detail: &str,
+    reset_at: Option<&str>,
 ) -> OfficeResult<serde_json::Value> {
     let terminal_id = TerminalId::from_str(terminal_id)?;
     let status = crate::agents::AgentStatus::parse(status)?;
@@ -1261,6 +1427,36 @@ fn agent_report(
             }),
         },
     )?;
+    // V15-5: rate-limit recovery plans. rate_limited REQUIRES a reset
+    // time (the office never guesses one); any other reported status
+    // cancels the open plan — the limit is over.
+    if status == crate::agents::AgentStatus::RateLimited {
+        let Some(reset_at) = reset_at else {
+            return Err(OfficeError::Validation(
+                "rate_limited requires reset_at (RFC3339); the office does not \
+                 schedule recovery for an unknown time"
+                    .into(),
+            ));
+        };
+        validate_rfc3339(reset_at)?;
+        store.connection().execute(
+            "UPDATE recovery_plans SET state = 'cancelled', fired_at = ?2
+             WHERE terminal_id = ?1 AND state = 'scheduled'",
+            rusqlite::params![terminal_id.to_string(), utc_now()],
+        )?;
+        store.connection().execute(
+            "INSERT INTO recovery_plans(terminal_id, reset_at, action, state, created_at)
+             VALUES (?1, ?2, 'resume_prompt', 'scheduled', ?3)",
+            rusqlite::params![terminal_id.to_string(), reset_at, utc_now()],
+        )?;
+    } else {
+        store.connection().execute(
+            "UPDATE recovery_plans SET state = 'cancelled', fired_at = ?2
+             WHERE terminal_id = ?1 AND state = 'scheduled'",
+            rusqlite::params![terminal_id.to_string(), utc_now()],
+        )?;
+    }
+
     serde_json::to_value(&record).map_err(|e| OfficeError::Validation(format!("record: {e}")))
 }
 
@@ -2486,6 +2682,686 @@ pub fn offline_status(home: &Path) -> OfficeResult<serde_json::Value> {
     Ok(value)
 }
 
+/// V15-4: cheap due check for the background sync (no locks held past the
+/// settings read; the heavy git work happens off-thread).
+fn auto_sync_due(shared: &OfficeShared) -> bool {
+    if shared.paused.load(Ordering::SeqCst) {
+        return false;
+    }
+    let store = shared.store.lock().expect("office store");
+    let auto_pull = read_auto_pull(&store);
+    drop(store);
+    if !auto_pull {
+        return false;
+    }
+    match *shared.last_sync.lock().expect("last sync") {
+        Some(last) => last.elapsed() >= Duration::from_secs(5 * 60),
+        None => true,
+    }
+}
+
+/// V15-4: the user-facing switch (default off, persisted).
+fn set_auto_pull(shared: &OfficeShared, on: bool) -> OfficeResult<serde_json::Value> {
+    let store = shared.store.lock().expect("office store");
+    store.connection().execute(
+        "INSERT INTO office_settings(key, value) VALUES ('auto_pull', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![if on { "true" } else { "false" }],
+    )?;
+    crate::foundation::events::append(
+        &store,
+        crate::foundation::events::NewEvent {
+            domain: DOMAIN_OFFICE_HOST,
+            kind: "auto_pull_toggled".into(),
+            subject_type: "office".into(),
+            subject_id: shared.host_id.clone(),
+            origin: "office_host".into(),
+            payload: serde_json::json!({ "on": on }),
+        },
+    )?;
+    Ok(serde_json::json!({ "auto_pull": on }))
+}
+
+// ---------------------------------------------------------------------------
+// V15 workbench deepening (issues V15-1..V15-5): files, PR cleanup,
+// handoff, auto-sync, rate-limit recovery. All handlers keep the office
+// discipline: typed ids, bounded reads, audit events, honest unknowns.
+// ---------------------------------------------------------------------------
+
+/// RFC3339 validation for user/agent supplied times (recovery plans).
+fn validate_rfc3339(text: &str) -> OfficeResult<()> {
+    time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
+        .map(|_| ())
+        .map_err(|e| OfficeError::Validation(format!("`{text}` is not RFC3339: {e}")))
+}
+
+/// The persisted `auto_pull` switch (V15-4): default OFF. Automatic pulls
+/// exist only when the user explicitly turned the switch on.
+fn read_auto_pull(store: &Store) -> bool {
+    store
+        .connection()
+        .query_row(
+            "SELECT value FROM office_settings WHERE key = 'auto_pull'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .map(|value| value == "true")
+        .unwrap_or(false)
+}
+
+/// The automatic sync cycle (V15-4): when `auto_pull` is on and the last
+/// cycle is older than 5 minutes, fast-forward every active project's MAIN
+/// checkout and fetch every task worktree. Pause gates the automatic path;
+/// `force = true` (explicit `viva sync now`) bypasses both the TTL and the
+/// pause, because a human asked. Task worktrees are fetched, NEVER pulled.
+fn auto_sync_all(shared: &OfficeShared, force: bool) -> OfficeResult<serde_json::Value> {
+    let auto_pull = {
+        let store = shared.store.lock().expect("office store");
+        read_auto_pull(&store)
+    };
+    if !force {
+        if shared.paused.load(Ordering::SeqCst) {
+            return Ok(serde_json::json!({ "skipped": "paused" }));
+        }
+        if let Some(last) = *shared.last_sync.lock().expect("last sync") {
+            if last.elapsed() < Duration::from_secs(5 * 60) {
+                return Ok(serde_json::json!({ "skipped": "recent" }));
+            }
+        }
+    }
+
+    let store = shared.store.lock().expect("office store");
+    let runner = crate::git::cli::CliRunner::default();
+    let mut results: Vec<serde_json::Value> = Vec::new();
+
+    // Main checkouts: automatic fast-forward ONLY when auto_pull is on.
+    for project in crate::projects::ProjectRegistry::new(&store).list(true)? {
+        let outcome = if !auto_pull {
+            crate::git::sync::MainSyncOutcome::Failed("auto_pull is off".into())
+        } else {
+            crate::git::sync::sync_main_checkout(&project.repo_path, &runner)?
+        };
+        let label = match &outcome {
+            crate::git::sync::MainSyncOutcome::FastForward { from, to } => {
+                format!("fast-forward {from}..{to}")
+            }
+            crate::git::sync::MainSyncOutcome::AlreadyUpToDate => "up to date".into(),
+            crate::git::sync::MainSyncOutcome::SkippedDirty => "skipped (dirty tree)".into(),
+            crate::git::sync::MainSyncOutcome::Failed(reason) => format!("failed: {reason}"),
+        };
+        results.push(serde_json::json!({
+            "kind": "main_checkout",
+            "project": project.project_id.to_string(),
+            "path": project.repo_path.display().to_string(),
+            "outcome": label,
+        }));
+        crate::foundation::events::append(
+            &store,
+            crate::foundation::events::NewEvent {
+                domain: DOMAIN_OFFICE_HOST,
+                kind: "git_auto_sync".into(),
+                subject_type: "project".into(),
+                subject_id: project.project_id.to_string(),
+                origin: "office_host".into(),
+                payload: serde_json::json!({ "outcome": label }),
+            },
+        )?;
+    }
+
+    // Task worktrees: fetch only — the working tree is never touched.
+    let service = crate::git::worktrees::WorktreeService::new(
+        &store,
+        crate::git::worktrees::ProtectedRefs::new(vec![]),
+    );
+    for record in service.all_records()? {
+        if record.released_at.is_some() {
+            continue;
+        }
+        let outcome = match crate::git::sync::fetch_worktree(&record.worktree_path, &runner) {
+            Ok(()) => "fetched".to_string(),
+            Err(err) => format!("fetch failed: {err}"),
+        };
+        results.push(serde_json::json!({
+            "kind": "worktree_fetch",
+            "worktree": record.worktree_id.to_string(),
+            "outcome": outcome,
+        }));
+    }
+
+    *shared.last_sync.lock().expect("last sync") = Some(Instant::now());
+    *shared.last_sync_note.lock().expect("sync note") =
+        Some(format!("{} sync result(s) at {}", results.len(), utc_now()));
+    Ok(serde_json::json!({
+        "auto_pull": auto_pull,
+        "results": results,
+    }))
+}
+
+/// The rate-limit recovery sweep (V15-5): runs at most once a second on
+/// the serve loop. Every DUE plan gets an honest outcome — the prompt is
+/// delivered to a live terminal, or the plan is closed with a note when
+/// the terminal is gone. Nothing is ever executed blindly twice.
+fn sweep_recovery_plans(shared: &OfficeShared) {
+    {
+        let mut last = shared.last_recovery_sweep.lock().expect("sweep clock");
+        if let Some(last) = *last {
+            if last.elapsed() < Duration::from_secs(1) {
+                return;
+            }
+        }
+        *last = Some(Instant::now());
+    }
+    let Ok(store) = shared.store.lock() else {
+        eprintln!("DBG sweep: store lock failed");
+        return;
+    };
+    #[cfg(test)]
+    {
+        let rows: Vec<(String, String)> = store
+            .connection()
+            .prepare("SELECT terminal_id, reset_at FROM recovery_plans")
+            .and_then(|mut stmt| {
+                stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .map(|rows| rows.collect::<Result<Vec<_>, _>>())
+            })
+            .map(|rows| rows.unwrap_or_default())
+            .unwrap_or_default();
+        let now = utc_now();
+        eprintln!("DBG sweep: now={now} rows={rows:?}");
+    }
+    let due: Vec<(i64, String, Option<String>)> = {
+        let mut stmt = store
+            .connection()
+            .prepare(
+                "SELECT id, terminal_id, task_id FROM recovery_plans
+                 WHERE state = 'scheduled' AND reset_at <= ?1",
+            )
+            .expect("due plans query");
+        let rows = stmt.query_map([utc_now()], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        });
+        match rows {
+            Ok(rows) => rows.collect::<Result<Vec<_>, _>>().unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    };
+    for (id, terminal_id, task_id) in due {
+        let task_id = task_id.as_deref();
+        let terminal = TerminalId::from_str(&terminal_id)
+            .ok()
+            .and_then(|tid| shared.terminals.handle(&tid).ok().flatten());
+        let (outcome, note) = match terminal {
+            Some(handle) => match handle.input(b"continue\n") {
+                Ok(()) => (
+                    "resume prompt delivered".to_string(),
+                    format!("prompted `{terminal_id}` to continue"),
+                ),
+                Err(err) => (
+                    "prompt failed".to_string(),
+                    format!("terminal `{terminal_id}` rejected input: {err}"),
+                ),
+            },
+            None => (
+                "terminal gone".to_string(),
+                format!("terminal `{terminal_id}` is no longer hosted; nothing to resume"),
+            ),
+        };
+        let _ = store.connection().execute(
+            "UPDATE recovery_plans SET state = 'fired', fired_at = ?2 WHERE id = ?1",
+            rusqlite::params![id, utc_now()],
+        );
+        let _ = crate::foundation::events::append(
+            &store,
+            crate::foundation::events::NewEvent {
+                domain: DOMAIN_OFFICE_HOST,
+                kind: "recovery_plan_fired".into(),
+                subject_type: "recovery_plan".into(),
+                subject_id: id.to_string(),
+                origin: "office_host".into(),
+                payload: serde_json::json!({
+                    "outcome": outcome,
+                    "note": note,
+                    "task_id": task_id,
+                }),
+            },
+        );
+    }
+}
+
+/// V15-1: the file inventory of one worktree — every tracked file plus
+/// untracked entries, each with its porcelain status. Clean files are
+/// marked `clean`; there is no second guessing of git's verdicts.
+fn worktree_files(shared: &OfficeShared, worktree_id: &str) -> OfficeResult<serde_json::Value> {
+    let wid = WorktreeId::from_str(worktree_id)?;
+    let store = shared.store.lock().expect("office store");
+    let service = crate::git::worktrees::WorktreeService::new(
+        &store,
+        crate::git::worktrees::ProtectedRefs::new(vec![]),
+    );
+    let record = service.record(&wid)?.ok_or_else(|| OfficeError::NotFound {
+        entity: "worktree",
+        id: worktree_id.to_string(),
+    })?;
+    let runner = crate::git::cli::CliRunner::default();
+    let cwd = &record.worktree_path;
+
+    let mut status_map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    if let Ok(status) = runner.git(
+        cwd,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    ) {
+        let tokens: Vec<String> = String::from_utf8_lossy(status.stdout.as_bytes())
+            .split('\0')
+            .filter(|token| !token.is_empty())
+            .map(str::to_string)
+            .collect();
+        let mut index = 0;
+        while index < tokens.len() {
+            let token = &tokens[index];
+            if token.len() < 4 {
+                index += 1;
+                continue;
+            }
+            let xy = token[..2].to_string();
+            let path = token[3..].to_string();
+            let rename = xy.contains('R') || xy.contains('C');
+            if rename {
+                index += 1; // skip the original-path token
+            }
+            status_map.insert(path, xy.trim().to_string());
+            index += 1;
+        }
+    }
+
+    let mut rows: Vec<(String, String)> = Vec::new();
+    if let Ok(listed) = runner.git(cwd, &["ls-files", "-z"]) {
+        for path in String::from_utf8_lossy(listed.stdout.as_bytes())
+            .split('\0')
+            .filter(|p| !p.is_empty())
+        {
+            let path = path.to_string();
+            let status = status_map
+                .get(&path)
+                .cloned()
+                .unwrap_or_else(|| "clean".into());
+            rows.push((path, status));
+        }
+    }
+    for (path, status) in &status_map {
+        if !rows.iter().any(|(existing, _)| existing == path) {
+            rows.push((path.clone(), status.clone()));
+        }
+    }
+    // Changed files lead; the rest alphabetical.
+    rows.sort_by(|a, b| {
+        let changed_a = a.1 != "clean";
+        let changed_b = b.1 != "clean";
+        changed_b.cmp(&changed_a).then(a.0.cmp(&b.0))
+    });
+
+    Ok(serde_json::json!({
+        "worktree_id": worktree_id,
+        "files": rows.into_iter().map(|(path, status)| serde_json::json!({
+            "path": path, "status": status,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+/// V15-1: one file's material — a unified diff against the worktree's
+/// recorded base for modified files, bounded content otherwise, and an
+/// honest `binary` verdict for non-text files.
+fn worktree_file_content(
+    shared: &OfficeShared,
+    worktree_id: &str,
+    path: &str,
+) -> OfficeResult<serde_json::Value> {
+    let wid = WorktreeId::from_str(worktree_id)?;
+    // Path safety: the client names a RELATIVE path inside the worktree.
+    if path.starts_with('/') || path.split('/').any(|part| part == "..") {
+        return Err(OfficeError::Validation(
+            "file paths must be relative to the worktree and may not contain `..`".into(),
+        ));
+    }
+    let store = shared.store.lock().expect("office store");
+    let service = crate::git::worktrees::WorktreeService::new(
+        &store,
+        crate::git::worktrees::ProtectedRefs::new(vec![]),
+    );
+    let record = service.record(&wid)?.ok_or_else(|| OfficeError::NotFound {
+        entity: "worktree",
+        id: worktree_id.to_string(),
+    })?;
+    let full_path = record.worktree_path.join(path);
+    let max_bytes: usize = 64 * 1024;
+
+    // Modified (tracked) → diff against the recorded base.
+    let runner = crate::git::cli::CliRunner::default();
+    let changed = runner
+        .git(
+            &record.worktree_path,
+            &["status", "--porcelain=v1", "-z", "--", path],
+        )
+        .map(|out| {
+            // One token at most for a single path: non-empty and not
+            // untracked (`??`) means the tracked file has changes.
+            let first = String::from_utf8_lossy(out.stdout.as_bytes());
+            let first = first.trim_end_matches('\0').trim();
+            !first.is_empty() && !first.starts_with("??")
+        })
+        .unwrap_or(false);
+    if changed {
+        let diff = runner
+            .git_ok(
+                &record.worktree_path,
+                &["diff", &record.base_sha, "--", path],
+            )
+            .map(|out| {
+                let raw = String::from_utf8_lossy(out.stdout.as_bytes()).into_owned();
+                if raw.len() > max_bytes {
+                    format!(
+                        "{}…\n(diff truncated at {max_bytes} bytes)",
+                        &raw[..max_bytes]
+                    )
+                } else {
+                    raw
+                }
+            })?;
+        return Ok(serde_json::json!({
+            "kind": "diff", "path": path, "text": diff,
+            "full_path": full_path.display().to_string(),
+        }));
+    }
+
+    // Otherwise: bounded content, honest binary verdict.
+    let bytes = std::fs::read(&full_path).map_err(OfficeError::Io)?;
+    let probe = &bytes[..bytes.len().min(8192)];
+    if probe.contains(&0u8) {
+        return Ok(serde_json::json!({
+            "kind": "binary", "path": path,
+            "bytes": bytes.len(),
+            "full_path": full_path.display().to_string(),
+        }));
+    }
+    let bounded = &bytes[..bytes.len().min(max_bytes)];
+    let truncated = bytes.len() > max_bytes;
+    Ok(serde_json::json!({
+        "kind": "content", "path": path,
+        "text": String::from_utf8_lossy(bounded),
+        "truncated": truncated, "bytes": bytes.len(),
+        "full_path": full_path.display().to_string(),
+    }))
+}
+
+/// V15-2: the merged-PR cleanup. The gate is real: the branch's PR must be
+/// MERGED (re-checked live, not from cache). `release` records the office
+/// giving the worktree up; the directory removal then runs WITHOUT force —
+/// a dirty tree refuses and says so. The caller confirmed the exact path
+/// (two-step UI); the action is audited either way.
+fn worktree_cleanup(shared: &OfficeShared, worktree_id: &str) -> OfficeResult<serde_json::Value> {
+    let wid = WorktreeId::from_str(worktree_id)?;
+    let store = shared.store.lock().expect("office store");
+    let service = crate::git::worktrees::WorktreeService::new(
+        &store,
+        crate::git::worktrees::ProtectedRefs::new(vec![]),
+    );
+    let record = service.record(&wid)?.ok_or_else(|| OfficeError::NotFound {
+        entity: "worktree",
+        id: worktree_id.to_string(),
+    })?;
+    let pr = crate::git::pr::pr_status_for_branch(&record.repo_root, &record.branch);
+    let state = pr
+        .as_ref()
+        .map(|info| info.state.clone())
+        .unwrap_or_else(|| "unknown".into());
+    if state != "merged" {
+        return Err(OfficeError::Validation(format!(
+            "cleanup requires a MERGED PR for branch `{}` (current: {state}); \
+             deleting work is a human decision",
+            record.branch
+        )));
+    }
+    let pr_number = pr.as_ref().map(|info| info.number);
+    service.release(&wid)?;
+    let runner = crate::git::cli::CliRunner::default();
+    let removal = runner.git_ok(
+        &record.repo_root,
+        &[
+            "worktree",
+            "remove",
+            record.worktree_path.to_string_lossy().as_ref(),
+        ],
+    );
+    if let Err(failure) = removal {
+        return Err(OfficeError::Validation(format!(
+            "worktree `{}` was released in the office records but its directory could \
+             not be removed ({}); remove it by hand after checking the tree",
+            record.worktree_path.display(),
+            failure
+        )));
+    }
+    crate::foundation::events::append(
+        &store,
+        crate::foundation::events::NewEvent {
+            domain: DOMAIN_OFFICE_HOST,
+            kind: "worktree_cleaned".into(),
+            subject_type: "worktree".into(),
+            subject_id: worktree_id.to_string(),
+            origin: "office_host".into(),
+            payload: serde_json::json!({
+                "path": record.worktree_path.display().to_string(),
+                "branch": record.branch,
+                "pr_number": pr_number,
+                "note": "released + removed after human confirmation of the exact path",
+            }),
+        },
+    )?;
+    Ok(serde_json::json!({
+        "cleaned": true,
+        "worktree_id": worktree_id.to_string(),
+        "path": record.worktree_path.display().to_string(),
+    }))
+}
+
+/// V15-3: hand a worktree from one agent to the next. The brief carries
+/// the task goal, the branch and the DEPARTING agent's last controlled
+/// summary (or an honest "none") — material transfer, never a promise of
+/// lossless context. The departing terminal is left running: stopping it
+/// is the human's call.
+fn agent_handoff(
+    shared: &OfficeShared,
+    worktree_id: &str,
+    to_agent: &str,
+) -> OfficeResult<serde_json::Value> {
+    let wid = WorktreeId::from_str(worktree_id)?;
+    let to_agent = to_agent.trim().to_string();
+    if to_agent.is_empty() || to_agent.contains(char::is_whitespace) || to_agent.contains('/') {
+        return Err(OfficeError::Validation(
+            "handoff target must be a bare command name (no spaces, no paths)".into(),
+        ));
+    }
+    let store = shared.store.lock().expect("office store");
+    let service = crate::git::worktrees::WorktreeService::new(
+        &store,
+        crate::git::worktrees::ProtectedRefs::new(vec![]),
+    );
+    let record = service.record(&wid)?.ok_or_else(|| OfficeError::NotFound {
+        entity: "worktree",
+        id: worktree_id.to_string(),
+    })?;
+
+    // The departing summary: the newest controlled report on any terminal
+    // of this worktree. Absent → an honest "none", never an invention.
+    let mut summary: Option<String> = None;
+    for terminal in shared.terminals.terminals_for_worktree(&wid) {
+        for status in shared
+            .agent_board
+            .project(&terminal.terminal_id.to_string())
+        {
+            if status.source == crate::agents::StatusSource::ControlledReport {
+                let candidate = format!(
+                    "{} reported {}: {}",
+                    status.agent,
+                    status.status.as_str(),
+                    status.detail
+                );
+                if summary.as_ref().map(|old| candidate > *old).unwrap_or(true) {
+                    summary = Some(candidate);
+                }
+            }
+        }
+    }
+    let goal = TaskRegistry::new(&store)
+        .require_task(&record.task_id)
+        .map(|task| task.goal)
+        .unwrap_or_else(|_| "(no linked task)".into());
+    let departing = summary
+        .clone()
+        .unwrap_or_else(|| "(no departing summary was reported)".into());
+    let brief = format!(
+        "【handoff】task: {goal}\nbranch: {}\nworktree: {}\ndeparting summary: {departing}\nPlease continue from the current state.",
+        record.branch,
+        record.worktree_path.display()
+    );
+
+    let spec =
+        crate::terminal::TerminalSpec::new(vec![to_agent.clone()], record.worktree_path.clone())?;
+    let (terminal_id, handle) = shared.terminals.spawn(
+        spec,
+        crate::foundation::records::TerminalOwner::AgentCli,
+        Some(wid),
+        format!("handoff → {to_agent}"),
+        None,
+        Some(&store),
+    )?;
+    seed_agent_identification(shared, &terminal_id, std::slice::from_ref(&to_agent));
+    handle.input(brief.as_bytes())?;
+    handle.input(b"\n")?;
+
+    {
+        let _ = TaskRegistry::new(&store).record_result(
+            &record.task_id,
+            None,
+            crate::tasks::ResultSource::User,
+            "agent_handoff",
+            format!(
+                "handoff:{worktree_id}:{to_agent}:{}",
+                uuid::Uuid::new_v4().simple()
+            ),
+            serde_json::json!({
+                "to_agent": to_agent,
+                "departing_summary": summary.clone(),
+                "brief_bytes": brief.len(),
+                "note": "material transfer; not lossless context, not acceptance",
+            }),
+        );
+    }
+    crate::foundation::events::append(
+        &store,
+        crate::foundation::events::NewEvent {
+            domain: DOMAIN_OFFICE_HOST,
+            kind: "agent_handoff".into(),
+            subject_type: "worktree".into(),
+            subject_id: worktree_id.to_string(),
+            origin: "office_host".into(),
+            payload: serde_json::json!({
+                "to_agent": to_agent,
+                "branch": record.branch,
+                "terminal_id": terminal_id.to_string(),
+            }),
+        },
+    )?;
+    Ok(serde_json::json!({
+        "terminal_id": terminal_id.to_string(),
+        "to_agent": to_agent,
+        "brief_bytes": brief.len(),
+        "departing_terminal_left_running": true,
+    }))
+}
+
+/// V15-4 manual trigger + the read-only listing.
+fn sync_now(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
+    auto_sync_all(shared, true)
+}
+
+fn recovery_list(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
+    let store = shared.store.lock().expect("office store");
+    let mut stmt = store.connection().prepare(
+        "SELECT id, terminal_id, task_id, reset_at, action, state, created_at, fired_at
+         FROM recovery_plans ORDER BY id DESC LIMIT 50",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(serde_json::json!({
+            "id": row.get::<_, i64>(0)?,
+            "terminal_id": row.get::<_, String>(1)?,
+            "task_id": row.get::<_, Option<String>>(2)?,
+            "reset_at": row.get::<_, String>(3)?,
+            "action": row.get::<_, String>(4)?,
+            "state": row.get::<_, String>(5)?,
+            "created_at": row.get::<_, String>(6)?,
+            "fired_at": row.get::<_, Option<String>>(7)?,
+        }))
+    })?;
+    let plans = rows.collect::<Result<Vec<_>, _>>()?;
+    Ok(serde_json::json!({ "plans": plans }))
+}
+
+fn recovery_schedule(
+    shared: &OfficeShared,
+    terminal_id: &str,
+    reset_at: &str,
+    task_id: Option<&str>,
+) -> OfficeResult<serde_json::Value> {
+    validate_rfc3339(reset_at)?;
+    let terminal = TerminalId::from_str(terminal_id)?;
+    shared
+        .terminals
+        .handle(&terminal)?
+        .ok_or_else(|| OfficeError::NotFound {
+            entity: "terminal",
+            id: terminal_id.to_string(),
+        })?;
+    let store = shared.store.lock().expect("office store");
+    store.connection().execute(
+        "INSERT INTO recovery_plans(terminal_id, task_id, reset_at, action, state, created_at)
+         VALUES (?1, ?2, ?3, 'resume_prompt', 'scheduled', ?4)",
+        rusqlite::params![terminal_id, task_id, reset_at, utc_now(),],
+    )?;
+    let id = store.connection().last_insert_rowid();
+    crate::foundation::events::append(
+        &store,
+        crate::foundation::events::NewEvent {
+            domain: DOMAIN_OFFICE_HOST,
+            kind: "recovery_plan_scheduled".into(),
+            subject_type: "recovery_plan".into(),
+            subject_id: id.to_string(),
+            origin: "office_host".into(),
+            payload: serde_json::json!({ "terminal_id": terminal_id, "reset_at": reset_at }),
+        },
+    )?;
+    Ok(serde_json::json!({ "id": id, "reset_at": reset_at, "state": "scheduled" }))
+}
+
+fn recovery_cancel(shared: &OfficeShared, plan_id: i64) -> OfficeResult<serde_json::Value> {
+    let store = shared.store.lock().expect("office store");
+    let changed = store.connection().execute(
+        "UPDATE recovery_plans SET state = 'cancelled', fired_at = ?2
+         WHERE id = ?1 AND state = 'scheduled'",
+        rusqlite::params![plan_id, utc_now()],
+    )?;
+    if changed == 0 {
+        return Err(OfficeError::NotFound {
+            entity: "scheduled recovery plan",
+            id: plan_id.to_string(),
+        });
+    }
+    Ok(serde_json::json!({ "cancelled": plan_id }))
+}
+
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
@@ -2857,6 +3733,8 @@ mod s2_workbench_tests {
         git(&repo, &["remote", "add", "origin", bare.to_str().unwrap()]);
         git(&repo, &["push", "origin", "main"]);
         git(&repo, &["fetch", "origin"]);
+        // auto_pull's `git pull --ff-only` needs tracking configured.
+        git(&repo, &["branch", "--set-upstream-to=origin/main", "main"]);
 
         let store = Store::open(
             &crate::foundation::paths::database_path(&host.home),
@@ -3421,6 +4299,7 @@ mod s4_agent_status_tests {
             agent: "codex".into(),
             status: "blocked".into(),
             detail: "waiting for tool approval".into(),
+            reset_at: None,
         });
         request.grant = Some(grant);
         request.member = Some("member-00000000-0000-0000-0000-000000000000".into());
@@ -3473,6 +4352,7 @@ mod s4_agent_status_tests {
             agent: "codex".into(),
             status: "done".into(),
             detail: String::new(),
+            reset_at: None,
         });
         request.member = Some("member-00000000-0000-0000-0000-000000000000".into());
         let err = client.call_request(request).expect_err("must deny");
@@ -3704,6 +4584,7 @@ mod s5_orchestration_tests {
             agent: "codex".into(),
             status: "blocked".into(),
             detail: "needs a decision".into(),
+            reset_at: None,
         });
         report.grant = Some(report_grant.clone());
         client.call_request(report).expect("report");
@@ -4070,5 +4951,743 @@ mod s6_pause_tests {
         };
         assert!(notes >= 1, "pause_restored must be recorded");
         drop(reopened);
+    }
+}
+
+#[cfg(test)]
+mod v15_tests {
+    use super::*;
+    use crate::office::OfficeClient;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    struct RunningHost {
+        dir: tempfile::TempDir,
+        home: std::path::PathBuf,
+        server: std::thread::JoinHandle<()>,
+    }
+
+    fn start_host() -> RunningHost {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let host = OfficeHost::open(&home).expect("host");
+        let server = host.serve_background();
+        let socket = home.join(OFFICE_SOCKET_NAME);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !socket.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        RunningHost { dir, home, server }
+    }
+
+    impl RunningHost {
+        fn client(&self) -> OfficeClient {
+            OfficeClient::connect(&self.home).expect("client")
+        }
+        fn shutdown(self) {
+            if let Ok(mut client) = OfficeClient::connect(&self.home) {
+                let _ = client.call(OfficeRequestKind::Shutdown { close_policy: None });
+            }
+            let _ = self.server.join();
+            drop(self.dir);
+        }
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(["-c", "user.email=test@viva.local", "-c", "user.name=test"])
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// A repo with one commit, a bare origin, and one adopted task
+    /// worktree on branch-wt.
+    fn seed_repo_worktree(host: &RunningHost, branch: &str) -> (String, std::path::PathBuf) {
+        let repo = host.dir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let bare = host.dir.path().join("origin.git");
+        git(host.dir.path(), &["init", "--bare", bare.to_str().unwrap()]);
+        git(&repo, &["init", "-b", "main"]);
+        std::fs::write(repo.join("README.md"), "seed\n").expect("seed");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "seed"]);
+        git(&repo, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        git(&repo, &["push", "origin", "main"]);
+        git(&repo, &["fetch", "origin"]);
+        // auto_pull's `git pull --ff-only` needs tracking configured.
+        git(&repo, &["branch", "--set-upstream-to=origin/main", "main"]);
+
+        let store = Store::open(
+            &crate::foundation::paths::database_path(&host.home),
+            office_migrations(),
+        )
+        .expect("store");
+        let project = crate::projects::ProjectRegistry::new(&store)
+            .register(None, "demo", &repo)
+            .expect("project");
+        let task = TaskRegistry::new(&store)
+            .create_task(
+                "v15 seed task",
+                vec![],
+                None,
+                None,
+                Some(project.project_id.clone()),
+            )
+            .expect("task");
+        let wt_path = host.dir.path().join("wt");
+        git(
+            &repo,
+            &["worktree", "add", wt_path.to_str().unwrap(), "-b", branch],
+        );
+        git(&repo, &["push", "origin", branch]);
+        crate::git::worktrees::WorktreeService::new(
+            &store,
+            crate::git::worktrees::ProtectedRefs::new(vec![]),
+        )
+        .adopt_existing(&repo, &wt_path, &task.task_id)
+        .expect("adopt");
+        (task.task_id.to_string(), wt_path)
+    }
+
+    fn worktree_id_for(client: &mut OfficeClient, path_suffix: &str) -> String {
+        let view = client.call(OfficeRequestKind::WorkbenchView).expect("view");
+        let rows = view
+            .get("worktrees")
+            .and_then(|v| v.as_array())
+            .expect("rows");
+        rows.iter()
+            .find(|row| {
+                row.get("path")
+                    .and_then(|p| p.as_str())
+                    .map(|p| p.ends_with(path_suffix))
+                    .unwrap_or(false)
+            })
+            .and_then(|row| row.get("worktree_id").and_then(|v| v.as_str()))
+            .expect("worktree row")
+            .to_string()
+    }
+
+    fn wait_for_output(client: &mut OfficeClient, terminal_id: &str, needle: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Ok(view) = client.call(OfficeRequestKind::TerminalSnapshot {
+                terminal_id: terminal_id.to_string(),
+            }) {
+                if format!("{view}").contains(needle) {
+                    return true;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    /// V15-1: the file inventory marks modified/untracked distinctly, the
+    /// modified file views as a diff against the recorded base, and an
+    /// untracked text file views as bounded content.
+    #[test]
+    fn worktree_files_content_and_diff() {
+        let host = start_host();
+        let (_, wt_path) = seed_repo_worktree(&host, "v15-files");
+        let mut client = host.client();
+        let worktree_id = worktree_id_for(&mut client, "wt");
+
+        std::fs::write(wt_path.join("README.md"), "seed changed\n").expect("modify");
+        std::fs::write(wt_path.join("notes.txt"), "fresh notes\n").expect("untracked");
+
+        let files = client
+            .call(OfficeRequestKind::WorktreeFiles {
+                worktree_id: worktree_id.clone(),
+            })
+            .expect("files");
+        let text = format!("{files}");
+        assert!(text.contains("README.md"), "{text}");
+        assert!(text.contains("notes.txt"), "{text}");
+
+        let diff = client
+            .call(OfficeRequestKind::WorktreeFileContent {
+                worktree_id: worktree_id.clone(),
+                path: "README.md".into(),
+            })
+            .expect("diff");
+        assert_eq!(diff.get("kind").and_then(|v| v.as_str()), Some("diff"));
+        assert!(
+            diff.get("text")
+                .and_then(|v| v.as_str())
+                .map(|t| t.contains("seed changed"))
+                .unwrap_or(false),
+            "the diff shows the change: {diff}"
+        );
+
+        let content = client
+            .call(OfficeRequestKind::WorktreeFileContent {
+                worktree_id: worktree_id.clone(),
+                path: "notes.txt".into(),
+            })
+            .expect("content");
+        assert_eq!(
+            content.get("kind").and_then(|v| v.as_str()),
+            Some("content")
+        );
+        assert!(
+            content
+                .get("text")
+                .and_then(|v| v.as_str())
+                .map(|t| t.contains("fresh notes"))
+                .unwrap_or(false)
+        );
+
+        // Path safety: traversal is refused, not resolved.
+        let err = client
+            .call(OfficeRequestKind::WorktreeFileContent {
+                worktree_id,
+                path: "../escape".into(),
+            })
+            .expect_err("traversal must be refused");
+        assert!(err.to_string().contains("relative"), "{err}");
+        host.shutdown();
+    }
+
+    /// V15-2: a MERGED PR unlocks the cleanup entry (release + directory
+    /// removal + audit); a branch without a merged PR is refused.
+    #[test]
+    fn merged_pr_unlocks_cleanup_and_unknown_refuses() {
+        let host = start_host();
+        let (_, wt_path) = seed_repo_worktree(&host, "branch-with-pr");
+
+        // Fake gh: branch-with-pr → MERGED, everything else fails (unknown).
+        let fake_bin = host.home.join("fakebin");
+        std::fs::create_dir_all(&fake_bin).expect("fake bin");
+        let gh = fake_bin.join("gh");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\nif [ \"$3\" = \"branch-with-pr\" ]; then\n  echo '{\"state\":\"MERGED\",\"number\":12,\"url\":\"https://example/pr/12\"}'\n  exit 0\nfi\nexit 1\n",
+        )
+        .expect("write gh");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let path_value = std::env::var("PATH").unwrap_or_default();
+        // SAFETY: test-only; the fake gh dir is prepended for this test and
+        // restored right after (other tests in this binary never spawn gh).
+        unsafe {
+            std::env::set_var("PATH", format!("{}:{path_value}", fake_bin.display()));
+        }
+
+        let mut client = host.client();
+        let worktree_id = worktree_id_for(&mut client, "wt");
+
+        // The PR state lands in the view.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let view = client.call(OfficeRequestKind::WorkbenchView).expect("view");
+            let merged = view
+                .get("worktrees")
+                .and_then(|v| v.as_array())
+                .and_then(|rows| {
+                    rows.iter()
+                        .find(|row| {
+                            row.get("worktree_id").and_then(|v| v.as_str())
+                                == Some(worktree_id.as_str())
+                        })
+                        .and_then(|row| {
+                            row.get("pr_state")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string)
+                        })
+                });
+            if merged.as_deref() == Some("merged") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "pr_state never showed merged");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        // Cleanup: released + directory actually removed + audited.
+        let cleaned = client
+            .call(OfficeRequestKind::WorktreeCleanup {
+                worktree_id: worktree_id.clone(),
+            })
+            .expect("cleanup");
+        assert_eq!(cleaned.get("cleaned").and_then(|v| v.as_bool()), Some(true));
+        assert!(!wt_path.exists(), "the directory is gone");
+
+        let store = Store::open(
+            &crate::foundation::paths::database_path(&host.home),
+            office_migrations(),
+        )
+        .expect("store");
+        let audited: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM office_events WHERE kind = 'worktree_cleaned'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("audit");
+        assert!(audited >= 1);
+
+        // A branch whose PR state is unknown (gh fails) is refused.
+        git(
+            &host.dir.path().join("repo"),
+            &[
+                "worktree",
+                "add",
+                host.dir.path().join("wt2").to_str().unwrap(),
+                "-b",
+                "no-pr-branch",
+            ],
+        );
+        crate::git::worktrees::WorktreeService::new(
+            &store,
+            crate::git::worktrees::ProtectedRefs::new(vec![]),
+        )
+        .adopt_existing(
+            &host.dir.path().join("repo"),
+            &host.dir.path().join("wt2"),
+            &crate::foundation::ids::TaskId::from_str(
+                &store
+                    .connection()
+                    .query_row("SELECT task_id FROM task_worktrees LIMIT 1", [], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .expect("task"),
+            )
+            .expect("task id"),
+        )
+        .expect("adopt 2");
+        let wt2 = worktree_id_for(&mut client, "wt2");
+        let err = client
+            .call(OfficeRequestKind::WorktreeCleanup { worktree_id: wt2 })
+            .expect_err("unknown PR state must refuse cleanup");
+        assert!(err.to_string().contains("MERGED"), "{err}");
+
+        // SAFETY: restoring the PATH saved above.
+        unsafe {
+            std::env::set_var("PATH", path_value);
+        }
+        host.shutdown();
+    }
+
+    /// V15-3: the handoff delivers a brief (task goal + departing summary)
+    /// into the new agent's terminal, records it in the task history, and
+    /// leaves the departing terminal running.
+    #[test]
+    fn handoff_moves_a_worktree_between_agents_with_a_brief() {
+        let host = start_host();
+        let home = host.home.clone();
+        // Two fake agents, on PATH: handoff targets are bare command
+        // names by contract.
+        let bin = home.join("agents");
+        std::fs::create_dir_all(&bin).expect("agents dir");
+        let saved_path = std::env::var("PATH").unwrap_or_default();
+        // SAFETY: test-only PATH prepend (fake agent dirs); restored below.
+        unsafe {
+            std::env::set_var("PATH", format!("{}:{saved_path}", bin.display()));
+        }
+        for name in ["fake-a", "fake-b"] {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\necho {name}-up\ncat\n")).expect("write");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod");
+            }
+        }
+        let (_, _wt_path) = seed_repo_worktree(&host, "v15-handoff");
+        let mut client = host.client();
+        let worktree_id = worktree_id_for(&mut client, "wt");
+
+        // Agent A's terminal reports the departing summary.
+        let created = client
+            .call(OfficeRequestKind::TerminalCreate {
+                argv: vec![bin.join("fake-a").display().to_string()],
+                cwd: home.display().to_string(),
+                env: vec![],
+                cols: 80,
+                rows: 24,
+                purpose: "departing agent".into(),
+                worktree_id: Some(worktree_id.clone()),
+                owner: "agent_cli".into(),
+            })
+            .expect("create a");
+        let terminal_a = created
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .expect("terminal id")
+            .to_string();
+        assert!(wait_for_output(&mut client, &terminal_a, "fake-a-up"));
+        let grant = {
+            let store = Store::open(
+                &crate::foundation::paths::database_path(&home),
+                office_migrations(),
+            )
+            .expect("store");
+            crate::authority::AuthorityEngine::new(&store)
+                .issue_root_grant(
+                    None,
+                    None,
+                    vec!["agent_report".into()],
+                    crate::authority::GrantMode::ActAutonomously,
+                    None,
+                )
+                .expect("grant")
+                .grant_id
+                .to_string()
+        };
+        let mut report = new_request(OfficeRequestKind::AgentReport {
+            terminal_id: terminal_a.clone(),
+            agent: "fake-a".into(),
+            status: "blocked".into(),
+            detail: "implemented the parser, tests pending".into(),
+            reset_at: None,
+        });
+        report.grant = Some(grant);
+        client.call_request(report).expect("report");
+
+        // The handoff: worktree → fake-b.
+        let handed = client
+            .call(OfficeRequestKind::AgentHandoff {
+                worktree_id: worktree_id.clone(),
+                to_agent: "fake-b".into(),
+            })
+            .expect("handoff");
+        let terminal_b = handed
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .expect("terminal b")
+            .to_string();
+        assert!(
+            wait_for_output(&mut client, &terminal_b, "handoff】task: v15 seed task"),
+            "the brief reaches the new agent"
+        );
+        assert!(
+            wait_for_output(&mut client, &terminal_b, "implemented the parser"),
+            "the departing summary rides in the brief"
+        );
+
+        // The departing terminal is still there.
+        let list = client.call(OfficeRequestKind::TerminalList).expect("list");
+        assert!(format!("{list}").contains(&terminal_a));
+
+        // The task history carries the handoff.
+        let store = Store::open(
+            &crate::foundation::paths::database_path(&home),
+            office_migrations(),
+        )
+        .expect("store");
+        let handoffs: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM task_results WHERE kind = 'agent_handoff'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("history");
+        assert!(handoffs >= 1, "the handoff is in the task history");
+
+        client
+            .call(OfficeRequestKind::TerminalStop {
+                terminal_id: terminal_a,
+            })
+            .expect("stop a");
+        client
+            .call(OfficeRequestKind::TerminalStop {
+                terminal_id: terminal_b,
+            })
+            .expect("stop b");
+        // SAFETY: restoring the saved PATH.
+        unsafe {
+            std::env::set_var("PATH", saved_path);
+        }
+        host.shutdown();
+    }
+
+    /// V15-4: auto_pull off → nothing moves; on → the main checkout
+    /// fast-forwards and worktrees fetch; behind shows in the view.
+    #[test]
+    fn auto_sync_respects_the_switch_and_never_merges_worktrees() {
+        let host = start_host();
+        let (task_id, _wt) = seed_repo_worktree(&host, "v15-sync");
+
+        // Make origin/main one commit ahead of the main checkout.
+        let repo = host.dir.path().join("repo");
+        let scratch = host.dir.path().join("scratch");
+        git(
+            host.dir.path(),
+            &[
+                "clone",
+                host.dir.path().join("origin.git").to_str().unwrap(),
+                scratch.to_str().unwrap(),
+            ],
+        );
+        // A bare repo's HEAD may point at the platform default (master);
+        // pin the scratch clone onto main explicitly.
+        git(&scratch, &["checkout", "-b", "main", "origin/main"]);
+        std::fs::write(scratch.join("ahead.txt"), "ahead\n").expect("ahead");
+        git(&scratch, &["add", "."]);
+        git(&scratch, &["commit", "-m", "ahead commit"]);
+        git(&scratch, &["push", "origin", "main"]);
+
+        // Put origin's v15-sync one commit ahead of the worktree so the
+        // behind marker has something real to show after the fetch.
+        git(&scratch, &["fetch", "origin", "v15-sync"]);
+        git(&scratch, &["checkout", "-b", "wtshift", "origin/v15-sync"]);
+        std::fs::write(scratch.join("wt-ahead.txt"), "wt ahead\n").expect("wt ahead");
+        git(&scratch, &["add", "."]);
+        git(&scratch, &["commit", "-m", "wt ahead commit"]);
+        git(&scratch, &["push", "origin", "wtshift:v15-sync"]);
+        git(&repo, &["fetch", "origin"]);
+
+        let mut client = host.client();
+
+        // auto_pull defaults OFF: a manual sync now must NOT move main.
+        let before = git_head(&host.home, &repo);
+        client.call(OfficeRequestKind::SyncNow).expect("sync now");
+        assert_eq!(
+            before,
+            git_head(&host.home, &repo),
+            "auto_pull off: main untouched"
+        );
+
+        // Turn it on via the socket (the same surface the workbench uses).
+        client
+            .call(OfficeRequestKind::SetAutoPull { on: true })
+            .expect("enable");
+
+        // Still off→on boundary: the explicit sync now fast-forwards main.
+        client.call(OfficeRequestKind::SyncNow).expect("sync now 2");
+        let after = git_head(&host.home, &repo);
+        assert_ne!(before, after, "auto_pull on: main fast-forwarded");
+
+        // The task worktree fetched (behind visible) but its HEAD never moved.
+        let view = client.call(OfficeRequestKind::WorkbenchView).expect("view");
+        let text = format!("{view}");
+        assert!(
+            text.contains("\"behind\":1") || text.contains("\"behind\": 1"),
+            "behind is displayed: {text}"
+        );
+        let _ = task_id;
+        host.shutdown();
+    }
+
+    fn git_head(home: &std::path::Path, repo: &std::path::Path) -> String {
+        let store = Store::open(
+            &crate::foundation::paths::database_path(home),
+            office_migrations(),
+        )
+        .expect("store");
+        drop(store);
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("rev-parse");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// V15-5: a recovery plan with a near reset_at fires on its own,
+    /// prompts the terminal, and lands in the audit trail.
+    #[test]
+    fn recovery_plan_fires_when_due_and_is_audited() {
+        let host = start_host();
+        let home = host.home.clone();
+        let mut client = host.client();
+        let created = client
+            .call(OfficeRequestKind::TerminalCreate {
+                argv: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "echo recovery-ready; cat".into(),
+                ],
+                cwd: home.display().to_string(),
+                env: vec![],
+                cols: 80,
+                rows: 24,
+                purpose: "rate-limited agent".into(),
+                worktree_id: None,
+                owner: "agent_cli".into(),
+            })
+            .expect("create");
+        let terminal_id = created
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .expect("terminal id")
+            .to_string();
+        assert!(wait_for_output(&mut client, &terminal_id, "recovery-ready"));
+
+        // Schedule via the socket (the same path the CLI uses).
+        client
+            .call(OfficeRequestKind::RecoverySchedule {
+                terminal_id: terminal_id.clone(),
+                reset_at: rfc3339_in(2),
+                task_id: None,
+            })
+            .expect("schedule");
+
+        // The sweep fires within a couple of seconds of the reset.
+        if let Ok(plans) = client.call(OfficeRequestKind::RecoveryList) {
+            eprintln!("DBG plans: {plans}");
+        }
+        assert!(
+            wait_for_output(&mut client, &terminal_id, "continue"),
+            "the recovery prompt must reach the terminal"
+        );
+
+        // Audit + plan state.
+        let store = Store::open(
+            &crate::foundation::paths::database_path(&home),
+            office_migrations(),
+        )
+        .expect("store");
+        let fired: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM recovery_plans WHERE state = 'fired'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("fired");
+        assert!(fired >= 1);
+        let audited: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM office_events WHERE kind = 'recovery_plan_fired'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("audit");
+        assert!(audited >= 1, "firing is audited");
+
+        // Cancel on a non-existent plan is an honest 404.
+        assert!(
+            client
+                .call(OfficeRequestKind::RecoveryCancel { plan_id: 999_999 })
+                .is_err()
+        );
+        host.shutdown();
+    }
+
+    fn rfc3339_in(secs: i64) -> String {
+        let at = time::OffsetDateTime::now_utc() + time::Duration::seconds(secs);
+        at.format(&time::format_description::well_known::Rfc3339)
+            .expect("format")
+    }
+
+    /// V15-5 honesty: rate_limited without a reset_at is refused — the
+    /// office never guesses a recovery time.
+    #[test]
+    fn rate_limited_without_reset_at_is_refused() {
+        let host = start_host();
+        let mut client = host.client();
+        let grant = {
+            let store = Store::open(
+                &crate::foundation::paths::database_path(&host.home),
+                office_migrations(),
+            )
+            .expect("store");
+            crate::authority::AuthorityEngine::new(&store)
+                .issue_root_grant(
+                    None,
+                    None,
+                    vec!["agent_report".into()],
+                    crate::authority::GrantMode::ActAutonomously,
+                    None,
+                )
+                .expect("grant")
+                .grant_id
+                .to_string()
+        };
+        let created = client
+            .call(OfficeRequestKind::TerminalCreate {
+                argv: vec!["/bin/sh".into(), "-c".into(), "cat".into()],
+                cwd: host.home.display().to_string(),
+                env: vec![],
+                cols: 80,
+                rows: 24,
+                purpose: "rate limit probe".into(),
+                worktree_id: None,
+                owner: "agent_cli".into(),
+            })
+            .expect("create");
+        let terminal_id = created
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .expect("terminal id")
+            .to_string();
+        let mut report = new_request(OfficeRequestKind::AgentReport {
+            terminal_id,
+            agent: "codex".into(),
+            status: "rate_limited".into(),
+            detail: "5h limit hit".into(),
+            reset_at: None,
+        });
+        report.grant = Some(grant);
+        let err = client.call_request(report).expect_err("must refuse");
+        assert!(err.to_string().contains("reset_at"), "{err}");
+        host.shutdown();
+    }
+
+    /// V15-5 restart semantics: a plan whose reset_at passed while no host
+    /// was running is marked expired on startup and NOT executed blindly.
+    #[test]
+    fn overdue_plans_expire_on_restart_without_executing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        {
+            let store = Store::open(
+                &crate::foundation::paths::database_path(&home),
+                office_migrations(),
+            )
+            .expect("store");
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO recovery_plans(terminal_id, task_id, reset_at, action, state, created_at)
+                     VALUES ('term-gone', NULL, '2026-01-01T00:00:00Z', 'resume_prompt', 'scheduled', ?1)",
+                    [utc_now()],
+                )
+                .expect("seed overdue plan");
+        }
+        let host = OfficeHost::open(&home).expect("host");
+        {
+            let shared = host.shared();
+            let store = shared.store.lock().expect("store");
+            let state: String = store
+                .connection()
+                .query_row(
+                    "SELECT state FROM recovery_plans WHERE terminal_id = 'term-gone'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("plan");
+            assert_eq!(state, "expired", "overdue plans expire, never execute");
+            let note: String = store
+                .connection()
+                .query_row(
+                    "SELECT detail FROM office_recovery_events
+                     WHERE kind = 'recovery_plan_expired' ORDER BY seq DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("recovery note");
+            assert!(note.contains("expired"), "{note}");
+        }
+        drop(host);
+        drop(dir);
     }
 }
