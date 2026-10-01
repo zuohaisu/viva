@@ -336,9 +336,11 @@ mod tests {
     }
 
     #[test]
-    fn process_tree_identifies_known_agents_without_claiming_state() {
-        // This test process is the "session root"; the real detection walks
-        // children. Here: an unknown tree yields None (no agent).
+    fn process_tree_returns_none_for_an_unknown_tree() {
+        // A pid with no children and no agent-like command line yields
+        // None: identification names agents, and unknown stays unknown.
+        // (The real identification path is exercised by the office S4
+        // integration test with a fake `codex` executable.)
         let identified = identify_by_process_tree(None).expect("ps runs");
         assert_eq!(identified, None);
     }

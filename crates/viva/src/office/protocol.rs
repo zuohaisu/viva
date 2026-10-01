@@ -112,6 +112,13 @@ pub enum OfficeRequestKind {
     WorkbenchView,
     /// The real bounded diff of one worktree against HEAD.
     WorkbenchDiff { worktree_id: String },
+    /// The workbench pane-layout preference (issue #43 AC2, QA F5):
+    /// `Some` saves the serialized layout, `None` returns the saved JSON
+    /// (null when none was saved). A UI preference, not an office fact.
+    WorkbenchLayout {
+        #[serde(default)]
+        layout_json: Option<String>,
+    },
     /// Open an interactive shell at a worktree's path (the workbench
     /// "open" action). The terminal is a user_shell owned by the server,
     /// attached to the worktree.

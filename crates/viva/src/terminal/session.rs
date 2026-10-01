@@ -578,11 +578,36 @@ impl TerminalHandle {
                     core.escalated = true;
                 }
                 self.signal_group(signal::SIGKILL);
+                // BOUNDED confirmation (issue #45 QA F8): an unreapable
+                // process (zombie whose parent never waits, D-state) must
+                // never block stop()/shutdown forever. Past the deadline the
+                // conclusion is recorded honestly: the kill was delivered,
+                // the STATUS is unobservable (code None) — idempotent like
+                // every other stop.
+                let kill_deadline = Instant::now() + Duration::from_secs(5);
                 loop {
                     if let Some(exit) = self.try_wait()? {
                         if let Some(log) = &self.disk_log {
                             log.finish();
                         }
+                        return Ok(exit);
+                    }
+                    if Instant::now() >= kill_deadline {
+                        if let Some(log) = &self.disk_log {
+                            log.finish();
+                        }
+                        let mut core = self.shared.core.lock().expect("session core");
+                        if let SessionState::Exited(exit) = core.state.clone() {
+                            return Ok(exit);
+                        }
+                        let exit = TerminalExit {
+                            code: None,
+                            signal: None,
+                            via: ExitVia::ForcedKill,
+                        };
+                        core.state = SessionState::Exited(exit.clone());
+                        core.child = None;
+                        core.adopted_pid = None;
                         return Ok(exit);
                     }
                     std::thread::sleep(Duration::from_millis(20));
@@ -609,6 +634,31 @@ impl TerminalHandle {
         {
             let _ = sig;
         }
+    }
+
+    /// Restart this server's reader after a failed handoff detachment
+    /// (issue #45 QA F3): the detachment must not leave the host "alive but
+    /// blind". Fails when the previous reader never confirmed exit - the
+    /// caller records the terminal as degraded (input works, output frozen
+    /// until restart) instead of pretending.
+    pub fn reattach_reader(&self) -> OfficeResult<()> {
+        if !self.shared.reader_gone.load(Ordering::SeqCst) {
+            return Err(OfficeError::Validation(
+                "the detached reader never confirmed exit; reattaching would race it".into(),
+            ));
+        }
+        let master_guard = self.master.lock().expect("pty master");
+        let Some(master) = master_guard.as_ref() else {
+            return Err(OfficeError::Validation(
+                "the session has no live master fd to read".into(),
+            ));
+        };
+        let reader_fd = master.dup()?;
+        drop(master_guard);
+        self.shared.reader_detached.store(false, Ordering::SeqCst);
+        self.shared.reader_gone.store(false, Ordering::SeqCst);
+        spawn_reader(&self.shared, reader_fd, self.disk_log.clone());
+        Ok(())
     }
 
     /// Stop this server's reader for the session (live-handoff step): blocks
@@ -700,6 +750,29 @@ fn spawn_reader(
     });
 }
 
+/// Zombie-aware liveness for an adopted session's pid (issue #45 QA F8).
+/// `waitpid(WNOHANG)` reaps when we are the parent; ECHILD (not our child)
+/// falls back to `kill(pid, 0)` — there a still-unreaped zombie of ANOTHER
+/// parent reads as alive, which is bounded by stop()'s deadline instead of
+/// spinning forever here.
+fn adopted_pid_alive(pid: u32) -> bool {
+    // SAFETY: waitpid with WNOHANG and a null status out-param.
+    let reaped = unsafe { libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), libc::WNOHANG) };
+    if reaped == pid as libc::pid_t {
+        return false; // we just reaped it: it exited
+    }
+    if reaped < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ECHILD) {
+            // Not our child.
+            return unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+        }
+        // EINTR or unknown: conservatively alive (the caller's deadline bounds this).
+        return true;
+    }
+    true // 0: running, not yet exited
+}
+
 /// Reap the child if it has exited. Called ONLY with the core lock held
 /// and ONLY across non-blocking work. Attribution: a reap after escalation
 /// is the forced kill's conclusion; after a stop request (pre-escalation)
@@ -709,9 +782,13 @@ fn reap_under_lock(core: &mut SessionCore) -> OfficeResult<Option<TerminalExit>>
         return Ok(Some(exit));
     }
     if let Some(pid) = core.adopted_pid {
-        // Adopted (handoff) session: not our child — liveness via
-        // kill(pid, 0); the exit STATUS is unobservable and never guessed.
-        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+        // Adopted (handoff) session: the exit STATUS is unobservable and
+        // never guessed. Liveness (issue #45 QA F8) must be ZOMBIE-AWARE:
+        // kill(pid, 0) reports an unreaped zombie as alive, which once hung
+        // stop() forever. First try waitpid(WNOHANG) — when this process IS
+        // the parent (the common handoff-into-a-thread case) it reaps the
+        // zombie outright; only otherwise fall back to kill(pid, 0).
+        let alive = adopted_pid_alive(pid);
         if alive {
             return Ok(None);
         }
@@ -808,4 +885,76 @@ fn signal_name(number: i32) -> String {
 mod signal {
     pub const SIGTERM: i32 = 15;
     pub const SIGKILL: i32 = 9;
+}
+
+#[cfg(test)]
+mod zombie_adoption_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// QA F8 regression (issue #45): an adopted session whose child is an
+    /// UNREAPED ZOMBIE must still stop within a bounded time. Before the
+    /// fix, kill(pid, 0) saw the zombie as alive and stop() spun forever -
+    /// this hung the CI run for 3h15m.
+    #[test]
+    fn stop_on_a_zombie_adopted_session_returns_bounded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A real child spawned by THIS process, killed and left unreaped:
+        // exactly the zombie the old host's given-up reaper leaves behind.
+        let spec = TerminalSpec::new(
+            vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()],
+            dir.path().to_path_buf(),
+        )
+        .expect("spec");
+        let (master, slave_fd) = OwnedMaster::open(&spec).expect("pty");
+        let child = crate::terminal::pty::spawn_child(&spec, slave_fd).expect("child");
+        let pid = child.id();
+        // Move the Child handle somewhere nothing reaps it (the old host's
+        // reaper already gave up in the incident).
+        std::thread::spawn(move || {
+            let child = child;
+            std::thread::sleep(Duration::from_secs(120));
+            drop(child);
+        });
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+        // Give the kernel a moment to turn the child into a zombie.
+        std::thread::sleep(Duration::from_millis(150));
+
+        // Adopt the zombie pid on a fresh master (the transferred fd).
+        let master_fd = master.dup().expect("dup");
+        let handle = TerminalHandle::adopt(
+            master_fd,
+            pid,
+            format!("pid={pid:?} argv0=/bin/sh spawned_at=adopted"),
+            80,
+            24,
+            vec![],
+            None,
+        )
+        .expect("adopt");
+
+        // stop() must return - bounded, from a thread so a regression
+        // fails the test instead of hanging the suite.
+        let (tx, rx) = mpsc::channel();
+        let stopper = std::thread::spawn(move || {
+            let outcome = handle.stop(StopPolicy {
+                graceful_timeout: Duration::from_millis(200),
+            });
+            let _ = tx.send(outcome);
+        });
+        let exit = rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("stop() must return within 15s on a zombie adopted session")
+            .expect("stop succeeds");
+        stopper.join().expect("stopper joins");
+        assert!(
+            matches!(exit.via, ExitVia::GracefulStop | ExitVia::ForcedKill),
+            "an honest conclusion, got {exit:?}"
+        );
+        drop(master);
+        drop(dir);
+    }
 }

@@ -18,13 +18,13 @@ pub const MAX_PANES: usize = 9;
 
 /// What one leaf shows. The browser is unique in practice (the app only
 /// ever creates one), terminals are unique by id.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PaneContent {
     Browser,
     Terminal(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SplitAxis {
     /// Left | right.
     Horizontal,
@@ -42,7 +42,7 @@ pub enum Direction {
 
 /// First/second split ratio as a percentage for the FIRST child
 /// (10..=90), so a user can never squeeze a pane to zero.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PaneNode {
     Leaf(PaneContent),
     Split {
@@ -193,6 +193,26 @@ impl PaneNode {
         }
     }
 
+    /// Drop terminal leaves whose id is no longer live (an attach after a
+    /// restart may find fewer sessions). Uses [`Self::close`], so every
+    /// removal collapses its split to the surviving sibling and the tree
+    /// can never empty past the root browser. Returns how many leaves were
+    /// pruned.
+    pub fn prune_dead_terminals(&mut self, live: &std::collections::HashSet<String>) -> usize {
+        let dead: Vec<PaneContent> = self
+            .leaves()
+            .into_iter()
+            .filter(|content| matches!(content, PaneContent::Terminal(id) if !live.contains(id)))
+            .collect();
+        let mut pruned = 0;
+        for content in dead {
+            if self.close(&content).is_some() {
+                pruned += 1;
+            }
+        }
+        pruned
+    }
+
     /// The geometric neighbor of the focused leaf in `direction`: among all
     /// leaves whose rect touches the focused rect across that direction's
     /// edge, the one with the largest overlap along the shared edge wins.
@@ -340,6 +360,32 @@ mod tests {
             tree.neighbor(a, &term("t2"), Direction::Left),
             Some(PaneContent::Browser)
         );
+    }
+
+    #[test]
+    fn prune_degrades_dead_terminals_and_collapses_browsers() {
+        let mut tree = sample_tree(); // browser | (t1 / t2)
+        // t1 dies; t2 survives: t1's split collapses to t2, leaving
+        // browser | t2.
+        let live: std::collections::HashSet<String> = ["t2".to_string()].into();
+        assert_eq!(tree.prune_dead_terminals(&live), 1);
+        assert_eq!(tree.leaves(), vec![PaneContent::Browser, term("t2")]);
+        // Everything terminal dead: the tree degrades to a single browser
+        // (the root leaf is irremovable).
+        let mut tree2 = sample_tree();
+        assert_eq!(
+            tree2.prune_dead_terminals(&std::collections::HashSet::new()),
+            2
+        );
+        assert_eq!(tree2.leaves(), vec![PaneContent::Browser]);
+    }
+
+    #[test]
+    fn layout_tree_survives_a_json_round_trip() {
+        let tree = sample_tree();
+        let json = serde_json::to_string(&tree).expect("serialize");
+        let back: PaneNode = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, tree);
     }
 
     #[test]

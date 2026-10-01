@@ -12,7 +12,7 @@
 //! children untouched: exactly the type-1 fallback semantics, with zero
 //! interruption.
 
-use std::io::{BufRead as _, Read as _, Write as _};
+use std::io::Write as _;
 use std::os::fd::RawFd;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
@@ -75,11 +75,11 @@ pub fn send_entries(
     for fd in fds {
         send_one_fd(stream, *fd)?;
     }
-    // The receiver acks and closes; a half-close after the ack line is
-    // normal, so read errors past the ack are not transfer failures.
+    // The ack is one line; read it newline-bounded (the receiver may keep
+    // the socket open). Read errors past a complete line are not failures.
     let mut ack = String::new();
-    let mut reader = stream.try_clone()?;
-    let _ = reader.read_to_string(&mut ack);
+    let mut reader = std::io::BufReader::new(stream.try_clone()?);
+    let _ = std::io::BufRead::read_line(&mut reader, &mut ack);
     if !ack.contains("\"ok\":true") && !ack.contains("\"ok\": true") {
         return Err(OfficeError::Validation(format!(
             "handoff receiver did not ack: {}",
@@ -91,35 +91,112 @@ pub fn send_entries(
 
 /// Read the manifest and the per-entry fds from the CONNECTED handoff
 /// stream, then ack. The receiver owns the received fds from that point on.
+///
+/// Implementation note (the Linux CI hang, issue #45 QA round 1): the
+/// manifest and the fd messages MAY coalesce into one socket segment, and
+/// a buffered reader that receives WITHOUT a control buffer makes the
+/// kernel DISCARD the passed fds. So this side receives with raw recvmsg
+/// and a control buffer on EVERY call, collecting fds per segment and
+/// parsing the manifest from the byte stream - coalescing then cannot
+/// lose anything.
 pub fn receive_entries(stream: &UnixStream) -> OfficeResult<(HandoffManifest, Vec<RawFd>)> {
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
-    let mut stream = stream.try_clone()?;
-    let mut line = String::new();
+    // SAFETY: every recvmsg below targets our own connected fd with valid
+    // iov + control buffers; cmsg walking uses the kernel-provided lengths.
+    #[cfg(unix)]
+    unsafe {
+        use std::os::fd::AsRawFd as _;
+        let fd = stream.as_raw_fd();
+        let mut data: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 8192];
+        let ctl_space = libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) as usize * 8;
+        let mut ctl = vec![0u8; ctl_space];
+        let mut received_fds: Vec<RawFd> = Vec::new();
+        let mut manifest: Option<HandoffManifest> = None;
+        let outcome = loop {
+            let mut iov = libc::iovec {
+                iov_base: chunk.as_mut_ptr().cast(),
+                iov_len: chunk.len(),
+            };
+            let mut msg: libc::msghdr = std::mem::zeroed();
+            msg.msg_iov = &mut iov;
+            msg.msg_iovlen = 1;
+            msg.msg_control = ctl.as_mut_ptr().cast();
+            msg.msg_controllen = ctl.len() as _;
+            let n = libc::recvmsg(fd, &mut msg, 0);
+            if msg.msg_controllen as usize >= libc::CMSG_LEN(0) as usize {
+                let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
+                while !cmsg.is_null() {
+                    if (*cmsg).cmsg_level == libc::SOL_SOCKET
+                        && (*cmsg).cmsg_type == libc::SCM_RIGHTS
+                    {
+                        let count = ((*cmsg).cmsg_len as usize - libc::CMSG_LEN(0) as usize)
+                            / std::mem::size_of::<RawFd>();
+                        let base = libc::CMSG_DATA(cmsg).cast::<RawFd>();
+                        for i in 0..count {
+                            received_fds.push(*base.add(i));
+                        }
+                    }
+                    cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
+                }
+            }
+            if n < 0 {
+                break Err(OfficeError::Io(std::io::Error::last_os_error()));
+            }
+            let n = n as usize;
+            data.extend_from_slice(&chunk[..n]);
+            if manifest.is_none() {
+                if let Some(pos) = data.iter().position(|b| *b == b'\n') {
+                    let line: Vec<u8> = data.drain(..=pos).collect();
+                    match serde_json::from_slice::<HandoffManifest>(&line[..line.len() - 1]) {
+                        Ok(parsed) => {
+                            if parsed.protocol != HANDOFF_PROTOCOL {
+                                break Err(OfficeError::Validation(format!(
+                                    "handoff protocol {} (expected {HANDOFF_PROTOCOL})",
+                                    parsed.protocol
+                                )));
+                            }
+                            manifest = Some(parsed);
+                        }
+                        Err(e) => {
+                            break Err(OfficeError::Validation(format!(
+                                "bad handoff manifest: {e}"
+                            )));
+                        }
+                    }
+                }
+            }
+            if let Some(parsed) = &manifest {
+                if received_fds.len() >= parsed.entries.len() {
+                    break Ok((parsed.clone(), std::mem::take(&mut received_fds)));
+                }
+            }
+            if n == 0 {
+                break Err(OfficeError::Validation(
+                    "handoff stream closed before all fds arrived".into(),
+                ));
+            }
+        };
+        // On any failure the already-received fds are ours to close.
+        if outcome.is_err() {
+            for fd in received_fds {
+                libc::close(fd);
+            }
+            return outcome;
+        }
+        // Ack ONLY after every fd is in: the sender keeps its own fd
+        // references until it sees this line.
+        let mut writer = stream.try_clone()?;
+        let _ = writer.write_all(b"{\"ok\":true}\n");
+        let _ = writer.flush();
+        outcome
+    }
+    #[cfg(not(unix))]
     {
-        let mut reader = std::io::BufReader::new(stream.try_clone()?);
-        reader.read_line(&mut line)?;
+        let _ = stream;
+        Err(OfficeError::Validation("fd passing requires unix".into()))
     }
-    if line.trim().len() > crate::office::MAX_MESSAGE_BYTES {
-        return Err(OfficeError::Validation(
-            "handoff manifest over the size bound".into(),
-        ));
-    }
-    let manifest: HandoffManifest = serde_json::from_str(line.trim())
-        .map_err(|e| OfficeError::Validation(format!("bad handoff manifest: {e}")))?;
-    if manifest.protocol != HANDOFF_PROTOCOL {
-        return Err(OfficeError::Validation(format!(
-            "handoff protocol {} (expected {HANDOFF_PROTOCOL})",
-            manifest.protocol
-        )));
-    }
-    let mut fds = Vec::new();
-    for _ in &manifest.entries {
-        fds.push(receive_one_fd(&stream)?);
-    }
-    stream.write_all(b"{\"ok\":true}\n")?;
-    stream.flush()?;
-    Ok((manifest, fds))
 }
 
 /// Send one fd over the stream via SCM_RIGHTS.
@@ -158,59 +235,18 @@ fn send_one_fd(stream: &UnixStream, fd: RawFd) -> OfficeResult<()> {
     }
 }
 
-/// Receive one fd sent via SCM_RIGHTS. The received fd is owned by the
-/// caller (and carries no close-on-exec flag).
-fn receive_one_fd(stream: &UnixStream) -> OfficeResult<RawFd> {
-    #[cfg(unix)]
-    unsafe {
-        use std::os::fd::AsRawFd as _;
-        let mut dummy = [0u8; 1];
-        let mut iov = libc::iovec {
-            iov_base: dummy.as_mut_ptr().cast(),
-            iov_len: 1,
-        };
-        let space = libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) as usize;
-        let mut cmsg_buf = vec![0u8; space];
-        let mut msg: libc::msghdr = std::mem::zeroed();
-        msg.msg_iov = &mut iov;
-        msg.msg_iovlen = 1;
-        msg.msg_control = cmsg_buf.as_mut_ptr().cast();
-        msg.msg_controllen = space as _;
-        let n = libc::recvmsg(stream.as_raw_fd(), &mut msg, 0);
-        if n < 0 {
-            return Err(OfficeError::Io(std::io::Error::last_os_error()));
-        }
-        if msg.msg_controllen == 0 {
-            return Err(OfficeError::Validation(
-                "handoff fd message carried no control data".into(),
-            ));
-        }
-        let cmsg = cmsg_buf.as_mut_ptr() as *mut libc::cmsghdr;
-        if (*cmsg).cmsg_level != libc::SOL_SOCKET || (*cmsg).cmsg_type != libc::SCM_RIGHTS {
-            return Err(OfficeError::Validation(
-                "handoff control message was not SCM_RIGHTS".into(),
-            ));
-        }
-        let data = libc::CMSG_DATA(cmsg).cast::<RawFd>();
-        Ok(*data)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = stream;
-        Err(OfficeError::Validation("fd passing requires unix".into()))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::fd::AsRawFd as _;
 
-    /// Round trip: a written byte travels through a received duplicate of
-    /// the same file description.
+    /// Round trip through the REAL protocol: send_entries delivers a
+    /// manifest + one fd; receive_entries recovers both — including the
+    /// Linux coalescing case (manifest and fd message in one segment),
+    /// which is exactly what the CI hang was made of.
     #[test]
-    fn fd_passing_transfers_an_open_description() {
-        let (a, b) = UnixStream::pair().expect("pair");
+    fn entries_round_trip_through_the_real_protocol() {
+        let (client_side, server_side) = UnixStream::pair().expect("pair");
         let dir = tempfile::tempdir().expect("dir");
         let path = dir.path().join("probe");
         let file = std::fs::OpenOptions::new()
@@ -220,15 +256,41 @@ mod tests {
             .truncate(true)
             .open(&path)
             .expect("open");
-        let fd = file.as_raw_fd();
-        send_one_fd(&a, fd).expect("send");
-        let received = receive_one_fd(&b).expect("recv");
-        // The received fd is a fresh reference: own it and use it.
-        let mut file = unsafe { std::fs::File::from_raw_fd(received) };
+        let manifest = HandoffManifest {
+            protocol: HANDOFF_PROTOCOL,
+            host_id: "host-test".into(),
+            entries: vec![HandoffEntry {
+                terminal_id: "term-test".into(),
+                owner: "user_shell".into(),
+                worktree_id: None,
+                purpose: "probe".into(),
+                pid: 1,
+                pid_start_marker: "pid=1".into(),
+                cols: 80,
+                rows: 24,
+                history: vec!["old line".into()],
+            }],
+        };
+        let fds = [file.as_raw_fd()];
+        let sender = std::thread::spawn({
+            let mut client_side = client_side;
+            let manifest = manifest.clone();
+            move || send_entries(&mut client_side, &manifest, &fds).expect("send")
+        });
+        let (received_manifest, received_fds) = {
+            let outcome = receive_entries(&server_side).expect("receive");
+            drop(server_side); // done receiving; the sender may see EOF past the ack
+            outcome
+        };
+        sender.join().expect("sender");
+        assert_eq!(received_manifest, manifest);
+        assert_eq!(received_fds.len(), 1);
+        // The received fd is a live reference to the same file description.
+        let mut file: std::fs::File =
+            unsafe { std::os::fd::FromRawFd::from_raw_fd(received_fds[0]) };
         file.write_all(b"probe-write")
             .expect("write via received fd");
         drop(file);
-        let content = std::fs::read(&path).expect("read");
-        assert_eq!(content, b"probe-write");
+        assert_eq!(std::fs::read(&path).expect("read"), b"probe-write");
     }
 }

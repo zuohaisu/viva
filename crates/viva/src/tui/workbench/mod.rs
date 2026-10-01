@@ -176,6 +176,9 @@ pub struct WorkbenchApp {
     diff_view: Option<String>,
     status_line: String,
     quit_requested: bool,
+    /// Set by every pane-tree mutation; the run loop persists the layout
+    /// to the server (QA F5) when it sees the flag.
+    layout_dirty: bool,
 }
 
 impl WorkbenchApp {
@@ -192,6 +195,7 @@ impl WorkbenchApp {
             diff_view: None,
             status_line: "Ctrl+arrows panes · | - split · x close · z zoom · o open · w worktree · 1-4 lists · Enter terminal · q detach".into(),
             quit_requested: false,
+            layout_dirty: false,
         }
     }
 
@@ -249,6 +253,43 @@ impl WorkbenchApp {
         self.zoomed
     }
 
+    pub fn layout_dirty(&self) -> bool {
+        self.layout_dirty
+    }
+
+    pub fn clear_layout_dirty(&mut self) {
+        self.layout_dirty = false;
+    }
+
+    /// The persisted layout payload: the pane tree plus the focused pane.
+    pub fn serialize_layout(&self) -> String {
+        serde_json::json!({ "grid": self.grid, "focus": self.pane_focus }).to_string()
+    }
+
+    /// Rebuild the pane tree from a saved layout (QA F5): terminal leaves
+    /// whose session is gone are pruned, and the focus falls back to the
+    /// browser unless it survived. Never fails — a broken layout degrades
+    /// to the default view.
+    pub fn restore_layout(&mut self, json: &str, live: &std::collections::HashSet<String>) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+            return;
+        };
+        let Ok(mut grid) =
+            serde_json::from_value::<PaneNode>(value.get("grid").cloned().unwrap_or_default())
+        else {
+            return;
+        };
+        grid.prune_dead_terminals(live);
+        self.grid = grid;
+        let leaves = self.grid.leaves();
+        self.pane_focus = value
+            .get("focus")
+            .and_then(|focus| serde_json::from_value::<PaneContent>(focus.clone()).ok())
+            .filter(|focus| leaves.contains(focus))
+            .unwrap_or(PaneContent::Browser);
+        self.layout_dirty = false;
+    }
+
     /// Move pane focus geometrically (Ctrl+Arrows in the keymap).
     pub fn move_pane_focus(&mut self, direction: Direction) -> bool {
         match self
@@ -279,6 +320,7 @@ impl WorkbenchApp {
     /// first terminal pane, or split one off when none exists. From a
     /// terminal pane: retarget it.
     pub fn attach_terminal(&mut self, terminal_id: String) {
+        self.layout_dirty = true;
         let content = PaneContent::Terminal(terminal_id);
         match self.pane_focus.clone() {
             PaneContent::Browser => {
@@ -312,6 +354,7 @@ impl WorkbenchApp {
     /// Split the focused pane and put a new terminal in the new leaf.
     /// Returns false (with a status message) at the pane cap.
     pub fn split_pane(&mut self, axis: SplitAxis, terminal_id: String) -> bool {
+        self.layout_dirty = true;
         let content = PaneContent::Terminal(terminal_id);
         if self.grid.split(&self.pane_focus, axis, content.clone()) {
             self.pane_focus = content;
@@ -329,6 +372,7 @@ impl WorkbenchApp {
     /// server — closing is a view operation, never a stop.
     pub fn close_pane(&mut self) {
         if let PaneContent::Terminal(id) = self.pane_focus.clone() {
+            self.layout_dirty = true;
             if let Some(removed) = self.grid.close(&PaneContent::Terminal(id)) {
                 if let PaneContent::Terminal(removed_id) = removed {
                     self.snapshots.remove(&removed_id);
@@ -1219,6 +1263,28 @@ fn run_client_inner(client: &mut crate::office::OfficeClient) -> OfficeResult<()
         .map_err(|e| crate::foundation::OfficeError::Io(std::io::Error::other(e.to_string())))?;
 
     let mut app = WorkbenchApp::new();
+    // First facts, then the saved layout (QA F5): attach rebuilds the same
+    // pane view, pruned to the terminals that still exist.
+    match client.call(crate::office::OfficeRequestKind::WorkbenchView) {
+        Ok(value) => {
+            if let Ok(model) = serde_json::from_value::<WorkbenchModel>(value) {
+                let live: std::collections::HashSet<String> = model
+                    .terminals
+                    .iter()
+                    .map(|terminal| terminal.terminal_id.clone())
+                    .collect();
+                app.set_model(model);
+                if let Ok(value) = client
+                    .call(crate::office::OfficeRequestKind::WorkbenchLayout { layout_json: None })
+                {
+                    if let Some(json) = value.get("layout").and_then(|layout| layout.as_str()) {
+                        app.restore_layout(json, &live);
+                    }
+                }
+            }
+        }
+        Err(err) => app.set_status(format!("server error: {err}")),
+    }
     loop {
         // Refresh from the server projection (never inside draw).
         match client.call(crate::office::OfficeRequestKind::WorkbenchView) {
@@ -1278,6 +1344,18 @@ fn run_client_inner(client: &mut crate::office::OfficeClient) -> OfficeResult<()
                 }
             }
             KeyOutcome::Handled | KeyOutcome::Ignored => {}
+        }
+        // Persist pane-tree changes so the next attach restores them.
+        if app.layout_dirty() {
+            let payload = app.serialize_layout();
+            if client
+                .call(crate::office::OfficeRequestKind::WorkbenchLayout {
+                    layout_json: Some(payload),
+                })
+                .is_ok()
+            {
+                app.clear_layout_dirty();
+            }
         }
     }
     Ok(())

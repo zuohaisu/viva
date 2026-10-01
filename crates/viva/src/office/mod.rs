@@ -39,6 +39,7 @@ pub use protocol::{
     new_request, read_message, round_trip, with_grant, write_message,
 };
 
+use std::os::fd::RawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
@@ -718,6 +719,9 @@ fn handle_request(
         } => terminal_resize(&shared, terminal_id, *cols, *rows),
         OfficeRequestKind::WorkbenchView => workbench_view(&shared),
         OfficeRequestKind::WorkbenchDiff { worktree_id } => workbench_diff(&shared, worktree_id),
+        OfficeRequestKind::WorkbenchLayout { layout_json } => {
+            workbench_layout(&shared, layout_json.as_deref())
+        }
         OfficeRequestKind::TerminalOpenInWorktree { worktree_id } => {
             terminal_open_in_worktree(&shared, worktree_id)
         }
@@ -1043,6 +1047,47 @@ fn workbench_view(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
     serde_json::to_value(&model).map_err(|e| OfficeError::Validation(format!("view: {e}")))
 }
 
+/// The pane-layout preference store (QA F5): the client persists its pane
+/// tree so a later attach rebuilds the same view. A UI preference in
+/// office_settings - bounded, validated as JSON, never an office fact.
+fn workbench_layout(
+    shared: &OfficeShared,
+    layout_json: Option<&str>,
+) -> OfficeResult<serde_json::Value> {
+    let store = shared.store.lock().expect("office store");
+    match layout_json {
+        Some(json) => {
+            if json.len() > 64 * 1024 {
+                return Err(OfficeError::Validation(
+                    "layout exceeds the 64 KiB bound".into(),
+                ));
+            }
+            // Must parse: a layout the client cannot restore is junk.
+            serde_json::from_str::<serde_json::Value>(json)
+                .map_err(|e| OfficeError::Validation(format!("layout is not valid JSON: {e}")))?;
+            store.connection().execute(
+                "INSERT INTO office_settings(key, value) VALUES ('workbench_layout', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [json],
+            )?;
+            Ok(serde_json::json!({ "saved": true }))
+        }
+        None => {
+            let saved: Option<String> = store
+                .connection()
+                .query_row(
+                    "SELECT value FROM office_settings WHERE key = 'workbench_layout'",
+                    [],
+                    |row| row.get(0),
+                )
+                .ok();
+            Ok(serde_json::json!({ "layout": saved }))
+        }
+    }
+}
+
+/// The real bounded diff of one worktree against HEAD (served over the
+/// socket for the workbench `d` action).
 fn workbench_diff(shared: &OfficeShared, worktree_id: &str) -> OfficeResult<serde_json::Value> {
     let worktree_id = WorktreeId::from_str(worktree_id)?;
     let store = shared.store.lock().expect("office store");
@@ -1524,6 +1569,31 @@ fn pause_server(shared: &OfficeShared, paused: bool) -> OfficeResult<serde_json:
     }))
 }
 
+/// The maintenance gate (S6, issue #48 QA F4): bounded maintenance windows
+/// run only when the office is not explicitly paused. Reads the PERSISTED
+/// pause, so the gate holds even with no live host - the pause itself
+/// persists, and this keeps "pause stops new dispatch AND maintenance
+/// cycles" true end to end.
+pub fn assert_maintenance_allowed(store: &Store) -> OfficeResult<()> {
+    let paused: bool = store
+        .connection()
+        .query_row(
+            "SELECT value FROM office_settings WHERE key = 'paused'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .map(|value| value == "true")
+        .unwrap_or(false);
+    if paused {
+        return Err(OfficeError::Validation(
+            "office is paused: maintenance windows are gated (running executions are \
+             unaffected; `viva resume` lifts the pause)"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Apply the close-policy hook at shutdown time. `pause` persists the
 /// paused state so the NEXT server starts paused; `continue` explicitly
 /// clears any pause; `None` (an unadorned shutdown) leaves the CURRENT
@@ -1588,9 +1658,10 @@ fn perform_handoff(
     listener: UnixListener,
     handoff_path: std::path::PathBuf,
 ) {
-    let outcome = (|| -> OfficeResult<usize> {
-        // Collect BEFORE accepting so the sender-side snapshot is one
-        // consistent set.
+    // Collect BEFORE accepting so the sender-side snapshot is one
+    // consistent set. Hoisted: the failure branch needs `entries` to put
+    // every reader back.
+    let collect = (|| -> OfficeResult<(Vec<HandoffEntry>, Vec<RawFd>)> {
         let mut entries = Vec::new();
         let mut fds = Vec::new();
         for entry in shared.terminals.list() {
@@ -1619,7 +1690,26 @@ fn perform_handoff(
             });
             fds.push(fd);
         }
-
+        Ok((entries, fds))
+    })();
+    let (entries, fds) = match collect {
+        Ok(pair) => pair,
+        Err(err) => {
+            let store = shared.store.lock().expect("office store");
+            let _ = record_recovery(
+                &store,
+                &shared.host_id,
+                "live_handoff_failed",
+                &format!(
+                    "the transfer never started ({err}); this host keeps serving every \
+                     terminal — no process touched"
+                ),
+            );
+            let _ = std::fs::remove_file(&handoff_path);
+            return;
+        }
+    };
+    let outcome = (|| -> OfficeResult<usize> {
         // Stop OUR readers first: two readers on one master would split
         // the child's bytes between the old and the new server. The ack is
         // sent only after every old reader has exited.
@@ -1702,14 +1792,41 @@ fn perform_handoff(
             shared.stopping.store(true, Ordering::SeqCst);
         }
         Err(err) => {
+            // Put every reader back FIRST (issue #45 QA F3): a failed
+            // transfer must leave this host exactly as it was — serving,
+            // with live output. A reader that cannot return names its
+            // terminal as degraded (input works, output frozen until
+            // restart) instead of pretending.
+            for entry in &entries {
+                let Ok(terminal_id) = TerminalId::from_str(&entry.terminal_id) else {
+                    continue;
+                };
+                if let Ok(Some(handle)) = shared.terminals.handle(&terminal_id) {
+                    if let Err(reattach_err) = handle.reattach_reader() {
+                        let store = shared.store.lock().expect("office store");
+                        let _ = record_recovery(
+                            &store,
+                            &shared.host_id,
+                            "live_handoff_reader_lost",
+                            &format!(
+                                "terminal `{}` could not reattach its output reader \
+                                 ({reattach_err}); input still reaches the child but new \
+                                 output is not captured until the server restarts",
+                                entry.terminal_id
+                            ),
+                        );
+                    }
+                }
+            }
             let store = shared.store.lock().expect("office store");
             let _ = record_recovery(
                 &store,
                 &shared.host_id,
                 "live_handoff_failed",
                 &format!(
-                    "the transfer did not complete ({err}); this host continues serving \
-                     every terminal — the type-1 fallback, no process touched"
+                    "the transfer did not complete ({err}); readers were reattached and \
+                     this host keeps serving every terminal — the type-1 fallback, no \
+                     process touched"
                 ),
             );
             let _ = std::fs::remove_file(&handoff_path);
@@ -2959,7 +3076,19 @@ mod s3_handoff_tests {
         let resume_thread = std::thread::spawn(move || resume_server(&resume_home));
 
         // The old host transfers, then exits gracefully WITHOUT stopping
-        // the terminal.
+        // the terminal. BOUNDED wait: a failed transfer leaves the host
+        // serving by design - the test must fail fast, never hang.
+        {
+            let deadline = Instant::now() + Duration::from_secs(45);
+            while socket.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            assert!(
+                !socket.exists(),
+                "the old host never released the control socket within 45s - \
+                 the handoff failed; see the live_handoff_failed recovery record"
+            );
+        }
         server.join().expect("old host exits cleanly");
 
         // The resumed host answers on the same control socket.
@@ -3025,10 +3154,152 @@ mod s3_handoff_tests {
         client2
             .call(OfficeRequestKind::Shutdown { close_policy: None })
             .expect("shutdown");
+        drop(client2);
+        {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while socket.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
         resume_thread
             .join()
             .expect("resumed host thread joins")
             .expect("resumed host ends cleanly");
+        drop(dir);
+    }
+
+    /// QA F3 (issue #45 AC3): a handoff that never completes must leave the
+    /// old host exactly as it was — answering, terminal live, input
+    /// reaching the child, and NEW OUTPUT VISIBLE again once the readers
+    /// are reattached. The failure record must not claim more than happened.
+    #[test]
+    fn failed_handoff_leaves_the_host_serving_with_live_output() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let host = OfficeHost::open(&home).expect("host");
+        let server = host.serve_background();
+        let socket = home.join(OFFICE_SOCKET_NAME);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !socket.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let mut client = OfficeClient::connect(&home).expect("client");
+        let created = client
+            .call(OfficeRequestKind::TerminalCreate {
+                argv: vec!["/bin/sh".into(), "-c".into(), "echo pre-marker; cat".into()],
+                cwd: home.display().to_string(),
+                env: vec![],
+                cols: 80,
+                rows: 24,
+                purpose: "failure probe".into(),
+                worktree_id: None,
+                owner: "user_shell".into(),
+            })
+            .expect("create");
+        let terminal_id = created
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .expect("terminal id")
+            .to_string();
+        assert!(wait_for_output(&mut client, &terminal_id, "pre-marker"));
+
+        // Begin the restart and NEVER start the resumed server: the
+        // handoff times out after HANDOFF_TIMEOUT.
+        let response = client
+            .call(OfficeRequestKind::ServerRestart)
+            .expect("restart");
+        assert_eq!(
+            response.get("state").and_then(|v| v.as_str()),
+            Some("handoff_ready")
+        );
+
+        // The failure lands as a recovery record within the timeout window.
+        let deadline = Instant::now() + HANDOFF_TIMEOUT + Duration::from_secs(15);
+        loop {
+            let store = Store::open(
+                &crate::foundation::paths::database_path(&home),
+                office_migrations(),
+            )
+            .expect("store");
+            let failed: i64 = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM office_recovery_events WHERE kind = 'live_handoff_failed'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("failure record");
+            drop(store);
+            if failed >= 1 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the handoff failure was never recorded"
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        // The host still answers... (reconnect: the control connection
+        // drops after its idle timeout, exactly what a real orchestrator
+        // recovers from)
+        let mut client = OfficeClient::connect(&home).expect("reconnect");
+        let ping = client.call(OfficeRequestKind::Ping).expect("ping");
+        assert!(ping.get("pid").is_some(), "the host must keep serving");
+
+        // ...the terminal is still listed and live...
+        let list = client.call(OfficeRequestKind::TerminalList).expect("list");
+        assert!(format!("{list}").contains(&terminal_id));
+
+        // ...input still reaches the child, and the reattached readers make
+        // the NEW output visible (the QA "alive but blind" regression).
+        client
+            .call(OfficeRequestKind::TerminalInput {
+                terminal_id: terminal_id.clone(),
+                bytes_hex: hex_encode(b"echo post-failure-marker\n"),
+            })
+            .expect("input after failure");
+        assert!(
+            wait_for_output(&mut client, &terminal_id, "post-failure-marker"),
+            "readers must be reattached on the failure path - \
+             a host that answers but sees no output is the exact defect this test pins"
+        );
+
+        // Honest records: the failure is named; a lost reader would be too.
+        {
+            let store = Store::open(
+                &crate::foundation::paths::database_path(&home),
+                office_migrations(),
+            )
+            .expect("store");
+            let detail: String = store
+                .connection()
+                .query_row(
+                    "SELECT detail FROM office_recovery_events WHERE kind = 'live_handoff_failed' \
+                     ORDER BY seq DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("failure detail");
+            assert!(
+                detail.contains("readers were reattached"),
+                "the record must describe the recovery: {detail}"
+            );
+        }
+
+        client
+            .call(OfficeRequestKind::Shutdown { close_policy: None })
+            .expect("shutdown");
+        drop(client);
+        {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while socket.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        server.join().expect("old host exits cleanly");
         drop(dir);
     }
 }

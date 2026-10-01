@@ -41,8 +41,9 @@ fn run(args: &[String]) -> OfficeResult<()> {
         // The daily control plane is top-level — `viva start`, `viva
         // status`, ... — with no `office` namespace to type through.
         Some(
-            "start" | "server" | "status" | "dispatch" | "terminals" | "stop-terminal" | "result"
-            | "shutdown" | "pause" | "resume" | "brief" | "create-task" | "grant" | "handoff",
+            "start" | "server" | "server-restart" | "status" | "dispatch" | "terminals"
+            | "stop-terminal" | "result" | "shutdown" | "pause" | "resume" | "brief"
+            | "create-task" | "grant" | "handoff",
         ) => cmd_office(args),
         Some("terminal") => cmd_terminal(args.get(1..).unwrap_or(&[])),
         Some("agent") => cmd_agent(args.get(1..).unwrap_or(&[])),
@@ -107,7 +108,9 @@ fn cmd_agent(args: &[String]) -> OfficeResult<()> {
     viva::foundation::paths::ensure_private_dir(&home)?;
     let mut client = viva::office::OfficeClient::ensure_server(&home)?;
     let mut named: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let mut i = 1;
+    // `args` arrives WITHOUT the `agent` subcommand; the subcommand word
+    // itself carries no dashes and is skipped by the loop.
+    let mut i = 0;
     while i < args.len() {
         let flag = args[i].as_str();
         if !flag.starts_with("--") {
@@ -157,11 +160,24 @@ fn cmd_agent(args: &[String]) -> OfficeResult<()> {
 /// `viva events [--since <seq>] [--limit <n>]` — the durable event feed
 /// (S5): an orchestrator reconnects with its last seen seq.
 fn cmd_events(args: &[String]) -> OfficeResult<()> {
+    let (since, limit) = parse_events_args(args)?;
     let home = viva::foundation::paths::viva_home(None);
     let mut client = viva::office::OfficeClient::ensure_server(&home)?;
+    let response = client.call(viva::office::OfficeRequestKind::EventsFeed {
+        since_seq: since,
+        limit,
+    })?;
+    println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
+}
+
+/// Pure parser for `viva events [--since <seq>] [--limit <n>]` so the
+/// off-by-one regression (QA F2: flags start at index 0 — the subcommand
+/// is already stripped) stays covered by a unit test.
+fn parse_events_args(args: &[String]) -> OfficeResult<(u64, u32)> {
     let mut since = 0u64;
     let mut limit = 100u32;
-    let mut i = 1;
+    let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--since" => {
@@ -188,12 +204,7 @@ fn cmd_events(args: &[String]) -> OfficeResult<()> {
         }
         i += 1;
     }
-    let response = client.call(viva::office::OfficeRequestKind::EventsFeed {
-        since_seq: since,
-        limit,
-    })?;
-    println!("{}", serde_json::to_string_pretty(&response)?);
-    Ok(())
+    Ok((since, limit))
 }
 
 /// `viva terminal …` — headless terminal control over the resident server:
@@ -385,6 +396,10 @@ USAGE:
         --task <id> --action <a> --mode <m> | viva brief <task-id> |
         viva handoff --task <id> --member <id> --summary <text>
         Task, grant, brief and handoff management.
+
+    viva server-restart
+        Upgrade path: hand every live terminal to a freshly spawned
+        resumed server (fd-level live handoff) and exit gracefully.
 
     viva pause | viva resume
         Owner controls over the resident runtime: pause stops NEW dispatch
@@ -1701,6 +1716,9 @@ fn cmd_maintenance(args: &[String]) -> OfficeResult<()> {
     };
 
     let store = open_office_store()?;
+    // S6: an explicitly paused office runs no maintenance windows (the
+    // pause persists, so this holds with no live host either).
+    viva::office::assert_maintenance_allowed(&store)?;
     let maintenance = viva::maintenance::MaintenanceService::new(&store);
     match args.first().map(String::as_str) {
         Some("review-knowledge") => {
@@ -1929,4 +1947,25 @@ fn write_private_export_json(
     let file = options.open(path)?;
     serde_json::to_writer_pretty(file, value)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_arg_tests {
+    use super::*;
+
+    #[test]
+    fn events_flags_parse_from_index_zero_qa_f2() {
+        let args: Vec<String> = ["--since", "7", "--limit", "25"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (since, limit) = parse_events_args(&args).expect("parse");
+        assert_eq!(since, 7);
+        assert_eq!(limit, 25);
+        // Defaults when no flags are given.
+        let (since, limit) = parse_events_args(&[]).expect("parse defaults");
+        assert_eq!((since, limit), (0, 100));
+        // Unknown flags still fail loudly.
+        assert!(parse_events_args(&["--bogus".to_string()]).is_err());
+    }
 }

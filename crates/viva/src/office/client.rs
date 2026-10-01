@@ -178,7 +178,13 @@ fn spawn_detached_server(home: &Path, extra_args: &[&str]) -> OfficeResult<()> {
 pub fn restart_server(home: &Path) -> OfficeResult<u32> {
     crate::foundation::paths::ensure_private_dir(home)?;
     // The OLD server must be running; a restart never spawns anything.
+    // Record its identity: during the handoff window the old host keeps
+    // answering, and the resumed host REBINDS the same socket path within
+    // milliseconds of the old one leaving - so "socket gone" is not a
+    // usable phase boundary. The identity change is.
     let mut client = OfficeClient::connect(home)?;
+    let before = client.call(OfficeRequestKind::Ping)?;
+    let old_pid = before.get("pid").and_then(|p| p.as_u64());
     let response = client.call(OfficeRequestKind::ServerRestart)?;
     let handoff_socket = response
         .get("handoff_socket")
@@ -192,23 +198,28 @@ pub fn restart_server(home: &Path) -> OfficeResult<u32> {
 
     spawn_detached_server(home, &["--resume"])?;
 
-    // Wait for the new host to answer. The old host leaves after the ack;
-    // the resumed one binds the same socket path.
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // Wait until whoever answers is NOT the old host (QA F1 round 2): the
+    // old host answers pings during the transfer window; the moment the
+    // resumed host rebinds, the pid changes. A failed handoff leaves the
+    // old host answering forever and times out honestly here.
+    let deadline = Instant::now() + Duration::from_secs(45);
     loop {
         if let Ok(mut client) = OfficeClient::connect(home) {
             if let Ok(status) = client.call(OfficeRequestKind::Ping) {
                 if let Some(pid) = status.get("pid").and_then(|p| p.as_u64()) {
-                    return Ok(pid as u32);
+                    if Some(pid) != old_pid {
+                        return Ok(pid as u32);
+                    }
                 }
             }
         }
         if Instant::now() >= deadline {
             return Err(OfficeError::Validation(
-                "the resumed server did not answer within 30s; see server.log and the                  recovery records"
+                "45s after a restart request the old host is still the one serving - the \
+                 handoff failed (see the recovery records and server.log)"
                     .into(),
             ));
         }
-        std::thread::sleep(Duration::from_millis(150));
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
