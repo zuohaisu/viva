@@ -30,6 +30,12 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
 use crate::foundation::error::OfficeResult;
 use crate::terminal::TerminalSnapshot;
+use crate::tui::layout::{Direction, PaneContent, PaneNode, SplitAxis};
+
+/// Reference area for geometric pane-focus moves: adjacency decisions are
+/// proportional, so one fixed virtual size is stable for any real size.
+const PANE_REF_AREA: ratatui::layout::Rect =
+    ratatui::layout::Rect { x: 0, y: 0, width: 100, height: 40 };
 
 // ---------------------------------------------------------------------------
 // Projections (read-only facts assembled by the store-backed source)
@@ -131,6 +137,14 @@ pub enum WorkbenchAction {
     ShowDiff(String),
     /// Ask the run loop to refresh the model from the registries.
     Refresh,
+    /// Split the focused pane right, spawning a shell in the new leaf.
+    SplitRight,
+    /// Split the focused pane below, spawning a shell in the new leaf.
+    SplitBelow,
+    /// Open a shell at the selected worktree (the `o` action).
+    OpenWorktreeShell(String),
+    /// Create the selected task's worktree (the `w` action).
+    CreateTaskWorktree(String),
 }
 
 /// The workbench application state. Pure view state + explicit caches;
@@ -139,9 +153,17 @@ pub struct WorkbenchApp {
     model: WorkbenchModel,
     focus: Focus,
     selected: usize,
+    /// The client-side pane tree (S2): leaves render the browser or one
+    /// terminal each. The terminals themselves live in the resident
+    /// server; closing a pane never stops one.
+    grid: PaneNode,
+    pane_focus: PaneContent,
+    zoomed: bool,
+    /// Per-terminal snapshot cache the pane tree renders; the run loop
+    /// fetches one per terminal leaf per cycle (bounded by the pane cap).
+    snapshots: std::collections::HashMap<String, TerminalSnapshot>,
     /// When set: keyboard bytes forward to this terminal; Esc releases.
     terminal_mode: Option<String>,
-    terminal_view: Option<TerminalSnapshot>,
     diff_view: Option<String>,
     status_line: String,
     quit_requested: bool,
@@ -153,10 +175,13 @@ impl WorkbenchApp {
             model: WorkbenchModel::default(),
             focus: Focus::Projects,
             selected: 0,
+            grid: PaneNode::leaf(PaneContent::Browser),
+            pane_focus: PaneContent::Browser,
+            zoomed: false,
+            snapshots: std::collections::HashMap::new(),
             terminal_mode: None,
-            terminal_view: None,
             diff_view: None,
-            status_line: "1-4 panes · Tab cycle · Enter terminal · d diff · s stop · r refresh · Esc releases · q detach".into(),
+            status_line: "Ctrl+arrows panes · | - split · x close · z zoom · o open · w worktree · 1-4 lists · Enter terminal · q detach".into(),
             quit_requested: false,
         }
     }
@@ -182,16 +207,149 @@ impl WorkbenchApp {
         &self.model
     }
 
-    pub fn set_terminal_view(&mut self, view: Option<TerminalSnapshot>) {
-        self.terminal_view = view;
-    }
-
     pub fn set_diff_view(&mut self, diff: Option<String>) {
         self.diff_view = diff;
     }
 
     pub fn set_status(&mut self, line: impl Into<String>) {
         self.status_line = line.into();
+    }
+
+    pub fn set_snapshot(&mut self, terminal_id: impl Into<String>, snapshot: TerminalSnapshot) {
+        self.snapshots.insert(terminal_id.into(), snapshot);
+    }
+
+    /// Terminal ids currently placed in the pane tree (fetch budget: the
+    /// tree never exceeds the layout cap).
+    pub fn terminal_leaves(&self) -> Vec<String> {
+        self.grid
+            .leaves()
+            .into_iter()
+            .filter_map(|c| match c {
+                PaneContent::Terminal(id) => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn pane_focus(&self) -> &PaneContent {
+        &self.pane_focus
+    }
+
+    pub fn zoomed(&self) -> bool {
+        self.zoomed
+    }
+
+    /// Move pane focus geometrically (Ctrl+Arrows in the keymap).
+    pub fn move_pane_focus(&mut self, direction: Direction) -> bool {
+        match self.grid.neighbor(PANE_REF_AREA, &self.pane_focus, direction) {
+            Some(next) => {
+                self.pane_focus = next;
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn cycle_pane(&mut self) {
+        let leaves = self.grid.leaves();
+        if leaves.len() < 2 {
+            return;
+        }
+        let index = leaves
+            .iter()
+            .position(|c| *c == self.pane_focus)
+            .unwrap_or(0);
+        self.pane_focus = leaves[(index + 1) % leaves.len()].clone();
+    }
+
+    /// Point the focused pane at a terminal. From the browser: reuse the
+    /// first terminal pane, or split one off when none exists. From a
+    /// terminal pane: retarget it.
+    pub fn attach_terminal(&mut self, terminal_id: String) {
+        let content = PaneContent::Terminal(terminal_id);
+        match self.pane_focus.clone() {
+            PaneContent::Browser => {
+                let existing = self
+                    .grid
+                    .leaves()
+                    .into_iter()
+                    .find(|c| matches!(c, PaneContent::Terminal(_)));
+                match existing {
+                    Some(first) => {
+                        self.grid.replace(&first, content.clone());
+                    }
+                    None => {
+                        self.grid.split(
+                            &PaneContent::Browser,
+                            SplitAxis::Horizontal,
+                            content.clone(),
+                        );
+                    }
+                }
+                self.pane_focus = content;
+            }
+            PaneContent::Terminal(old) => {
+                self.grid
+                    .replace(&PaneContent::Terminal(old), content.clone());
+                self.pane_focus = content;
+            }
+        }
+    }
+
+    /// Split the focused pane and put a new terminal in the new leaf.
+    /// Returns false (with a status message) at the pane cap.
+    pub fn split_pane(&mut self, axis: SplitAxis, terminal_id: String) -> bool {
+        let content = PaneContent::Terminal(terminal_id);
+        if self.grid.split(&self.pane_focus, axis, content.clone()) {
+            self.pane_focus = content;
+            true
+        } else {
+            self.set_status(format!(
+                "pane limit reached ({} panes) — close one first",
+                crate::tui::layout::MAX_PANES
+            ));
+            false
+        }
+    }
+
+    /// Close the focused terminal pane. The terminal keeps running in the
+    /// server — closing is a view operation, never a stop.
+    pub fn close_pane(&mut self) {
+        if let PaneContent::Terminal(id) = self.pane_focus.clone() {
+            if let Some(removed) = self.grid.close(&PaneContent::Terminal(id)) {
+                if let PaneContent::Terminal(removed_id) = removed {
+                    self.snapshots.remove(&removed_id);
+                    self.set_status(format!(
+                        "pane closed — terminal {removed_id} keeps running server-side"
+                    ));
+                }
+                self.pane_focus = self
+                    .grid
+                    .leaves()
+                    .first()
+                    .cloned()
+                    .unwrap_or(PaneContent::Browser);
+            }
+        }
+    }
+
+    pub fn toggle_zoom(&mut self) {
+        self.zoomed = !self.zoomed;
+    }
+
+    /// The focused terminal's worktree, for split-cwd decisions.
+    pub fn focused_worktree_id(&self) -> Option<String> {
+        if let PaneContent::Terminal(id) = &self.pane_focus {
+            return self
+                .model
+                .terminals
+                .iter()
+                .find(|t| t.terminal_id == *id)?
+                .worktree_id
+                .clone();
+        }
+        None
     }
 
     /// Explicitly enter terminal-forwarding mode (run loop decides when —
@@ -204,7 +362,6 @@ impl WorkbenchApp {
 
     pub fn leave_terminal_mode(&mut self) {
         self.terminal_mode = None;
-        self.terminal_view = None;
         self.status_line = "terminal released".into();
     }
 
@@ -275,6 +432,24 @@ impl WorkbenchApp {
             self.quit_requested = true;
             return KeyOutcome::QuitRequested;
         }
+        // Pane-grid movement (S2): Ctrl+Arrows. The browser pane
+        // participates like any other leaf.
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            let direction = match key.code {
+                KeyCode::Left => Some(Direction::Left),
+                KeyCode::Right => Some(Direction::Right),
+                KeyCode::Up => Some(Direction::Up),
+                KeyCode::Down => Some(Direction::Down),
+                _ => None,
+            };
+            if let Some(direction) = direction {
+                return if self.move_pane_focus(direction) {
+                    KeyOutcome::Handled
+                } else {
+                    KeyOutcome::Ignored
+                };
+            }
+        }
         match key.code {
             KeyCode::Char('q') | KeyCode::Char('Q') => {
                 self.quit_requested = true;
@@ -301,13 +476,17 @@ impl WorkbenchApp {
                 KeyOutcome::Handled
             }
             KeyCode::Tab => {
-                self.focus = match self.focus {
-                    Focus::Projects => Focus::Worktrees,
-                    Focus::Worktrees => Focus::Tasks,
-                    Focus::Tasks => Focus::Terminals,
-                    Focus::Terminals => Focus::Projects,
-                };
-                self.selected = 0;
+                if self.pane_focus == PaneContent::Browser {
+                    self.focus = match self.focus {
+                        Focus::Projects => Focus::Worktrees,
+                        Focus::Worktrees => Focus::Tasks,
+                        Focus::Tasks => Focus::Terminals,
+                        Focus::Terminals => Focus::Projects,
+                    };
+                    self.selected = 0;
+                } else {
+                    self.cycle_pane();
+                }
                 KeyOutcome::Handled
             }
             KeyCode::Down | KeyCode::Char('j') if self.row_count() > 0 => {
@@ -331,6 +510,47 @@ impl WorkbenchApp {
             KeyCode::Char('d') if self.focus == Focus::Worktrees => {
                 match self.selected_worktree() {
                     Some(id) => KeyOutcome::Action(WorkbenchAction::ShowDiff(id)),
+                    None => KeyOutcome::Ignored,
+                }
+            }
+            KeyCode::Char('|') => KeyOutcome::Action(WorkbenchAction::SplitRight),
+            KeyCode::Char('-') => KeyOutcome::Action(WorkbenchAction::SplitBelow),
+            KeyCode::Char('x') if matches!(self.pane_focus, PaneContent::Terminal(_)) => {
+                self.close_pane();
+                KeyOutcome::Handled
+            }
+            KeyCode::Char('z') => {
+                self.toggle_zoom();
+                KeyOutcome::Handled
+            }
+            // Enter on a focused terminal pane: keyboard forwarding.
+            KeyCode::Enter if matches!(self.pane_focus, PaneContent::Terminal(_)) => {
+                let id = match &self.pane_focus {
+                    PaneContent::Terminal(id) => id.clone(),
+                    _ => unreachable!("guarded above"),
+                };
+                self.enter_terminal_mode(id);
+                KeyOutcome::Handled
+            }
+            // `o` on a worktree row: open a shell at that worktree.
+            KeyCode::Char('o')
+                if self.focus == Focus::Worktrees
+                    && self.pane_focus == PaneContent::Browser =>
+            {
+                match self.selected_worktree() {
+                    Some(id) => KeyOutcome::Action(WorkbenchAction::OpenWorktreeShell(id)),
+                    None => KeyOutcome::Ignored,
+                }
+            }
+            // `w` on a task row: create the task's worktree (server-side
+            // V08 policy; removal stays a human-authorized action).
+            KeyCode::Char('w')
+                if self.focus == Focus::Tasks && self.pane_focus == PaneContent::Browser =>
+            {
+                match self.model.tasks.get(self.selected) {
+                    Some(task) => {
+                        KeyOutcome::Action(WorkbenchAction::CreateTaskWorktree(task.task_id.clone()))
+                    }
                     None => KeyOutcome::Ignored,
                 }
             }
@@ -362,6 +582,7 @@ impl WorkbenchApp {
                 },
                 ratatui::style::Style::new().bold(),
             ),
+            Span::raw(if self.zoomed { "  [zoom]" } else { "" }),
             Span::raw(if self.terminal_mode.is_some() {
                 "  [terminal focused]"
             } else {
@@ -370,45 +591,18 @@ impl WorkbenchApp {
         ]);
         frame.render_widget(Paragraph::new(header), chunks[0]);
 
-        if let (Some(view), Some(_id)) = (&self.terminal_view, &self.terminal_mode) {
-            // Bottom-anchored: scrollback above the live grid, clipped to
-            // what fits — a reattached client sees the server-kept history.
-            let mut lines: Vec<Line> = view
-                .scrollback
-                .iter()
-                .chain(view.visible.iter())
-                .map(|row| Line::from(row.clone()))
-                .collect();
-            let max_lines = chunks[1].height.saturating_sub(2) as usize;
-            if lines.len() > max_lines {
-                let skip = lines.len() - max_lines;
-                lines.drain(..skip);
-            }
-            lines.push(Line::from(format!(
-                "— {}×{} · scrollback: {} lines{} · output bytes: {} —",
-                view.cols,
-                view.rows,
-                view.scrollback.len(),
-                if view.scrollback_capped { " (capped)" } else { "" },
-                view.total_output_bytes
-            )));
-            frame.render_widget(
-                Paragraph::new(lines).block(
-                    Block::new()
-                        .title(format!(
-                            " terminal {} ",
-                            self.terminal_mode.clone().unwrap_or_default()
-                        ))
-                        .borders(Borders::ALL),
-                ),
-                chunks[1],
-            );
+        // The pane tree lays out the main area: the browser leaf renders
+        // the focused list, terminal leaves render server snapshots. Zoom
+        // draws only the focused pane, full-screen.
+        let layout = if self.zoomed {
+            vec![(self.pane_focus.clone(), chunks[1])]
         } else {
-            match self.focus {
-                Focus::Projects => self.draw_projects(frame, chunks[1]),
-                Focus::Worktrees => self.draw_worktrees(frame, chunks[1]),
-                Focus::Tasks => self.draw_tasks(frame, chunks[1]),
-                Focus::Terminals => self.draw_terminals(frame, chunks[1]),
+            self.grid.render_layout(chunks[1])
+        };
+        for (content, rect) in &layout {
+            match content {
+                PaneContent::Browser => self.draw_browser(frame, *rect),
+                PaneContent::Terminal(id) => self.draw_terminal_pane(frame, *rect, id),
             }
         }
 
@@ -435,6 +629,54 @@ impl WorkbenchApp {
         }
     }
 
+    fn draw_browser(&self, frame: &mut Frame, area: Rect) {
+        match self.focus {
+            Focus::Projects => self.draw_projects(frame, area),
+            Focus::Worktrees => self.draw_worktrees(frame, area),
+            Focus::Tasks => self.draw_tasks(frame, area),
+            Focus::Terminals => self.draw_terminals(frame, area),
+        }
+    }
+
+    /// One terminal leaf: the server snapshot, bottom-anchored so a
+    /// reattached client sees the server-kept history.
+    fn draw_terminal_pane(&self, frame: &mut Frame, area: Rect, id: &str) {
+        let title = if self.pane_focus == PaneContent::Terminal(id.to_string()) {
+            format!(" terminal {id} · pane focus ")
+        } else {
+            format!(" terminal {id} ")
+        };
+        let lines: Vec<Line> = match self.snapshots.get(id) {
+            Some(view) => {
+                let mut lines: Vec<Line> = view
+                    .scrollback
+                    .iter()
+                    .chain(view.visible.iter())
+                    .map(|row| Line::from(row.clone()))
+                    .collect();
+                let max_lines = area.height.saturating_sub(2) as usize;
+                if lines.len() > max_lines {
+                    let skip = lines.len() - max_lines;
+                    lines.drain(..skip);
+                }
+                lines.push(Line::from(format!(
+                    "— {}×{} · scrollback: {} lines{} · output bytes: {} —",
+                    view.cols,
+                    view.rows,
+                    view.scrollback.len(),
+                    if view.scrollback_capped { " (capped)" } else { "" },
+                    view.total_output_bytes
+                )));
+                lines
+            }
+            None => vec![Line::from(" waiting for the first server snapshot… ")],
+        };
+        frame.render_widget(
+            Paragraph::new(lines).block(Block::new().title(title).borders(Borders::ALL)),
+            area,
+        );
+    }
+
     fn draw_projects(&self, frame: &mut Frame, area: Rect) {
         let items: Vec<ListItem> = self
             .model
@@ -453,32 +695,53 @@ impl WorkbenchApp {
     }
 
     fn draw_worktrees(&self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self
-            .model
-            .worktrees
-            .iter()
-            .enumerate()
-            .map(|(i, w)| {
-                let marker = if self.selected == i { "▶ " } else { "  " };
-                let dirty = match w.dirty {
-                    Some(true) => "dirty",
-                    Some(false) => "clean",
-                    None => "unknown",
-                };
-                ListItem::new(Line::from(format!(
-                    "{marker}{} · {} · {} · task:{} · {}",
-                    w.branch,
-                    dirty,
-                    w.path,
-                    w.task_id.as_deref().unwrap_or("-"),
-                    w.source
-                )))
-            })
-            .collect();
+        // Grouped by project (S2): a styled header per project, real rows
+        // selectable beneath. Headers are render-only; the selection index
+        // counts real rows only.
+        let mut items: Vec<ListItem> = Vec::new();
+        let mut current_project: Option<String> = None;
+        let mut real_index = 0usize;
+        for w in &self.model.worktrees {
+            if current_project.as_ref() != Some(&w.project_id) {
+                current_project = Some(w.project_id.clone());
+                let name = self
+                    .model
+                    .projects
+                    .iter()
+                    .find(|p| p.project_id == w.project_id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| "no project".into());
+                items.push(ListItem::new(Line::from(Span::styled(
+                    format!("── {name}"),
+                    ratatui::style::Style::new().bold().gray(),
+                ))));
+            }
+            let focused =
+                self.pane_focus == PaneContent::Browser && self.focus == Focus::Worktrees;
+            let marker = if focused && self.selected == real_index {
+                "▶ "
+            } else {
+                "  "
+            };
+            let dirty = match w.dirty {
+                Some(true) => "dirty",
+                Some(false) => "clean",
+                None => "unknown",
+            };
+            items.push(ListItem::new(Line::from(format!(
+                "{marker}{} · {} · {} · task:{} · {}",
+                w.branch,
+                dirty,
+                w.path,
+                w.task_id.as_deref().unwrap_or("-"),
+                w.source
+            ))));
+            real_index += 1;
+        }
         frame.render_widget(
             List::new(items).block(
                 Block::new()
-                    .title(" worktrees — branch · state · path · task · source ")
+                    .title(" worktrees — project · branch · state · path · task · source ")
                     .borders(Borders::ALL),
             ),
             area,
@@ -636,8 +899,18 @@ impl<'a> WorkbenchStore<'a> {
             })
             .collect::<Vec<_>>();
 
-        let tasks = tasks_registry
-            .list_tasks(0, 200)?
+        let task_records = tasks_registry.list_tasks(0, 200)?;
+        // Worktree grouping (S2): a worktree groups under its task's
+        // project, so the render can show per-project headers.
+        let project_of_task: std::collections::HashMap<String, String> = task_records
+            .iter()
+            .filter_map(|t| {
+                t.project_id
+                    .as_ref()
+                    .map(|p| (t.task_id.to_string(), p.to_string()))
+            })
+            .collect();
+        let tasks = task_records
             .into_iter()
             .map(|t| TaskRow {
                 task_id: t.task_id.to_string(),
@@ -649,7 +922,7 @@ impl<'a> WorkbenchStore<'a> {
         // Worktree records + real dirty state per record.
         let worktree_service =
             crate::git::worktrees::WorktreeService::new(self.store, self.protected.clone());
-        let worktrees = worktree_service
+        let mut worktrees = worktree_service
             .all_records()?
             .into_iter()
             .filter(|r| r.released_at.is_none())
@@ -657,7 +930,10 @@ impl<'a> WorkbenchStore<'a> {
                 let dirty = self.dirty_state(&r.worktree_path);
                 WorktreeRow {
                     worktree_id: r.worktree_id.to_string(),
-                    project_id: String::new(),
+                    project_id: project_of_task
+                        .get(&r.task_id.to_string())
+                        .cloned()
+                        .unwrap_or_default(),
                     path: r.worktree_path.to_string_lossy().into_owned(),
                     branch: r.branch,
                     dirty,
@@ -666,6 +942,9 @@ impl<'a> WorkbenchStore<'a> {
                 }
             })
             .collect::<Vec<_>>();
+        // Same-project rows stay adjacent (the render inserts one header
+        // per group).
+        worktrees.sort_by(|a, b| a.project_id.cmp(&b.project_id).then(a.path.cmp(&b.path)));
 
         let terminals = self
             .terminals
@@ -899,14 +1178,14 @@ fn run_client_inner(client: &mut crate::office::OfficeClient) -> OfficeResult<()
             },
             Err(err) => app.set_status(format!("server error: {err}")),
         }
-        // A focused terminal's view is a live server snapshot, scrollback
-        // included — this is what a reattached client sees again.
-        if let Some(id) = app.terminal_mode().map(str::to_string) {
+        // Fetch one snapshot per terminal leaf (bounded by the pane cap):
+        // every rendered pane stays live, focused or not.
+        for id in app.terminal_leaves() {
             match client.call(crate::office::OfficeRequestKind::TerminalSnapshot {
                 terminal_id: id.clone(),
             }) {
                 Ok(value) => match serde_json::from_value::<TerminalSnapshot>(value) {
-                    Ok(view) => app.set_terminal_view(Some(view)),
+                    Ok(view) => app.set_snapshot(id, view),
                     Err(err) => app.set_status(format!("snapshot decode error: {err}")),
                 },
                 Err(err) => app.set_status(format!("snapshot error: {err}")),
@@ -962,6 +1241,7 @@ fn apply_client_action(
 ) -> OfficeResult<()> {
     match action {
         WorkbenchAction::EnterTerminal(id) => {
+            app.attach_terminal(id.clone());
             app.enter_terminal_mode(id);
             Ok(())
         }
@@ -985,7 +1265,88 @@ fn apply_client_action(
             Ok(())
         }
         WorkbenchAction::Refresh => Ok(()), // the loop refreshes every cycle
+        WorkbenchAction::SplitRight => spawn_and_split(client, app, SplitAxis::Horizontal),
+        WorkbenchAction::SplitBelow => spawn_and_split(client, app, SplitAxis::Vertical),
+        WorkbenchAction::OpenWorktreeShell(worktree_id) => {
+            let value = client.call(crate::office::OfficeRequestKind::TerminalOpenInWorktree {
+                worktree_id,
+            })?;
+            let terminal_id = value
+                .get("terminal_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    crate::foundation::OfficeError::Validation(
+                        "open returned no terminal id".into(),
+                    )
+                })?
+                .to_string();
+            app.attach_terminal(terminal_id.clone());
+            app.enter_terminal_mode(terminal_id);
+            Ok(())
+        }
+        WorkbenchAction::CreateTaskWorktree(task_id) => {
+            let value =
+                client.call(crate::office::OfficeRequestKind::WorktreeCreateForTask {
+                    task_id: task_id.clone(),
+                    branch: None,
+                    base_dir: None,
+                })?;
+            let path = value
+                .get("worktree_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            app.set_status(format!(
+                "worktree created for task {task_id}: {path}"
+            ));
+            Ok(())
+        }
     }
+}
+
+/// Spawn a shell next to the focused pane: same worktree when the focused
+/// terminal has one, else the client's own directory. The pane focus moves
+/// into the new leaf.
+fn spawn_and_split(
+    client: &mut crate::office::OfficeClient,
+    app: &mut WorkbenchApp,
+    axis: SplitAxis,
+) -> OfficeResult<()> {
+    let worktree_id = app.focused_worktree_id();
+    let cwd = worktree_id
+        .as_ref()
+        .and_then(|wid| {
+            app.model()
+                .worktrees
+                .iter()
+                .find(|w| &w.worktree_id == wid)
+        })
+        .map(|w| w.path.clone())
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_default()
+                .display()
+                .to_string()
+        });
+    let value = client.call(crate::office::OfficeRequestKind::TerminalCreate {
+        argv: vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())],
+        cwd,
+        env: vec![],
+        cols: 80,
+        rows: 24,
+        purpose: "shell".into(),
+        worktree_id,
+        owner: "user_shell".into(),
+    })?;
+    let terminal_id = value
+        .get("terminal_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            crate::foundation::OfficeError::Validation("spawn returned no terminal id".into())
+        })?
+        .to_string();
+    app.split_pane(axis, terminal_id);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1142,6 +1503,77 @@ mod tests {
             app.on_key(KeyEvent::from(KeyCode::Home)),
             KeyOutcome::Forward(b"\x1b[H".to_vec())
         );
+    }
+
+    fn snapshot_with(lines: &[&str]) -> TerminalSnapshot {
+        TerminalSnapshot {
+            cols: 80,
+            rows: 12,
+            visible: lines.iter().map(|s| s.to_string()).collect(),
+            scrollback: vec![],
+            scrollback_capped: false,
+            total_output_bytes: 64,
+            log_truncated: false,
+        }
+    }
+
+    #[test]
+    fn pane_tree_renders_multiple_terminal_panes_side_by_side() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.attach_terminal("t1".into());
+        app.split_pane(SplitAxis::Vertical, "t2".into());
+        app.split_pane(SplitAxis::Horizontal, "t3".into());
+        assert_eq!(app.terminal_leaves(), vec!["t1", "t2", "t3"]);
+        app.set_snapshot("t1", snapshot_with(&["alpha-out"]));
+        app.set_snapshot("t2", snapshot_with(&["beta-out"]));
+        app.set_snapshot("t3", snapshot_with(&["gamma-out"]));
+
+        let view = render(&app, 160, 44);
+        assert!(view.contains("terminal t1"), "{view}");
+        assert!(view.contains("terminal t2"));
+        assert!(view.contains("terminal t3"));
+        assert!(view.contains("alpha-out"));
+        assert!(view.contains("beta-out"));
+        assert!(view.contains("gamma-out"));
+    }
+
+    #[test]
+    fn closing_a_pane_is_a_view_operation_and_zoom_isolates_one_pane() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.attach_terminal("t1".into());
+        app.split_pane(SplitAxis::Vertical, "t2".into());
+        // The focused pane is t2; closing it keeps t1 running in the server.
+        app.close_pane();
+        assert_eq!(app.terminal_leaves(), vec!["t1"]);
+        // Focus t1 (close returned focus to the browser), then zoom in on it.
+        app.attach_terminal("t1".into());
+        app.toggle_zoom();
+        app.set_snapshot("t1", snapshot_with(&["solo-out"]));
+        let view = render(&app, 160, 44);
+        assert!(view.contains("solo-out"), "{view}");
+        assert!(view.contains("[zoom]"));
+        // The browser's list CONTENT is hidden (the header keeps the list
+        // label; the sample project row path must be gone).
+        assert!(
+            !view.contains("/code/viva"),
+            "zoom hides the browser content: {view}"
+        );
+        app.toggle_zoom();
+        assert!(render(&app, 160, 44).contains("/code/viva"));
+    }
+
+    #[test]
+    fn pane_focus_moves_geometrically_between_leaves() {
+        let mut app = WorkbenchApp::new();
+        app.attach_terminal("t1".into());
+        app.split_pane(SplitAxis::Vertical, "t2".into());
+        // Focus is on t2 after the split; move up to t1, left to the browser.
+        app.move_pane_focus(Direction::Up);
+        assert_eq!(app.pane_focus(), &PaneContent::Terminal("t1".into()));
+        app.move_pane_focus(Direction::Left);
+        assert_eq!(app.pane_focus(), &PaneContent::Browser);
     }
 
     #[test]

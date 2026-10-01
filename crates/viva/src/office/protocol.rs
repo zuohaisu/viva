@@ -112,6 +112,20 @@ pub enum OfficeRequestKind {
     WorkbenchView,
     /// The real bounded diff of one worktree against HEAD.
     WorkbenchDiff { worktree_id: String },
+    /// Open an interactive shell at a worktree's path (the workbench
+    /// "open" action). The terminal is a user_shell owned by the server,
+    /// attached to the worktree.
+    TerminalOpenInWorktree { worktree_id: String },
+    /// Create a task worktree from the task's project repo (V08 policy:
+    /// protected refs, one checkout per branch). Removal is never a socket
+    /// action — it stays an explicitly authorized human operation.
+    WorktreeCreateForTask {
+        task_id: String,
+        #[serde(default)]
+        branch: Option<String>,
+        #[serde(default)]
+        base_dir: Option<String>,
+    },
     /// Results recorded for a task (process facts, QA conclusions, PR/CI).
     TaskResults { task_id: String },
     /// Record one member's explicit handoff summary for a task. A

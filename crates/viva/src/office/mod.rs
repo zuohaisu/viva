@@ -634,6 +634,14 @@ fn handle_request(
         } => terminal_resize(&shared, terminal_id, *cols, *rows),
         OfficeRequestKind::WorkbenchView => workbench_view(&shared),
         OfficeRequestKind::WorkbenchDiff { worktree_id } => workbench_diff(&shared, worktree_id),
+        OfficeRequestKind::TerminalOpenInWorktree { worktree_id } => {
+            terminal_open_in_worktree(&shared, worktree_id)
+        }
+        OfficeRequestKind::WorktreeCreateForTask {
+            task_id,
+            branch,
+            base_dir,
+        } => worktree_create_for_task(&shared, task_id, branch.as_deref(), base_dir.as_deref()),
         OfficeRequestKind::TaskResults { task_id } => task_results(&shared, task_id),
         OfficeRequestKind::Handoff {
             task_id,
@@ -881,6 +889,76 @@ fn workbench_diff(shared: &OfficeShared, worktree_id: &str) -> OfficeResult<serd
     })?;
     let diff = service.worktree_diff(&record.worktree_path, 64 * 1024)?;
     Ok(serde_json::json!({ "worktree_id": worktree_id.to_string(), "diff": diff }))
+}
+
+/// Open an interactive shell at a worktree's path (the workbench `o`
+/// action): a user_shell owned by the server, attached to the worktree.
+fn terminal_open_in_worktree(
+    shared: &OfficeShared,
+    worktree_id: &str,
+) -> OfficeResult<serde_json::Value> {
+    let worktree_id = WorktreeId::from_str(worktree_id)?;
+    let store = shared.store.lock().expect("office store");
+    let service = crate::git::worktrees::WorktreeService::new(
+        &store,
+        crate::git::worktrees::ProtectedRefs::new(vec![]),
+    );
+    let record = service.record(&worktree_id)?.ok_or_else(|| {
+        OfficeError::NotFound {
+            entity: "worktree",
+            id: worktree_id.to_string(),
+        }
+    })?;
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    let spec = crate::terminal::TerminalSpec::new(vec![shell], record.worktree_path.clone())?;
+    let (terminal_id, handle) = shared.terminals.spawn(
+        spec,
+        TerminalOwner::UserShell,
+        Some(worktree_id),
+        format!("shell · {}", record.branch),
+        None,
+        Some(&store),
+    )?;
+    Ok(serde_json::json!({
+        "terminal_id": terminal_id.to_string(),
+        "pid": handle.pid(),
+        "cwd": record.worktree_path.display().to_string(),
+        "branch": record.branch,
+    }))
+}
+
+/// Create a task worktree from the task's project repo (the workbench `w`
+/// action on a task row). The repo comes from the task's project record —
+/// never from the client; branch and base dir have honest defaults. The
+/// V08 policy (protected refs, one checkout per branch) is the service's.
+fn worktree_create_for_task(
+    shared: &OfficeShared,
+    task_id: &str,
+    branch: Option<&str>,
+    base_dir: Option<&str>,
+) -> OfficeResult<serde_json::Value> {
+    let task_id = TaskId::from_str(task_id)?;
+    let store = shared.store.lock().expect("office store");
+    let task = TaskRegistry::new(&store).require_task(&task_id)?;
+    let project_id = task.project_id.ok_or_else(|| {
+        OfficeError::Validation(format!(
+            "task `{task_id}` has no project; a worktree needs the project's repo root"
+        ))
+    })?;
+    let project = crate::projects::ProjectRegistry::new(&store).require(&project_id)?;
+    let repo_root = project.repo_path;
+    let base = base_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root.join("worktrees"));
+    let branch = branch
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("agent/task-{}", task_id));
+    let mut service = crate::git::worktrees::WorktreeService::new(
+        &store,
+        crate::git::worktrees::ProtectedRefs::new(vec![]),
+    );
+    let record = service.create_task_worktree(&repo_root, &base, &task_id, &branch)?;
+    serde_json::to_value(&record).map_err(|e| OfficeError::Validation(format!("record: {e}")))
 }
 
 fn status(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
@@ -1693,6 +1771,198 @@ mod server_split_tests {
         let model: crate::tui::workbench::WorkbenchModel =
             serde_json::from_value(view).expect("model decode");
         assert!(model.terminals.is_empty());
+        host.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod s2_workbench_tests {
+    use super::*;
+    use crate::office::OfficeClient;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    struct RunningHost {
+        dir: tempfile::TempDir,
+        home: std::path::PathBuf,
+        server: std::thread::JoinHandle<()>,
+    }
+
+    fn start_host() -> RunningHost {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).expect("home dir");
+        let host = OfficeHost::open(&home).expect("host claims the slot");
+        let server = host.serve_background();
+        let socket = home.join(OFFICE_SOCKET_NAME);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !socket.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        RunningHost { dir, home, server }
+    }
+
+    impl RunningHost {
+        fn client(&self) -> OfficeClient {
+            OfficeClient::connect(&self.home).expect("client connects")
+        }
+
+        fn shutdown(self) {
+            if let Ok(mut client) = OfficeClient::connect(&self.home) {
+                let _ = client.call(OfficeRequestKind::Shutdown);
+            }
+            let _ = self.server.join();
+            drop(self.dir);
+        }
+    }
+
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(["-c", "user.email=test@viva.local", "-c", "user.name=test"])
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// A real repo with one commit, a bare `origin` remote it pushes to
+    /// (so the V08 create path can fetch and resolve the default branch),
+    /// and three adopted task worktrees.
+    fn seed_repo_and_worktrees(host: &RunningHost) -> String {
+        let repo = host.dir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let bare = host.dir.path().join("origin.git");
+        git(&host.dir.path(), &["init", "--bare", bare.to_str().unwrap()]);
+        git(&repo, &["init", "-b", "main"]);
+        std::fs::write(repo.join("README.md"), "seed\n").expect("seed file");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "seed"]);
+        git(&repo, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        git(&repo, &["push", "origin", "main"]);
+        git(&repo, &["fetch", "origin"]);
+
+        let store = Store::open(
+            &crate::foundation::paths::database_path(&host.home),
+            office_migrations(),
+        )
+        .expect("store");
+        let project =
+            crate::projects::ProjectRegistry::new(&store).register(None, "demo", &repo).expect("project");
+        let task = TaskRegistry::new(&store)
+            .create_task("three worktrees", vec![], None, None, Some(project.project_id.clone()))
+            .expect("task");
+        let mut service = crate::git::worktrees::WorktreeService::new(
+            &store,
+            crate::git::worktrees::ProtectedRefs::new(vec![]),
+        );
+        for name in ["wt-a", "wt-b", "wt-c"] {
+            let path = host.dir.path().join(name);
+            git(
+                &repo,
+                &["worktree", "add", path.to_str().unwrap(), "-b", &format!("branch-{name}")],
+            );
+            service
+                .adopt_existing(&repo, &path, &task.task_id)
+                .expect("adopt");
+        }
+        task.task_id.to_string()
+    }
+
+    fn wait_for_output(client: &mut OfficeClient, terminal_id: &str, needle: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Ok(view) = client.call(OfficeRequestKind::TerminalSnapshot {
+                terminal_id: terminal_id.to_string(),
+            }) {
+                if format!("{view}").contains(needle) {
+                    return true;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    /// The workbench view serves ≥3 real worktrees grouped under their
+    /// project; `o` opens a shell AT the worktree (cwd visible in output).
+    #[test]
+    fn grouped_view_open_in_worktree_and_create_for_task() {
+        let host = start_host();
+        let task_id = seed_repo_and_worktrees(&host);
+        let mut client = host.client();
+
+        // ≥3 worktrees, each carrying its project for the group headers.
+        let view = client.call(OfficeRequestKind::WorkbenchView).expect("view");
+        let model: crate::tui::workbench::WorkbenchModel =
+            serde_json::from_value(view).expect("decode");
+        assert!(model.worktrees.len() >= 3, "{}", model.worktrees.len());
+        assert!(model.worktrees.iter().all(|w| !w.project_id.is_empty()));
+        // Grouped: same-project rows are adjacent.
+        let mut projects_in_order = model.worktrees.iter().map(|w| w.project_id.clone()).collect::<Vec<_>>();
+        projects_in_order.dedup();
+        assert_eq!(projects_in_order.len(), 1);
+
+        // `o`: a shell whose cwd IS the worktree — `pwd` proves it.
+        let wt_a = model
+            .worktrees
+            .iter()
+            .find(|w| w.path.ends_with("wt-a"))
+            .expect("wt-a row");
+        let opened = client
+            .call(OfficeRequestKind::TerminalOpenInWorktree {
+                worktree_id: wt_a.worktree_id.clone(),
+            })
+            .expect("open");
+        let terminal_id = opened
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .expect("terminal id")
+            .to_string();
+        client
+            .call(OfficeRequestKind::TerminalInput {
+                terminal_id: terminal_id.clone(),
+                bytes_hex: hex_encode(b"pwd\n"),
+            })
+            .expect("pwd");
+        assert!(
+            wait_for_output(&mut client, &terminal_id, "wt-a"),
+            "the shell must run inside the worktree"
+        );
+
+        // `w`: create a 4th worktree for the task through the socket.
+        let created = client
+            .call(OfficeRequestKind::WorktreeCreateForTask {
+                task_id: task_id.clone(),
+                branch: Some("agent/s2-created".into()),
+                base_dir: None,
+            })
+            .expect("create for task");
+        let path = created
+            .get("worktree_path")
+            .and_then(|v| v.as_str())
+            .expect("worktree path")
+            .to_string();
+        assert!(
+            std::path::Path::new(&path).join(".git").exists()
+                || std::path::Path::new(&path).exists(),
+            "the created worktree exists on disk at {path}"
+        );
+        let view = client.call(OfficeRequestKind::WorkbenchView).expect("view2");
+        let model: crate::tui::workbench::WorkbenchModel =
+            serde_json::from_value(view).expect("decode2");
+        assert!(model.worktrees.iter().any(|w| w.path == path));
+
+        client
+            .call(OfficeRequestKind::TerminalStop {
+                terminal_id: terminal_id.clone(),
+            })
+            .expect("stop shell");
         host.shutdown();
     }
 }
