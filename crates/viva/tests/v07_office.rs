@@ -273,7 +273,7 @@ fn cli_dispatches_observes_and_stops_over_the_real_channel() {
         .unwrap_or(false)
     });
 
-    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown))
+    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown { close_policy: None }))
         .expect("shutdown");
     host.join().expect("host thread ends after shutdown");
 }
@@ -311,7 +311,7 @@ fn revoked_grant_denies_dispatch_and_creates_no_execution() {
     assert!(err.contains("denied"), "got: {err}");
     assert_eq!(count_executions(&home), 0, "no execution may be created");
 
-    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown)).ok();
+    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown { close_policy: None })).ok();
     host.join().ok();
 }
 
@@ -356,7 +356,7 @@ fn second_host_refuses_and_names_the_running_one() {
         "the refusal should name the running host's pid {pid}: {message}"
     );
 
-    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown)).ok();
+    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown { close_policy: None })).ok();
     host.join().ok();
 }
 
@@ -379,7 +379,7 @@ fn graceful_shutdown_stops_owned_terminals_and_persists_the_handoff() {
     )
     .expect("dispatch");
 
-    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown))
+    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown { close_policy: None }))
         .expect("shutdown accepted");
     host.join().expect("serve ends");
     assert!(
@@ -545,7 +545,7 @@ fn crash_restart_reconciles_without_rerunning_finished_work() {
         "the refusal created no execution"
     );
 
-    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown)).ok();
+    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown { close_policy: None })).ok();
     host.join().ok();
 }
 
@@ -576,7 +576,7 @@ fn graceful_shutdown_records_every_exit_before_the_handoff() {
     )
     .expect("dispatch");
 
-    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown))
+    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown { close_policy: None }))
         .expect("shutdown");
     host.join().expect("serve ends");
 
@@ -626,7 +626,7 @@ fn graceful_shutdown_records_every_exit_before_the_handoff() {
         false_orphans.is_empty(),
         "a graceful shutdown must not be recorded as orphaning its own terminals: {false_orphans:?}"
     );
-    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown)).ok();
+    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown { close_policy: None })).ok();
     host.join().ok();
 }
 
@@ -653,7 +653,7 @@ fn host_home_and_channel_are_private_and_authenticated() {
         );
     }
 
-    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown)).ok();
+    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown { close_policy: None })).ok();
     host.join().ok();
 }
 
@@ -705,7 +705,7 @@ fn a_grant_never_serves_a_member_other_than_its_principal() {
     assert!(err.contains("was not issued to member"), "got: {err}");
     assert_eq!(count_executions(&home), 0, "no execution may be created");
 
-    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown)).ok();
+    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown { close_policy: None })).ok();
     host.join().ok();
 }
 
@@ -751,7 +751,7 @@ fn request_keys_never_replay_across_tasks() {
         .unwrap_or(0);
     assert_eq!(task2_intents, 0, "task two must have no intent");
 
-    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown)).ok();
+    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown { close_policy: None })).ok();
     host.join().ok();
 }
 
@@ -795,6 +795,6 @@ fn channel_survives_delayed_and_pipelined_requests() {
     let third = office::read_message(&mut stream).expect("malformed answered in-band");
     assert!(third.contains("\"ok\":false"), "got: {third}");
 
-    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown)).ok();
+    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown { close_policy: None })).ok();
     host.join().ok();
 }

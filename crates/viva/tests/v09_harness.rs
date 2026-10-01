@@ -240,7 +240,7 @@ fn handoff_records_member_report_and_never_completes_the_task() {
     // An empty summary is rejected, not stored.
     assert!(handoff("   ").is_err());
 
-    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown)).ok();
+    office::send_request(&home, office::new_request(OfficeRequestKind::Shutdown { close_policy: None })).ok();
     host.join().ok();
 }
 

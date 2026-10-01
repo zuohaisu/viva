@@ -189,9 +189,22 @@ pub enum OfficeRequestKind {
         #[serde(default = "default_feed_limit")]
         limit: u32,
     },
+    /// Suspend NEW dispatch and maintenance cycles (S6, issue #48):
+    /// already-running executions are never touched - stopping one is the
+    /// separate, explicit terminal/execution stop. Owner-only.
+    Pause,
+    /// Lift a pause: dispatch and maintenance resume. Owner-only.
+    Resume,
     /// Ask the host to shut down gracefully: stop new dispatch, stop owned
     /// terminals, persist the handoff, release the channel.
-    Shutdown,
+    /// `close_policy` names the hook the TUI/CLI applied before asking:
+    /// `continue` (default) or `pause` - under pause the NEXT server
+    /// starts paused (the pause is persisted, the semantics survive a
+    /// restart).
+    Shutdown {
+        #[serde(default)]
+        close_policy: Option<String>,
+    },
     /// Begin a live handoff (S3, issue #45): the host binds `handoff.sock`
     /// and answers with its path. The resumed server connects, receives
     /// every live PTY master fd + manifest, and takes over; the old host

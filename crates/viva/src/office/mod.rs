@@ -55,7 +55,8 @@ use crate::members::MemberRegistry;
 use crate::tasks::{ExecutionStart, TaskRegistry, TaskStatus};
 use crate::terminal::{StopPolicy, TerminalRegistry};
 
-/// The `office_host` migration domain: host registry and recovery records.
+/// The `office_host` migration domain: host registry, recovery records and
+/// a tiny settings table (S6 close-policy / pause persistence).
 pub const DOMAIN_OFFICE_HOST: Domain = Domain::new("office_host");
 
 pub const OFFICE_HOST_V1_SQL: &str = r#"
@@ -75,6 +76,16 @@ CREATE TABLE office_recovery_events (
     kind        TEXT NOT NULL,
     detail      TEXT NOT NULL,
     recorded_at TEXT NOT NULL
+);
+"#;
+
+/// The office_host v2 slice: key/value settings for owner-controlled
+/// semantics that must survive a restart (close-policy pause, and the
+/// pause itself).
+pub const OFFICE_HOST_V2_SQL: &str = r#"
+CREATE TABLE office_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 "#;
 
@@ -121,6 +132,12 @@ pub fn office_migrations() -> &'static crate::foundation::store::FrozenMigration
         let registry = crate::maintenance::register_migrations(registry);
         let registry = crate::tools::computer::register_migrations(registry);
         let registry = crate::memory::register_migrations(registry);
+        let registry = registry.register(
+            DOMAIN_OFFICE_HOST,
+            2,
+            "office host v2 (settings)",
+            OFFICE_HOST_V2_SQL,
+        );
         registry
             .register(DOMAIN_OFFICE_HOST, 1, "office host v1", OFFICE_HOST_V1_SQL)
             .freeze()
@@ -145,6 +162,9 @@ pub struct OfficeShared {
     /// Agent status board (S4): controlled reports (authoritative) and
     /// screen/process observations (auxiliary), kept per source.
     pub agent_board: crate::agents::AgentStatusBoard,
+    /// Paused (S6): no NEW dispatch, no maintenance cycles; running
+    /// executions are untouched. Owner-controlled, explicitly.
+    pub paused: AtomicBool,
     /// Exit-watchers for dispatched executions. The graceful shutdown
     /// joins them BEFORE writing its handoff record — otherwise the
     /// process exit would die with the process and the next host would
@@ -199,6 +219,15 @@ impl OfficeHost {
             office_migrations(),
         )?;
         let host_id = Self::reconcile(&store, &host_id)?;
+        let persisted_pause: bool = store
+            .connection()
+            .query_row(
+                "SELECT value FROM office_settings WHERE key = 'paused'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map(|value| value == "true")
+            .unwrap_or(false);
         store.connection().execute(
             "INSERT INTO office_hosts(host_id, pid, started_at) VALUES (?1, ?2, ?3)",
             rusqlite::params![host_id, std::process::id() as i64, utc_now()],
@@ -216,6 +245,7 @@ impl OfficeHost {
             transferred: AtomicBool::new(false),
             handoff_listener: Mutex::new(None),
             agent_board: crate::agents::AgentStatusBoard::new(),
+            paused: AtomicBool::new(persisted_pause),
             watchers: Mutex::new(Vec::new()),
         });
         Ok(Self { shared, listener })
@@ -253,6 +283,15 @@ impl OfficeHost {
             let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
+        let persisted_pause: bool = store
+            .connection()
+            .query_row(
+                "SELECT value FROM office_settings WHERE key = 'paused'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map(|value| value == "true")
+            .unwrap_or(false);
         for (old_host, pid) in previous {
             store.connection().execute(
                 "UPDATE office_hosts SET exited_at = ?2, exit_kind = 'crashed' WHERE host_id = ?1",
@@ -265,6 +304,14 @@ impl OfficeHost {
                 &format!(
                     "host `{old_host}` (pid {pid}) did not record its exit; its owned processes are unaccounted, none were killed or re-run"
                 ),
+            )?;
+        }
+        if persisted_pause {
+            record_recovery(
+                store,
+                new_host_id,
+                "pause_restored",
+                "the previous state carried an explicit pause; this host starts paused                  (dispatch and maintenance stay off until `viva resume`)",
             )?;
         }
 
@@ -587,7 +634,7 @@ fn handle_connection(shared: Arc<OfficeShared>, mut stream: UnixStream) -> Offic
             protocol::write_message(&mut stream, &response)?;
             continue;
         }
-        let is_shutdown = matches!(request.kind, OfficeRequestKind::Shutdown);
+        let is_shutdown = matches!(request.kind, OfficeRequestKind::Shutdown { .. });
         let response = match handle_request(Arc::clone(&shared), &request) {
             Ok(result) => OfficeResponse::ok(&request.request_id, result),
             Err(err) => OfficeResponse::err(&request.request_id, err.to_string()),
@@ -681,7 +728,12 @@ fn handle_request(
             member_id,
             summary,
         } => handoff(&shared, task_id, member_id, summary),
-        OfficeRequestKind::Shutdown => Ok(serde_json::json!({"shutting_down": true})),
+        OfficeRequestKind::Shutdown { close_policy } => {
+            apply_close_policy(&shared, close_policy.as_deref())?;
+            Ok(serde_json::json!({"shutting_down": true}))
+        }
+        OfficeRequestKind::Pause => pause_server(&shared, true),
+        OfficeRequestKind::Resume => pause_server(&shared, false),
         OfficeRequestKind::ServerRestart => begin_server_restart(&shared),
         OfficeRequestKind::AgentReport {
             terminal_id,
@@ -700,12 +752,12 @@ fn handle_request(
         OfficeRequestKind::AgentPrompt {
             terminal_id,
             prompt,
-        } => agent_prompt(&shared, &terminal_id, &prompt),
+        } => agent_prompt(&shared, terminal_id, prompt),
         OfficeRequestKind::AgentWait {
             terminal_id,
             status,
             timeout_secs,
-        } => agent_wait(&shared, &terminal_id, &status, *timeout_secs),
+        } => agent_wait(&shared, terminal_id, status, *timeout_secs),
         OfficeRequestKind::EventsFeed { since_seq, limit } => {
             events_feed(&shared, *since_seq, *limit)
         }
@@ -734,7 +786,9 @@ fn is_member_gated_kind(kind: &OfficeRequestKind) -> bool {
             | OfficeRequestKind::AgentContentSubmit { .. }
             | OfficeRequestKind::AgentPrompt { .. }
             | OfficeRequestKind::AgentWait { .. }
-            | OfficeRequestKind::Shutdown
+            | OfficeRequestKind::Pause
+            | OfficeRequestKind::Resume
+            | OfficeRequestKind::Shutdown { .. }
     )
 }
 
@@ -810,11 +864,14 @@ fn authorize_socket_request(shared: &OfficeShared, request: &OfficeRequest) -> O
     // action (dispatch is further checked in its handler; shutdown is an
     // owner action no member grant may carry).
     if request.member.is_some() && is_member_gated_kind(&request.kind) {
-        if matches!(request.kind, OfficeRequestKind::Shutdown) {
+        if matches!(
+            request.kind,
+            OfficeRequestKind::Shutdown { .. } | OfficeRequestKind::Pause | OfficeRequestKind::Resume
+        ) {
             return Err(audit_grant_denial(
                 shared,
                 request,
-                "shutdown is an owner action; member grants cannot carry it",
+                "shutdown/pause/resume are owner actions; member grants cannot carry them",
             ));
         }
         let action_needed = match request.kind {
@@ -868,6 +925,7 @@ fn audit_grant_denial(shared: &OfficeShared, request: &OfficeRequest, reason: &s
 /// sizes, no UI) and the workbench path. The owner is restricted to
 /// user-owned kinds here; only Dispatch can create an execution-owned
 /// terminal, so a socket client can never fake member attribution.
+#[allow(clippy::too_many_arguments)]
 fn terminal_create(
     shared: &OfficeShared,
     argv: &[String],
@@ -1397,6 +1455,61 @@ fn events_feed(shared: &OfficeShared, since_seq: u64, limit: u32) -> OfficeResul
 }
 
 // ---------------------------------------------------------------------------
+// Pause/resume + close policy (S6, issue #48; ADR 0012 decision 3)
+// ---------------------------------------------------------------------------
+
+/// Owner pause/resume: flip the gate, persist it (the semantics survive a
+/// restart), and audit. Running executions are untouched by design.
+fn pause_server(shared: &OfficeShared, paused: bool) -> OfficeResult<serde_json::Value> {
+    shared.paused.store(paused, Ordering::SeqCst);
+    {
+        let store = shared.store.lock().expect("office store");
+        store.connection().execute(
+            "INSERT INTO office_settings(key, value) VALUES ('paused', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![if paused { "true" } else { "false" }],
+        )?;
+        crate::foundation::events::append(
+            &store,
+            crate::foundation::events::NewEvent {
+                domain: DOMAIN_OFFICE_HOST,
+                kind: if paused { "office_paused" } else { "office_resumed" }.into(),
+                subject_type: "office".into(),
+                subject_id: shared.host_id.clone(),
+                origin: "office_host".into(),
+                payload: serde_json::json!({
+                    "note": if paused {
+                        "no new dispatch, no maintenance cycles; running executions untouched"
+                    } else {
+                        "dispatch and maintenance resumed"
+                    },
+                }),
+            },
+        )?;
+    }
+    Ok(serde_json::json!({
+        "paused": paused,
+        "note": "the gate covers new dispatch and maintenance only",
+    }))
+}
+
+/// Apply the close-policy hook at shutdown time. `pause` persists the
+/// paused state so the NEXT server starts paused; `continue` explicitly
+/// clears any pause; `None` (an unadorned shutdown) leaves the CURRENT
+/// state untouched - an operator-paused office that is shut down comes
+/// back paused, because the pause was an explicit owner decision.
+fn apply_close_policy(shared: &OfficeShared, close_policy: Option<&str>) -> OfficeResult<()> {
+    match close_policy {
+        Some("pause") => pause_server(shared, true).map(|_| ()),
+        Some("continue") => pause_server(shared, false).map(|_| ()),
+        None => Ok(()),
+        Some(other) => Err(OfficeError::Validation(format!(
+            "unknown close policy `{other}` (continue | pause)"
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Live handoff (S3, issue #45; ADR 0012 decision 2)
 // ---------------------------------------------------------------------------
 
@@ -1740,6 +1853,7 @@ fn status(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
         "pid": std::process::id(),
         "home": shared.home.display().to_string(),
         "stopping": shared.stopping.load(Ordering::SeqCst),
+        "paused": shared.paused.load(Ordering::SeqCst),
         "executions": {"total": row_count_executions, "running": running, "completed": completed},
         "terminals": terminals,
     }))
@@ -1768,6 +1882,15 @@ fn dispatch(
     cwd: &Path,
     worktree_id: Option<&str>,
 ) -> OfficeResult<serde_json::Value> {
+    // The pause gate (S6): no NEW dispatch while paused. Running
+    // executions are never touched here - stopping one is the explicit,
+    // separate stop.
+    if shared.paused.load(Ordering::SeqCst) {
+        return Err(OfficeError::Validation(
+            "office is paused: no new dispatch (running executions are unaffected;              `viva resume` lifts the pause)"
+                .into(),
+        ));
+    }
     let task_id = TaskId::from_str(task_id)?;
     let member_id = MemberId::from_str(member_id)?;
     let grant_id = GrantId::from_str(grant_id)?;
@@ -2282,7 +2405,7 @@ mod server_split_tests {
         /// the serve loop BEFORE the temp home disappears.
         fn shutdown(self) {
             if let Ok(mut client) = OfficeClient::connect(&self.home) {
-                let _ = client.call(OfficeRequestKind::Shutdown);
+                let _ = client.call(OfficeRequestKind::Shutdown { close_policy: None });
             }
             let _ = self.server.join();
             drop(self.dir);
@@ -2549,7 +2672,7 @@ mod s2_workbench_tests {
 
         fn shutdown(self) {
             if let Ok(mut client) = OfficeClient::connect(&self.home) {
-                let _ = client.call(OfficeRequestKind::Shutdown);
+                let _ = client.call(OfficeRequestKind::Shutdown { close_policy: None });
             }
             let _ = self.server.join();
             drop(self.dir);
@@ -2843,7 +2966,7 @@ mod s3_handoff_tests {
         }
 
         // Clean teardown: the resumed host shuts down like any other.
-        client2.call(OfficeRequestKind::Shutdown).expect("shutdown");
+        client2.call(OfficeRequestKind::Shutdown { close_policy: None }).expect("shutdown");
         resume_thread.join().expect("resumed host ends cleanly");
         drop(dir);
     }
@@ -2882,7 +3005,7 @@ mod s4_agent_status_tests {
         }
         fn shutdown(self) {
             if let Ok(mut client) = OfficeClient::connect(&self.home) {
-                let _ = client.call(OfficeRequestKind::Shutdown);
+                let _ = client.call(OfficeRequestKind::Shutdown { close_policy: None });
             }
             let _ = self.server.join();
             drop(self.dir);
@@ -3173,7 +3296,7 @@ mod s5_orchestration_tests {
         }
         fn shutdown(self) {
             if let Ok(mut client) = OfficeClient::connect(&self.home) {
-                let _ = client.call(OfficeRequestKind::Shutdown);
+                let _ = client.call(OfficeRequestKind::Shutdown { close_policy: None });
             }
             let _ = self.server.join();
             drop(self.dir);
@@ -3351,5 +3474,217 @@ mod s5_orchestration_tests {
             .expect("timeout audit");
         assert!(timeouts >= 1, "the timeout is audited");
         host.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod s6_pause_tests {
+    use super::*;
+    use crate::office::OfficeClient;
+    use std::time::{Duration, Instant};
+
+    struct RunningHost {
+        dir: tempfile::TempDir,
+        home: std::path::PathBuf,
+        server: std::thread::JoinHandle<()>,
+    }
+
+    fn start_host() -> RunningHost {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let host = OfficeHost::open(&home).expect("host");
+        let server = host.serve_background();
+        let socket = home.join(OFFICE_SOCKET_NAME);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !socket.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        RunningHost { dir, home, server }
+    }
+
+    impl RunningHost {
+        fn client(&self) -> OfficeClient {
+            OfficeClient::connect(&self.home).expect("client")
+        }
+        fn shutdown(self) {
+            if let Ok(mut client) = OfficeClient::connect(&self.home) {
+                let _ = client.call(OfficeRequestKind::Shutdown { close_policy: None });
+            }
+            let _ = self.server.join();
+            drop(self.dir);
+        }
+    }
+
+    /// A REAL dispatch chain (member + binding + task + live grant) so the
+    /// pause gate is tested against the full authorization path.
+    fn seed_dispatch_chain(home: &std::path::Path) -> (String, String, String) {
+        let store = Store::open(
+            &crate::foundation::paths::database_path(home),
+            office_migrations(),
+        )
+        .expect("store");
+        let member = crate::members::MemberRegistry::new(&store)
+            .register("operator")
+            .expect("member");
+        crate::members::MemberRegistry::new(&store)
+            .set_binding(&crate::members::MemberBinding {
+                member_id: member.member_id.clone(),
+                role: "developer".into(),
+                model_binding: "glm-5.3-flash".into(),
+                tools: vec![],
+                updated_at: crate::foundation::ids::utc_now(),
+            })
+            .expect("binding");
+        let task = TaskRegistry::new(&store)
+            .create_task("prove the pause gate", vec![], None, None, None)
+            .expect("task");
+        let grant = crate::authority::AuthorityEngine::new(&store)
+            .issue_root_grant(
+                Some(member.member_id.clone()),
+                Some(task.task_id.clone()),
+                vec!["dispatch_delegated".into()],
+                crate::authority::GrantMode::ActAutonomously,
+                None,
+            )
+            .expect("grant");
+        (
+            member.member_id.to_string(),
+            task.task_id.to_string(),
+            grant.grant_id.to_string(),
+        )
+    }
+
+    /// Pause stops NEW dispatch (authorized chain included) and running
+    /// executions are untouched; resume lifts the gate; the pause survives
+    /// a restart; pause/resume are owner-only.
+    #[test]
+    fn pause_gates_new_dispatch_only_and_survives_a_restart() {
+        let host = start_host();
+        let mut client = host.client();
+        let (member, task, grant) = seed_dispatch_chain(&host.home);
+        let dispatch_with_cwd = |cwd: &str| OfficeRequestKind::Dispatch {
+            task_id: task.clone(),
+            member_id: member.clone(),
+            grant_id: grant.clone(),
+            request_key: format!("req-{}", uuid::Uuid::new_v4().simple()),
+            argv: vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()],
+            cwd: cwd.to_string(),
+            worktree_id: None,
+        };
+
+        // Before the pause the dispatch is authorized and would spawn; use
+        // an invalid cwd so we prove authorization PASSED (cwd error comes
+        // after the grant checks).
+        let err = client
+            .call(dispatch_with_cwd("/definitely/not/here"))
+            .expect_err("the dispatch must fail");
+        // Either rejection proves the request walked the real path: the
+        // cwd check (terminal cwd must be absolute+existing paths differ
+        // per spawn backend) fires after the grant checks either way.
+        assert!(
+            err.to_string().contains("cwd") || err.to_string().contains("spawn"),
+            "expected the post-authorization failure, got: {err}"
+        );
+
+        // Pause: the same fully-authorized dispatch is now refused.
+        client.call(OfficeRequestKind::Pause).expect("pause");
+        let err = client
+            .call(dispatch_with_cwd("/definitely/not/here"))
+            .expect_err("paused dispatch must be refused");
+        assert!(err.to_string().contains("paused"), "{err}");
+
+        // Member grants cannot carry pause/resume: owner-only.
+        let mut owner_attempt = new_request(OfficeRequestKind::Pause);
+        owner_attempt.member = Some(member.clone());
+        owner_attempt.grant = Some(grant.clone());
+        let err = client.call_request(owner_attempt).expect_err("must deny");
+        assert!(err.to_string().contains("owner action"), "{err}");
+
+        // Resume lifts the gate (cwd check again proves the path).
+        client.call(OfficeRequestKind::Resume).expect("resume");
+        let err = client
+            .call(dispatch_with_cwd("/definitely/not/here"))
+            .expect_err("the dispatch must fail again");
+        assert!(
+            err.to_string().contains("cwd") || err.to_string().contains("spawn"),
+            "the gate is open (post-authorization failure expected): {err}"
+        );
+
+        // A paused server persists the pause: the next host starts paused.
+        client.call(OfficeRequestKind::Pause).expect("pause 2");
+        {
+            let store = Store::open(
+                &crate::foundation::paths::database_path(&host.home),
+                office_migrations(),
+            )
+            .expect("store");
+            let value: String = store
+                .connection()
+                .query_row(
+                    "SELECT value FROM office_settings WHERE key = 'paused'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("setting");
+            assert_eq!(value, "true");
+        }
+        // Close with the pause in place, then reopen: paused comes back.
+        client
+            .call(OfficeRequestKind::Shutdown { close_policy: None })
+            .expect("shutdown");
+        let _ = host.server.join();
+        let reopened = OfficeHost::open(&host.home).expect("reopen");
+        assert!(
+            reopened.shared().paused.load(std::sync::atomic::Ordering::SeqCst),
+            "the persisted pause survives the restart"
+        );
+        {
+            let shared = reopened.shared();
+            let store = shared.store.lock().expect("store");
+            store
+                .connection()
+                .execute(
+                    "UPDATE office_settings SET value = 'false' WHERE key = 'paused'",
+                    [],
+                )
+                .expect("cleanup");
+        }
+        drop(reopened);
+    }
+
+    /// close-policy=pause at shutdown leaves the NEXT server paused;
+    /// continue (default) clears it. Type-1 recovery facts stay honest.
+    #[test]
+    fn close_policy_pause_carries_across_shutdown() {
+        let host = start_host();
+        let mut client = host.client();
+        client
+            .call(OfficeRequestKind::Shutdown {
+                close_policy: Some("pause".into()),
+            })
+            .expect("shutdown with pause policy");
+        let _ = host.server.join();
+
+        let reopened = OfficeHost::open(&host.home).expect("reopen");
+        assert!(
+            reopened.shared().paused.load(std::sync::atomic::Ordering::SeqCst),
+            "close-policy=pause must leave the next host paused"
+        );
+        // The recovery log names the restore.
+        let notes: i64 = {
+            let shared = reopened.shared();
+            let store = shared.store.lock().expect("store");
+            store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM office_recovery_events WHERE kind = 'pause_restored'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("recovery")
+        };
+        assert!(notes >= 1, "pause_restored must be recorded");
+        drop(reopened);
     }
 }

@@ -735,8 +735,7 @@ impl WorkbenchApp {
         // counts real rows only.
         let mut items: Vec<ListItem> = Vec::new();
         let mut current_project: Option<String> = None;
-        let mut real_index = 0usize;
-        for w in &self.model.worktrees {
+        for (real_index, w) in self.model.worktrees.iter().enumerate() {
             if current_project.as_ref() != Some(&w.project_id) {
                 current_project = Some(w.project_id.clone());
                 let name = self
@@ -771,7 +770,6 @@ impl WorkbenchApp {
                 w.task_id.as_deref().unwrap_or("-"),
                 w.source
             ))));
-            real_index += 1;
         }
         frame.render_widget(
             List::new(items).block(

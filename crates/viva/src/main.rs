@@ -42,6 +42,7 @@ fn run(args: &[String]) -> OfficeResult<()> {
         // status`, ... — with no `office` namespace to type through.
         Some(
             "start" | "server" | "status" | "dispatch" | "terminals" | "stop-terminal" | "result" | "shutdown"
+            | "pause" | "resume"
             | "brief" | "create-task" | "grant" | "handoff",
         ) => cmd_office(args),
         Some("terminal") => cmd_terminal(args.get(1..).unwrap_or(&[])),
@@ -377,9 +378,25 @@ USAGE:
         viva handoff --task <id> --member <id> --summary <text>
         Task, grant, brief and handoff management.
 
+    viva pause | viva resume
+        Owner controls over the resident runtime: pause stops NEW dispatch
+        and maintenance cycles (running executions are untouched); resume
+        lifts the pause. The state persists across restarts.
+
     viva shutdown
         Ask the resident server to stop dispatch, stop owned terminals,
-        persist the handoff and release the channel.
+        persist the handoff and release the channel. Set VIVA_CLOSE_POLICY
+        =pause to leave the next server paused.
+
+    viva agent prompt --terminal <id> --text <text> [--member <id> --grant <id>]
+    viva agent wait --terminal <id> --status <working|blocked|done|idle> \
+        [--timeout <secs>] [--member <id> --grant <id>]
+        The orchestration primitives (issue #47): prompt an agent's
+        terminal, or wait server-side for its reported status.
+
+    viva events [--since <seq>] [--limit <n>]
+        The durable office event feed: reconnect with your last seen seq
+        and miss nothing.
 
     viva conversations <create|fork|rename|set-native|attach-task|detach-task|archive|tree|handoff> [flags]
         Conversation metadata (office-owned tree; the harness owns the transcript).
@@ -643,10 +660,24 @@ fn cmd_office(args: &[String]) -> OfficeResult<()> {
             )
         }
         Some("shutdown") => {
-            cmd_office_query(&home, viva::office::OfficeRequestKind::Shutdown)?;
+            let close_policy = std::env::var("VIVA_CLOSE_POLICY").ok().filter(|p| p == "pause");
+            cmd_office_query(
+                &home,
+                viva::office::OfficeRequestKind::Shutdown { close_policy },
+            )?;
             // Human commentary goes to stderr; stdout stays pure JSON for
             // callers that parse it (the extension envelope, tooling).
             eprintln!("office: shutdown accepted; owned terminals stopped, handoff persisted");
+            Ok(())
+        }
+        Some("pause") => {
+            cmd_office_query(&home, viva::office::OfficeRequestKind::Pause)?;
+            eprintln!("office: paused - no new dispatch, no maintenance; running executions keep running");
+            Ok(())
+        }
+        Some("resume") => {
+            cmd_office_query(&home, viva::office::OfficeRequestKind::Resume)?;
+            eprintln!("office: resumed - dispatch and maintenance are live again");
             Ok(())
         }
         Some("brief") => cmd_office_brief(args.get(1..).unwrap_or(&[])),

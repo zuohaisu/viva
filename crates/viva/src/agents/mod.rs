@@ -224,7 +224,7 @@ pub fn identify_by_process_tree(
     let output = Command::new("ps")
         .args(["-eo", "pid=,ppid=,command="])
         .output()
-        .map_err(|e| crate::foundation::error::OfficeError::Io(e))?;
+        .map_err(crate::foundation::error::OfficeError::Io)?;
     if !output.status.success() {
         // A failing ps is an honest unknown, not a guess.
         return Ok(None);
