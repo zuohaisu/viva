@@ -1,6 +1,6 @@
 # Herdr 架构与功能映射研究：Viva 终端运行时的对齐、冲突与裁决点
 
-Status: planning evidence; official docs/API/source metadata inspected, no herdr source line-by-line audit, nothing built or benchmarked. Route decision: **A 原生实现**（2026-10-01，Haisu 裁决，见 §5/§6）. Date: 2026-10-01.
+Status: planning evidence; official docs/API/source metadata inspected, no herdr source line-by-line audit, nothing built or benchmarked. Route decision: **A 原生实现**（2026-10-01，Haisu 裁决，见 §5/§6）；同日三轮逐项裁定收齐（§5.1–§5.3），ADR 0011 §6 修订以 [ADR 0012](../decisions/0012-resident-runtime-and-terminal-orchestration.md) 草案提出（同 PR）. Date: 2026-10-01.
 
 [Goal check] This work advances Viva's runtime capability by mapping herdr's full feature surface onto Viva's user stories and naming the exact ADR conflicts and decision points a "herdr-like Viva" requires.
 
@@ -71,19 +71,61 @@ Status: planning evidence; official docs/API/source metadata inspected, no herdr
 4. **agent 状态定位**：屏幕推断仅作展示层；验收、派发与恢复继续走受控接口（ADR 0011 §5.2），写进对应切片的验收记录。
 5. **第三方二进制依赖政策**：随路线 B 出局，不适用。
 
-## 6. 路线 A 的执行含义与切片序列
+### 5.1 二轮裁定（2026-10-01，逐项过审）
 
-路线 A 的证据基线：herdr 的价值是"哪些能力组合成立"的活样本，不是代码来源。Viva 带走的是思路——session→workspace→tab→pane 的导航树、五态 agent 展示、检测分层的谨慎（进程树识别优先、屏幕规则兜底、集成钩子权威）、按功能域拆配置——全部可不经其代码独立实现；实现落在 Viva 既有领域模型（成员/任务/执行/授权）之上，不照搬 herdr 的 pane 中心模型。
+同日 Haisu 逐项复审功能面，**路线 A（原生实现）不变**，但第一轮第 1、2 条中被本轮裁定取代的子项按"追加不回写"规则记录如下：
 
-切片序列（建议作为 [V14 issue #27](https://github.com/zuohaisu/viva/issues/27) 的子问题拆分，与已关闭的 V05/V06/V07/V08 能力衔接）：
+已裁定：
 
-1. **多 pane 布局引擎**（`tui/`）：pane 树（分割/焦点切换/zoom），多终端快照同屏的绘制预算（V06 目前单焦点 pane）。验收：≥3 个真实终端 + 1 个 shell，切换、resize、邻居互不影响。
-2. **worktree 分组工作台**（`git/` + `tui/`）：V08 的 worktree 服务以分组行呈现，行上挂 create/open 动作；remove 仍走人工授权，charter 的 worktree 生命周期规则不因 UI 好用而放宽。验收：对真实仓库展示 ≥3 个 worktree 并可进入。
-3. **agent 状态展示层**（`terminal/` + `tui/`）：第一层做前台进程树识别（herdr 同思路的 Rust 最小实现）；屏幕规则仅作有界实验并在 UI 标注 unverified。验收：对 1–2 个真实 agent CLI 展示 working/blocked/done，且与受控接口记录的执行状态并列呈现、不互相冒充。
-4. **无头固定尺寸终端**（`terminal/`）：供编排使用的固定 cols/rows 会话，快照可编程读取。验收：无 UI 也能创建、读快照、按策略停止。
-5. **重启恢复（ADR 0011 §6 语义）**：重启后恢复事实与归属，恢复动作显式触发（Pi 原生 resume 属 V09/V10 交界，不在此片承诺）。验收：重启不丢归属、不重跑已完成任务。
+1. **常驻 server + client/server 拆分：要**（detach/attach 的前提）。→ ADR 0011 §6 需修订，修订文本待本轮全部裁定收齐后随本文档一并提出；§6 切片序列同步重排，server/client 拆分将成为新的早期切片。
+2. **detach/attach：要。**
+3. **live handoff（活 PTY 转移）：要**（依赖常驻 server）。
+4. **SSH 多机同窗：后续阶段必须，首版不做**（建立在常驻 server 之上）。
+5. **音效与 toast 通知：要。**
+6. **主题系统：首版不做，后续加。UI 国际化：首版不做，后续加。**
+7. **agent 检测首版范围：codex、claude、codebuddy、qodercli、cline、hermes、pi coding agent，共 7 个**；其余按"需要哪个加哪个"。注：herdr 现有规则表可见 claude/codex/cline，codebuddy/qodercli/hermes 大概率需自建规则（自建同时避免 §7 的实质性材料复制问题）；pi 在 Viva 内可经受控扩展取得权威状态，优先于屏幕推断。
+8. **不要：插件与市场、onboarding 向导、面向 agent 的 SKILL.md。键位自定义：暂不需要。**
 
-每一片走标准 worktree→PR 流程；V12 的 16 路并发资源门槛不变——多 pane 不等于 16 个常驻渲染，绘制仍走 V06 的"缓存快照、单渲染者"纪律。
+待裁定（已请求解释，解释后由 Haisu 裁定）：
+
+- 跨重启"活恢复"（进程未死过的类型二恢复）与 live handoff 的工程边界
+- 屏幕推断的定位（权威状态 vs 仅展示层）
+- kitty 图片协议渲染
+- socket API 终端原语编排面
+- CJK 输入法光标跟随
+- 常驻 server 回归后，关闭 TUI 时任务派发与定期维护"继续还是暂停"（§6 原文为暂停，daemon 语义下两者皆可行）
+
+### 5.2 二轮裁定补充（同日，§5.1 待裁定的处理）
+
+1. **类型二活恢复：要**。fd 级活转移进范围；边界照旧——仅覆盖 server 重启/升级场景，关机断电仍走类型一（恢复事实 + 显式恢复动作 + 原生 resume）。
+2. **kitty 图片协议渲染：首版不做**。图片展示需求由后续桌面客户端承载，TUI 版届时再评估。
+3. **socket API 终端原语编排面：要**。定位为"agent 编排 agent"的基础设施（sendKeys / wait / prompt / 事件订阅）。约束：socket 调用必须经 Viva 授权校验（grant 语义延伸到 socket 层），不得成为绕过授权的旁路；ADR 0011 §5.4 的"RPC 未来可选"指 Pi 内部 RPC，与本 API 是两回事，修订时一并写明。
+4. **CJK 输入法光标跟随：暂不跟进**（herdr 亦仅列为实验特性，尚不成熟）。首版接受"能打、候选框可能不跟手"；实际使用暴露问题或生态成熟再立项。
+5. **关闭 TUI 后任务派发与定期维护：继续**，且**必须提供显式暂停操作**。细则随 ADR 0011 §6 修订草案定义：运行/暂停两种 server 状态；暂停=不接新派发、不跑维护周期，已运行执行不受暂停误停（停单个执行用既有 stop 语义）；CLI 与 TUI 双入口；可选"关窗即暂停"策略配置（默认继续）。
+
+### 5.3 三轮裁定（同日）：屏幕推断定位
+
+Haisu 裁定：**屏幕推断不作默认权威**。理由：Viva 生态中的自模型容器必须经受控通道取得 agent 内容（在 claude 等工具里跑了什么、形成了哪些总结、做了什么任务），交容器判定是否保存——权威事实只有受控申报一条来源；屏幕推断降为展示辅助。此裁定确认 ADR 0011 §5.2 不变；受控申报通道同时承担自模型容器的取材职责（容器侧策展规则属自模型边界，Viva 保证通道与留痕；raw event 不自动成为 memory）。
+
+至此二轮全部待裁定项收齐。ADR 0011 §6 修订与终端原语 API 定位以 [ADR 0012](../decisions/0012-resident-runtime-and-terminal-orchestration.md) 草案提出；§6 切片序列同步重排。
+
+## 6. 路线 A 的执行含义与切片序列（2026-10-01 按二轮/三轮裁定重排）
+
+路线 A 的证据基线不变：herdr 的价值是"哪些能力组合成立"的活样本，不是代码来源。Viva 带走思路——session→workspace→tab→pane 导航树、检测分层的谨慎、按功能域拆配置——全部不经其代码独立实现；实现落在 Viva 既有领域模型（成员/任务/执行/授权）之上，不照搬 herdr 的 pane 中心模型。
+
+范围变化声明：本节初版（无常驻 server 的子集）给出的"1–2 万行"量级估算已因二轮裁定（常驻 server、类型二活恢复、编排 API）**不再适用**；扩围后的规模不在此编造数字，以各切片验收记录累积实测。
+
+切片序列（建议作为 [V14 issue #27](https://github.com/zuohaisu/viva/issues/27) 的子问题拆分，与已关闭的 V05/V06/V07/V08 能力衔接；顺序按依赖排布）：
+
+1. **常驻 server + client/server 拆分**（`terminal/` + 新 `server/`）：server 持有 PTY、仿真状态、有界日志与 socket 面；TUI 降为客户端；detach/attach 第一版；V05 进程组纪律整体迁移；无头固定尺寸终端顺带落地（TerminalSpec 已支持固定尺寸）。验收：关客户端 agent 不死；重连恢复视图；socket 骨架上未授权调用被拒且留审计。
+2. **多 pane 布局引擎 + worktree 分组工作台**（`tui/` + `git/`）：客户端内 pane 树（分割/焦点/zoom）、多快照同屏绘制预算；V08 worktree 服务分组呈现，行上挂 create/open（remove 仍人工授权）。验收：≥3 终端 + 1 shell 同屏，切换/resize 邻居互不影响；真实仓库 ≥3 worktree 可进入。
+3. **类型二活恢复 + live handoff**（`server/`）：fd 级转移覆盖 server 重启/升级；转移失败路径退回类型一。验收：server 升级式重启期间 agent 输出流不中断、scrollback 保留。
+4. **agent 状态三层 + 自模型容器取材通道**（`harness/` + `tui/`）：pi 经扩展受控申报（权威）；7 CLI（codex、claude、codebuddy、qodercli、cline、hermes、pi）进程树识别 + 屏幕辅助展示（UI 标注 unverified）；claude 等钩子集成起步；受控通道向自模型容器提供 agent 内容，由容器判定保存。验收：7 CLI 状态展示；pi 权威状态与屏幕辅助并列呈现、不互相冒充。
+5. **终端原语编排 API 全量**（`server/` + `authority/`）：sendKeys/wait/prompt/events.subscribe + 会话/pane 管理；全部调用过 grant 校验、留审计。验收：orchestrator 全流程（创建 pane→派 prompt→wait→收结果）零越权、全程留痕。
+6. **暂停/恢复与关闭策略 + 类型一恢复闭环**：pause/resume 双入口、close-policy 配置（默认 continue）；SQLite 恢复事实与归属、显式恢复动作、原生 resume（Pi resume 属 V09/V10 交界，不在此片承诺）。验收：关 TUI 派发继续；pause 不派发且不停在跑执行；重启不丢归属、不重跑完成任务。
+7. **范围内排后 / 后续阶段 / 不做**：音效与 toast 通知、主题系统、UI 国际化（范围内，随核心切片后排）；SSH 多机（后续阶段必须）；kitty 图片协议随桌面客户端评估；不做——插件与市场、onboarding、SKILL.md、键位自定义、CJK IME 专项。
+
+每一片走标准 worktree→PR 流程；V12 的 16 路并发资源门槛扩展覆盖常驻 server 稳态内存与恢复路径；多 pane 不等于 16 个常驻渲染，绘制仍走 V06 的"缓存快照、单渲染者"纪律。
 
 ## 7. 许可与归属合规
 
