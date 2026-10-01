@@ -7,6 +7,7 @@
 // the right platform package.
 
 const { spawn } = require("child_process");
+const path = require("path");
 
 const archMap = { arm64: "arm64", x64: "x64" };
 
@@ -32,7 +33,12 @@ try {
   process.exit(1);
 }
 
-const child = spawn(nativeBin, process.argv.slice(2), { stdio: "inherit" });
+const child = spawn(nativeBin, process.argv.slice(2), {
+  stdio: "inherit",
+  // The native updater must use npm for this installation, keeping the
+  // wrapper and optional platform dependency at the same version.
+  env: { ...process.env, VIVA_NPM_PACKAGE_ROOT: path.resolve(__dirname, "..") },
+});
 
 child.on("error", (err) => {
   console.error("viva: failed to exec the platform binary:", err.message);

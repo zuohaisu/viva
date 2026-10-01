@@ -14,7 +14,9 @@ delivery channel: the installed command stays `viva`.
   `@zuohaisu/viva-darwin-<arch>/bin/viva`, spawns it with inherited stdio,
   forwards argv, exit codes and SIGINT/SIGTERM/SIGHUP. No postinstall
   network access — npm's optionalDependencies mechanism picks the platform
-  package, and the `os`/`cpu` fields keep the other one away.
+  package, and the `os`/`cpu` fields keep the other one away. It passes its own
+  package root as `VIVA_NPM_PACKAGE_ROOT` so the native updater can identify
+  this channel instead of replacing a file inside npm's dependency tree.
 - One-time maintainer setup (human-only): on npmjs.com as `zuohaisu`,
   create a granular **automation** token with read/write for
   `@zuohaisu/*`, and add it as the repository secret `NPM_TOKEN`.
@@ -24,6 +26,18 @@ delivery channel: the installed command stays `viva`.
   `prepare-packages.py` with the tag version, then publishes platform
   packages first and the wrapper last. Without `NPM_TOKEN` the job skips
   with an honest note.
+
+## Updating
+
+`viva update --check` queries the npm `latest` dist-tag. `viva update` upgrades
+global installations using `npm install --global --prefix <original-prefix>
+@zuohaisu/viva@<checked-version> --no-audit --no-fund --ignore-scripts`, then
+verifies the installed wrapper's `--version`. It requires npm on PATH and
+write access to the original prefix; it never uses sudo or changes npm's
+configuration. npm owns package installation/failure behavior (this is not
+an atomic binary-only swap). Local installs are checkable, but updates must
+be made explicitly with `npm install @zuohaisu/viva@latest` in their project.
+Running servers and agents are left alone; restart the server explicitly.
 
 ## Local checks (no registry, no token)
 

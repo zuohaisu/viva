@@ -113,6 +113,7 @@ core       →  stdlib only
 | `knowledge/` | 旧 run events / 旧文档的 experience≠memory 纪律 | 四类知识的归属边界 + "复用证据"的可判定定义 | 新组件：append-only entries + usage；不引入记忆框架 |
 | `github/` | `gh` CLI（已安装且已认证）、旧 GitHub 连接器 | 只需只读关联与证据读取，且必须禁止写操作 | 新组件（薄）：白名单式只读 `gh` 调用 |
 | TUI 并发 | 旧 `_worker_running` 全局布尔 | 同一个成员要能并行多个执行，停止互不影响 | 用执行注册表取代布尔；归属取自执行记录（bug 修复） |
+| Rust `update/` | GitHub Release artifacts + SHA-256 (`release.yml`), npm wrapper/platform optional dependencies, system curl, tar/flate2/semver/tempfile | No user-invoked upgrade entry; replacing an npm-managed binary would desynchronize package versions | Thin `viva update [--check]`: npm upgrades its own global prefix; standalone macOS uses bounded HTTPS downloads, checksum/version verification and atomic binary replacement; no state migration, implicit server restart or member maintenance |
 | `workflows/`（F01） | Task/Execution/grant（V03/V04）、`gh`/git（V08）、task brief、退役流水线的失败经验 | 交付型任务需要可配置的步骤/角色/证据/重试预算，且不能再造固定 ticket pipeline | 新组件（薄）：工作流是数据（步骤×角色×证据×预算×转移）；推进只认绑定真实 head 的证据；保护动作注册期拒绝；无 ticket/run/verdict 对象 |
 | `maintenance/`（F02） | knowledge lifecycle/skills（V11）、git 只读检查（V08）、TaskRegistry | 运行期复审只有手动管理；需要带证据、幂等、可逆、授权门控的提议机制 | 新组件：session 窗口 + dedup 提议 ledger；本模块无删除/prune/远端写；worktree 与整洁类仅人审 |
 | `tools/computer/`（F03） | `orca computer` CLI（本机已装已授权）、`osascript`、members 探测 | 成员需要经 Viva 定位→动作→核验地操作浏览器/原生应用，带授权与前后证据 | 新组件（薄）：复用现有工具的 argv 适配 + 审计 + task 级授权 + 跨进程前台 lease；不写自动化平台 |
