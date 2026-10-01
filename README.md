@@ -89,6 +89,34 @@ cargo install --path crates/viva    # or: cargo build --release
 viva init && viva doctor
 ```
 
+### Update
+
+```bash
+viva update --check      # check the latest stable version without installing
+viva update              # upgrade this installation
+```
+
+Global npm installs update through npm at the original prefix, keeping the
+wrapper and platform package in sync. Local npm installs should use
+`npm install @zuohaisu/viva@latest` from their project instead.
+
+Standalone macOS binaries (including `cargo install`) update from the official
+GitHub Release for their architecture: HTTPS download → SHA-256 verification
+→ version probe → atomic executable replacement. Equal/older releases are not
+installed; failed native downloads/validation leave the executable unchanged.
+The installation directory must be writable; Viva never invokes `sudo`.
+Cargo build outputs and directly invoked package-manager binaries are refused.
+Native updates replace **only the executable**; refresh bundled Pi extension
+sources separately from the matching release if you use them. Checksums verify
+integrity, not an independent publisher signature.
+
+Updates do not open/migrate `VIVA_HOME`, alter members/tasks/history, or
+restart running servers/agents. After installing, explicitly run
+`viva server-restart` to use the new binary in a running server, then reconnect
+the TUI. Upgrades are user-invoked, not automatic member maintenance actions.
+Older releases without this command need a one-time npm reinstall or release
+download before `viva update` becomes available.
+
 **Run Viva:**
 
 ```bash

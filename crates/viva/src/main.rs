@@ -37,6 +37,7 @@ fn run(args: &[String]) -> OfficeResult<()> {
         }
         Some("init") => cmd_init(),
         Some("doctor") => cmd_doctor(),
+        Some("update") => viva::update::run(args.get(1..).unwrap_or(&[])),
         Some("event") => cmd_event(args.get(1..).unwrap_or(&[])),
         // The daily control plane is top-level — `viva start`, `viva
         // status`, ... — with no `office` namespace to type through.
@@ -351,6 +352,10 @@ USAGE:
 
     viva doctor
         Report state root, database, schema versions and table counts.
+
+    viva update [--check]
+        Upgrade to the latest stable version (GitHub Release or global npm).
+        --check only checks. Does not modify VIVA_HOME or restart servers.
 
     viva event add <domain> <kind> <subject-type> <subject-id> [payload-json]
         Append one office event (origin: cli).

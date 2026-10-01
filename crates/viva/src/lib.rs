@@ -26,5 +26,6 @@ pub mod tasks;
 pub mod terminal;
 pub mod tools;
 pub mod tui;
+pub mod update;
 pub mod workflows;
 pub mod workspaces;
