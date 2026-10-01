@@ -34,8 +34,12 @@ use crate::tui::layout::{Direction, PaneContent, PaneNode, SplitAxis};
 
 /// Reference area for geometric pane-focus moves: adjacency decisions are
 /// proportional, so one fixed virtual size is stable for any real size.
-const PANE_REF_AREA: ratatui::layout::Rect =
-    ratatui::layout::Rect { x: 0, y: 0, width: 100, height: 40 };
+const PANE_REF_AREA: ratatui::layout::Rect = ratatui::layout::Rect {
+    x: 0,
+    y: 0,
+    width: 100,
+    height: 40,
+};
 
 // ---------------------------------------------------------------------------
 // Projections (read-only facts assembled by the store-backed source)
@@ -247,7 +251,10 @@ impl WorkbenchApp {
 
     /// Move pane focus geometrically (Ctrl+Arrows in the keymap).
     pub fn move_pane_focus(&mut self, direction: Direction) -> bool {
-        match self.grid.neighbor(PANE_REF_AREA, &self.pane_focus, direction) {
+        match self
+            .grid
+            .neighbor(PANE_REF_AREA, &self.pane_focus, direction)
+        {
             Some(next) => {
                 self.pane_focus = next;
                 true
@@ -539,8 +546,7 @@ impl WorkbenchApp {
             }
             // `o` on a worktree row: open a shell at that worktree.
             KeyCode::Char('o')
-                if self.focus == Focus::Worktrees
-                    && self.pane_focus == PaneContent::Browser =>
+                if self.focus == Focus::Worktrees && self.pane_focus == PaneContent::Browser =>
             {
                 match self.selected_worktree() {
                     Some(id) => KeyOutcome::Action(WorkbenchAction::OpenWorktreeShell(id)),
@@ -553,9 +559,9 @@ impl WorkbenchApp {
                 if self.focus == Focus::Tasks && self.pane_focus == PaneContent::Browser =>
             {
                 match self.model.tasks.get(self.selected) {
-                    Some(task) => {
-                        KeyOutcome::Action(WorkbenchAction::CreateTaskWorktree(task.task_id.clone()))
-                    }
+                    Some(task) => KeyOutcome::Action(WorkbenchAction::CreateTaskWorktree(
+                        task.task_id.clone(),
+                    )),
                     None => KeyOutcome::Ignored,
                 }
             }
@@ -681,7 +687,11 @@ impl WorkbenchApp {
                     view.cols,
                     view.rows,
                     view.scrollback.len(),
-                    if view.scrollback_capped { " (capped)" } else { "" },
+                    if view.scrollback_capped {
+                        " (capped)"
+                    } else {
+                        ""
+                    },
                     view.total_output_bytes
                 )));
                 lines
@@ -750,8 +760,7 @@ impl WorkbenchApp {
                     ratatui::style::Style::new().bold().gray(),
                 ))));
             }
-            let focused =
-                self.pane_focus == PaneContent::Browser && self.focus == Focus::Worktrees;
+            let focused = self.pane_focus == PaneContent::Browser && self.focus == Focus::Worktrees;
             let marker = if focused && self.selected == real_index {
                 "▶ "
             } else {
@@ -1309,9 +1318,8 @@ fn apply_client_action(
         WorkbenchAction::SplitRight => spawn_and_split(client, app, SplitAxis::Horizontal),
         WorkbenchAction::SplitBelow => spawn_and_split(client, app, SplitAxis::Vertical),
         WorkbenchAction::OpenWorktreeShell(worktree_id) => {
-            let value = client.call(crate::office::OfficeRequestKind::TerminalOpenInWorktree {
-                worktree_id,
-            })?;
+            let value = client
+                .call(crate::office::OfficeRequestKind::TerminalOpenInWorktree { worktree_id })?;
             let terminal_id = value
                 .get("terminal_id")
                 .and_then(|v| v.as_str())
@@ -1326,20 +1334,17 @@ fn apply_client_action(
             Ok(())
         }
         WorkbenchAction::CreateTaskWorktree(task_id) => {
-            let value =
-                client.call(crate::office::OfficeRequestKind::WorktreeCreateForTask {
-                    task_id: task_id.clone(),
-                    branch: None,
-                    base_dir: None,
-                })?;
+            let value = client.call(crate::office::OfficeRequestKind::WorktreeCreateForTask {
+                task_id: task_id.clone(),
+                branch: None,
+                base_dir: None,
+            })?;
             let path = value
                 .get("worktree_path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            app.set_status(format!(
-                "worktree created for task {task_id}: {path}"
-            ));
+            app.set_status(format!("worktree created for task {task_id}: {path}"));
             Ok(())
         }
     }
@@ -1356,12 +1361,7 @@ fn spawn_and_split(
     let worktree_id = app.focused_worktree_id();
     let cwd = worktree_id
         .as_ref()
-        .and_then(|wid| {
-            app.model()
-                .worktrees
-                .iter()
-                .find(|w| &w.worktree_id == wid)
-        })
+        .and_then(|wid| app.model().worktrees.iter().find(|w| &w.worktree_id == wid))
         .map(|w| w.path.clone())
         .unwrap_or_else(|| {
             std::env::current_dir()

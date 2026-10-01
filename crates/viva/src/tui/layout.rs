@@ -58,11 +58,7 @@ impl PaneNode {
         PaneNode::Leaf(content)
     }
 
-    pub fn split_new(
-        first: PaneContent,
-        axis: SplitAxis,
-        second: PaneContent,
-    ) -> Self {
+    pub fn split_new(first: PaneContent, axis: SplitAxis, second: PaneContent) -> Self {
         PaneNode::Split {
             axis,
             first: Box::new(PaneNode::Leaf(first)),
@@ -86,12 +82,7 @@ impl PaneNode {
     /// Split the leaf matching `focus`, inserting `new_leaf` as the second
     /// child. Refuses when the tree is at the pane cap or the focus leaf
     /// is absent. Returns whether anything changed.
-    pub fn split(
-        &mut self,
-        focus: &PaneContent,
-        axis: SplitAxis,
-        new_leaf: PaneContent,
-    ) -> bool {
+    pub fn split(&mut self, focus: &PaneContent, axis: SplitAxis, new_leaf: PaneContent) -> bool {
         if self.leaves().len() >= MAX_PANES {
             return false;
         }
@@ -108,8 +99,7 @@ impl PaneNode {
             }
             PaneNode::Leaf(_) => false,
             PaneNode::Split { first, second, .. } => {
-                first.split(focus, axis, new_leaf.clone())
-                    || second.split(focus, axis, new_leaf)
+                first.split(focus, axis, new_leaf.clone()) || second.split(focus, axis, new_leaf)
             }
         }
     }
@@ -169,16 +159,30 @@ impl PaneNode {
                         let first_width = area.width.saturating_mul(ratio) / 100;
                         let second_width = area.width.saturating_sub(first_width);
                         (
-                            Rect { width: first_width, ..area },
-                            Rect { x: area.x + first_width, width: second_width, ..area },
+                            Rect {
+                                width: first_width,
+                                ..area
+                            },
+                            Rect {
+                                x: area.x + first_width,
+                                width: second_width,
+                                ..area
+                            },
                         )
                     }
                     SplitAxis::Vertical => {
                         let first_height = area.height.saturating_mul(ratio) / 100;
                         let second_height = area.height.saturating_sub(first_height);
                         (
-                            Rect { height: first_height, ..area },
-                            Rect { y: area.y + first_height, height: second_height, ..area },
+                            Rect {
+                                height: first_height,
+                                ..area
+                            },
+                            Rect {
+                                y: area.y + first_height,
+                                height: second_height,
+                                ..area
+                            },
                         )
                     }
                 };
@@ -211,14 +215,12 @@ impl PaneNode {
             let overlap_along_edge = match direction {
                 Direction::Left | Direction::Right => {
                     let top = focus_rect.y.max(rect.y);
-                    let bottom = (focus_rect.y + focus_rect.height)
-                        .min(rect.y + rect.height);
+                    let bottom = (focus_rect.y + focus_rect.height).min(rect.y + rect.height);
                     bottom.saturating_sub(top)
                 }
                 Direction::Up | Direction::Down => {
                     let left = focus_rect.x.max(rect.x);
-                    let right = (focus_rect.x + focus_rect.width)
-                        .min(rect.x + rect.width);
+                    let right = (focus_rect.x + focus_rect.width).min(rect.x + rect.width);
                     right.saturating_sub(left)
                 }
             };
@@ -265,7 +267,12 @@ mod tests {
     }
 
     fn area() -> Rect {
-        Rect { x: 0, y: 0, width: 100, height: 40 }
+        Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 40,
+        }
     }
 
     #[test]
@@ -273,7 +280,11 @@ mod tests {
         let tree = sample_tree();
         let layout = tree.render_layout(area());
         assert_eq!(layout.len(), 3);
-        let browser = layout.iter().find(|(c, _)| *c == PaneContent::Browser).unwrap().1;
+        let browser = layout
+            .iter()
+            .find(|(c, _)| *c == PaneContent::Browser)
+            .unwrap()
+            .1;
         assert_eq!(browser.width, 50);
         let t1 = layout.iter().find(|(c, _)| *c == term("t1")).unwrap().1;
         let t2 = layout.iter().find(|(c, _)| *c == term("t2")).unwrap().1;
@@ -317,7 +328,10 @@ mod tests {
             Some(term("t1")),
             "browser's right neighbor is t1 (the top-right pane)"
         );
-        assert_eq!(tree.neighbor(a, &PaneContent::Browser, Direction::Left), None);
+        assert_eq!(
+            tree.neighbor(a, &PaneContent::Browser, Direction::Left),
+            None
+        );
         assert_eq!(
             tree.neighbor(a, &term("t2"), Direction::Up),
             Some(term("t1"))

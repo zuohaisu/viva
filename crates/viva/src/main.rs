@@ -41,9 +41,8 @@ fn run(args: &[String]) -> OfficeResult<()> {
         // The daily control plane is top-level — `viva start`, `viva
         // status`, ... — with no `office` namespace to type through.
         Some(
-            "start" | "server" | "status" | "dispatch" | "terminals" | "stop-terminal" | "result" | "shutdown"
-            | "pause" | "resume"
-            | "brief" | "create-task" | "grant" | "handoff",
+            "start" | "server" | "status" | "dispatch" | "terminals" | "stop-terminal" | "result"
+            | "shutdown" | "pause" | "resume" | "brief" | "create-task" | "grant" | "handoff",
         ) => cmd_office(args),
         Some("terminal") => cmd_terminal(args.get(1..).unwrap_or(&[])),
         Some("agent") => cmd_agent(args.get(1..).unwrap_or(&[])),
@@ -142,16 +141,15 @@ fn cmd_agent(args: &[String]) -> OfficeResult<()> {
     let mut request = viva::office::new_request(kind);
     request.member = get("member");
     request.grant = get("grant");
-    let response = if let viva::office::OfficeRequestKind::AgentWait { timeout_secs, .. } =
-        &request.kind
-    {
-        client.call_with_timeout(
-            request.kind.clone(),
-            std::time::Duration::from_secs(timeout_secs + 15),
-        )?
-    } else {
-        client.call_request(request)?
-    };
+    let response =
+        if let viva::office::OfficeRequestKind::AgentWait { timeout_secs, .. } = &request.kind {
+            client.call_with_timeout(
+                request.kind.clone(),
+                std::time::Duration::from_secs(timeout_secs + 15),
+            )?
+        } else {
+            client.call_request(request)?
+        };
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
 }
@@ -190,8 +188,10 @@ fn cmd_events(args: &[String]) -> OfficeResult<()> {
         }
         i += 1;
     }
-    let response =
-        client.call(viva::office::OfficeRequestKind::EventsFeed { since_seq: since, limit })?;
+    let response = client.call(viva::office::OfficeRequestKind::EventsFeed {
+        since_seq: since,
+        limit,
+    })?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
 }
@@ -221,12 +221,16 @@ fn cmd_terminal(args: &[String]) -> OfficeResult<()> {
                             OfficeError::Validation(format!("flag --{flag} needs a value"))
                         })?;
                         match flag.as_str() {
-                            "cols" => cols = value.parse().map_err(|_| {
-                                OfficeError::Validation("--cols must be a number".into())
-                            })?,
-                            "rows" => rows = value.parse().map_err(|_| {
-                                OfficeError::Validation("--rows must be a number".into())
-                            })?,
+                            "cols" => {
+                                cols = value.parse().map_err(|_| {
+                                    OfficeError::Validation("--cols must be a number".into())
+                                })?
+                            }
+                            "rows" => {
+                                rows = value.parse().map_err(|_| {
+                                    OfficeError::Validation("--rows must be a number".into())
+                                })?
+                            }
                             "cwd" => cwd = Some(value.clone()),
                             "purpose" => purpose = Some(value.clone()),
                             "owner" => owner = value.clone(),
@@ -253,18 +257,16 @@ fn cmd_terminal(args: &[String]) -> OfficeResult<()> {
             let cwd = cwd
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-            let response = client.call(
-                viva::office::OfficeRequestKind::TerminalCreate {
-                    argv,
-                    cwd: cwd.display().to_string(),
-                    env: vec![],
-                    cols,
-                    rows,
-                    purpose: purpose.unwrap_or_else(|| "headless session".into()),
-                    worktree_id: None,
-                    owner,
-                },
-            )?;
+            let response = client.call(viva::office::OfficeRequestKind::TerminalCreate {
+                argv,
+                cwd: cwd.display().to_string(),
+                env: vec![],
+                cols,
+                rows,
+                purpose: purpose.unwrap_or_else(|| "headless session".into()),
+                worktree_id: None,
+                owner,
+            })?;
             println!("{}", serde_json::to_string_pretty(&response)?);
             Ok(())
         }
@@ -280,7 +282,9 @@ fn cmd_terminal(args: &[String]) -> OfficeResult<()> {
         }
         Some("resize") => {
             let terminal_id = args.get(1).ok_or_else(|| {
-                OfficeError::Validation("usage: viva terminal resize <terminal-id> --cols N --rows N".into())
+                OfficeError::Validation(
+                    "usage: viva terminal resize <terminal-id> --cols N --rows N".into(),
+                )
             })?;
             let mut named = std::collections::HashMap::new();
             let mut i = 2;
@@ -293,12 +297,16 @@ fn cmd_terminal(args: &[String]) -> OfficeResult<()> {
                 named.insert(flag.to_string(), value.clone());
                 i += 1;
             }
-            let cols: u16 = named.get("--cols").ok_or_else(|| {
-                OfficeError::Validation("resize needs --cols".into())
-            })?.parse().map_err(|_| OfficeError::Validation("--cols must be a number".into()))?;
-            let rows: u16 = named.get("--rows").ok_or_else(|| {
-                OfficeError::Validation("resize needs --rows".into())
-            })?.parse().map_err(|_| OfficeError::Validation("--rows must be a number".into()))?;
+            let cols: u16 = named
+                .get("--cols")
+                .ok_or_else(|| OfficeError::Validation("resize needs --cols".into()))?
+                .parse()
+                .map_err(|_| OfficeError::Validation("--cols must be a number".into()))?;
+            let rows: u16 = named
+                .get("--rows")
+                .ok_or_else(|| OfficeError::Validation("resize needs --rows".into()))?
+                .parse()
+                .map_err(|_| OfficeError::Validation("--rows must be a number".into()))?;
             let response = client.call(viva::office::OfficeRequestKind::TerminalResize {
                 terminal_id: terminal_id.clone(),
                 cols,
@@ -660,7 +668,9 @@ fn cmd_office(args: &[String]) -> OfficeResult<()> {
             )
         }
         Some("shutdown") => {
-            let close_policy = std::env::var("VIVA_CLOSE_POLICY").ok().filter(|p| p == "pause");
+            let close_policy = std::env::var("VIVA_CLOSE_POLICY")
+                .ok()
+                .filter(|p| p == "pause");
             cmd_office_query(
                 &home,
                 viva::office::OfficeRequestKind::Shutdown { close_policy },
@@ -672,7 +682,9 @@ fn cmd_office(args: &[String]) -> OfficeResult<()> {
         }
         Some("pause") => {
             cmd_office_query(&home, viva::office::OfficeRequestKind::Pause)?;
-            eprintln!("office: paused - no new dispatch, no maintenance; running executions keep running");
+            eprintln!(
+                "office: paused - no new dispatch, no maintenance; running executions keep running"
+            );
             Ok(())
         }
         Some("resume") => {

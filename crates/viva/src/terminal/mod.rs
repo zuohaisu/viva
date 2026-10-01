@@ -186,18 +186,15 @@ impl TerminalRegistry {
             history,
             disk_log,
         )?);
-        self.sessions
-            .lock()
-            .expect("terminal registry")
-            .push((
-                TerminalEntry {
-                    terminal_id,
-                    owner,
-                    worktree_id,
-                    purpose,
-                },
-                handle,
-            ));
+        self.sessions.lock().expect("terminal registry").push((
+            TerminalEntry {
+                terminal_id,
+                owner,
+                worktree_id,
+                purpose,
+            },
+            handle,
+        ));
         Ok(())
     }
 

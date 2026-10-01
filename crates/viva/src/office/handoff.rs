@@ -101,7 +101,9 @@ pub fn receive_entries(stream: &UnixStream) -> OfficeResult<(HandoffManifest, Ve
         reader.read_line(&mut line)?;
     }
     if line.trim().len() > crate::office::MAX_MESSAGE_BYTES {
-        return Err(OfficeError::Validation("handoff manifest over the size bound".into()));
+        return Err(OfficeError::Validation(
+            "handoff manifest over the size bound".into(),
+        ));
     }
     let manifest: HandoffManifest = serde_json::from_str(line.trim())
         .map_err(|e| OfficeError::Validation(format!("bad handoff manifest: {e}")))?;
@@ -208,21 +210,23 @@ mod tests {
     /// the same file description.
     #[test]
     fn fd_passing_transfers_an_open_description() {
-        let (mut a, mut b) = UnixStream::pair().expect("pair");
+        let (a, b) = UnixStream::pair().expect("pair");
         let dir = tempfile::tempdir().expect("dir");
         let path = dir.path().join("probe");
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
+            .truncate(true)
             .open(&path)
             .expect("open");
         let fd = file.as_raw_fd();
-        send_one_fd(&mut a, fd).expect("send");
-        let received = receive_one_fd(&mut b).expect("recv");
+        send_one_fd(&a, fd).expect("send");
+        let received = receive_one_fd(&b).expect("recv");
         // The received fd is a fresh reference: own it and use it.
         let mut file = unsafe { std::fs::File::from_raw_fd(received) };
-        file.write_all(b"probe-write").expect("write via received fd");
+        file.write_all(b"probe-write")
+            .expect("write via received fd");
         drop(file);
         let content = std::fs::read(&path).expect("read");
         assert_eq!(content, b"probe-write");

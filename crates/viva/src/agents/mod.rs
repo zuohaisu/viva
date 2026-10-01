@@ -28,13 +28,19 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::foundation::error::{OfficeResult};
+use crate::foundation::error::OfficeResult;
 use crate::terminal::TerminalSnapshot;
 
 /// The agent CLIs the office detects in its first version (owner ruling,
 /// 2026-10-01). Everything else is displayed as an unknown agent.
 pub const DETECTABLE_AGENTS: &[&str] = &[
-    "codex", "claude", "codebuddy", "qodercli", "cline", "hermes", "pi",
+    "codex",
+    "claude",
+    "codebuddy",
+    "qodercli",
+    "cline",
+    "hermes",
+    "pi",
 ];
 
 /// Agent states, herdr-shaped but ours: what the SOURCES report.
@@ -198,10 +204,7 @@ pub fn infer_from_screen(snapshot: &TerminalSnapshot) -> Option<AgentStatus> {
     if tail.is_empty() {
         return None;
     }
-    if BLOCKED_MARKERS
-        .iter()
-        .any(|marker| tail.contains(marker))
-    {
+    if BLOCKED_MARKERS.iter().any(|marker| tail.contains(marker)) {
         return Some(AgentStatus::Blocked);
     }
     None
@@ -214,9 +217,7 @@ pub fn infer_from_screen(snapshot: &TerminalSnapshot) -> Option<AgentStatus> {
 /// The agent CLI running inside a terminal's process tree, if any of the
 /// seven detectable ones is there. Identification only: this says WHO
 /// runs, never WHAT state they are in.
-pub fn identify_by_process_tree(
-    child_pid: Option<u32>,
-) -> OfficeResult<Option<String>> {
+pub fn identify_by_process_tree(child_pid: Option<u32>) -> OfficeResult<Option<String>> {
     use std::process::Command;
     let Some(pid) = child_pid else {
         return Ok(None);
@@ -256,13 +257,10 @@ pub fn identify_by_process_tree(
             for agent in DETECTABLE_AGENTS {
                 // Match the binary name in the command line (argv0 or
                 // path head) rather than anywhere in the arguments.
-                let matches = command
-                    .split_whitespace()
-                    .any(|word| {
-                        let base = word.rsplit('/').next().unwrap_or(word);
-                        base.to_ascii_lowercase().starts_with(agent)
-                    })
-                    || lower.starts_with(agent);
+                let matches = command.split_whitespace().any(|word| {
+                    let base = word.rsplit('/').next().unwrap_or(word);
+                    base.to_ascii_lowercase().starts_with(agent)
+                }) || lower.starts_with(agent);
                 if matches {
                     return Ok(Some(agent.to_string()));
                 }
@@ -324,7 +322,7 @@ mod tests {
         assert_eq!(projection[0].source, StatusSource::ControlledReport);
         assert_eq!(projection[0].status, AgentStatus::Blocked);
         assert_eq!(projection[1].source, StatusSource::ScreenInference);
-        assert!(projection[1].source.is_authoritative() == false);
+        assert!(!projection[1].source.is_authoritative());
         // A newer report replaces the report slot only.
         board.observe(AgentStatusRecord {
             terminal_id: "t1".into(),

@@ -265,7 +265,11 @@ pub fn spawn_child(spec: &TerminalSpec, slave_fd: RawFd) -> OfficeResult<std::pr
             if libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
             }
-            let _ = libc::ioctl(tty_for_tty, libc::TIOCSCTTY as libc::c_ulong, 0 as libc::c_int);
+            let _ = libc::ioctl(
+                tty_for_tty,
+                libc::TIOCSCTTY as libc::c_ulong,
+                0 as libc::c_int,
+            );
             Ok(())
         });
         // The pre_exec reference fd is CLOEXEC: it closes at exec inside

@@ -19,10 +19,10 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::foundation::error::{OfficeError, OfficeResult};
-use crate::office::protocol::{
-    new_request, round_trip, OfficeRequest, OfficeRequestKind, OfficeResponse,
-};
 use crate::office::OFFICE_SOCKET_NAME;
+use crate::office::protocol::{
+    OfficeRequest, OfficeRequestKind, OfficeResponse, new_request, round_trip,
+};
 
 /// How long `ensure_server` waits for a freshly spawned server to bind its
 /// socket before declaring the start failed.
@@ -106,13 +106,15 @@ impl OfficeClient {
 
     /// [`Self::call`] with a pre-built request (grant fields set).
     pub fn call_request(&mut self, request: OfficeRequest) -> OfficeResult<serde_json::Value> {
-        let OfficeResponse { ok, result, error, .. } = round_trip(&mut self.stream, &request)?;
+        let OfficeResponse {
+            ok, result, error, ..
+        } = round_trip(&mut self.stream, &request)?;
         if ok {
             Ok(result.unwrap_or(serde_json::Value::Null))
         } else {
-            Err(OfficeError::Validation(error.unwrap_or_else(|| {
-                "rejected without a reason".into()
-            })))
+            Err(OfficeError::Validation(
+                error.unwrap_or_else(|| "rejected without a reason".into()),
+            ))
         }
     }
 
@@ -164,9 +166,9 @@ fn spawn_detached_server(home: &Path, extra_args: &[&str]) -> OfficeResult<()> {
         // that dies with the attaching client (ADR 0012 decision 1).
         command.process_group(0);
     }
-    command
-        .spawn()
-        .map_err(|e| OfficeError::Validation(format!("failed to spawn the resident server: {e}")))?;
+    command.spawn().map_err(|e| {
+        OfficeError::Validation(format!("failed to spawn the resident server: {e}"))
+    })?;
     Ok(())
 }
 

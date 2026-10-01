@@ -164,10 +164,7 @@ pub enum OfficeRequestKind {
     /// Send a prompt to an agent's terminal (S5, issue #47): the text goes
     /// to the child's stdin as-is and the send is audited. Member-attributed
     /// calls need a live grant carrying `agent_prompt`.
-    AgentPrompt {
-        terminal_id: String,
-        prompt: String,
-    },
+    AgentPrompt { terminal_id: String, prompt: String },
     /// Wait, server-side, until the terminal's AUTHORITATIVE agent status
     /// matches (or the timeout passes). The wait runs on the host thread -
     /// the orchestrator may disconnect; the outcome is audited either way

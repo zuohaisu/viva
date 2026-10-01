@@ -42,7 +42,7 @@ use crate::foundation::ids::TerminalId;
 use crate::foundation::records::{TerminalEvent, TerminalEventKind, TerminalOwner};
 use crate::foundation::store::Store;
 use crate::redaction::ByteRedactor;
-use crate::terminal::pty::{spawn_child, OwnedMaster};
+use crate::terminal::pty::{OwnedMaster, spawn_child};
 
 /// Grid + scrollback cap: memory stays bounded no matter what the child
 /// prints; the disk log keeps the full stream.
@@ -611,19 +611,19 @@ impl TerminalHandle {
         }
     }
 
-/// Stop this server's reader for the session (live-handoff step): blocks
-/// until the reader thread has exited, so the transferred fd's bytes are
-/// contended by nobody. Called by the OLD server before it acks.
-pub fn detach_reader(&self) {
-    self.shared.reader_detached.store(true, Ordering::SeqCst);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !self.shared.reader_gone.load(Ordering::SeqCst) {
-        if Instant::now() >= deadline {
-            return;
+    /// Stop this server's reader for the session (live-handoff step): blocks
+    /// until the reader thread has exited, so the transferred fd's bytes are
+    /// contended by nobody. Called by the OLD server before it acks.
+    pub fn detach_reader(&self) {
+        self.shared.reader_detached.store(true, Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !self.shared.reader_gone.load(Ordering::SeqCst) {
+            if Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
         }
-        std::thread::sleep(Duration::from_millis(5));
     }
-}
 }
 
 /// Reader thread: raw output → emulator (bounded ring) + disk log

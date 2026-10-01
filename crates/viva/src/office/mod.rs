@@ -480,7 +480,11 @@ impl OfficeHost {
         record_recovery(
             &store,
             &shared.host_id,
-            if transferred { "graceful_handoff_after_transfer" } else { "graceful_handoff" },
+            if transferred {
+                "graceful_handoff_after_transfer"
+            } else {
+                "graceful_handoff"
+            },
             &format!("{note} ({terminal_count} terminal(s) were hosted here)"),
         )?;
         drop(store);
@@ -746,9 +750,13 @@ fn handle_request(
             kind,
             content,
             source_ref,
-        } => {
-            agent_content_submit(&shared, terminal_id.as_deref(), kind, content, source_ref.as_deref())
-        }
+        } => agent_content_submit(
+            &shared,
+            terminal_id.as_deref(),
+            kind,
+            content,
+            source_ref.as_deref(),
+        ),
         OfficeRequestKind::AgentPrompt {
             terminal_id,
             prompt,
@@ -866,7 +874,9 @@ fn authorize_socket_request(shared: &OfficeShared, request: &OfficeRequest) -> O
     if request.member.is_some() && is_member_gated_kind(&request.kind) {
         if matches!(
             request.kind,
-            OfficeRequestKind::Shutdown { .. } | OfficeRequestKind::Pause | OfficeRequestKind::Resume
+            OfficeRequestKind::Shutdown { .. }
+                | OfficeRequestKind::Pause
+                | OfficeRequestKind::Resume
         ) {
             return Err(audit_grant_denial(
                 shared,
@@ -954,9 +964,7 @@ fn terminal_create(
     spec.cols = cols;
     spec.rows = rows;
     spec.validate()?;
-    let worktree = worktree_id
-        .map(WorktreeId::from_str)
-        .transpose()?;
+    let worktree = worktree_id.map(WorktreeId::from_str).transpose()?;
     let store = shared.store.lock().expect("office store");
     let (terminal_id, handle) = shared.terminals.spawn(
         spec,
@@ -1002,10 +1010,9 @@ fn workbench_view(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
     // S4 sweep: for every live terminal, refresh the AUXILIARY screen
     // observation (display-only) and project all sources onto the rows.
     for row in &mut model.terminals {
-        if let Ok(Some(handle)) = shared
-            .terminals
-            .handle(&crate::foundation::ids::TerminalId::from_str(&row.terminal_id).expect("row id"))
-        {
+        if let Ok(Some(handle)) = shared.terminals.handle(
+            &crate::foundation::ids::TerminalId::from_str(&row.terminal_id).expect("row id"),
+        ) {
             if handle.try_wait().ok().flatten().is_none() {
                 if let Ok(snapshot) = handle.snapshot() {
                     if let Some(status) = crate::agents::infer_from_screen(&snapshot) {
@@ -1016,14 +1023,16 @@ fn workbench_view(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
                             .find(|r| r.source == crate::agents::StatusSource::ProcessTree)
                             .map(|r| r.agent)
                             .unwrap_or_else(|| "unknown".into());
-                        shared.agent_board.observe(crate::agents::AgentStatusRecord {
-                            terminal_id: row.terminal_id.clone(),
-                            agent,
-                            status,
-                            source: crate::agents::StatusSource::ScreenInference,
-                            detail: "screen rules (auxiliary, never a fact)".into(),
-                            updated_at: utc_now(),
-                        });
+                        shared
+                            .agent_board
+                            .observe(crate::agents::AgentStatusRecord {
+                                terminal_id: row.terminal_id.clone(),
+                                agent,
+                                status,
+                                source: crate::agents::StatusSource::ScreenInference,
+                                detail: "screen rules (auxiliary, never a fact)".into(),
+                                updated_at: utc_now(),
+                            });
                     }
                 }
             };
@@ -1041,12 +1050,12 @@ fn workbench_diff(shared: &OfficeShared, worktree_id: &str) -> OfficeResult<serd
         &store,
         crate::git::worktrees::ProtectedRefs::new(vec![]),
     );
-    let record = service.record(&worktree_id)?.ok_or_else(|| {
-        OfficeError::NotFound {
+    let record = service
+        .record(&worktree_id)?
+        .ok_or_else(|| OfficeError::NotFound {
             entity: "worktree",
             id: worktree_id.to_string(),
-        }
-    })?;
+        })?;
     let diff = service.worktree_diff(&record.worktree_path, 64 * 1024)?;
     Ok(serde_json::json!({ "worktree_id": worktree_id.to_string(), "diff": diff }))
 }
@@ -1063,12 +1072,12 @@ fn terminal_open_in_worktree(
         &store,
         crate::git::worktrees::ProtectedRefs::new(vec![]),
     );
-    let record = service.record(&worktree_id)?.ok_or_else(|| {
-        OfficeError::NotFound {
+    let record = service
+        .record(&worktree_id)?
+        .ok_or_else(|| OfficeError::NotFound {
             entity: "worktree",
             id: worktree_id.to_string(),
-        }
-    })?;
+        })?;
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let spec = crate::terminal::TerminalSpec::new(vec![shell], record.worktree_path.clone())?;
     let (terminal_id, handle) = shared.terminals.spawn(
@@ -1132,20 +1141,26 @@ fn seed_agent_identification(shared: &OfficeShared, terminal_id: &TerminalId, ar
     let Some(program) = argv.first() else {
         return;
     };
-    let base = program.rsplit('/').next().unwrap_or(program).to_ascii_lowercase();
+    let base = program
+        .rsplit('/')
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
     let agent = crate::agents::DETECTABLE_AGENTS
         .iter()
         .find(|agent| base.starts_with(**agent))
         .map(|agent| agent.to_string());
     if let Some(agent) = agent {
-        shared.agent_board.observe(crate::agents::AgentStatusRecord {
-            terminal_id: terminal_id.to_string(),
-            agent,
-            status: crate::agents::AgentStatus::Unknown,
-            source: crate::agents::StatusSource::ProcessTree,
-            detail: "identified from the spawned argv".into(),
-            updated_at: utc_now(),
-        });
+        shared
+            .agent_board
+            .observe(crate::agents::AgentStatusRecord {
+                terminal_id: terminal_id.to_string(),
+                agent,
+                status: crate::agents::AgentStatus::Unknown,
+                source: crate::agents::StatusSource::ProcessTree,
+                detail: "identified from the spawned argv".into(),
+                updated_at: utc_now(),
+            });
     }
 }
 
@@ -1163,7 +1178,9 @@ fn agent_report(
     let terminal_id = TerminalId::from_str(terminal_id)?;
     let status = crate::agents::AgentStatus::parse(status)?;
     if agent.trim().is_empty() {
-        return Err(OfficeError::Validation("agent name must not be empty".into()));
+        return Err(OfficeError::Validation(
+            "agent name must not be empty".into(),
+        ));
     }
     // A report about a terminal this office hosts: identity checks out.
     shared
@@ -1215,12 +1232,13 @@ fn agent_content_submit(
     source_ref: Option<&str>,
 ) -> OfficeResult<serde_json::Value> {
     if kind.trim().is_empty() {
-        return Err(OfficeError::Validation("content kind must not be empty".into()));
+        return Err(OfficeError::Validation(
+            "content kind must not be empty".into(),
+        ));
     }
     if content.is_empty() {
         return Err(OfficeError::Validation(
-            "content must not be empty; the channel moves real material, not placeholders"
-                .into(),
+            "content must not be empty; the channel moves real material, not placeholders".into(),
         ));
     }
     if content.len() > 1024 * 1024 {
@@ -1300,7 +1318,11 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
 /// keystroke-level act - reaching the child's stdin proves nothing about
 /// the agent's understanding (that is what the status reports and the
 /// content intake are for).
-fn agent_prompt(shared: &OfficeShared, terminal_id: &str, prompt: &str) -> OfficeResult<serde_json::Value> {
+fn agent_prompt(
+    shared: &OfficeShared,
+    terminal_id: &str,
+    prompt: &str,
+) -> OfficeResult<serde_json::Value> {
     let terminal_id = TerminalId::from_str(terminal_id)?;
     if prompt.is_empty() {
         return Err(OfficeError::Validation(
@@ -1421,7 +1443,11 @@ fn agent_wait(
 /// The durable event feed: office events after a sequence number. This is
 /// how a disconnected orchestrator catches up - reconnect and ask again
 /// with the last seq you saw.
-fn events_feed(shared: &OfficeShared, since_seq: u64, limit: u32) -> OfficeResult<serde_json::Value> {
+fn events_feed(
+    shared: &OfficeShared,
+    since_seq: u64,
+    limit: u32,
+) -> OfficeResult<serde_json::Value> {
     let limit = limit.clamp(1, 500);
     let store = shared.store.lock().expect("office store");
     let mut stmt = store.connection().prepare(
@@ -1473,7 +1499,12 @@ fn pause_server(shared: &OfficeShared, paused: bool) -> OfficeResult<serde_json:
             &store,
             crate::foundation::events::NewEvent {
                 domain: DOMAIN_OFFICE_HOST,
-                kind: if paused { "office_paused" } else { "office_resumed" }.into(),
+                kind: if paused {
+                    "office_paused"
+                } else {
+                    "office_resumed"
+                }
+                .into(),
                 subject_type: "office".into(),
                 subject_id: shared.host_id.clone(),
                 origin: "office_host".into(),
@@ -2551,7 +2582,9 @@ mod server_split_tests {
                 terminal_id: b.clone(),
             })
             .expect("neighbor survives");
-        assert!(format!("{view}").contains("b-marker") || wait_for_output(&mut client, &b, "b-marker"));
+        assert!(
+            format!("{view}").contains("b-marker") || wait_for_output(&mut client, &b, "b-marker")
+        );
         host.shutdown();
     }
 
@@ -2623,9 +2656,7 @@ mod server_split_tests {
     fn workbench_view_serves_the_projection() {
         let host = start_host();
         let mut client = host.client();
-        let view = client
-            .call(OfficeRequestKind::WorkbenchView)
-            .expect("view");
+        let view = client.call(OfficeRequestKind::WorkbenchView).expect("view");
         for key in ["projects", "worktrees", "tasks", "terminals", "attention"] {
             assert!(view.get(key).is_some(), "view misses `{key}`: {view}");
         }
@@ -2701,7 +2732,7 @@ mod s2_workbench_tests {
         let repo = host.dir.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         let bare = host.dir.path().join("origin.git");
-        git(&host.dir.path(), &["init", "--bare", bare.to_str().unwrap()]);
+        git(host.dir.path(), &["init", "--bare", bare.to_str().unwrap()]);
         git(&repo, &["init", "-b", "main"]);
         std::fs::write(repo.join("README.md"), "seed\n").expect("seed file");
         git(&repo, &["add", "."]);
@@ -2715,10 +2746,17 @@ mod s2_workbench_tests {
             office_migrations(),
         )
         .expect("store");
-        let project =
-            crate::projects::ProjectRegistry::new(&store).register(None, "demo", &repo).expect("project");
+        let project = crate::projects::ProjectRegistry::new(&store)
+            .register(None, "demo", &repo)
+            .expect("project");
         let task = TaskRegistry::new(&store)
-            .create_task("three worktrees", vec![], None, None, Some(project.project_id.clone()))
+            .create_task(
+                "three worktrees",
+                vec![],
+                None,
+                None,
+                Some(project.project_id.clone()),
+            )
             .expect("task");
         let mut service = crate::git::worktrees::WorktreeService::new(
             &store,
@@ -2728,7 +2766,13 @@ mod s2_workbench_tests {
             let path = host.dir.path().join(name);
             git(
                 &repo,
-                &["worktree", "add", path.to_str().unwrap(), "-b", &format!("branch-{name}")],
+                &[
+                    "worktree",
+                    "add",
+                    path.to_str().unwrap(),
+                    "-b",
+                    &format!("branch-{name}"),
+                ],
             );
             service
                 .adopt_existing(&repo, &path, &task.task_id)
@@ -2767,7 +2811,11 @@ mod s2_workbench_tests {
         assert!(model.worktrees.len() >= 3, "{}", model.worktrees.len());
         assert!(model.worktrees.iter().all(|w| !w.project_id.is_empty()));
         // Grouped: same-project rows are adjacent.
-        let mut projects_in_order = model.worktrees.iter().map(|w| w.project_id.clone()).collect::<Vec<_>>();
+        let mut projects_in_order = model
+            .worktrees
+            .iter()
+            .map(|w| w.project_id.clone())
+            .collect::<Vec<_>>();
         projects_in_order.dedup();
         assert_eq!(projects_in_order.len(), 1);
 
@@ -2816,7 +2864,9 @@ mod s2_workbench_tests {
                 || std::path::Path::new(&path).exists(),
             "the created worktree exists on disk at {path}"
         );
-        let view = client.call(OfficeRequestKind::WorkbenchView).expect("view2");
+        let view = client
+            .call(OfficeRequestKind::WorkbenchView)
+            .expect("view2");
         let model: crate::tui::workbench::WorkbenchModel =
             serde_json::from_value(view).expect("decode2");
         assert!(model.worktrees.iter().any(|w| w.path == path));
@@ -2872,7 +2922,11 @@ mod s3_handoff_tests {
         let mut client = OfficeClient::connect(&home).expect("first client");
         let created = client
             .call(OfficeRequestKind::TerminalCreate {
-                argv: vec!["/bin/sh".into(), "-c".into(), "echo handoff-marker; cat".into()],
+                argv: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "echo handoff-marker; cat".into(),
+                ],
                 cwd: home.display().to_string(),
                 env: vec![],
                 cols: 90,
@@ -2890,7 +2944,9 @@ mod s3_handoff_tests {
         assert!(wait_for_output(&mut client, &terminal_id, "handoff-marker"));
 
         // Begin the restart: the response names the rendezvous socket.
-        let response = client.call(OfficeRequestKind::ServerRestart).expect("restart");
+        let response = client
+            .call(OfficeRequestKind::ServerRestart)
+            .expect("restart");
         assert_eq!(
             response.get("state").and_then(|v| v.as_str()),
             Some("handoff_ready")
@@ -2966,8 +3022,13 @@ mod s3_handoff_tests {
         }
 
         // Clean teardown: the resumed host shuts down like any other.
-        client2.call(OfficeRequestKind::Shutdown { close_policy: None }).expect("shutdown");
-        resume_thread.join().expect("resumed host ends cleanly");
+        client2
+            .call(OfficeRequestKind::Shutdown { close_policy: None })
+            .expect("shutdown");
+        resume_thread
+            .join()
+            .expect("resumed host thread joins")
+            .expect("resumed host ends cleanly");
         drop(dir);
     }
 }
@@ -2976,7 +3037,6 @@ mod s3_handoff_tests {
 mod s4_agent_status_tests {
     use super::*;
     use crate::office::OfficeClient;
-    use std::str::FromStr as _;
     use std::time::{Duration, Instant};
 
     struct RunningHost {
@@ -3094,11 +3154,17 @@ mod s4_agent_status_tests {
         request.grant = Some(grant);
         request.member = Some("member-00000000-0000-0000-0000-000000000000".into());
         let record = client.call_request(request).expect("report accepted");
-        assert_eq!(record.get("status").and_then(|v| v.as_str()), Some("blocked"));
+        assert_eq!(
+            record.get("status").and_then(|v| v.as_str()),
+            Some("blocked")
+        );
 
         // The view carries BOTH sources, labeled and separated.
         let row = view_for(&mut client, &terminal_id);
-        let statuses = row.get("agent_status").and_then(|v| v.as_array()).expect("statuses");
+        let statuses = row
+            .get("agent_status")
+            .and_then(|v| v.as_array())
+            .expect("statuses");
         let sources: Vec<&str> = statuses
             .iter()
             .filter_map(|s| s.get("source").and_then(|v| v.as_str()))
@@ -3179,7 +3245,10 @@ mod s4_agent_status_tests {
                 .and_then(|v| v.as_array())
                 .and_then(|rows| {
                     rows.iter()
-                        .find(|row| row.get("terminal_id").and_then(|v| v.as_str()) == Some(terminal_id.as_str()))
+                        .find(|row| {
+                            row.get("terminal_id").and_then(|v| v.as_str())
+                                == Some(terminal_id.as_str())
+                        })
                         .and_then(|row| row.get("agent_status").and_then(|v| v.as_array()).cloned())
                 });
             if let Some(statuses) = statuses {
@@ -3236,7 +3305,10 @@ mod s4_agent_status_tests {
             .and_then(|v| v.as_str())
             .expect("path")
             .to_string();
-        assert!(std::path::Path::new(&path).exists(), "content stored at {path}");
+        assert!(
+            std::path::Path::new(&path).exists(),
+            "content stored at {path}"
+        );
         assert!(
             response
                 .get("note")
@@ -3335,7 +3407,11 @@ mod s5_orchestration_tests {
         // 1. create a pane running cat (echoes everything).
         let created = client
             .call(OfficeRequestKind::TerminalCreate {
-                argv: vec!["/bin/sh".into(), "-c".into(), "echo ready-marker; cat".into()],
+                argv: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "echo ready-marker; cat".into(),
+                ],
                 cwd: host.home.display().to_string(),
                 env: vec![],
                 cols: 80,
@@ -3367,7 +3443,10 @@ mod s5_orchestration_tests {
         });
         prompt.grant = Some(prompt_grant.clone());
         let prompt_response = client.call_request(prompt).expect("prompt");
-        assert_eq!(prompt_response.get("sent").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            prompt_response.get("sent").and_then(|v| v.as_bool()),
+            Some(true)
+        );
 
         // 3. wait for the blocked status: already matched, returns fast.
         let mut wait = new_request(OfficeRequestKind::AgentWait {
@@ -3380,20 +3459,35 @@ mod s5_orchestration_tests {
             .call_with_timeout(wait.kind.clone(), Duration::from_secs(10))
             .expect("wait");
         assert_eq!(waited.get("matched").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(waited.get("status").and_then(|v| v.as_str()), Some("blocked"));
+        assert_eq!(
+            waited.get("status").and_then(|v| v.as_str()),
+            Some("blocked")
+        );
 
         // 4. the durable event feed names every step of the flow.
         let feed = client
-            .call(OfficeRequestKind::EventsFeed { since_seq: 0, limit: 200 })
+            .call(OfficeRequestKind::EventsFeed {
+                since_seq: 0,
+                limit: 200,
+            })
             .expect("feed");
         let kinds: Vec<String> = feed
             .get("events")
             .and_then(|v| v.as_array())
             .expect("events")
             .iter()
-            .filter_map(|event| event.get("kind").and_then(|k| k.as_str()).map(str::to_string))
+            .filter_map(|event| {
+                event
+                    .get("kind")
+                    .and_then(|k| k.as_str())
+                    .map(str::to_string)
+            })
             .collect();
-        for expected in ["agent_status_reported", "agent_prompt_sent", "agent_wait_matched"] {
+        for expected in [
+            "agent_status_reported",
+            "agent_prompt_sent",
+            "agent_wait_matched",
+        ] {
             assert!(
                 kinds.iter().any(|k| k == expected),
                 "the feed must contain {expected}: {kinds:?}"
@@ -3402,13 +3496,28 @@ mod s5_orchestration_tests {
 
         // 5. reconnect semantics: a feed since the last seen seq returns
         // only newer events.
-        let last_seq = feed.get("last_seq").and_then(|v| v.as_u64()).expect("last seq");
+        let last_seq = feed
+            .get("last_seq")
+            .and_then(|v| v.as_u64())
+            .expect("last seq");
         let fresh = client
-            .call(OfficeRequestKind::EventsFeed { since_seq: last_seq, limit: 100 })
+            .call(OfficeRequestKind::EventsFeed {
+                since_seq: last_seq,
+                limit: 100,
+            })
             .expect("feed since");
         assert!(
-            fresh.get("events").and_then(|v| v.as_array()).expect("events").is_empty()
-                || fresh.get("events").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0) <= 1,
+            fresh
+                .get("events")
+                .and_then(|v| v.as_array())
+                .expect("events")
+                .is_empty()
+                || fresh
+                    .get("events")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0)
+                    <= 1,
             "the catch-up feed is bounded to newer events"
         );
         host.shutdown();
@@ -3484,7 +3593,8 @@ mod s6_pause_tests {
     use std::time::{Duration, Instant};
 
     struct RunningHost {
-        dir: tempfile::TempDir,
+        /// Holds the temp home alive for the whole test; never read.
+        _dir: tempfile::TempDir,
         home: std::path::PathBuf,
         server: std::thread::JoinHandle<()>,
     }
@@ -3500,19 +3610,16 @@ mod s6_pause_tests {
         while !socket.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        RunningHost { dir, home, server }
+        RunningHost {
+            _dir: dir,
+            home,
+            server,
+        }
     }
 
     impl RunningHost {
         fn client(&self) -> OfficeClient {
             OfficeClient::connect(&self.home).expect("client")
-        }
-        fn shutdown(self) {
-            if let Ok(mut client) = OfficeClient::connect(&self.home) {
-                let _ = client.call(OfficeRequestKind::Shutdown { close_policy: None });
-            }
-            let _ = self.server.join();
-            drop(self.dir);
         }
     }
 
@@ -3636,7 +3743,10 @@ mod s6_pause_tests {
         let _ = host.server.join();
         let reopened = OfficeHost::open(&host.home).expect("reopen");
         assert!(
-            reopened.shared().paused.load(std::sync::atomic::Ordering::SeqCst),
+            reopened
+                .shared()
+                .paused
+                .load(std::sync::atomic::Ordering::SeqCst),
             "the persisted pause survives the restart"
         );
         {
@@ -3668,7 +3778,10 @@ mod s6_pause_tests {
 
         let reopened = OfficeHost::open(&host.home).expect("reopen");
         assert!(
-            reopened.shared().paused.load(std::sync::atomic::Ordering::SeqCst),
+            reopened
+                .shared()
+                .paused
+                .load(std::sync::atomic::Ordering::SeqCst),
             "close-policy=pause must leave the next host paused"
         );
         // The recovery log names the restore.
