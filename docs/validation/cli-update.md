@@ -76,3 +76,34 @@ Serial full-suite success does not erase those parallel failures.
   Previously published binaries without `update` need a one-time reinstall
   to obtain this feature. No user installation, Viva home or worktree was
   upgraded/deleted during validation.
+
+## v0.2.1 release preflight
+
+The owner requested v0.2.1 publication. The existing PR #52 now carries the
+package-version bump in `crates/viva/Cargo.toml` and `Cargo.lock`, with release
+notes in `docs/releases/v0.2.1.md`. npm manifests continue to derive their
+version from the release tag through the existing packaging workflow.
+
+- `cargo test --workspace --no-fail-fast`: PASS for every non-ignored test,
+  including the default parallel PTY tests in this run. Earlier local PTY
+  failures above remain recorded; this pass does not erase them.
+- `cargo fmt --all -- --check`: PASS.
+- `cargo clippy --workspace --all-targets -- -D warnings`: PASS.
+- `cargo build --release --locked`: PASS on the current macOS Intel host.
+- `target/release/viva --version`: reports `viva 0.2.1`.
+- `target/release/viva update --help`: PASS; new command is present.
+- `target/release/viva update --check`: PASS; current `0.2.1`, public latest
+  `0.2.0`, no downgrade performed.
+- `bash packaging/npm/test-local.sh` and
+  `node --check packaging/npm/viva/bin/viva.js`: PASS.
+- `git diff --check`: PASS; release diff inspected for secrets/artifacts.
+- GitHub repository secret metadata includes `NPM_TOKEN`; its value was not
+  read. `npm view @zuohaisu/viva dist-tags --json` still reports `latest`
+  `0.2.0`; secret presence is not proof that a future publish will succeed.
+
+Publication remains pending the repository owner's merge of PR #52. The
+implementation author must not merge/approve its own PR, or bypass that
+boundary by releasing an unmerged feature branch. No `v0.2.1` tag, GitHub
+Release, npm publication or production installation was created by this
+preflight. After owner merge, the requested release can use the existing
+`v*` tag workflow and verify both artifact and npm channel results.
