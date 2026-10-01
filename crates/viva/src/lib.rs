@@ -9,6 +9,7 @@
 //! `<domain>::register_migrations`; composition into the binary lands with
 //! V07 (lane A).
 
+pub mod agents;
 pub mod authority;
 pub mod conversations;
 pub mod foundation;

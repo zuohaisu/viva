@@ -69,7 +69,7 @@ pub struct TaskRow {
     pub status: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalRow {
     pub terminal_id: String,
     pub worktree_id: Option<String>,
@@ -77,6 +77,11 @@ pub struct TerminalRow {
     pub owner_label: String,
     /// Office's real knowledge; `None` is shown as unknown.
     pub live: Option<bool>,
+    /// Agent status observations, PER SOURCE (S4): controlled reports are
+    /// authoritative, screen inference is auxiliary. They sit side by
+    /// side, never merged into one claim.
+    #[serde(default)]
+    pub agent_status: Vec<crate::agents::AgentStatusRecord>,
 }
 
 /// A needs-attention marker: a fact recorded by the office that a human
@@ -91,7 +96,7 @@ pub struct AttentionMarker {
 /// The workbench snapshot the view renders. Serialized over the control
 /// channel since the client/server split (#43): the server assembles it
 /// from the real registries, the client renders it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorkbenchModel {
     pub projects: Vec<ProjectRow>,
     pub worktrees: Vec<WorktreeRow>,
@@ -641,10 +646,22 @@ impl WorkbenchApp {
     /// One terminal leaf: the server snapshot, bottom-anchored so a
     /// reattached client sees the server-kept history.
     fn draw_terminal_pane(&self, frame: &mut Frame, area: Rect, id: &str) {
-        let title = if self.pane_focus == PaneContent::Terminal(id.to_string()) {
-            format!(" terminal {id} · pane focus ")
+        let statuses = self
+            .model
+            .terminals
+            .iter()
+            .find(|t| t.terminal_id == id)
+            .map(|t| Self::format_agent_status(&t.agent_status))
+            .unwrap_or_default();
+        let status_suffix = if statuses.is_empty() {
+            String::new()
         } else {
-            format!(" terminal {id} ")
+            format!(" · {statuses}")
+        };
+        let title = if self.pane_focus == PaneContent::Terminal(id.to_string()) {
+            format!(" terminal {id} · pane focus{status_suffix} ")
+        } else {
+            format!(" terminal {id}{status_suffix} ")
         };
         let lines: Vec<Line> = match self.snapshots.get(id) {
             Some(view) => {
@@ -675,6 +692,24 @@ impl WorkbenchApp {
             Paragraph::new(lines).block(Block::new().title(title).borders(Borders::ALL)),
             area,
         );
+    }
+
+    /// One-line, source-labeled agent status: `(reported)` = the agent's
+    /// own controlled word; `(screen)` = auxiliary rules, never a fact;
+    /// `(detected)` = process-tree identification.
+    fn format_agent_status(records: &[crate::agents::AgentStatusRecord]) -> String {
+        records
+            .iter()
+            .map(|record| {
+                let source = match record.source {
+                    crate::agents::StatusSource::ControlledReport => "reported",
+                    crate::agents::StatusSource::ScreenInference => "screen",
+                    crate::agents::StatusSource::ProcessTree => "detected",
+                };
+                format!("{}:{}({})", record.agent, record.status.as_str(), source)
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     fn draw_projects(&self, frame: &mut Frame, area: Rect) {
@@ -785,12 +820,19 @@ impl WorkbenchApp {
                     Some(false) => "exited",
                     None => "unknown",
                 };
+                let agents = Self::format_agent_status(&t.agent_status);
+                let agents = if agents.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {agents}")
+                };
                 ListItem::new(Line::from(format!(
-                    "{marker}{} · {} · {} · wt:{}",
+                    "{marker}{} · {} · {} · wt:{}{}",
                     t.purpose,
                     t.owner_label,
                     live,
-                    t.worktree_id.as_deref().unwrap_or("-")
+                    t.worktree_id.as_deref().unwrap_or("-"),
+                    agents
                 )))
             })
             .collect();
@@ -965,6 +1007,7 @@ impl<'a> WorkbenchStore<'a> {
                     purpose: entry.purpose,
                     owner_label: owner_label(&entry.owner),
                     live,
+                    agent_status: Vec::new(),
                 }
             })
             .collect::<Vec<_>>();
@@ -1389,6 +1432,7 @@ mod tests {
                 purpose: "user shell".into(),
                 owner_label: "user_shell".into(),
                 live: Some(true),
+                agent_status: vec![],
             }],
             attention: vec![AttentionMarker {
                 kind: "execution_failed".into(),

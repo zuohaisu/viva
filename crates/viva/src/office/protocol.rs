@@ -136,6 +136,31 @@ pub enum OfficeRequestKind {
         member_id: String,
         summary: String,
     },
+    /// A member's controlled agent-status report (S4, issue #46) — the
+    /// AUTHORITATIVE source. Requires a live grant carrying
+    /// `agent_report`. Screen inference never writes this slot.
+    AgentReport {
+        terminal_id: String,
+        agent: String,
+        /// working | blocked | done | idle | unknown
+        status: String,
+        #[serde(default)]
+        detail: String,
+    },
+    /// Submit agent content for the self-model container's intake (S4):
+    /// what ran, which summaries formed, which tasks were done. Viva
+    /// guarantees the channel and the audit trail; the CONTAINER decides
+    /// what to keep — a raw event is never promoted to memory here.
+    /// Requires a live grant carrying `agent_content`.
+    AgentContentSubmit {
+        #[serde(default)]
+        terminal_id: Option<String>,
+        /// e.g. transcript_summary | task_summary | decision_record
+        kind: String,
+        content: String,
+        #[serde(default)]
+        source_ref: Option<String>,
+    },
     /// Ask the host to shut down gracefully: stop new dispatch, stop owned
     /// terminals, persist the handoff, release the channel.
     Shutdown,

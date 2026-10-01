@@ -142,6 +142,9 @@ pub struct OfficeShared {
     pub transferred: AtomicBool,
     /// The rendezvous listener for an in-progress handoff, if any.
     handoff_listener: Mutex<Option<UnixListener>>,
+    /// Agent status board (S4): controlled reports (authoritative) and
+    /// screen/process observations (auxiliary), kept per source.
+    pub agent_board: crate::agents::AgentStatusBoard,
     /// Exit-watchers for dispatched executions. The graceful shutdown
     /// joins them BEFORE writing its handoff record — otherwise the
     /// process exit would die with the process and the next host would
@@ -212,6 +215,7 @@ impl OfficeHost {
             stopping: AtomicBool::new(false),
             transferred: AtomicBool::new(false),
             handoff_listener: Mutex::new(None),
+            agent_board: crate::agents::AgentStatusBoard::new(),
             watchers: Mutex::new(Vec::new()),
         });
         Ok(Self { shared, listener })
@@ -679,6 +683,20 @@ fn handle_request(
         } => handoff(&shared, task_id, member_id, summary),
         OfficeRequestKind::Shutdown => Ok(serde_json::json!({"shutting_down": true})),
         OfficeRequestKind::ServerRestart => begin_server_restart(&shared),
+        OfficeRequestKind::AgentReport {
+            terminal_id,
+            agent,
+            status,
+            detail,
+        } => agent_report(&shared, terminal_id, agent, status, detail),
+        OfficeRequestKind::AgentContentSubmit {
+            terminal_id,
+            kind,
+            content,
+            source_ref,
+        } => {
+            agent_content_submit(&shared, terminal_id.as_deref(), kind, content, source_ref.as_deref())
+        }
     }
 }
 
@@ -700,6 +718,8 @@ fn is_member_gated_kind(kind: &OfficeRequestKind) -> bool {
             | OfficeRequestKind::TerminalResize { .. }
             | OfficeRequestKind::TerminalStop { .. }
             | OfficeRequestKind::Handoff { .. }
+            | OfficeRequestKind::AgentReport { .. }
+            | OfficeRequestKind::AgentContentSubmit { .. }
             | OfficeRequestKind::Shutdown
     )
 }
@@ -785,6 +805,8 @@ fn authorize_socket_request(shared: &OfficeShared, request: &OfficeRequest) -> O
         }
         let action_needed = match request.kind {
             OfficeRequestKind::Dispatch { .. } => "dispatch_delegated",
+            OfficeRequestKind::AgentReport { .. } => "agent_report",
+            OfficeRequestKind::AgentContentSubmit { .. } => "agent_content",
             _ => SOCKET_CONTROL_ACTION,
         };
         if !grant.actions.iter().any(|a| a == action_needed) {
@@ -870,6 +892,7 @@ fn terminal_create(
         None,
         Some(&store),
     )?;
+    seed_agent_identification(shared, &terminal_id, argv);
     Ok(serde_json::json!({
         "terminal_id": terminal_id.to_string(),
         "pid": handle.pid(),
@@ -900,7 +923,40 @@ fn terminal_resize(
 /// the in-process workbench used, now served to attach clients.
 fn workbench_view(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
     let store = shared.store.lock().expect("office store");
-    let model = crate::tui::workbench::assemble_view(&store, &shared.terminals)?;
+    let mut model = crate::tui::workbench::assemble_view(&store, &shared.terminals)?;
+
+    // S4 sweep: for every live terminal, refresh the AUXILIARY screen
+    // observation (display-only) and project all sources onto the rows.
+    for row in &mut model.terminals {
+        if let Ok(Some(handle)) = shared
+            .terminals
+            .handle(&crate::foundation::ids::TerminalId::from_str(&row.terminal_id).expect("row id"))
+        {
+            if handle.try_wait().ok().flatten().is_none() {
+                if let Ok(snapshot) = handle.snapshot() {
+                    if let Some(status) = crate::agents::infer_from_screen(&snapshot) {
+                        let agent = shared
+                            .agent_board
+                            .project(&row.terminal_id)
+                            .into_iter()
+                            .find(|r| r.source == crate::agents::StatusSource::ProcessTree)
+                            .map(|r| r.agent)
+                            .unwrap_or_else(|| "unknown".into());
+                        shared.agent_board.observe(crate::agents::AgentStatusRecord {
+                            terminal_id: row.terminal_id.clone(),
+                            agent,
+                            status,
+                            source: crate::agents::StatusSource::ScreenInference,
+                            detail: "screen rules (auxiliary, never a fact)".into(),
+                            updated_at: utc_now(),
+                        });
+                    }
+                }
+            };
+        };
+        row.agent_status = shared.agent_board.project(&row.terminal_id);
+    }
+
     serde_json::to_value(&model).map_err(|e| OfficeError::Validation(format!("view: {e}")))
 }
 
@@ -989,6 +1045,177 @@ fn worktree_create_for_task(
     );
     let record = service.create_task_worktree(&repo_root, &base, &task_id, &branch)?;
     serde_json::to_value(&record).map_err(|e| OfficeError::Validation(format!("record: {e}")))
+}
+
+// ---------------------------------------------------------------------------
+// Agent status + container intake (S4, issue #46; ADR 0012 decision 5)
+// ---------------------------------------------------------------------------
+
+/// Seed the process-tree identification slot from the spawned argv: the
+/// dominant case is that the session IS the agent CLI. Identification
+/// names the agent only - the state stays unknown until a source speaks.
+fn seed_agent_identification(shared: &OfficeShared, terminal_id: &TerminalId, argv: &[String]) {
+    let Some(program) = argv.first() else {
+        return;
+    };
+    let base = program.rsplit('/').next().unwrap_or(program).to_ascii_lowercase();
+    let agent = crate::agents::DETECTABLE_AGENTS
+        .iter()
+        .find(|agent| base.starts_with(**agent))
+        .map(|agent| agent.to_string());
+    if let Some(agent) = agent {
+        shared.agent_board.observe(crate::agents::AgentStatusRecord {
+            terminal_id: terminal_id.to_string(),
+            agent,
+            status: crate::agents::AgentStatus::Unknown,
+            source: crate::agents::StatusSource::ProcessTree,
+            detail: "identified from the spawned argv".into(),
+            updated_at: utc_now(),
+        });
+    }
+}
+
+/// A controlled agent-status report: the AUTHORITATIVE source. Requires a
+/// member attribution + a live grant carrying `agent_report` (the socket
+/// gate enforces that before this handler runs). The report is audited;
+/// it describes the agent's state and never completes a task.
+fn agent_report(
+    shared: &OfficeShared,
+    terminal_id: &str,
+    agent: &str,
+    status: &str,
+    detail: &str,
+) -> OfficeResult<serde_json::Value> {
+    let terminal_id = TerminalId::from_str(terminal_id)?;
+    let status = crate::agents::AgentStatus::parse(status)?;
+    if agent.trim().is_empty() {
+        return Err(OfficeError::Validation("agent name must not be empty".into()));
+    }
+    // A report about a terminal this office hosts: identity checks out.
+    shared
+        .terminals
+        .handle(&terminal_id)?
+        .ok_or_else(|| OfficeError::NotFound {
+            entity: "terminal",
+            id: terminal_id.to_string(),
+        })?;
+    let record = crate::agents::AgentStatusRecord {
+        terminal_id: terminal_id.to_string(),
+        agent: agent.to_string(),
+        status,
+        source: crate::agents::StatusSource::ControlledReport,
+        detail: detail.to_string(),
+        updated_at: utc_now(),
+    };
+    shared.agent_board.observe(record.clone());
+    let store = shared.store.lock().expect("office store");
+    crate::foundation::events::append(
+        &store,
+        crate::foundation::events::NewEvent {
+            domain: DOMAIN_OFFICE_HOST,
+            kind: "agent_status_reported".into(),
+            subject_type: "terminal".into(),
+            subject_id: terminal_id.to_string(),
+            origin: "office_host".into(),
+            payload: serde_json::json!({
+                "agent": agent,
+                "status": status.as_str(),
+                "detail": detail,
+                "source": "controlled_report",
+            }),
+        },
+    )?;
+    serde_json::to_value(&record).map_err(|e| OfficeError::Validation(format!("record: {e}")))
+}
+
+/// Submit agent content for the self-model container's intake. The content
+/// lands as a private file reference; the submission is audited with a
+/// digest so the container (and the owner) can trace what entered. Viva
+/// does NOT decide whether the content becomes memory - that is the
+/// container's curation, outside this channel.
+fn agent_content_submit(
+    shared: &OfficeShared,
+    terminal_id: Option<&str>,
+    kind: &str,
+    content: &str,
+    source_ref: Option<&str>,
+) -> OfficeResult<serde_json::Value> {
+    if kind.trim().is_empty() {
+        return Err(OfficeError::Validation("content kind must not be empty".into()));
+    }
+    if content.is_empty() {
+        return Err(OfficeError::Validation(
+            "content must not be empty; the channel moves real material, not placeholders"
+                .into(),
+        ));
+    }
+    if content.len() > 1024 * 1024 {
+        return Err(OfficeError::Validation(
+            "content exceeds the 1 MiB channel bound; split the submission".into(),
+        ));
+    }
+    let content_dir = shared.home.join("agent_content");
+    std::fs::create_dir_all(&content_dir)?;
+    let content_id = format!("content-{}", uuid::Uuid::new_v4().simple());
+    let path = content_dir.join(format!("{content_id}.json"));
+    let digest = fnv1a_64(content.as_bytes());
+    let record = serde_json::json!({
+        "content_id": content_id,
+        "kind": kind,
+        "terminal_id": terminal_id,
+        "source_ref": source_ref,
+        "bytes": content.len(),
+        "digest_fnv1a_64": format!("{digest:016x}"),
+        "submitted_at": utc_now(),
+        "content": content,
+    });
+    {
+        let mut file = std::fs::OpenOptions::new();
+        file.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            file.mode(0o600);
+        }
+        let mut file = file.open(&path)?;
+        serde_json::to_writer_pretty(&mut file, &record)?;
+    }
+    let store = shared.store.lock().expect("office store");
+    crate::foundation::events::append(
+        &store,
+        crate::foundation::events::NewEvent {
+            domain: DOMAIN_OFFICE_HOST,
+            kind: "agent_content_submitted".into(),
+            subject_type: "agent_content".into(),
+            subject_id: content_id.clone(),
+            origin: "office_host".into(),
+            payload: serde_json::json!({
+                "kind": kind,
+                "terminal_id": terminal_id,
+                "source_ref": source_ref,
+                "bytes": content.len(),
+                "digest_fnv1a_64": format!("{digest:016x}"),
+                "path": path.display().to_string(),
+                "note": "channel + audit only; the container decides what to keep",
+            }),
+        },
+    )?;
+    Ok(serde_json::json!({
+        "content_id": content_id,
+        "digest_fnv1a_64": format!("{digest:016x}"),
+        "path": path.display().to_string(),
+        "note": "submitted to the container intake; the container decides what to keep - not a memory, not a fact",
+    }))
+}
+
+/// FNV-1a (64-bit) content digest for the intake audit trail.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 // ---------------------------------------------------------------------------
@@ -1518,6 +1745,7 @@ fn dispatch(
             return Err(err);
         }
     };
+    seed_agent_identification(shared, &terminal_id, argv);
     let pid = handle.pid().unwrap_or(0) as i64;
     tasks.confirm_launch(request_key, pid, handle.pid_start_marker.clone())?;
 
@@ -2440,5 +2668,297 @@ mod s3_handoff_tests {
         client2.call(OfficeRequestKind::Shutdown).expect("shutdown");
         resume_thread.join().expect("resumed host ends cleanly");
         drop(dir);
+    }
+}
+
+#[cfg(test)]
+mod s4_agent_status_tests {
+    use super::*;
+    use crate::office::OfficeClient;
+    use std::str::FromStr as _;
+    use std::time::{Duration, Instant};
+
+    struct RunningHost {
+        dir: tempfile::TempDir,
+        home: std::path::PathBuf,
+        server: std::thread::JoinHandle<()>,
+    }
+
+    fn start_host() -> RunningHost {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let host = OfficeHost::open(&home).expect("host");
+        let server = host.serve_background();
+        let socket = home.join(OFFICE_SOCKET_NAME);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !socket.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        RunningHost { dir, home, server }
+    }
+
+    impl RunningHost {
+        fn client(&self) -> OfficeClient {
+            OfficeClient::connect(&self.home).expect("client")
+        }
+        fn shutdown(self) {
+            if let Ok(mut client) = OfficeClient::connect(&self.home) {
+                let _ = client.call(OfficeRequestKind::Shutdown);
+            }
+            let _ = self.server.join();
+            drop(self.dir);
+        }
+    }
+
+    /// An owner-issued grant carrying one action (shared authority: no
+    /// principal, usable by any member - documented in the authority).
+    fn grant_for(home: &std::path::Path, actions: &[&str]) -> String {
+        let store = Store::open(
+            &crate::foundation::paths::database_path(home),
+            office_migrations(),
+        )
+        .expect("store");
+        let grant = crate::authority::AuthorityEngine::new(&store)
+            .issue_root_grant(
+                None,
+                None,
+                actions.iter().map(|s| s.to_string()).collect(),
+                crate::authority::GrantMode::ActAutonomously,
+                None,
+            )
+            .expect("grant");
+        grant.grant_id.to_string()
+    }
+
+    fn create_codex_like_terminal(client: &mut OfficeClient, home: &std::path::Path) -> String {
+        // A real executable named after a detectable agent: identification
+        // comes from the spawned argv.
+        let fake_dir = home.join("fake-agents");
+        std::fs::create_dir_all(&fake_dir).expect("fake dir");
+        let fake = fake_dir.join("codex");
+        std::fs::write(&fake, "#!/bin/sh\necho codex-up\ncat\n").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let created = client
+            .call(OfficeRequestKind::TerminalCreate {
+                argv: vec![fake.display().to_string()],
+                cwd: home.display().to_string(),
+                env: vec![],
+                cols: 80,
+                rows: 24,
+                purpose: "agent under test".into(),
+                worktree_id: None,
+                owner: "agent_cli".into(),
+            })
+            .expect("create");
+        created
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .expect("terminal id")
+            .to_string()
+    }
+
+    fn view_for(client: &mut OfficeClient, terminal_id: &str) -> serde_json::Value {
+        let view = client.call(OfficeRequestKind::WorkbenchView).expect("view");
+        let rows = view
+            .get("terminals")
+            .and_then(|v| v.as_array())
+            .expect("terminals array")
+            .clone();
+        rows.into_iter()
+            .find(|row| row.get("terminal_id").and_then(|v| v.as_str()) == Some(terminal_id))
+            .expect("the row exists")
+    }
+
+    /// The three-layer story on one terminal: detected (process/argv) +
+    /// authoritative (controlled report) + auxiliary (screen) sit side by
+    /// side, clearly labeled, and the report is audited.
+    #[test]
+    fn controlled_report_is_authoritative_and_audited() {
+        let host = start_host();
+        let mut client = host.client();
+        let terminal_id = create_codex_like_terminal(&mut client, &host.home);
+        let grant = grant_for(&host.home, &["agent_report"]);
+
+        let mut request = new_request(OfficeRequestKind::AgentReport {
+            terminal_id: terminal_id.clone(),
+            agent: "codex".into(),
+            status: "blocked".into(),
+            detail: "waiting for tool approval".into(),
+        });
+        request.grant = Some(grant);
+        request.member = Some("member-00000000-0000-0000-0000-000000000000".into());
+        let record = client.call_request(request).expect("report accepted");
+        assert_eq!(record.get("status").and_then(|v| v.as_str()), Some("blocked"));
+
+        // The view carries BOTH sources, labeled and separated.
+        let row = view_for(&mut client, &terminal_id);
+        let statuses = row.get("agent_status").and_then(|v| v.as_array()).expect("statuses");
+        let sources: Vec<&str> = statuses
+            .iter()
+            .filter_map(|s| s.get("source").and_then(|v| v.as_str()))
+            .collect();
+        assert!(sources.contains(&"controlled_report"), "{sources:?}");
+        assert!(sources.contains(&"process_tree"), "{sources:?}");
+
+        // The report is audited.
+        let store = Store::open(
+            &crate::foundation::paths::database_path(&host.home),
+            office_migrations(),
+        )
+        .expect("store");
+        let audited: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM office_events WHERE kind = 'agent_status_reported'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("audit");
+        assert!(audited >= 1);
+        host.shutdown();
+    }
+
+    /// A report without a grant is refused and audited - the controlled
+    /// channel is controlled.
+    #[test]
+    fn report_without_grant_is_denied() {
+        let host = start_host();
+        let mut client = host.client();
+        let terminal_id = create_codex_like_terminal(&mut client, &host.home);
+        let mut request = new_request(OfficeRequestKind::AgentReport {
+            terminal_id: terminal_id.clone(),
+            agent: "codex".into(),
+            status: "done".into(),
+            detail: String::new(),
+        });
+        request.member = Some("member-00000000-0000-0000-0000-000000000000".into());
+        let err = client.call_request(request).expect_err("must deny");
+        assert!(err.to_string().contains("denied"), "{err}");
+        host.shutdown();
+    }
+
+    /// Screen inference shows up as AUXILIARY in the view - and the fact
+    /// layer stays untouched (no task results invented by screen rules).
+    #[test]
+    fn screen_inference_is_auxiliary_only() {
+        let host = start_host();
+        let mut client = host.client();
+        // A child that leaves a blocking-looking screen behind.
+        let created = client
+            .call(OfficeRequestKind::TerminalCreate {
+                argv: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "echo 'Do you want to proceed? (y/n)'; sleep 30".into(),
+                ],
+                cwd: host.home.display().to_string(),
+                env: vec![],
+                cols: 80,
+                rows: 24,
+                purpose: "screen probe".into(),
+                worktree_id: None,
+                owner: "agent_cli".into(),
+            })
+            .expect("create");
+        let terminal_id = created
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .expect("terminal id")
+            .to_string();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let view = client.call(OfficeRequestKind::WorkbenchView).expect("view");
+            let statuses = view
+                .get("terminals")
+                .and_then(|v| v.as_array())
+                .and_then(|rows| {
+                    rows.iter()
+                        .find(|row| row.get("terminal_id").and_then(|v| v.as_str()) == Some(terminal_id.as_str()))
+                        .and_then(|row| row.get("agent_status").and_then(|v| v.as_array()).cloned())
+                });
+            if let Some(statuses) = statuses {
+                let screen = statuses.iter().any(|s| {
+                    s.get("source").and_then(|v| v.as_str()) == Some("screen_inference")
+                        && s.get("status").and_then(|v| v.as_str()) == Some("blocked")
+                });
+                if screen {
+                    break;
+                }
+            }
+            assert!(Instant::now() < deadline, "screen inference never observed");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        // The fact layer is untouched: no task results exist for the probe.
+        let store = Store::open(
+            &crate::foundation::paths::database_path(&host.home),
+            office_migrations(),
+        )
+        .expect("store");
+        let results: i64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM task_results", [], |row| row.get(0))
+            .expect("task results");
+        assert_eq!(results, 0, "screen inference must not invent facts");
+        host.shutdown();
+    }
+
+    /// The container intake: content lands as a private file, the
+    /// submission is audited with a digest, and the answer says plainly
+    /// that the container decides what to keep.
+    #[test]
+    fn container_intake_records_content_with_audit() {
+        let host = start_host();
+        let mut client = host.client();
+        let grant = grant_for(&host.home, &["agent_content"]);
+
+        let mut request = new_request(OfficeRequestKind::AgentContentSubmit {
+            terminal_id: None,
+            kind: "task_summary".into(),
+            content: "ran the test suite; 3 failures traced to flaky timing".into(),
+            source_ref: Some("session:abc/turn:42".into()),
+        });
+        request.grant = Some(grant);
+        let response = client.call_request(request).expect("submit");
+        let content_id = response
+            .get("content_id")
+            .and_then(|v| v.as_str())
+            .expect("content id")
+            .to_string();
+        let path = response
+            .get("path")
+            .and_then(|v| v.as_str())
+            .expect("path")
+            .to_string();
+        assert!(std::path::Path::new(&path).exists(), "content stored at {path}");
+        assert!(
+            response
+                .get("note")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .contains("container decides"),
+            "the answer keeps the curation boundary honest"
+        );
+
+        let store = Store::open(
+            &crate::foundation::paths::database_path(&host.home),
+            office_migrations(),
+        )
+        .expect("store");
+        let audited: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM office_events WHERE kind = 'agent_content_submitted' AND subject_id = ?1",
+                [content_id.as_str()],
+                |row| row.get(0),
+            )
+            .expect("audit");
+        assert_eq!(audited, 1);
+        host.shutdown();
     }
 }
