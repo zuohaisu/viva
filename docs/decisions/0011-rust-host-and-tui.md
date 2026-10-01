@@ -1,6 +1,6 @@
 # ADR 0011 — Rust 本地宿主、Pi 对话宿主与 SQLite 状态存储
 
-Status: **Accepted**（Rust/Pi：Haisu 显式裁决，2026-09-27；SQLite：2026-09-28）· Implementation: **已交付（2026-09-28，首版主链 PR #34）**：Rust 宿主（`crates/viva/`）、SQLite 状态层、Pi 对话宿主（`extensions/pi/`）均已实现并有验收测试；Python 运行时已于 V13 退役（`docs/validation/v13-python-retirement.md`）。真实 Pi 端到端与 Intel 平台验收保持 pending（见 V12 记录）。
+Status: **Accepted**（Rust/Pi：Haisu 显式裁决，2026-09-27；SQLite：2026-09-28）· Implementation: **已交付（2026-09-28，首版主链 PR #34）**：Rust 宿主（`crates/viva/`）、SQLite 状态层、Pi 对话宿主（`extensions/pi/`）均已实现并有验收测试；Python 运行时已于 V13 退役（`docs/validation/v13-python-retirement.md`）。真实 Pi 端到端与 Intel 平台验收保持 pending（见 V12 记录）。· Amendment: 2026-10-01 起 §6（关闭界面的语义）由 [ADR 0012](0012-resident-runtime-and-terminal-orchestration.md) 修订（常驻运行时、detach/attach、退出暂停语义）；终端原语 API 与 §5.4"RPC/SDK 未来可选"的区分见 ADR 0012；其余条款不变。
 
 > 效力说明：以下三项均为用户裁决：Rust 本地宿主；Pi 作为 Samuel 的首个默认对话宿主，以交互终端与小型扩展接入；SQLite + 文件保存 Viva 状态。Tokio + Ratatui + Crossterm 是随 Rust 方向记录的实施默认组合。本文是技术选型的唯一权威结论，历史研究只保留来源与讨论过程。
 
