@@ -1,6 +1,6 @@
 # Herdr 架构与功能映射研究：Viva 终端运行时的对齐、冲突与裁决点
 
-Status: planning evidence; official docs/API/source metadata inspected, no herdr source line-by-line audit, nothing built or benchmarked. Route decision: **A 原生实现**（2026-10-01，Haisu 裁决，见 §5/§6）. Date: 2026-10-01.
+Status: planning evidence; official docs/API/source metadata inspected, no herdr source line-by-line audit, nothing built or benchmarked. Route decision: **A 原生实现**（2026-10-01，Haisu 裁决，见 §5/§6）；同日二轮裁定反转 daemon 范围（见 §5.1），ADR 0011 §6 修订文本待剩余裁定收齐后提出. Date: 2026-10-01.
 
 [Goal check] This work advances Viva's runtime capability by mapping herdr's full feature surface onto Viva's user stories and naming the exact ADR conflicts and decision points a "herdr-like Viva" requires.
 
@@ -70,6 +70,30 @@ Status: planning evidence; official docs/API/source metadata inspected, no herdr
 3. **路线**：A（本条即裁决本身）。
 4. **agent 状态定位**：屏幕推断仅作展示层；验收、派发与恢复继续走受控接口（ADR 0011 §5.2），写进对应切片的验收记录。
 5. **第三方二进制依赖政策**：随路线 B 出局，不适用。
+
+### 5.1 二轮裁定（2026-10-01，逐项过审）
+
+同日 Haisu 逐项复审功能面，**路线 A（原生实现）不变**，但第一轮第 1、2 条中被本轮裁定取代的子项按"追加不回写"规则记录如下：
+
+已裁定：
+
+1. **常驻 server + client/server 拆分：要**（detach/attach 的前提）。→ ADR 0011 §6 需修订，修订文本待本轮全部裁定收齐后随本文档一并提出；§6 切片序列同步重排，server/client 拆分将成为新的早期切片。
+2. **detach/attach：要。**
+3. **live handoff（活 PTY 转移）：要**（依赖常驻 server）。
+4. **SSH 多机同窗：后续阶段必须，首版不做**（建立在常驻 server 之上）。
+5. **音效与 toast 通知：要。**
+6. **主题系统：首版不做，后续加。UI 国际化：首版不做，后续加。**
+7. **agent 检测首版范围：codex、claude、codebuddy、qodercli、cline、hermes、pi coding agent，共 7 个**；其余按"需要哪个加哪个"。注：herdr 现有规则表可见 claude/codex/cline，codebuddy/qodercli/hermes 大概率需自建规则（自建同时避免 §7 的实质性材料复制问题）；pi 在 Viva 内可经受控扩展取得权威状态，优先于屏幕推断。
+8. **不要：插件与市场、onboarding 向导、面向 agent 的 SKILL.md。键位自定义：暂不需要。**
+
+待裁定（已请求解释，解释后由 Haisu 裁定）：
+
+- 跨重启"活恢复"（进程未死过的类型二恢复）与 live handoff 的工程边界
+- 屏幕推断的定位（权威状态 vs 仅展示层）
+- kitty 图片协议渲染
+- socket API 终端原语编排面
+- CJK 输入法光标跟随
+- 常驻 server 回归后，关闭 TUI 时任务派发与定期维护"继续还是暂停"（§6 原文为暂停，daemon 语义下两者皆可行）
 
 ## 6. 路线 A 的执行含义与切片序列
 
