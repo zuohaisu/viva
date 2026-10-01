@@ -23,7 +23,10 @@ use serde_json::Value;
 use crate::foundation::error::{OfficeError, OfficeResult};
 
 /// Current wire-protocol version. A bump is a coordinated contract change.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// v2 (ADR 0012 / issue #43): the resident-server split adds headless
+/// terminal creation/resize, the workbench view/diff projections, and the
+/// per-request grant field; client and server ship in one binary.
+pub const PROTOCOL_VERSION: u32 = 2;
 /// Hard bound on one framed message (request or response), in bytes.
 pub const MAX_MESSAGE_BYTES: usize = 256 * 1024;
 /// Per-read timeout on the socket; a silent peer cannot hold a thread.
@@ -35,6 +38,18 @@ pub struct OfficeRequest {
     pub request_id: String,
     pub version: u32,
     pub kind: OfficeRequestKind,
+    /// Optional live-grant reference carried by the caller. Any presented
+    /// grant is validated by the host before the request runs; an invalid,
+    /// revoked or expired one is rejected and audited (ADR 0012 decision 4:
+    /// grant semantics extend to the socket layer). Absent means the
+    /// OS-authenticated owner (same-uid peer) acts as the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<String>,
+    /// Optional member attribution. A member-attributed mutating request
+    /// must carry a live grant whose principal matches; the host rejects
+    /// and audits anything else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member: Option<String>,
 }
 
 /// The office-level request vocabulary. Read-only kinds are answerable from
@@ -68,6 +83,56 @@ pub enum OfficeRequestKind {
     },
     /// Stop one terminal (its process group only — never the neighbors).
     TerminalStop { terminal_id: String },
+    /// Create one terminal in the resident server. This is the headless
+    /// and workbench spawn path: fixed sizes are allowed, and the owner is
+    /// limited to user-owned kinds — an execution-owned terminal can only
+    /// come from Dispatch, so a socket client can never fake one.
+    TerminalCreate {
+        argv: Vec<String>,
+        cwd: String,
+        #[serde(default)]
+        env: Vec<(String, String)>,
+        #[serde(default = "default_cols")]
+        cols: u16,
+        #[serde(default = "default_rows")]
+        rows: u16,
+        purpose: String,
+        worktree_id: Option<String>,
+        /// `user_shell` | `agent_cli` | `test_run`.
+        owner: String,
+    },
+    /// Resize one terminal's PTY.
+    TerminalResize {
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    /// The workbench projection: projects, worktrees (+real dirty state),
+    /// tasks, terminals (+live state) and needs-attention markers.
+    WorkbenchView,
+    /// The real bounded diff of one worktree against HEAD.
+    WorkbenchDiff { worktree_id: String },
+    /// The workbench pane-layout preference (issue #43 AC2, QA F5):
+    /// `Some` saves the serialized layout, `None` returns the saved JSON
+    /// (null when none was saved). A UI preference, not an office fact.
+    WorkbenchLayout {
+        #[serde(default)]
+        layout_json: Option<String>,
+    },
+    /// Open an interactive shell at a worktree's path (the workbench
+    /// "open" action). The terminal is a user_shell owned by the server,
+    /// attached to the worktree.
+    TerminalOpenInWorktree { worktree_id: String },
+    /// Create a task worktree from the task's project repo (V08 policy:
+    /// protected refs, one checkout per branch). Removal is never a socket
+    /// action — it stays an explicitly authorized human operation.
+    WorktreeCreateForTask {
+        task_id: String,
+        #[serde(default)]
+        branch: Option<String>,
+        #[serde(default)]
+        base_dir: Option<String>,
+    },
     /// Results recorded for a task (process facts, QA conclusions, PR/CI).
     TaskResults { task_id: String },
     /// Record one member's explicit handoff summary for a task. A
@@ -78,9 +143,94 @@ pub enum OfficeRequestKind {
         member_id: String,
         summary: String,
     },
+    /// A member's controlled agent-status report (S4, issue #46) — the
+    /// AUTHORITATIVE source. Requires a live grant carrying
+    /// `agent_report`. Screen inference never writes this slot.
+    AgentReport {
+        terminal_id: String,
+        agent: String,
+        /// working | blocked | done | idle | unknown
+        status: String,
+        #[serde(default)]
+        detail: String,
+    },
+    /// Submit agent content for the self-model container's intake (S4):
+    /// what ran, which summaries formed, which tasks were done. Viva
+    /// guarantees the channel and the audit trail; the CONTAINER decides
+    /// what to keep — a raw event is never promoted to memory here.
+    /// Requires a live grant carrying `agent_content`.
+    AgentContentSubmit {
+        #[serde(default)]
+        terminal_id: Option<String>,
+        /// e.g. transcript_summary | task_summary | decision_record
+        kind: String,
+        content: String,
+        #[serde(default)]
+        source_ref: Option<String>,
+    },
+    /// Send a prompt to an agent's terminal (S5, issue #47): the text goes
+    /// to the child's stdin as-is and the send is audited. Member-attributed
+    /// calls need a live grant carrying `agent_prompt`.
+    AgentPrompt { terminal_id: String, prompt: String },
+    /// Wait, server-side, until the terminal's AUTHORITATIVE agent status
+    /// matches (or the timeout passes). The wait runs on the host thread -
+    /// the orchestrator may disconnect; the outcome is audited either way
+    /// and readable from the events feed. Member-attributed calls need a
+    /// grant carrying `terminal_control`.
+    AgentWait {
+        terminal_id: String,
+        /// working | blocked | done | idle | unknown
+        status: String,
+        #[serde(default = "default_wait_timeout")]
+        timeout_secs: u64,
+    },
+    /// The office event stream since a sequence number (S5): the durable,
+    /// reconnectable feed. A client that disconnects re-subscribes with its
+    /// last seen seq and misses nothing.
+    EventsFeed {
+        #[serde(default)]
+        since_seq: u64,
+        #[serde(default = "default_feed_limit")]
+        limit: u32,
+    },
+    /// Suspend NEW dispatch and maintenance cycles (S6, issue #48):
+    /// already-running executions are never touched - stopping one is the
+    /// separate, explicit terminal/execution stop. Owner-only.
+    Pause,
+    /// Lift a pause: dispatch and maintenance resume. Owner-only.
+    Resume,
     /// Ask the host to shut down gracefully: stop new dispatch, stop owned
     /// terminals, persist the handoff, release the channel.
-    Shutdown,
+    /// `close_policy` names the hook the TUI/CLI applied before asking:
+    /// `continue` (default) or `pause` - under pause the NEXT server
+    /// starts paused (the pause is persisted, the semantics survive a
+    /// restart).
+    Shutdown {
+        #[serde(default)]
+        close_policy: Option<String>,
+    },
+    /// Begin a live handoff (S3, issue #45): the host binds `handoff.sock`
+    /// and answers with its path. The resumed server connects, receives
+    /// every live PTY master fd + manifest, and takes over; the old host
+    /// exits only after a full ack. On any failure the old host keeps
+    /// serving — the type-1 fallback, with zero interruption.
+    ServerRestart,
+}
+
+fn default_cols() -> u16 {
+    80
+}
+
+fn default_wait_timeout() -> u64 {
+    30
+}
+
+fn default_feed_limit() -> u32 {
+    100
+}
+
+fn default_rows() -> u16 {
+    24
 }
 
 /// One response, correlated by request id.
@@ -177,7 +327,21 @@ pub fn new_request(kind: OfficeRequestKind) -> OfficeRequest {
         request_id: format!("req-{}", uuid::Uuid::new_v4().simple()),
         version: PROTOCOL_VERSION,
         kind,
+        grant: None,
+        member: None,
     }
+}
+
+/// Attach a live-grant reference (and optional member attribution) to a
+/// request under construction.
+pub fn with_grant(
+    mut request: OfficeRequest,
+    grant: impl Into<String>,
+    member: Option<String>,
+) -> OfficeRequest {
+    request.grant = Some(grant.into());
+    request.member = member;
+    request
 }
 
 #[cfg(test)]

@@ -30,6 +30,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use crate::foundation::error::OfficeResult;
 
 pub mod conversations;
+pub mod layout;
 pub mod workbench;
 
 // ---------------------------------------------------------------------------

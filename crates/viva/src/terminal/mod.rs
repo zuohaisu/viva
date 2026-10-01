@@ -8,6 +8,7 @@
 //! worktree may host many purpose-terminals; switching or stopping one
 //! never touches its neighbors.
 
+mod pty;
 mod session;
 
 pub use session::{
@@ -156,6 +157,45 @@ impl TerminalRegistry {
             .iter()
             .map(|(entry, _)| entry.clone())
             .collect()
+    }
+
+    /// Register an ADOPTED session received by live handoff (issue #45):
+    /// the terminal keeps its identity (same id across the restart) and
+    /// the handle runs on the transferred master fd.
+    #[allow(clippy::too_many_arguments)]
+    pub fn adopt(
+        &self,
+        terminal_id: TerminalId,
+        owner: TerminalOwner,
+        worktree_id: Option<crate::foundation::ids::WorktreeId>,
+        purpose: String,
+        master_fd: std::os::fd::RawFd,
+        pid: u32,
+        pid_start_marker: String,
+        cols: u16,
+        rows: u16,
+        history: Vec<String>,
+        disk_log: Option<Arc<DiskLog>>,
+    ) -> OfficeResult<()> {
+        let handle = Arc::new(TerminalHandle::adopt(
+            master_fd,
+            pid,
+            pid_start_marker,
+            cols,
+            rows,
+            history,
+            disk_log,
+        )?);
+        self.sessions.lock().expect("terminal registry").push((
+            TerminalEntry {
+                terminal_id,
+                owner,
+                worktree_id,
+                purpose,
+            },
+            handle,
+        ));
+        Ok(())
     }
 
     /// Live count: sessions that have not recorded an exit.

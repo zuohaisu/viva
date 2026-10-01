@@ -1,6 +1,12 @@
 //! The parallel-development workbench (V14, issue #27): one office spanning
 //! many projects, tasks and worktrees, with real terminals per worktree.
 //!
+//! Since the resident-server split (S1, issue #43; ADR 0012) this module is
+//! the CLIENT: facts arrive as `WorkbenchView` projections over the control
+//! channel, actions go back as requests, and `q` detaches while the server
+//! keeps every terminal running. The server side of the projections lives
+//! in [`assemble_view`], called by the office host.
+//!
 //! Composition rules (this module only combines; the domains stay theirs):
 //! - Facts come from the existing registries (projects/tasks V02–V03,
 //!   worktrees V08, terminals V05). Lists, dirty flags and needs-attention
@@ -12,9 +18,8 @@
 //!   execution.
 //! - Diffs and status are real git facts, read-only; editing is delegated
 //!   to the user's own editor — the workbench builds no code editor.
-//! - Quit is the office protocol: owned terminals are stopped, worktree
-//!   contents and records are left exactly as they are, and nothing is
-//!   re-run when the office reopens.
+//! - Quit is a detach: worktree contents and records are left exactly as
+//!   they are, nothing is re-run when the client reattaches.
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
@@ -23,23 +28,31 @@ use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
-use std::str::FromStr as _;
-
 use crate::foundation::error::OfficeResult;
 use crate::terminal::TerminalSnapshot;
+use crate::tui::layout::{Direction, PaneContent, PaneNode, SplitAxis};
+
+/// Reference area for geometric pane-focus moves: adjacency decisions are
+/// proportional, so one fixed virtual size is stable for any real size.
+const PANE_REF_AREA: ratatui::layout::Rect = ratatui::layout::Rect {
+    x: 0,
+    y: 0,
+    width: 100,
+    height: 40,
+};
 
 // ---------------------------------------------------------------------------
 // Projections (read-only facts assembled by the store-backed source)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProjectRow {
     pub project_id: String,
     pub name: String,
     pub repo_path: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorktreeRow {
     pub worktree_id: String,
     pub project_id: String,
@@ -53,14 +66,14 @@ pub struct WorktreeRow {
     pub source: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TaskRow {
     pub task_id: String,
     pub goal: String,
     pub status: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalRow {
     pub terminal_id: String,
     pub worktree_id: Option<String>,
@@ -68,19 +81,26 @@ pub struct TerminalRow {
     pub owner_label: String,
     /// Office's real knowledge; `None` is shown as unknown.
     pub live: Option<bool>,
+    /// Agent status observations, PER SOURCE (S4): controlled reports are
+    /// authoritative, screen inference is auxiliary. They sit side by
+    /// side, never merged into one claim.
+    #[serde(default)]
+    pub agent_status: Vec<crate::agents::AgentStatusRecord>,
 }
 
 /// A needs-attention marker: a fact recorded by the office that a human
 /// should look at (a failed execution, an unresolved launch). Projections
 /// only — the workbench never decides what to do about them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AttentionMarker {
     pub kind: String,
     pub detail: String,
 }
 
-/// The workbench snapshot the view renders.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// The workbench snapshot the view renders. Serialized over the control
+/// channel since the client/server split (#43): the server assembles it
+/// from the real registries, the client renders it.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorkbenchModel {
     pub projects: Vec<ProjectRow>,
     pub worktrees: Vec<WorktreeRow>,
@@ -106,8 +126,8 @@ pub enum Focus {
 pub enum KeyOutcome {
     Handled,
     Ignored,
-    /// The user asked to quit; the run loop must stop owned terminals,
-    /// persist state, and restore the physical terminal.
+    /// The user asked to quit; the client run loop detaches from the
+    /// resident server (the server keeps running — ADR 0012).
     QuitRequested,
     /// Terminal-mode: these bytes belong to the focused terminal's stdin.
     Forward(Vec<u8>),
@@ -126,6 +146,14 @@ pub enum WorkbenchAction {
     ShowDiff(String),
     /// Ask the run loop to refresh the model from the registries.
     Refresh,
+    /// Split the focused pane right, spawning a shell in the new leaf.
+    SplitRight,
+    /// Split the focused pane below, spawning a shell in the new leaf.
+    SplitBelow,
+    /// Open a shell at the selected worktree (the `o` action).
+    OpenWorktreeShell(String),
+    /// Create the selected task's worktree (the `w` action).
+    CreateTaskWorktree(String),
 }
 
 /// The workbench application state. Pure view state + explicit caches;
@@ -134,12 +162,23 @@ pub struct WorkbenchApp {
     model: WorkbenchModel,
     focus: Focus,
     selected: usize,
+    /// The client-side pane tree (S2): leaves render the browser or one
+    /// terminal each. The terminals themselves live in the resident
+    /// server; closing a pane never stops one.
+    grid: PaneNode,
+    pane_focus: PaneContent,
+    zoomed: bool,
+    /// Per-terminal snapshot cache the pane tree renders; the run loop
+    /// fetches one per terminal leaf per cycle (bounded by the pane cap).
+    snapshots: std::collections::HashMap<String, TerminalSnapshot>,
     /// When set: keyboard bytes forward to this terminal; Esc releases.
     terminal_mode: Option<String>,
-    terminal_view: Option<TerminalSnapshot>,
     diff_view: Option<String>,
     status_line: String,
     quit_requested: bool,
+    /// Set by every pane-tree mutation; the run loop persists the layout
+    /// to the server (QA F5) when it sees the flag.
+    layout_dirty: bool,
 }
 
 impl WorkbenchApp {
@@ -148,11 +187,15 @@ impl WorkbenchApp {
             model: WorkbenchModel::default(),
             focus: Focus::Projects,
             selected: 0,
+            grid: PaneNode::leaf(PaneContent::Browser),
+            pane_focus: PaneContent::Browser,
+            zoomed: false,
+            snapshots: std::collections::HashMap::new(),
             terminal_mode: None,
-            terminal_view: None,
             diff_view: None,
-            status_line: "1-4 panes · Tab cycle · Enter terminal · d diff · s stop · r refresh · Esc releases · q quit".into(),
+            status_line: "Ctrl+arrows panes · | - split · x close · z zoom · o open · w worktree · 1-4 lists · Enter terminal · q detach".into(),
             quit_requested: false,
+            layout_dirty: false,
         }
     }
 
@@ -177,16 +220,192 @@ impl WorkbenchApp {
         &self.model
     }
 
-    pub fn set_terminal_view(&mut self, view: Option<TerminalSnapshot>) {
-        self.terminal_view = view;
-    }
-
     pub fn set_diff_view(&mut self, diff: Option<String>) {
         self.diff_view = diff;
     }
 
     pub fn set_status(&mut self, line: impl Into<String>) {
         self.status_line = line.into();
+    }
+
+    pub fn set_snapshot(&mut self, terminal_id: impl Into<String>, snapshot: TerminalSnapshot) {
+        self.snapshots.insert(terminal_id.into(), snapshot);
+    }
+
+    /// Terminal ids currently placed in the pane tree (fetch budget: the
+    /// tree never exceeds the layout cap).
+    pub fn terminal_leaves(&self) -> Vec<String> {
+        self.grid
+            .leaves()
+            .into_iter()
+            .filter_map(|c| match c {
+                PaneContent::Terminal(id) => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn pane_focus(&self) -> &PaneContent {
+        &self.pane_focus
+    }
+
+    pub fn zoomed(&self) -> bool {
+        self.zoomed
+    }
+
+    pub fn layout_dirty(&self) -> bool {
+        self.layout_dirty
+    }
+
+    pub fn clear_layout_dirty(&mut self) {
+        self.layout_dirty = false;
+    }
+
+    /// The persisted layout payload: the pane tree plus the focused pane.
+    pub fn serialize_layout(&self) -> String {
+        serde_json::json!({ "grid": self.grid, "focus": self.pane_focus }).to_string()
+    }
+
+    /// Rebuild the pane tree from a saved layout (QA F5): terminal leaves
+    /// whose session is gone are pruned, and the focus falls back to the
+    /// browser unless it survived. Never fails — a broken layout degrades
+    /// to the default view.
+    pub fn restore_layout(&mut self, json: &str, live: &std::collections::HashSet<String>) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+            return;
+        };
+        let Ok(mut grid) =
+            serde_json::from_value::<PaneNode>(value.get("grid").cloned().unwrap_or_default())
+        else {
+            return;
+        };
+        grid.prune_dead_terminals(live);
+        self.grid = grid;
+        let leaves = self.grid.leaves();
+        self.pane_focus = value
+            .get("focus")
+            .and_then(|focus| serde_json::from_value::<PaneContent>(focus.clone()).ok())
+            .filter(|focus| leaves.contains(focus))
+            .unwrap_or(PaneContent::Browser);
+        self.layout_dirty = false;
+    }
+
+    /// Move pane focus geometrically (Ctrl+Arrows in the keymap).
+    pub fn move_pane_focus(&mut self, direction: Direction) -> bool {
+        match self
+            .grid
+            .neighbor(PANE_REF_AREA, &self.pane_focus, direction)
+        {
+            Some(next) => {
+                self.pane_focus = next;
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn cycle_pane(&mut self) {
+        let leaves = self.grid.leaves();
+        if leaves.len() < 2 {
+            return;
+        }
+        let index = leaves
+            .iter()
+            .position(|c| *c == self.pane_focus)
+            .unwrap_or(0);
+        self.pane_focus = leaves[(index + 1) % leaves.len()].clone();
+    }
+
+    /// Point the focused pane at a terminal. From the browser: reuse the
+    /// first terminal pane, or split one off when none exists. From a
+    /// terminal pane: retarget it.
+    pub fn attach_terminal(&mut self, terminal_id: String) {
+        self.layout_dirty = true;
+        let content = PaneContent::Terminal(terminal_id);
+        match self.pane_focus.clone() {
+            PaneContent::Browser => {
+                let existing = self
+                    .grid
+                    .leaves()
+                    .into_iter()
+                    .find(|c| matches!(c, PaneContent::Terminal(_)));
+                match existing {
+                    Some(first) => {
+                        self.grid.replace(&first, content.clone());
+                    }
+                    None => {
+                        self.grid.split(
+                            &PaneContent::Browser,
+                            SplitAxis::Horizontal,
+                            content.clone(),
+                        );
+                    }
+                }
+                self.pane_focus = content;
+            }
+            PaneContent::Terminal(old) => {
+                self.grid
+                    .replace(&PaneContent::Terminal(old), content.clone());
+                self.pane_focus = content;
+            }
+        }
+    }
+
+    /// Split the focused pane and put a new terminal in the new leaf.
+    /// Returns false (with a status message) at the pane cap.
+    pub fn split_pane(&mut self, axis: SplitAxis, terminal_id: String) -> bool {
+        self.layout_dirty = true;
+        let content = PaneContent::Terminal(terminal_id);
+        if self.grid.split(&self.pane_focus, axis, content.clone()) {
+            self.pane_focus = content;
+            true
+        } else {
+            self.set_status(format!(
+                "pane limit reached ({} panes) — close one first",
+                crate::tui::layout::MAX_PANES
+            ));
+            false
+        }
+    }
+
+    /// Close the focused terminal pane. The terminal keeps running in the
+    /// server — closing is a view operation, never a stop.
+    pub fn close_pane(&mut self) {
+        if let PaneContent::Terminal(id) = self.pane_focus.clone() {
+            self.layout_dirty = true;
+            if let Some(removed) = self.grid.close(&PaneContent::Terminal(id)) {
+                if let PaneContent::Terminal(removed_id) = removed {
+                    self.snapshots.remove(&removed_id);
+                    self.set_status(format!(
+                        "pane closed — terminal {removed_id} keeps running server-side"
+                    ));
+                }
+                self.pane_focus = self
+                    .grid
+                    .leaves()
+                    .first()
+                    .cloned()
+                    .unwrap_or(PaneContent::Browser);
+            }
+        }
+    }
+
+    pub fn toggle_zoom(&mut self) {
+        self.zoomed = !self.zoomed;
+    }
+
+    /// The focused terminal's worktree, for split-cwd decisions.
+    pub fn focused_worktree_id(&self) -> Option<String> {
+        if let PaneContent::Terminal(id) = &self.pane_focus {
+            return self
+                .model
+                .terminals
+                .iter()
+                .find(|t| t.terminal_id == *id)?
+                .worktree_id
+                .clone();
+        }
+        None
     }
 
     /// Explicitly enter terminal-forwarding mode (run loop decides when —
@@ -199,7 +418,6 @@ impl WorkbenchApp {
 
     pub fn leave_terminal_mode(&mut self) {
         self.terminal_mode = None;
-        self.terminal_view = None;
         self.status_line = "terminal released".into();
     }
 
@@ -270,6 +488,24 @@ impl WorkbenchApp {
             self.quit_requested = true;
             return KeyOutcome::QuitRequested;
         }
+        // Pane-grid movement (S2): Ctrl+Arrows. The browser pane
+        // participates like any other leaf.
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            let direction = match key.code {
+                KeyCode::Left => Some(Direction::Left),
+                KeyCode::Right => Some(Direction::Right),
+                KeyCode::Up => Some(Direction::Up),
+                KeyCode::Down => Some(Direction::Down),
+                _ => None,
+            };
+            if let Some(direction) = direction {
+                return if self.move_pane_focus(direction) {
+                    KeyOutcome::Handled
+                } else {
+                    KeyOutcome::Ignored
+                };
+            }
+        }
         match key.code {
             KeyCode::Char('q') | KeyCode::Char('Q') => {
                 self.quit_requested = true;
@@ -296,13 +532,17 @@ impl WorkbenchApp {
                 KeyOutcome::Handled
             }
             KeyCode::Tab => {
-                self.focus = match self.focus {
-                    Focus::Projects => Focus::Worktrees,
-                    Focus::Worktrees => Focus::Tasks,
-                    Focus::Tasks => Focus::Terminals,
-                    Focus::Terminals => Focus::Projects,
-                };
-                self.selected = 0;
+                if self.pane_focus == PaneContent::Browser {
+                    self.focus = match self.focus {
+                        Focus::Projects => Focus::Worktrees,
+                        Focus::Worktrees => Focus::Tasks,
+                        Focus::Tasks => Focus::Terminals,
+                        Focus::Terminals => Focus::Projects,
+                    };
+                    self.selected = 0;
+                } else {
+                    self.cycle_pane();
+                }
                 KeyOutcome::Handled
             }
             KeyCode::Down | KeyCode::Char('j') if self.row_count() > 0 => {
@@ -326,6 +566,46 @@ impl WorkbenchApp {
             KeyCode::Char('d') if self.focus == Focus::Worktrees => {
                 match self.selected_worktree() {
                     Some(id) => KeyOutcome::Action(WorkbenchAction::ShowDiff(id)),
+                    None => KeyOutcome::Ignored,
+                }
+            }
+            KeyCode::Char('|') => KeyOutcome::Action(WorkbenchAction::SplitRight),
+            KeyCode::Char('-') => KeyOutcome::Action(WorkbenchAction::SplitBelow),
+            KeyCode::Char('x') if matches!(self.pane_focus, PaneContent::Terminal(_)) => {
+                self.close_pane();
+                KeyOutcome::Handled
+            }
+            KeyCode::Char('z') => {
+                self.toggle_zoom();
+                KeyOutcome::Handled
+            }
+            // Enter on a focused terminal pane: keyboard forwarding.
+            KeyCode::Enter if matches!(self.pane_focus, PaneContent::Terminal(_)) => {
+                let id = match &self.pane_focus {
+                    PaneContent::Terminal(id) => id.clone(),
+                    _ => unreachable!("guarded above"),
+                };
+                self.enter_terminal_mode(id);
+                KeyOutcome::Handled
+            }
+            // `o` on a worktree row: open a shell at that worktree.
+            KeyCode::Char('o')
+                if self.focus == Focus::Worktrees && self.pane_focus == PaneContent::Browser =>
+            {
+                match self.selected_worktree() {
+                    Some(id) => KeyOutcome::Action(WorkbenchAction::OpenWorktreeShell(id)),
+                    None => KeyOutcome::Ignored,
+                }
+            }
+            // `w` on a task row: create the task's worktree (server-side
+            // V08 policy; removal stays a human-authorized action).
+            KeyCode::Char('w')
+                if self.focus == Focus::Tasks && self.pane_focus == PaneContent::Browser =>
+            {
+                match self.model.tasks.get(self.selected) {
+                    Some(task) => KeyOutcome::Action(WorkbenchAction::CreateTaskWorktree(
+                        task.task_id.clone(),
+                    )),
                     None => KeyOutcome::Ignored,
                 }
             }
@@ -357,6 +637,7 @@ impl WorkbenchApp {
                 },
                 ratatui::style::Style::new().bold(),
             ),
+            Span::raw(if self.zoomed { "  [zoom]" } else { "" }),
             Span::raw(if self.terminal_mode.is_some() {
                 "  [terminal focused]"
             } else {
@@ -365,33 +646,18 @@ impl WorkbenchApp {
         ]);
         frame.render_widget(Paragraph::new(header), chunks[0]);
 
-        if let (Some(view), Some(_id)) = (&self.terminal_view, &self.terminal_mode) {
-            let mut lines: Vec<Line> = view
-                .visible
-                .iter()
-                .map(|row| Line::from(row.clone()))
-                .collect();
-            lines.push(Line::from(format!(
-                "— {}×{} · scrollback capped: {} · output bytes: {} —",
-                view.cols, view.rows, view.scrollback_capped, view.total_output_bytes
-            )));
-            frame.render_widget(
-                Paragraph::new(lines).block(
-                    Block::new()
-                        .title(format!(
-                            " terminal {} ",
-                            self.terminal_mode.clone().unwrap_or_default()
-                        ))
-                        .borders(Borders::ALL),
-                ),
-                chunks[1],
-            );
+        // The pane tree lays out the main area: the browser leaf renders
+        // the focused list, terminal leaves render server snapshots. Zoom
+        // draws only the focused pane, full-screen.
+        let layout = if self.zoomed {
+            vec![(self.pane_focus.clone(), chunks[1])]
         } else {
-            match self.focus {
-                Focus::Projects => self.draw_projects(frame, chunks[1]),
-                Focus::Worktrees => self.draw_worktrees(frame, chunks[1]),
-                Focus::Tasks => self.draw_tasks(frame, chunks[1]),
-                Focus::Terminals => self.draw_terminals(frame, chunks[1]),
+            self.grid.render_layout(chunks[1])
+        };
+        for (content, rect) in &layout {
+            match content {
+                PaneContent::Browser => self.draw_browser(frame, *rect),
+                PaneContent::Terminal(id) => self.draw_terminal_pane(frame, *rect, id),
             }
         }
 
@@ -418,6 +684,88 @@ impl WorkbenchApp {
         }
     }
 
+    fn draw_browser(&self, frame: &mut Frame, area: Rect) {
+        match self.focus {
+            Focus::Projects => self.draw_projects(frame, area),
+            Focus::Worktrees => self.draw_worktrees(frame, area),
+            Focus::Tasks => self.draw_tasks(frame, area),
+            Focus::Terminals => self.draw_terminals(frame, area),
+        }
+    }
+
+    /// One terminal leaf: the server snapshot, bottom-anchored so a
+    /// reattached client sees the server-kept history.
+    fn draw_terminal_pane(&self, frame: &mut Frame, area: Rect, id: &str) {
+        let statuses = self
+            .model
+            .terminals
+            .iter()
+            .find(|t| t.terminal_id == id)
+            .map(|t| Self::format_agent_status(&t.agent_status))
+            .unwrap_or_default();
+        let status_suffix = if statuses.is_empty() {
+            String::new()
+        } else {
+            format!(" · {statuses}")
+        };
+        let title = if self.pane_focus == PaneContent::Terminal(id.to_string()) {
+            format!(" terminal {id} · pane focus{status_suffix} ")
+        } else {
+            format!(" terminal {id}{status_suffix} ")
+        };
+        let lines: Vec<Line> = match self.snapshots.get(id) {
+            Some(view) => {
+                let mut lines: Vec<Line> = view
+                    .scrollback
+                    .iter()
+                    .chain(view.visible.iter())
+                    .map(|row| Line::from(row.clone()))
+                    .collect();
+                let max_lines = area.height.saturating_sub(2) as usize;
+                if lines.len() > max_lines {
+                    let skip = lines.len() - max_lines;
+                    lines.drain(..skip);
+                }
+                lines.push(Line::from(format!(
+                    "— {}×{} · scrollback: {} lines{} · output bytes: {} —",
+                    view.cols,
+                    view.rows,
+                    view.scrollback.len(),
+                    if view.scrollback_capped {
+                        " (capped)"
+                    } else {
+                        ""
+                    },
+                    view.total_output_bytes
+                )));
+                lines
+            }
+            None => vec![Line::from(" waiting for the first server snapshot… ")],
+        };
+        frame.render_widget(
+            Paragraph::new(lines).block(Block::new().title(title).borders(Borders::ALL)),
+            area,
+        );
+    }
+
+    /// One-line, source-labeled agent status: `(reported)` = the agent's
+    /// own controlled word; `(screen)` = auxiliary rules, never a fact;
+    /// `(detected)` = process-tree identification.
+    fn format_agent_status(records: &[crate::agents::AgentStatusRecord]) -> String {
+        records
+            .iter()
+            .map(|record| {
+                let source = match record.source {
+                    crate::agents::StatusSource::ControlledReport => "reported",
+                    crate::agents::StatusSource::ScreenInference => "screen",
+                    crate::agents::StatusSource::ProcessTree => "detected",
+                };
+                format!("{}:{}({})", record.agent, record.status.as_str(), source)
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     fn draw_projects(&self, frame: &mut Frame, area: Rect) {
         let items: Vec<ListItem> = self
             .model
@@ -436,32 +784,50 @@ impl WorkbenchApp {
     }
 
     fn draw_worktrees(&self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self
-            .model
-            .worktrees
-            .iter()
-            .enumerate()
-            .map(|(i, w)| {
-                let marker = if self.selected == i { "▶ " } else { "  " };
-                let dirty = match w.dirty {
-                    Some(true) => "dirty",
-                    Some(false) => "clean",
-                    None => "unknown",
-                };
-                ListItem::new(Line::from(format!(
-                    "{marker}{} · {} · {} · task:{} · {}",
-                    w.branch,
-                    dirty,
-                    w.path,
-                    w.task_id.as_deref().unwrap_or("-"),
-                    w.source
-                )))
-            })
-            .collect();
+        // Grouped by project (S2): a styled header per project, real rows
+        // selectable beneath. Headers are render-only; the selection index
+        // counts real rows only.
+        let mut items: Vec<ListItem> = Vec::new();
+        let mut current_project: Option<String> = None;
+        for (real_index, w) in self.model.worktrees.iter().enumerate() {
+            if current_project.as_ref() != Some(&w.project_id) {
+                current_project = Some(w.project_id.clone());
+                let name = self
+                    .model
+                    .projects
+                    .iter()
+                    .find(|p| p.project_id == w.project_id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| "no project".into());
+                items.push(ListItem::new(Line::from(Span::styled(
+                    format!("── {name}"),
+                    ratatui::style::Style::new().bold().gray(),
+                ))));
+            }
+            let focused = self.pane_focus == PaneContent::Browser && self.focus == Focus::Worktrees;
+            let marker = if focused && self.selected == real_index {
+                "▶ "
+            } else {
+                "  "
+            };
+            let dirty = match w.dirty {
+                Some(true) => "dirty",
+                Some(false) => "clean",
+                None => "unknown",
+            };
+            items.push(ListItem::new(Line::from(format!(
+                "{marker}{} · {} · {} · task:{} · {}",
+                w.branch,
+                dirty,
+                w.path,
+                w.task_id.as_deref().unwrap_or("-"),
+                w.source
+            ))));
+        }
         frame.render_widget(
             List::new(items).block(
                 Block::new()
-                    .title(" worktrees — branch · state · path · task · source ")
+                    .title(" worktrees — project · branch · state · path · task · source ")
                     .borders(Borders::ALL),
             ),
             area,
@@ -505,12 +871,19 @@ impl WorkbenchApp {
                     Some(false) => "exited",
                     None => "unknown",
                 };
+                let agents = Self::format_agent_status(&t.agent_status);
+                let agents = if agents.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {agents}")
+                };
                 ListItem::new(Line::from(format!(
-                    "{marker}{} · {} · {} · wt:{}",
+                    "{marker}{} · {} · {} · wt:{}{}",
                     t.purpose,
                     t.owner_label,
                     live,
-                    t.worktree_id.as_deref().unwrap_or("-")
+                    t.worktree_id.as_deref().unwrap_or("-"),
+                    agents
                 )))
             })
             .collect();
@@ -619,8 +992,18 @@ impl<'a> WorkbenchStore<'a> {
             })
             .collect::<Vec<_>>();
 
-        let tasks = tasks_registry
-            .list_tasks(0, 200)?
+        let task_records = tasks_registry.list_tasks(0, 200)?;
+        // Worktree grouping (S2): a worktree groups under its task's
+        // project, so the render can show per-project headers.
+        let project_of_task: std::collections::HashMap<String, String> = task_records
+            .iter()
+            .filter_map(|t| {
+                t.project_id
+                    .as_ref()
+                    .map(|p| (t.task_id.to_string(), p.to_string()))
+            })
+            .collect();
+        let tasks = task_records
             .into_iter()
             .map(|t| TaskRow {
                 task_id: t.task_id.to_string(),
@@ -632,7 +1015,7 @@ impl<'a> WorkbenchStore<'a> {
         // Worktree records + real dirty state per record.
         let worktree_service =
             crate::git::worktrees::WorktreeService::new(self.store, self.protected.clone());
-        let worktrees = worktree_service
+        let mut worktrees = worktree_service
             .all_records()?
             .into_iter()
             .filter(|r| r.released_at.is_none())
@@ -640,7 +1023,10 @@ impl<'a> WorkbenchStore<'a> {
                 let dirty = self.dirty_state(&r.worktree_path);
                 WorktreeRow {
                     worktree_id: r.worktree_id.to_string(),
-                    project_id: String::new(),
+                    project_id: project_of_task
+                        .get(&r.task_id.to_string())
+                        .cloned()
+                        .unwrap_or_default(),
                     path: r.worktree_path.to_string_lossy().into_owned(),
                     branch: r.branch,
                     dirty,
@@ -649,6 +1035,9 @@ impl<'a> WorkbenchStore<'a> {
                 }
             })
             .collect::<Vec<_>>();
+        // Same-project rows stay adjacent (the render inserts one header
+        // per group).
+        worktrees.sort_by(|a, b| a.project_id.cmp(&b.project_id).then(a.path.cmp(&b.path)));
 
         let terminals = self
             .terminals
@@ -669,6 +1058,7 @@ impl<'a> WorkbenchStore<'a> {
                     purpose: entry.purpose,
                     owner_label: owner_label(&entry.owner),
                     live,
+                    agent_status: Vec::new(),
                 }
             })
             .collect::<Vec<_>>();
@@ -817,15 +1207,34 @@ fn owner_label(owner: &crate::foundation::records::TerminalOwner) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// The product entry: run the workbench as THE active office host
+// Server-side assembly (called by the resident host for WorkbenchView)
 // ---------------------------------------------------------------------------
 
-/// Run the interactive workbench on this terminal. The caller has already
-/// opened the office host (`OfficeHost::open`) and runs its serve loop on
-/// a background thread; this loop owns the UI and, on quit, performs the
-/// real office shutdown (stop owned terminals, join watchers, persist the
-/// handoff, release the channel) before restoring the physical terminal.
-pub fn run(shared: std::sync::Arc<crate::office::OfficeShared>) -> OfficeResult<()> {
+/// Assemble the workbench model from the real registries. This is what the
+/// resident host serves for `WorkbenchView` requests; the client renders it
+/// verbatim and owns no second source of these facts.
+pub fn assemble_view(
+    store: &crate::foundation::store::Store,
+    terminals: &crate::terminal::TerminalRegistry,
+) -> OfficeResult<WorkbenchModel> {
+    let workbench = WorkbenchStore {
+        store,
+        terminals,
+        protected: crate::git::worktrees::ProtectedRefs::new(vec![]),
+    };
+    workbench.refresh()
+}
+
+// ---------------------------------------------------------------------------
+// The product entry: run the workbench as a CLIENT of the resident server
+// ---------------------------------------------------------------------------
+
+/// Run the interactive workbench as a client of the resident office server
+/// (ADR 0012, issue #43). All facts arrive as [`WorkbenchView`] projections
+/// over the control channel; all actions go back as requests. `q` DETACHES:
+/// the client exits, the server keeps every terminal running, and a later
+/// attach restores the same view from server-held state.
+pub fn run_client(mut client: crate::office::OfficeClient) -> OfficeResult<()> {
     // Honest gate: a workbench without a real terminal cannot work. Fail
     // loudly instead of half-working against a pipe.
     #[cfg(unix)]
@@ -835,29 +1244,68 @@ pub fn run(shared: std::sync::Arc<crate::office::OfficeShared>) -> OfficeResult<
     if !stdin_is_tty {
         return Err(crate::foundation::OfficeError::Validation(
             "viva workbench needs an interactive terminal (stdin is not a tty); \
-             use `viva start` for the headless host"
+             use `viva server` for the headless host and `viva terminal` for headless \
+             terminals"
                 .into(),
         ));
     }
 
     let guard = crate::tui::TerminalGuard::enter()?;
-    let result = run_inner(shared);
+    let result = run_client_inner(&mut client);
     drop(guard); // raw mode off + main screen back on EVERY path
     result
 }
 
-fn run_inner(shared: std::sync::Arc<crate::office::OfficeShared>) -> OfficeResult<()> {
+fn run_client_inner(client: &mut crate::office::OfficeClient) -> OfficeResult<()> {
     use ratatui::crossterm::event::{self, Event, KeyEventKind};
     let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
     let mut terminal = ratatui::Terminal::new(backend)
         .map_err(|e| crate::foundation::OfficeError::Io(std::io::Error::other(e.to_string())))?;
 
     let mut app = WorkbenchApp::new();
-    let quit = loop {
-        // Refresh from the real registries (never inside draw).
-        match refresh_app(&shared, &mut app) {
-            Ok(()) => {}
-            Err(err) => app.set_status(format!("data error: {err}")),
+    // First facts, then the saved layout (QA F5): attach rebuilds the same
+    // pane view, pruned to the terminals that still exist.
+    match client.call(crate::office::OfficeRequestKind::WorkbenchView) {
+        Ok(value) => {
+            if let Ok(model) = serde_json::from_value::<WorkbenchModel>(value) {
+                let live: std::collections::HashSet<String> = model
+                    .terminals
+                    .iter()
+                    .map(|terminal| terminal.terminal_id.clone())
+                    .collect();
+                app.set_model(model);
+                if let Ok(value) = client
+                    .call(crate::office::OfficeRequestKind::WorkbenchLayout { layout_json: None })
+                {
+                    if let Some(json) = value.get("layout").and_then(|layout| layout.as_str()) {
+                        app.restore_layout(json, &live);
+                    }
+                }
+            }
+        }
+        Err(err) => app.set_status(format!("server error: {err}")),
+    }
+    loop {
+        // Refresh from the server projection (never inside draw).
+        match client.call(crate::office::OfficeRequestKind::WorkbenchView) {
+            Ok(value) => match serde_json::from_value::<WorkbenchModel>(value) {
+                Ok(model) => app.set_model(model),
+                Err(err) => app.set_status(format!("view decode error: {err}")),
+            },
+            Err(err) => app.set_status(format!("server error: {err}")),
+        }
+        // Fetch one snapshot per terminal leaf (bounded by the pane cap):
+        // every rendered pane stays live, focused or not.
+        for id in app.terminal_leaves() {
+            match client.call(crate::office::OfficeRequestKind::TerminalSnapshot {
+                terminal_id: id.clone(),
+            }) {
+                Ok(value) => match serde_json::from_value::<TerminalSnapshot>(value) {
+                    Ok(view) => app.set_snapshot(id, view),
+                    Err(err) => app.set_status(format!("snapshot decode error: {err}")),
+                },
+                Err(err) => app.set_status(format!("snapshot error: {err}")),
+            }
         }
         terminal.draw(|frame| app.draw(frame)).map_err(|e| {
             crate::foundation::OfficeError::Io(std::io::Error::other(e.to_string()))
@@ -878,97 +1326,146 @@ fn run_inner(shared: std::sync::Arc<crate::office::OfficeShared>) -> OfficeResul
             continue;
         }
         match app.on_key(key) {
-            KeyOutcome::QuitRequested => break true,
+            // Detach, not shutdown: the resident server keeps running.
+            KeyOutcome::QuitRequested => break,
             KeyOutcome::Action(action) => {
-                if let Err(err) = apply_action(&shared, &mut app, action) {
+                if let Err(err) = apply_client_action(client, &mut app, action) {
                     app.set_status(format!("action failed: {err}"));
                 }
             }
             KeyOutcome::Forward(bytes) => {
                 if let Some(id) = app.terminal_mode().map(str::to_string) {
-                    if let Ok(terminal_id) = crate::foundation::ids::TerminalId::from_str(&id) {
-                        if let Ok(Some(handle)) = shared.terminals.handle(&terminal_id) {
-                            handle.input(&bytes)?;
-                        }
+                    if let Err(err) = client.call(crate::office::OfficeRequestKind::TerminalInput {
+                        terminal_id: id,
+                        bytes_hex: crate::office::hex_encode(&bytes),
+                    }) {
+                        app.set_status(format!("input failed: {err}"));
                     }
                 }
             }
             KeyOutcome::Handled | KeyOutcome::Ignored => {}
         }
-    };
-    if quit {
-        // The quit protocol, really: stop owned terminals, join exit
-        // watchers, persist the handoff, release the channel.
-        crate::office::OfficeHost::shutdown_shared(&shared)?;
+        // Persist pane-tree changes so the next attach restores them.
+        if app.layout_dirty() {
+            let payload = app.serialize_layout();
+            if client
+                .call(crate::office::OfficeRequestKind::WorkbenchLayout {
+                    layout_json: Some(payload),
+                })
+                .is_ok()
+            {
+                app.clear_layout_dirty();
+            }
+        }
     }
-    // Ask the serve loop to finish (its own shutdown is idempotent).
-    shared
-        .stopping
-        .store(true, std::sync::atomic::Ordering::SeqCst);
     Ok(())
 }
 
-/// Pull a fresh model from the real registries into the app.
-fn refresh_app(shared: &crate::office::OfficeShared, app: &mut WorkbenchApp) -> OfficeResult<()> {
-    let store = shared.store.lock().expect("office store");
-    let workbench = WorkbenchStore {
-        store: &store,
-        terminals: &shared.terminals,
-        protected: crate::git::worktrees::ProtectedRefs::new(vec![]),
-    };
-    app.set_model(workbench.refresh()?);
-    Ok(())
-}
-
-/// Execute one workbench action against the owning registries.
-fn apply_action(
-    shared: &crate::office::OfficeShared,
+/// Execute one workbench action against the resident server.
+fn apply_client_action(
+    client: &mut crate::office::OfficeClient,
     app: &mut WorkbenchApp,
     action: WorkbenchAction,
 ) -> OfficeResult<()> {
     match action {
         WorkbenchAction::EnterTerminal(id) => {
+            app.attach_terminal(id.clone());
             app.enter_terminal_mode(id);
             Ok(())
         }
         WorkbenchAction::StopTerminal(id) => {
-            let terminal_id = crate::foundation::ids::TerminalId::from_str(&id)?;
-            let store = shared.store.lock().expect("office store");
-            let workbench = WorkbenchStore {
-                store: &store,
-                terminals: &shared.terminals,
-                protected: crate::git::worktrees::ProtectedRefs::new(vec![]),
-            };
-            workbench.stop_terminal(&terminal_id)?;
+            client.call(crate::office::OfficeRequestKind::TerminalStop {
+                terminal_id: id.clone(),
+            })?;
             app.set_status(format!("terminal {id} stopped"));
             Ok(())
         }
         WorkbenchAction::ShowDiff(worktree_id) => {
-            let worktree_id_parsed = crate::foundation::ids::WorktreeId::from_str(&worktree_id)?;
-            let store = shared.store.lock().expect("office store");
-            let workbench = WorkbenchStore {
-                store: &store,
-                terminals: &shared.terminals,
-                protected: crate::git::worktrees::ProtectedRefs::new(vec![]),
-            };
-            let record = crate::git::worktrees::WorktreeService::new(
-                &store,
-                crate::git::worktrees::ProtectedRefs::new(vec![]),
-            )
-            .record(&worktree_id_parsed)?
-            .ok_or_else(|| crate::foundation::OfficeError::NotFound {
-                entity: "worktree",
-                id: worktree_id.clone(),
+            let value = client.call(crate::office::OfficeRequestKind::WorkbenchDiff {
+                worktree_id: worktree_id.clone(),
             })?;
-            let diff = workbench.worktree_diff(&record.worktree_path, 64 * 1024)?;
+            let diff = value
+                .get("diff")
+                .and_then(|d| d.as_str())
+                .unwrap_or("")
+                .to_string();
             app.set_diff_view(Some(diff));
             Ok(())
         }
-        WorkbenchAction::Refresh => {
-            refresh_app(shared, app)?;
+        WorkbenchAction::Refresh => Ok(()), // the loop refreshes every cycle
+        WorkbenchAction::SplitRight => spawn_and_split(client, app, SplitAxis::Horizontal),
+        WorkbenchAction::SplitBelow => spawn_and_split(client, app, SplitAxis::Vertical),
+        WorkbenchAction::OpenWorktreeShell(worktree_id) => {
+            let value = client
+                .call(crate::office::OfficeRequestKind::TerminalOpenInWorktree { worktree_id })?;
+            let terminal_id = value
+                .get("terminal_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    crate::foundation::OfficeError::Validation(
+                        "open returned no terminal id".into(),
+                    )
+                })?
+                .to_string();
+            app.attach_terminal(terminal_id.clone());
+            app.enter_terminal_mode(terminal_id);
+            Ok(())
+        }
+        WorkbenchAction::CreateTaskWorktree(task_id) => {
+            let value = client.call(crate::office::OfficeRequestKind::WorktreeCreateForTask {
+                task_id: task_id.clone(),
+                branch: None,
+                base_dir: None,
+            })?;
+            let path = value
+                .get("worktree_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            app.set_status(format!("worktree created for task {task_id}: {path}"));
             Ok(())
         }
     }
+}
+
+/// Spawn a shell next to the focused pane: same worktree when the focused
+/// terminal has one, else the client's own directory. The pane focus moves
+/// into the new leaf.
+fn spawn_and_split(
+    client: &mut crate::office::OfficeClient,
+    app: &mut WorkbenchApp,
+    axis: SplitAxis,
+) -> OfficeResult<()> {
+    let worktree_id = app.focused_worktree_id();
+    let cwd = worktree_id
+        .as_ref()
+        .and_then(|wid| app.model().worktrees.iter().find(|w| &w.worktree_id == wid))
+        .map(|w| w.path.clone())
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_default()
+                .display()
+                .to_string()
+        });
+    let value = client.call(crate::office::OfficeRequestKind::TerminalCreate {
+        argv: vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())],
+        cwd,
+        env: vec![],
+        cols: 80,
+        rows: 24,
+        purpose: "shell".into(),
+        worktree_id,
+        owner: "user_shell".into(),
+    })?;
+    let terminal_id = value
+        .get("terminal_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            crate::foundation::OfficeError::Validation("spawn returned no terminal id".into())
+        })?
+        .to_string();
+    app.split_pane(axis, terminal_id);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1011,6 +1508,7 @@ mod tests {
                 purpose: "user shell".into(),
                 owner_label: "user_shell".into(),
                 live: Some(true),
+                agent_status: vec![],
             }],
             attention: vec![AttentionMarker {
                 kind: "execution_failed".into(),
@@ -1125,6 +1623,77 @@ mod tests {
             app.on_key(KeyEvent::from(KeyCode::Home)),
             KeyOutcome::Forward(b"\x1b[H".to_vec())
         );
+    }
+
+    fn snapshot_with(lines: &[&str]) -> TerminalSnapshot {
+        TerminalSnapshot {
+            cols: 80,
+            rows: 12,
+            visible: lines.iter().map(|s| s.to_string()).collect(),
+            scrollback: vec![],
+            scrollback_capped: false,
+            total_output_bytes: 64,
+            log_truncated: false,
+        }
+    }
+
+    #[test]
+    fn pane_tree_renders_multiple_terminal_panes_side_by_side() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.attach_terminal("t1".into());
+        app.split_pane(SplitAxis::Vertical, "t2".into());
+        app.split_pane(SplitAxis::Horizontal, "t3".into());
+        assert_eq!(app.terminal_leaves(), vec!["t1", "t2", "t3"]);
+        app.set_snapshot("t1", snapshot_with(&["alpha-out"]));
+        app.set_snapshot("t2", snapshot_with(&["beta-out"]));
+        app.set_snapshot("t3", snapshot_with(&["gamma-out"]));
+
+        let view = render(&app, 160, 44);
+        assert!(view.contains("terminal t1"), "{view}");
+        assert!(view.contains("terminal t2"));
+        assert!(view.contains("terminal t3"));
+        assert!(view.contains("alpha-out"));
+        assert!(view.contains("beta-out"));
+        assert!(view.contains("gamma-out"));
+    }
+
+    #[test]
+    fn closing_a_pane_is_a_view_operation_and_zoom_isolates_one_pane() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.attach_terminal("t1".into());
+        app.split_pane(SplitAxis::Vertical, "t2".into());
+        // The focused pane is t2; closing it keeps t1 running in the server.
+        app.close_pane();
+        assert_eq!(app.terminal_leaves(), vec!["t1"]);
+        // Focus t1 (close returned focus to the browser), then zoom in on it.
+        app.attach_terminal("t1".into());
+        app.toggle_zoom();
+        app.set_snapshot("t1", snapshot_with(&["solo-out"]));
+        let view = render(&app, 160, 44);
+        assert!(view.contains("solo-out"), "{view}");
+        assert!(view.contains("[zoom]"));
+        // The browser's list CONTENT is hidden (the header keeps the list
+        // label; the sample project row path must be gone).
+        assert!(
+            !view.contains("/code/viva"),
+            "zoom hides the browser content: {view}"
+        );
+        app.toggle_zoom();
+        assert!(render(&app, 160, 44).contains("/code/viva"));
+    }
+
+    #[test]
+    fn pane_focus_moves_geometrically_between_leaves() {
+        let mut app = WorkbenchApp::new();
+        app.attach_terminal("t1".into());
+        app.split_pane(SplitAxis::Vertical, "t2".into());
+        // Focus is on t2 after the split; move up to t1, left to the browser.
+        app.move_pane_focus(Direction::Up);
+        assert_eq!(app.pane_focus(), &PaneContent::Terminal("t1".into()));
+        app.move_pane_focus(Direction::Left);
+        assert_eq!(app.pane_focus(), &PaneContent::Browser);
     }
 
     #[test]
