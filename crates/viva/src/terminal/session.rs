@@ -709,7 +709,22 @@ fn spawn_reader(
                     revents: 0,
                 };
                 // SAFETY: one pollfd for our own fd, 100ms tick.
-                let ready = unsafe { libc::poll(&mut poll_fd, 1, 100) };
+                let ready = loop {
+                    // SAFETY: one pollfd for our own fd, 100ms tick.
+                    let r = unsafe { libc::poll(&mut poll_fd, 1, 100) };
+                    if r < 0 {
+                        // EINTR: retry the poll — a signal must not kill
+                        // the reader (QA round 4 CI: under parallel load a
+                        // spurious EINTR permanently killed the reader and
+                        // the child's output froze mid-stream).
+                        let err = std::io::Error::last_os_error();
+                        if err.raw_os_error() == Some(libc::EINTR) {
+                            continue;
+                        }
+                        break r;
+                    }
+                    break r;
+                };
                 if ready == 0 {
                     let Some(shared) = shared.upgrade() else {
                         break;
@@ -739,7 +754,15 @@ fn spawn_reader(
                         log.write_raw(&buf[..n]);
                     }
                 }
-                Err(_) => break,
+                Err(err) => {
+                    // EAGAIN/EINTR after POLLIN: transient — retry the
+                    // read instead of tearing the reader down.
+                    let raw = err.raw_os_error();
+                    if raw == Some(libc::EAGAIN) || raw == Some(libc::EINTR) {
+                        continue;
+                    }
+                    break;
+                }
             }
             let Some(shared) = shared.upgrade() else {
                 break;
