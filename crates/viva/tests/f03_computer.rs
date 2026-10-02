@@ -866,17 +866,28 @@ fn foreground_lane_serializes_but_reads_run_free() {
     });
 
     // While B is mid-action, the lane is B's — visible from A's own
-    // separate connection.
-    std::thread::sleep(std::time::Duration::from_millis(80));
-    {
+    // separate connection. Poll (up to 5s) for B's lease instead of a
+    // fixed sleep: a loaded runner schedules the action thread late, and
+    // an empty early probe used to fail the whole test.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let holder = loop {
         let store = Store::open(&db, &frozen()).expect("store check");
         let coordinator = ForegroundCoordinator::new(&store);
-        assert_eq!(
-            coordinator.holder().expect("holder").as_deref(),
-            Some(task_b.as_str()),
-            "B holds the foreground lane while its action runs (cross-connection)"
+        let holder = coordinator.holder().expect("holder");
+        if holder.as_deref() == Some(task_b.as_str()) {
+            break holder;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "B never acquired the foreground lane"
         );
-    }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert_eq!(
+        holder.as_deref(),
+        Some(task_b.as_str()),
+        "B holds the foreground lane while its action runs (cross-connection)"
+    );
 
     // A's independent read context does not wait for the lane.
     {
