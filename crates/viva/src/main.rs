@@ -216,7 +216,13 @@ fn cmd_sync(args: &[String]) -> OfficeResult<()> {
     let mut client = viva::office::OfficeClient::ensure_server(&home)?;
     match args.first().map(String::as_str) {
         Some("now") | None => {
-            let response = client.call(viva::office::OfficeRequestKind::SyncNow)?;
+            // A cycle can run several 30s-timeout git commands; the
+            // client's 10s default read timeout would report failure for
+            // work that actually succeeded (QA F14).
+            let response = client.call_with_timeout(
+                viva::office::OfficeRequestKind::SyncNow,
+                std::time::Duration::from_secs(150),
+            )?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
         Some("auto-pull") => {
@@ -233,7 +239,10 @@ fn cmd_sync(args: &[String]) -> OfficeResult<()> {
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
         Some("status") => {
-            let response = client.call(viva::office::OfficeRequestKind::WorkbenchView)?;
+            let response = client.call_with_timeout(
+                viva::office::OfficeRequestKind::WorkbenchView,
+                std::time::Duration::from_secs(30),
+            )?;
             let note = response.get("sync_note").cloned().unwrap_or_default();
             println!(
                 "{}",
