@@ -337,6 +337,16 @@ fn high_volume_output_stays_bounded_and_the_log_is_redacted() {
         "the loud session must finish"
     );
 
+    // The child exiting does NOT mean the reader thread drained the PTY
+    // yet — on a busy runner the kernel buffer can still hold megabytes
+    // (CI saw total_output_bytes at ~288k right after exit, then the
+    // count kept growing). eof_seen is set only after the reader saw the
+    // stream end, which IS the drain point.
+    assert!(
+        wait_for(Duration::from_secs(30), || { loud.output_stream_drained() }),
+        "the reader must drain the stream before the volume is judged"
+    );
+
     let snap = loud.snapshot().expect("snapshot");
     // Bounded memory: the ring never exceeds the cap even with ~8MB fed.
     assert!(snap.scrollback.len() <= viva::terminal::SCROLLBACK_LINES);

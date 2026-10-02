@@ -521,6 +521,14 @@ impl TerminalHandle {
         self.shared.total_output_bytes.load(Ordering::SeqCst)
     }
 
+    /// True once the reader thread saw the stream end: every byte the
+    /// child ever wrote has been counted and parsed by then. Distinguishes
+    /// "child exited" from "output drained" — the CI flake was judging
+    /// the volume in the gap between the two.
+    pub fn output_stream_drained(&self) -> bool {
+        self.shared.eof_seen.load(Ordering::SeqCst)
+    }
+
     /// Non-blocking exit check. All reap discipline lives here: the core
     /// lock is held only across the non-blocking check, never across a
     /// blocking wait, so a concurrent stop() can always run its
