@@ -18,6 +18,7 @@ cat > "$STUB" <<'EOF'
 #!/bin/bash
 if [ "$1" = "--version" ]; then echo "viva 9.9.9-npm-stub"; exit 0; fi
 if [ "$1" = "--exit-code" ]; then exit "${2:-3}"; fi
+if [ "$1" = "--npm-root" ]; then printf '%s\n' "$VIVA_NPM_PACKAGE_ROOT"; exit 0; fi
 echo "stub argv: $*"
 EOF
 chmod +x "$STUB"
@@ -51,6 +52,8 @@ VIVA="$PWD/node_modules/.bin/viva"
 echo "== exec: version, argv passthrough, exit code"
 "$VIVA" --version | grep -q "viva 9.9.9-npm-stub" || { echo "FAIL: version"; exit 1; }
 "$VIVA" status --json | grep -q "stub argv: status --json" || { echo "FAIL: argv"; exit 1; }
+ROOT="$(VIVA_NPM_PACKAGE_ROOT=forged-root "$VIVA" --npm-root)"
+[ "$ROOT" = "$(pwd -P)/node_modules/@zuohaisu/viva" ] || { echo "FAIL: npm updater channel root (got $ROOT)"; exit 1; }
 set +e
 "$VIVA" --exit-code 3
 CODE=$?
