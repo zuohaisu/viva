@@ -320,8 +320,23 @@ impl OfficeResponse {
 
 /// Read one framed JSON message. The frame is a single line; a peer that
 /// sends an over-long or non-JSON frame is a protocol violation, not a panic.
+///
+/// The read timeout is CALLER-OWNED: `call_with_timeout` sets the stream's
+/// timeout before dispatch, and resetting it to IO_TIMEOUT here used to
+/// silently void that (QA F14 — a 16s sync cycle errored at the client at
+/// 10.03s while the server completed the work). Default callers get
+/// [`IO_TIMEOUT`].
 pub fn read_message(stream: &mut UnixStream) -> OfficeResult<String> {
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
+    read_message_within(stream, IO_TIMEOUT)
+}
+
+/// [`read_message`] with an explicit read budget (server-side waits may
+/// legitimately outlive the default 10s).
+pub fn read_message_within(
+    stream: &mut UnixStream,
+    read_timeout: Duration,
+) -> OfficeResult<String> {
+    stream.set_read_timeout(Some(read_timeout))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
     let n = reader.read_line(&mut line)?;
@@ -356,13 +371,24 @@ pub fn write_message(stream: &mut UnixStream, value: &impl Serialize) -> OfficeR
     Ok(())
 }
 
-/// Send one request and wait for its correlated response.
+/// Send one request and wait for its correlated response (default read
+/// budget: [`IO_TIMEOUT`]).
 pub fn round_trip(
     stream: &mut UnixStream,
     request: &OfficeRequest,
 ) -> OfficeResult<OfficeResponse> {
+    round_trip_within(stream, request, IO_TIMEOUT)
+}
+
+/// [`round_trip`] with an explicit read budget — the path
+/// `call_with_timeout` relies on.
+pub fn round_trip_within(
+    stream: &mut UnixStream,
+    request: &OfficeRequest,
+    read_timeout: Duration,
+) -> OfficeResult<OfficeResponse> {
     write_message(stream, request)?;
-    let line = read_message(stream)?;
+    let line = read_message_within(stream, read_timeout)?;
     let response: OfficeResponse = serde_json::from_str(&line).map_err(|e| {
         OfficeError::Validation(format!("control channel sent a malformed response: {e}"))
     })?;

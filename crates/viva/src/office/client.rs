@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use crate::foundation::error::{OfficeError, OfficeResult};
 use crate::office::OFFICE_SOCKET_NAME;
 use crate::office::protocol::{
-    OfficeRequest, OfficeRequestKind, OfficeResponse, new_request, round_trip,
+    OfficeRequest, OfficeRequestKind, OfficeResponse, new_request, round_trip, round_trip_within,
 };
 
 /// How long `ensure_server` waits for a freshly spawned server to bind its
@@ -123,19 +123,35 @@ impl OfficeClient {
         round_trip(&mut self.stream, request)
     }
 
-    /// One request with a longer read timeout - `agent.wait` runs
-    /// server-side for up to its timeout, so the client's socket read must
-    /// tolerate the silence.
+    /// One request with an explicit read budget. The budget is carried
+    /// through the whole round trip — `read_message` used to reset it to
+    /// IO_TIMEOUT mid-flight, voiding this API entirely (QA F14: a 16s
+    /// sync errored at the client at 10.03s while the server succeeded).
     pub fn call_with_timeout(
         &mut self,
         kind: OfficeRequestKind,
         read_timeout: std::time::Duration,
     ) -> OfficeResult<serde_json::Value> {
-        self.stream.set_read_timeout(Some(read_timeout))?;
-        let result = self.call(kind);
-        self.stream
-            .set_read_timeout(Some(crate::office::protocol::IO_TIMEOUT))?;
-        result
+        self.call_request_with_timeout(new_request(kind), read_timeout)
+    }
+
+    /// [`Self::call_with_timeout`] for a pre-built request (grant fields
+    /// intact).
+    pub fn call_request_with_timeout(
+        &mut self,
+        request: OfficeRequest,
+        read_timeout: std::time::Duration,
+    ) -> OfficeResult<serde_json::Value> {
+        let OfficeResponse {
+            ok, result, error, ..
+        } = round_trip_within(&mut self.stream, &request, read_timeout)?;
+        if ok {
+            Ok(result.unwrap_or(serde_json::Value::Null))
+        } else {
+            Err(OfficeError::Validation(
+                error.unwrap_or_else(|| "rejected without a reason".into()),
+            ))
+        }
     }
 }
 

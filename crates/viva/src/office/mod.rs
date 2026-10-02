@@ -5158,23 +5158,28 @@ mod qa_round2_tests {
         let sync_home = host.home.clone();
         let syncer = std::thread::spawn(move || {
             let mut c = OfficeClient::connect(&sync_home).expect("sync client");
-            let _ = c.call_with_timeout(OfficeRequestKind::SyncNow, Duration::from_secs(120));
+            c.call_with_timeout(OfficeRequestKind::SyncNow, Duration::from_secs(120))
         });
 
-        // While git sleeps, a Ping must answer FAST — with a latency
-        // CEILING so the guard can actually fail.
+        // While git sleeps, a STORE-BACKED request must answer FAST.
+        // Ping never takes the store mutex (the grant gate returns early
+        // for grant-less owner requests and the Ping branch reads no
+        // state) — pinging could pass even with the lock held for 30s
+        // (QA F16 round 4). RecoveryList locks the store: the probe that
+        // can actually catch the regression.
         let deadline = Instant::now() + Duration::from_secs(12);
         let mut answered = false;
         while Instant::now() < deadline {
             if let Ok(mut c) = OfficeClient::connect(&host.home) {
                 let started = Instant::now();
-                let result = c.call_with_timeout(OfficeRequestKind::Ping, Duration::from_secs(2));
+                let result =
+                    c.call_with_timeout(OfficeRequestKind::RecoveryList, Duration::from_secs(2));
                 let elapsed = started.elapsed();
                 if result.is_ok() {
                     assert!(
                         elapsed <= Duration::from_secs(2),
-                        "ping latency {elapsed:?} during the slow sync — the store \
-                         lock is being held across network git (QA F3 regression)"
+                        "RecoveryList latency {elapsed:?} during the slow sync — the \
+                         store lock is being held across network git (QA F3 regression)"
                     );
                     answered = true;
                     break;
@@ -5187,7 +5192,14 @@ mod qa_round2_tests {
             "the office must keep answering during a slow sync"
         );
 
-        syncer.join().expect("sync thread ends");
+        // The SyncNow outcome must be surfaced too — discarding it (the
+        // previous guard) masked the F14 client-timeout failure.
+        let sync_outcome = syncer.join().expect("sync thread ends");
+        assert!(
+            sync_outcome.is_ok(),
+            "the SyncNow round trip must succeed under its 120s budget: {:?}",
+            sync_outcome.err()
+        );
         // SAFETY: restoring the saved PATH.
         unsafe {
             std::env::set_var("PATH", saved_path);
@@ -6193,5 +6205,169 @@ mod s6_pause_tests {
         };
         assert!(notes >= 1, "pause_restored must be recorded");
         drop(reopened);
+    }
+}
+
+#[cfg(test)]
+mod qa_round4_tests {
+    use super::*;
+    use crate::office::OfficeClient;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    struct RunningHost {
+        /// Holds the temp home alive for the whole test; never read.
+        _dir: tempfile::TempDir,
+        home: std::path::PathBuf,
+        shared: Option<Arc<OfficeShared>>,
+        server: std::thread::JoinHandle<()>,
+    }
+
+    fn start_host() -> RunningHost {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let host = OfficeHost::open(&home).expect("host");
+        let shared = host.shared();
+        let server = host.serve_background();
+        let socket = home.join(OFFICE_SOCKET_NAME);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !socket.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        RunningHost {
+            _dir: dir,
+            home,
+            shared: Some(shared),
+            server,
+        }
+    }
+
+    impl RunningHost {
+        fn client(&self) -> OfficeClient {
+            OfficeClient::connect(&self.home).expect("client")
+        }
+        fn shutdown(self) {
+            if let Ok(mut client) = OfficeClient::connect(&self.home) {
+                let _ = client.call(OfficeRequestKind::Shutdown { close_policy: None });
+            }
+            let _ = self.server.join();
+        }
+    }
+
+    fn git_seed(repo: &std::path::Path) {
+        // Identity rides on EVERY git call that needs it, and every
+        // status is asserted (QA F13's lesson).
+        let init = Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .arg("-C")
+            .arg(repo)
+            .args(["init", "-b", "main"])
+            .output()
+            .expect("init");
+        assert!(init.status.success());
+        std::fs::write(repo.join("f.txt"), "x\n").expect("file");
+        let add = Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .arg("-C")
+            .arg(repo)
+            .args(["add", "."])
+            .output()
+            .expect("add");
+        assert!(add.status.success());
+        let commit = Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .arg("-C")
+            .arg(repo)
+            .args(["commit", "-m", "seed"])
+            .output()
+            .expect("commit");
+        assert!(commit.status.success());
+    }
+
+    /// QA F18 (issue #57): one project whose pull cannot run (no remote)
+    /// must NOT abort the cycle — both projects report, every outcome is
+    /// audited (git_auto_sync), and the round trip SUCCEEDS. This guard
+    /// was lost in round 3's tail surgery; restored here with the
+    /// auto_pull switch on so the failures are genuine pull attempts.
+    #[test]
+    fn one_untracked_project_does_not_abort_the_cycle() {
+        let host = start_host();
+        let work = tempfile::tempdir().expect("work dir");
+        let repo_a = work.path().join("repo-a");
+        let repo_b = work.path().join("repo-b");
+        std::fs::create_dir_all(&repo_a).expect("dir a");
+        std::fs::create_dir_all(&repo_b).expect("dir b");
+        git_seed(&repo_a);
+        git_seed(&repo_b);
+        // Neither repo has a remote: both pulls must fail HONESTLY and
+        // the cycle must still complete.
+        {
+            let store = host
+                .shared
+                .as_ref()
+                .expect("shared")
+                .store
+                .lock()
+                .expect("store");
+            let registry = crate::projects::ProjectRegistry::new(&store);
+            registry
+                .register(None, "proj-a", &repo_a)
+                .expect("register a");
+            registry
+                .register(None, "proj-b", &repo_b)
+                .expect("register b");
+        }
+
+        let mut client = host.client();
+        client
+            .call(OfficeRequestKind::SetAutoPull { on: true })
+            .expect("auto_pull on");
+        let response = client
+            .call_with_timeout(OfficeRequestKind::SyncNow, Duration::from_secs(60))
+            .expect("the cycle must not abort on a failing project");
+        let results = response
+            .get("results")
+            .and_then(|v| v.as_array())
+            .expect("results")
+            .clone();
+        assert_eq!(results.len(), 2, "both projects report: {results:?}");
+        let failed = results
+            .iter()
+            .filter(|row| {
+                row.get("outcome")
+                    .and_then(|v| v.as_str())
+                    .map(|o| o.starts_with("failed"))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(
+            failed, 2,
+            "both remote-less pulls fail honestly: {results:?}"
+        );
+
+        // Every outcome is audited.
+        {
+            let store = Store::open(
+                &crate::foundation::paths::database_path(&host.home),
+                office_migrations(),
+            )
+            .expect("store");
+            let audited: i64 = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM office_events WHERE kind = 'git_auto_sync'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("audit count");
+            assert!(audited >= 2, "each outcome audited: {audited}");
+        }
+
+        client
+            .call(OfficeRequestKind::Shutdown { close_policy: None })
+            .expect("shutdown");
+        drop(work);
+        host.shutdown();
     }
 }
