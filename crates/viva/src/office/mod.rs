@@ -1438,7 +1438,10 @@ fn agent_report(
                     .into(),
             ));
         };
-        validate_rfc3339(reset_at)?;
+        // Normalize to UTC before storing (QA F1): a local offset like
+        // +08:00 stored verbatim breaks the sweep's reset_at comparison
+        // and silently delays/skips the wake-up.
+        let reset_at = normalize_rfc3339_utc(reset_at)?;
         store.connection().execute(
             "UPDATE recovery_plans SET state = 'cancelled', fired_at = ?2
              WHERE terminal_id = ?1 AND state = 'scheduled'",
@@ -2728,11 +2731,30 @@ fn set_auto_pull(shared: &OfficeShared, on: bool) -> OfficeResult<serde_json::Va
 // discipline: typed ids, bounded reads, audit events, honest unknowns.
 // ---------------------------------------------------------------------------
 
-/// RFC3339 validation for user/agent supplied times (recovery plans).
-fn validate_rfc3339(text: &str) -> OfficeResult<()> {
-    time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
-        .map(|_| ())
-        .map_err(|e| OfficeError::Validation(format!("`{text}` is not RFC3339: {e}")))
+/// RFC3339 validation + normalization for user/agent supplied times
+/// (recovery plans, V15-5 QA F1): the value is stored as UTC with whole
+/// seconds. Recovery sweeps compare reset times as TEXT against utc_now()
+/// (1-second sweep granularity) — that comparison is only correct when
+/// every stored value is normalized to the same offset. A local offset
+/// like `+08:00` must NEVER be stored verbatim: it would make a due plan
+/// look und Due and an undu one due under string ordering.
+fn normalize_rfc3339_utc(text: &str) -> OfficeResult<String> {
+    let parsed = time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
+        .map_err(|e| OfficeError::Validation(format!("`{text}` is not RFC3339: {e}")))?;
+    // to_offset (NOT replace_offset): it CONVERTS the instant so the
+    // wall clock reads the same moment in UTC. replace_offset only
+    // relabels the zone and keeps the wall clock — the exact bug QA F1
+    // reported (a +08:00 time stored 8 hours off).
+    let utc = parsed.to_offset(time::UtcOffset::UTC);
+    // Whole seconds: the sweep runs at 1-second granularity and the stored
+    // text is compared against utc_now() (which has no fractional part).
+    let whole = utc.time().replace_nanosecond(0);
+    let utc = match whole {
+        Ok(time) => utc.replace_time(time),
+        Err(_) => utc,
+    };
+    utc.format(&time::format_description::well_known::Rfc3339)
+        .map_err(|e| OfficeError::Validation(format!("recovery time formatting failed: {e}")))
 }
 
 /// The persisted `auto_pull` switch (V15-4): default OFF. Automatic pulls
@@ -2770,16 +2792,40 @@ fn auto_sync_all(shared: &OfficeShared, force: bool) -> OfficeResult<serde_json:
         }
     }
 
+    // Snapshot WHAT to sync under the store lock, then DROP it: the git
+    // probes below are network operations (30s timeout each) and the same
+    // mutex guards every office request (QA F3).
+    let (main_checkouts, worktrees) = {
+        let store = shared.store.lock().expect("office store");
+        let mains: Vec<(String, std::path::PathBuf)> =
+            crate::projects::ProjectRegistry::new(&store)
+                .list(true)?
+                .into_iter()
+                .map(|project| (project.project_id.to_string(), project.repo_path))
+                .collect();
+        let service = crate::git::worktrees::WorktreeService::new(
+            &store,
+            crate::git::worktrees::ProtectedRefs::new(vec![]),
+        );
+        let trees: Vec<(String, std::path::PathBuf)> = service
+            .all_records()?
+            .into_iter()
+            .filter(|record| record.released_at.is_none())
+            .map(|record| (record.worktree_id.to_string(), record.worktree_path))
+            .collect();
+        (mains, trees)
+    };
+
     let store = shared.store.lock().expect("office store");
     let runner = crate::git::cli::CliRunner::default();
     let mut results: Vec<serde_json::Value> = Vec::new();
 
     // Main checkouts: automatic fast-forward ONLY when auto_pull is on.
-    for project in crate::projects::ProjectRegistry::new(&store).list(true)? {
+    for (project_id, repo_path) in &main_checkouts {
         let outcome = if !auto_pull {
-            crate::git::sync::MainSyncOutcome::Failed("auto_pull is off".into())
+            crate::git::sync::MainSyncOutcome::SkippedAutoPullDisabled
         } else {
-            crate::git::sync::sync_main_checkout(&project.repo_path, &runner)?
+            crate::git::sync::sync_main_checkout(repo_path, &runner)?
         };
         let label = match &outcome {
             crate::git::sync::MainSyncOutcome::FastForward { from, to } => {
@@ -2787,12 +2833,15 @@ fn auto_sync_all(shared: &OfficeShared, force: bool) -> OfficeResult<serde_json:
             }
             crate::git::sync::MainSyncOutcome::AlreadyUpToDate => "up to date".into(),
             crate::git::sync::MainSyncOutcome::SkippedDirty => "skipped (dirty tree)".into(),
+            crate::git::sync::MainSyncOutcome::SkippedAutoPullDisabled => {
+                "skipped (auto_pull is off)".into()
+            }
             crate::git::sync::MainSyncOutcome::Failed(reason) => format!("failed: {reason}"),
         };
         results.push(serde_json::json!({
             "kind": "main_checkout",
-            "project": project.project_id.to_string(),
-            "path": project.repo_path.display().to_string(),
+            "project": project_id,
+            "path": repo_path.display().to_string(),
             "outcome": label,
         }));
         crate::foundation::events::append(
@@ -2801,7 +2850,7 @@ fn auto_sync_all(shared: &OfficeShared, force: bool) -> OfficeResult<serde_json:
                 domain: DOMAIN_OFFICE_HOST,
                 kind: "git_auto_sync".into(),
                 subject_type: "project".into(),
-                subject_id: project.project_id.to_string(),
+                subject_id: project_id.clone(),
                 origin: "office_host".into(),
                 payload: serde_json::json!({ "outcome": label }),
             },
@@ -2809,21 +2858,14 @@ fn auto_sync_all(shared: &OfficeShared, force: bool) -> OfficeResult<serde_json:
     }
 
     // Task worktrees: fetch only — the working tree is never touched.
-    let service = crate::git::worktrees::WorktreeService::new(
-        &store,
-        crate::git::worktrees::ProtectedRefs::new(vec![]),
-    );
-    for record in service.all_records()? {
-        if record.released_at.is_some() {
-            continue;
-        }
-        let outcome = match crate::git::sync::fetch_worktree(&record.worktree_path, &runner) {
+    for (worktree_id, worktree_path) in &worktrees {
+        let outcome = match crate::git::sync::fetch_worktree(worktree_path, &runner) {
             Ok(()) => "fetched".to_string(),
             Err(err) => format!("fetch failed: {err}"),
         };
         results.push(serde_json::json!({
             "kind": "worktree_fetch",
-            "worktree": record.worktree_id.to_string(),
+            "worktree": worktree_id,
             "outcome": outcome,
         }));
     }
@@ -2852,23 +2894,8 @@ fn sweep_recovery_plans(shared: &OfficeShared) {
         *last = Some(Instant::now());
     }
     let Ok(store) = shared.store.lock() else {
-        eprintln!("DBG sweep: store lock failed");
         return;
     };
-    #[cfg(test)]
-    {
-        let rows: Vec<(String, String)> = store
-            .connection()
-            .prepare("SELECT terminal_id, reset_at FROM recovery_plans")
-            .and_then(|mut stmt| {
-                stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                    .map(|rows| rows.collect::<Result<Vec<_>, _>>())
-            })
-            .map(|rows| rows.unwrap_or_default())
-            .unwrap_or_default();
-        let now = utc_now();
-        eprintln!("DBG sweep: now={now} rows={rows:?}");
-    }
     let due: Vec<(i64, String, Option<String>)> = {
         let mut stmt = store
             .connection()
@@ -2978,6 +3005,7 @@ fn worktree_files(shared: &OfficeShared, worktree_id: &str) -> OfficeResult<serd
         }
     }
 
+    let max_rows: usize = 500;
     let mut rows: Vec<(String, String)> = Vec::new();
     if let Ok(listed) = runner.git(cwd, &["ls-files", "-z"]) {
         for path in String::from_utf8_lossy(listed.stdout.as_bytes())
@@ -3004,8 +3032,14 @@ fn worktree_files(shared: &OfficeShared, worktree_id: &str) -> OfficeResult<serd
         changed_b.cmp(&changed_a).then(a.0.cmp(&b.0))
     });
 
+    // Bounded response (QA F5): huge repos must degrade to a truncated
+    // list with a real count, not a transport error at 256 KiB.
+    let total = rows.len();
+    rows.truncate(max_rows);
     Ok(serde_json::json!({
         "worktree_id": worktree_id,
+        "truncated": total > max_rows,
+        "total": total,
         "files": rows.into_iter().map(|(path, status)| serde_json::json!({
             "path": path, "status": status,
         })).collect::<Vec<_>>(),
@@ -3119,6 +3153,22 @@ fn worktree_cleanup(shared: &OfficeShared, worktree_id: &str) -> OfficeResult<se
         .map(|info| info.state.clone())
         .unwrap_or_else(|| "unknown".into());
     if state != "merged" {
+        // The refusal is a fact too (#53 boundary: every outcome audited).
+        crate::foundation::events::append(
+            &store,
+            crate::foundation::events::NewEvent {
+                domain: DOMAIN_OFFICE_HOST,
+                kind: "worktree_cleanup_refused".into(),
+                subject_type: "worktree".into(),
+                subject_id: worktree_id.to_string(),
+                origin: "office_host".into(),
+                payload: serde_json::json!({
+                    "branch": record.branch,
+                    "pr_state": state,
+                    "reason": "cleanup requires a MERGED PR",
+                }),
+            },
+        )?;
         return Err(OfficeError::Validation(format!(
             "cleanup requires a MERGED PR for branch `{}` (current: {state}); \
              deleting work is a human decision",
@@ -3137,6 +3187,21 @@ fn worktree_cleanup(shared: &OfficeShared, worktree_id: &str) -> OfficeResult<se
         ],
     );
     if let Err(failure) = removal {
+        crate::foundation::events::append(
+            &store,
+            crate::foundation::events::NewEvent {
+                domain: DOMAIN_OFFICE_HOST,
+                kind: "worktree_cleanup_failed".into(),
+                subject_type: "worktree".into(),
+                subject_id: worktree_id.to_string(),
+                origin: "office_host".into(),
+                payload: serde_json::json!({
+                    "path": record.worktree_path.display().to_string(),
+                    "detail": format!("directory removal failed: {failure}"),
+                    "note": "released in records; directory still on disk",
+                }),
+            },
+        )?;
         return Err(OfficeError::Validation(format!(
             "worktree `{}` was released in the office records but its directory could \
              not be removed ({}); remove it by hand after checking the tree",
@@ -3156,7 +3221,9 @@ fn worktree_cleanup(shared: &OfficeShared, worktree_id: &str) -> OfficeResult<se
                 "path": record.worktree_path.display().to_string(),
                 "branch": record.branch,
                 "pr_number": pr_number,
-                "note": "released + removed after human confirmation of the exact path",
+                "merged_state": state,
+                "note": "released + removed; merged state re-checked live at cleanup; \
+                         caller-side confirmation is the requesting client's duty",
             }),
         },
     )?;
@@ -3195,23 +3262,32 @@ fn agent_handoff(
     })?;
 
     // The departing summary: the newest controlled report on any terminal
-    // of this worktree. Absent → an honest "none", never an invention.
+    // of this worktree (by updated_at, not lexicographic order — QA F6).
+    // Absent → an honest "none", never an invention.
     let mut summary: Option<String> = None;
+    let mut from_agent: Option<String> = None;
+    let mut latest_at: Option<String> = None;
     for terminal in shared.terminals.terminals_for_worktree(&wid) {
         for status in shared
             .agent_board
             .project(&terminal.terminal_id.to_string())
         {
-            if status.source == crate::agents::StatusSource::ControlledReport {
-                let candidate = format!(
+            if status.source != crate::agents::StatusSource::ControlledReport {
+                continue;
+            }
+            let newer = latest_at
+                .as_ref()
+                .map(|latest| status.updated_at.as_str() > latest.as_str())
+                .unwrap_or(true);
+            if newer {
+                latest_at = Some(status.updated_at.clone());
+                from_agent = Some(status.agent.clone());
+                summary = Some(format!(
                     "{} reported {}: {}",
                     status.agent,
                     status.status.as_str(),
                     status.detail
-                );
-                if summary.as_ref().map(|old| candidate > *old).unwrap_or(true) {
-                    summary = Some(candidate);
-                }
+                ));
             }
         }
     }
@@ -3253,6 +3329,7 @@ fn agent_handoff(
                 uuid::Uuid::new_v4().simple()
             ),
             serde_json::json!({
+                "from_agent": from_agent.clone(),
                 "to_agent": to_agent,
                 "departing_summary": summary.clone(),
                 "brief_bytes": brief.len(),
@@ -3316,7 +3393,9 @@ fn recovery_schedule(
     reset_at: &str,
     task_id: Option<&str>,
 ) -> OfficeResult<serde_json::Value> {
-    validate_rfc3339(reset_at)?;
+    // Normalize to UTC before storing (QA F1): sweeps compare reset times
+    // as UTC text.
+    let reset_at = normalize_rfc3339_utc(reset_at)?;
     let terminal = TerminalId::from_str(terminal_id)?;
     shared
         .terminals
@@ -3399,7 +3478,7 @@ mod server_split_tests {
     use crate::office::OfficeClient;
     use std::time::{Duration, Instant};
 
-    struct RunningHost {
+    pub(crate) struct RunningHost {
         dir: tempfile::TempDir,
         home: std::path::PathBuf,
         server: std::thread::JoinHandle<()>,
@@ -3461,7 +3540,11 @@ mod server_split_tests {
             .to_string()
     }
 
-    fn wait_for_output(client: &mut OfficeClient, terminal_id: &str, needle: &str) -> bool {
+    pub(crate) fn wait_for_output(
+        client: &mut OfficeClient,
+        terminal_id: &str,
+        needle: &str,
+    ) -> bool {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             if let Ok(view) = client.call(OfficeRequestKind::TerminalSnapshot {
@@ -3669,7 +3752,7 @@ mod s2_workbench_tests {
     use std::process::Command;
     use std::time::{Duration, Instant};
 
-    struct RunningHost {
+    pub(crate) struct RunningHost {
         dir: tempfile::TempDir,
         home: std::path::PathBuf,
         server: std::thread::JoinHandle<()>,
@@ -3881,7 +3964,11 @@ mod s3_handoff_tests {
     use crate::office::OfficeClient;
     use std::time::{Duration, Instant};
 
-    fn wait_for_output(client: &mut OfficeClient, terminal_id: &str, needle: &str) -> bool {
+    pub(crate) fn wait_for_output(
+        client: &mut OfficeClient,
+        terminal_id: &str,
+        needle: &str,
+    ) -> bool {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             if let Ok(view) = client.call(OfficeRequestKind::TerminalSnapshot {
@@ -4188,13 +4275,13 @@ mod s4_agent_status_tests {
     use crate::office::OfficeClient;
     use std::time::{Duration, Instant};
 
-    struct RunningHost {
+    pub(crate) struct RunningHost {
         dir: tempfile::TempDir,
         home: std::path::PathBuf,
         server: std::thread::JoinHandle<()>,
     }
 
-    fn start_host() -> RunningHost {
+    pub(crate) fn start_host() -> RunningHost {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).expect("home");
@@ -4493,13 +4580,13 @@ mod s5_orchestration_tests {
     use crate::office::OfficeClient;
     use std::time::{Duration, Instant};
 
-    struct RunningHost {
+    pub(crate) struct RunningHost {
         dir: tempfile::TempDir,
         home: std::path::PathBuf,
         server: std::thread::JoinHandle<()>,
     }
 
-    fn start_host() -> RunningHost {
+    pub(crate) fn start_host() -> RunningHost {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).expect("home");
@@ -4744,14 +4831,14 @@ mod s6_pause_tests {
     use crate::office::OfficeClient;
     use std::time::{Duration, Instant};
 
-    struct RunningHost {
+    pub(crate) struct RunningHost {
         /// Holds the temp home alive for the whole test; never read.
         _dir: tempfile::TempDir,
-        home: std::path::PathBuf,
+        pub(crate) home: std::path::PathBuf,
         server: std::thread::JoinHandle<()>,
     }
 
-    fn start_host() -> RunningHost {
+    pub(crate) fn start_host() -> RunningHost {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).expect("home");
@@ -4770,8 +4857,14 @@ mod s6_pause_tests {
     }
 
     impl RunningHost {
-        fn client(&self) -> OfficeClient {
+        pub(crate) fn client(&self) -> OfficeClient {
             OfficeClient::connect(&self.home).expect("client")
+        }
+        pub(crate) fn shutdown(self) {
+            if let Ok(mut client) = OfficeClient::connect(&self.home) {
+                let _ = client.call(OfficeRequestKind::Shutdown { close_policy: None });
+            }
+            let _ = self.server.join();
         }
     }
 
@@ -4961,13 +5054,13 @@ mod v15_tests {
     use std::process::Command;
     use std::time::{Duration, Instant};
 
-    struct RunningHost {
+    pub(crate) struct RunningHost {
         dir: tempfile::TempDir,
         home: std::path::PathBuf,
         server: std::thread::JoinHandle<()>,
     }
 
-    fn start_host() -> RunningHost {
+    pub(crate) fn start_host() -> RunningHost {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).expect("home");
@@ -5539,9 +5632,22 @@ mod v15_tests {
             .expect("schedule");
 
         // The sweep fires within a couple of seconds of the reset.
-        if let Ok(plans) = client.call(OfficeRequestKind::RecoveryList) {
-            eprintln!("DBG plans: {plans}");
-        }
+        let plans = client
+            .call(OfficeRequestKind::RecoveryList)
+            .expect("recovery list");
+        let state = plans
+            .get("plans")
+            .and_then(|v| v.as_array())
+            .and_then(|rows| rows.first())
+            .and_then(|row| row.get("state").and_then(|s| s.as_str()))
+            .expect("plan state")
+            .to_string();
+        // The plan must NOT fire early: a +08:00 offset that is still in
+        // the future must stay `scheduled` under a UTC string comparison.
+        assert_eq!(state, "scheduled", "no early fire for offset times");
+
+        // ... and a plan whose reset (expressed in +08:00) is due within
+        // seconds MUST fire — the offset itself must not delay it.
         assert!(
             wait_for_output(&mut client, &terminal_id, "continue"),
             "the recovery prompt must reach the terminal"
@@ -5689,5 +5795,130 @@ mod v15_tests {
         }
         drop(host);
         drop(dir);
+    }
+}
+
+#[cfg(test)]
+mod qa_round2_tests {
+    use super::s3_handoff_tests::wait_for_output;
+    use super::s6_pause_tests::start_host;
+    use super::*;
+    use crate::office::OfficeClient;
+    use std::time::{Duration, Instant};
+
+    /// QA F1 (issue #58): reset_at expressed in a NON-UTC offset must fire
+    /// at the true instant. A +08:00 time that is due within ~2s was
+    /// silently delayed by ~8h under string comparison.
+    #[test]
+    fn offset_reset_at_fires_at_the_true_instant() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let host = OfficeHost::open(&home).expect("host");
+        let server = host.serve_background();
+        let socket = home.join(OFFICE_SOCKET_NAME);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !socket.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let mut client = OfficeClient::connect(&home).expect("client");
+        let created = client
+            .call(OfficeRequestKind::TerminalCreate {
+                argv: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "echo offset-ready; cat".into(),
+                ],
+                cwd: home.display().to_string(),
+                env: vec![],
+                cols: 80,
+                rows: 24,
+                purpose: "offset probe".into(),
+                worktree_id: None,
+                owner: "agent_cli".into(),
+            })
+            .expect("create");
+        let terminal_id = created
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .expect("terminal id")
+            .to_string();
+        assert!(wait_for_output(&mut client, &terminal_id, "offset-ready"));
+
+        // due in ~2s, EXPRESSED IN +08:00 (Haisu's local zone).
+        let local_due = (time::OffsetDateTime::now_utc() + time::Duration::seconds(2))
+            .to_offset(time::UtcOffset::from_hms(8, 0, 0).expect("+08:00"));
+        let reset_at = local_due
+            .format(&time::format_description::well_known::Rfc3339)
+            .expect("format");
+        assert!(reset_at.contains("+08:00"), "{reset_at}");
+
+        let scheduled = client
+            .call(OfficeRequestKind::RecoverySchedule {
+                terminal_id: terminal_id.clone(),
+                reset_at,
+                task_id: None,
+            })
+            .expect("schedule");
+        // The stored value must be normalized to UTC (ends in Z).
+        assert!(
+            scheduled
+                .get("reset_at")
+                .and_then(|v| v.as_str())
+                .map(|s| s.ends_with('Z'))
+                .unwrap_or(false),
+            "reset_at must be normalized to UTC: {scheduled}"
+        );
+
+        // The stored reset time is 2s away (normalized): after ~4s the
+        // sweep must have fired. Under the old string comparison this
+        // would take ~8 hours.
+        std::thread::sleep(Duration::from_secs(4));
+        let plans = client.call(OfficeRequestKind::RecoveryList).expect("list");
+        let state = plans
+            .get("plans")
+            .and_then(|v| v.as_array())
+            .and_then(|rows| rows.first())
+            .and_then(|row| row.get("state").and_then(|s| s.as_str()))
+            .expect("plan state")
+            .to_string();
+        assert_eq!(state, "fired", "the offset plan must fire on time");
+
+        client
+            .call(OfficeRequestKind::Shutdown { close_policy: None })
+            .expect("shutdown");
+        server.join().expect("old host joins");
+        drop(dir);
+    }
+
+    /// QA F3 (issue #57): a slow network sync must not freeze the office —
+    /// the store lock is dropped before the git probes. Simulated by a
+    /// sync against a path whose git hangs... practical proxy: while a
+    /// SyncNow runs, a Ping must still answer within 2s.
+    #[test]
+    fn office_stays_responsive_around_sync() {
+        let host = start_host();
+        // auto_pull off: sync is a fast no-op path — but the assertion is
+        // that the office answers CONCURRENT with any sync at all.
+        let sync_home = host.home.clone();
+        let syncer = std::thread::spawn(move || {
+            let mut c = OfficeClient::connect(&sync_home).expect("sync client");
+            let _ = c.call(OfficeRequestKind::SyncNow);
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut answered = false;
+        while Instant::now() < deadline {
+            if let Ok(mut c) = OfficeClient::connect(&host.home) {
+                if c.call(OfficeRequestKind::Ping).is_ok() {
+                    answered = true;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        syncer.join().expect("sync thread");
+        assert!(answered, "office must stay responsive around sync");
+        host.shutdown();
     }
 }

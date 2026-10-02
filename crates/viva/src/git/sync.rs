@@ -13,9 +13,15 @@ use crate::git::cli::CliRunner;
 /// git-side detail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MainSyncOutcome {
-    FastForward { from: String, to: String },
+    FastForward {
+        from: String,
+        to: String,
+    },
     AlreadyUpToDate,
     SkippedDirty,
+    /// The user-facing auto_pull switch is off: a deliberate SKIP (gate),
+    /// not a failure — audit records must not overstate it.
+    SkippedAutoPullDisabled,
     Failed(String),
 }
 

@@ -194,8 +194,11 @@ pub enum WorkbenchAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilePanel {
     pub worktree_id: String,
-    /// `(path, status)` rows as served by the office.
+    /// `(path, status)` rows as served by the office (bounded: may be a
+    /// truncation of the full inventory — see `truncated`/`total`).
     pub rows: Vec<(String, String)>,
+    pub truncated: bool,
+    pub total: usize,
     pub selected: usize,
     /// When set: this file's diff/content is being viewed instead of the
     /// list. Esc returns to the list first. `full_path` backs the `e`
@@ -243,7 +246,8 @@ pub struct WorkbenchApp {
     /// V15-3: the handoff target picker.
     handoff_picker: Option<HandoffPicker>,
     /// V15-2: armed cleanup — the first `D` names the exact path, the
-    /// second confirms. Anything else disarms.
+    /// second confirms. Any OTHER keypress disarms (stale arming must not
+    /// turn a later `D` into an unintended deletion).
     cleanup_armed: Option<String>,
 }
 
@@ -526,6 +530,13 @@ impl WorkbenchApp {
     /// Handle one key event.
     pub fn on_key(&mut self, key: KeyEvent) -> KeyOutcome {
         use ratatui::crossterm::event::KeyModifiers;
+        // QA F8: stale cleanup arming must never survive an unrelated
+        // keypress — only the confirming second `D` keeps it.
+        if self.cleanup_armed.is_some()
+            && !(key.code == KeyCode::Char('D') && self.focus == Focus::Worktrees)
+        {
+            self.cleanup_armed = None;
+        }
         // Overlays own the keyboard first (V15-1 file panel).
         if self.file_panel.is_some() {
             let viewing = self.file_panel.as_ref().unwrap().viewing.is_some();
@@ -764,7 +775,11 @@ impl WorkbenchApp {
                     None => KeyOutcome::Ignored,
                 }
             }
-            KeyCode::Char('g') => KeyOutcome::Action(WorkbenchAction::ToggleAutoPull),
+            // `g` flips a workspace-wide switch: keep it deliberate by
+            // binding it to the worktrees list (QA F8).
+            KeyCode::Char('g') if self.focus == Focus::Worktrees => {
+                KeyOutcome::Action(WorkbenchAction::ToggleAutoPull)
+            }
             KeyCode::Char('d') if self.focus == Focus::Worktrees => {
                 match self.selected_worktree() {
                     Some(id) => KeyOutcome::Action(WorkbenchAction::ShowDiff(id)),
@@ -1013,6 +1028,16 @@ impl WorkbenchApp {
             }
             _ => {
                 let mut items: Vec<ListItem> = Vec::new();
+                if panel.truncated {
+                    items.push(ListItem::new(Line::from(Span::styled(
+                        format!(
+                            "— showing {} of {} files (truncated) —",
+                            panel.rows.len(),
+                            panel.total
+                        ),
+                        ratatui::style::Style::new().gray(),
+                    ))));
+                }
                 for (i, (path, status)) in panel.rows.iter().enumerate() {
                     let marker = if panel.selected == i { "▶ " } else { "  " };
                     items.push(ListItem::new(Line::from(format!(
@@ -1747,14 +1772,30 @@ fn apply_client_action(
                 app.set_status("no files in this worktree");
                 return Ok(());
             }
+            let truncated = value
+                .get("truncated")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let total = value
+                .get("total")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(rows.len() as u64) as usize;
             app.file_panel = Some(FilePanel {
-                worktree_id,
+                worktree_id: worktree_id.clone(),
                 rows,
+                truncated,
+                total,
                 selected: 0,
                 viewing: None,
                 full_path: None,
             });
             app.file_view = None;
+            if truncated {
+                app.set_status(format!(
+                    "file list truncated to {} of {total} — narrow the worktree first",
+                    worktree_id
+                ));
+            }
             Ok(())
         }
         WorkbenchAction::ViewFile { worktree_id, path } => {
