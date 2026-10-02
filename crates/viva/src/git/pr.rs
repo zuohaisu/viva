@@ -21,10 +21,20 @@ pub struct PrInfo {
 /// missing, network down, or no PR exists for the branch). Callers must
 /// display unknown as unknown.
 pub fn pr_status_for_branch(repo_root: &Path, branch: &str) -> Option<PrInfo> {
+    pr_status_for_branch_using(repo_root, branch, "gh")
+}
+
+/// [`pr_status_for_branch`] with an explicit gh program — tests inject a
+/// fake here instead of racing the process-global PATH (QA round 4/5).
+pub fn pr_status_for_branch_using(
+    repo_root: &Path,
+    branch: &str,
+    gh_program: &str,
+) -> Option<PrInfo> {
     let runner = CliRunner::default();
     let out = runner
         .run(
-            "gh",
+            gh_program,
             repo_root,
             &["pr", "view", branch, "--json", "state,number,url"],
         )

@@ -198,6 +198,10 @@ pub struct OfficeShared {
     pub last_sync_note: Mutex<Option<String>>,
     /// V15-5: recovery sweep throttle (at most once a second).
     pub last_recovery_sweep: Mutex<Option<Instant>>,
+    /// V15-2/QA: test seam — the gh program the PR probes invoke. None in
+    /// production ("gh" from PATH); tests point it at a fake script so
+    /// they never race the process-global PATH.
+    pub gh_bin: Mutex<Option<String>>,
     /// Exit-watchers for dispatched executions. The graceful shutdown
     /// joins them BEFORE writing its handoff record — otherwise the
     /// process exit would die with the process and the next host would
@@ -283,6 +287,7 @@ impl OfficeHost {
             last_sync: Mutex::new(None),
             last_sync_note: Mutex::new(None),
             last_recovery_sweep: Mutex::new(None),
+            gh_bin: Mutex::new(None),
             watchers: Mutex::new(Vec::new()),
         });
         Ok(Self { shared, listener })
@@ -1210,15 +1215,22 @@ fn workbench_view(shared: Arc<OfficeShared>) -> OfficeResult<serde_json::Value> 
                 if at.elapsed() < Duration::from_secs(60) {
                     info.clone()
                 } else {
-                    let fresh =
-                        crate::git::pr::pr_status_for_branch(&record.repo_root, &record.branch);
+                    let fresh = crate::git::pr::pr_status_for_branch_using(
+                        &record.repo_root,
+                        &record.branch,
+                        gh_program_for(&shared).as_str(),
+                    );
                     *at = Instant::now();
                     *info = fresh.clone();
                     fresh
                 }
             }
             Entry::Vacant(vacant) => {
-                let fresh = crate::git::pr::pr_status_for_branch(&record.repo_root, &record.branch);
+                let fresh = crate::git::pr::pr_status_for_branch_using(
+                    &record.repo_root,
+                    &record.branch,
+                    gh_program_for(&shared).as_str(),
+                );
                 vacant.insert((Instant::now(), fresh.clone()));
                 fresh
             }
@@ -2777,6 +2789,17 @@ fn normalize_rfc3339_utc(text: &str) -> OfficeResult<String> {
         .map_err(|e| OfficeError::Validation(format!("recovery time formatting failed: {e}")))
 }
 
+/// The gh program to invoke for PR probes: the shared override (tests)
+/// or plain `gh` from PATH (production).
+fn gh_program_for(shared: &OfficeShared) -> String {
+    shared
+        .gh_bin
+        .lock()
+        .expect("gh bin")
+        .clone()
+        .unwrap_or_else(|| "gh".into())
+}
+
 /// The persisted `auto_pull` switch (V15-4): default OFF. Automatic pulls
 /// exist only when the user explicitly turned the switch on.
 fn read_auto_pull(store: &Store) -> bool {
@@ -3203,7 +3226,11 @@ fn worktree_cleanup(
         })?;
         (record.repo_root, record.worktree_path, record.branch)
     };
-    let pr = crate::git::pr::pr_status_for_branch(&repo_root, &branch);
+    let pr = crate::git::pr::pr_status_for_branch_using(
+        &repo_root,
+        &branch,
+        gh_program_for(shared).as_str(),
+    );
     let state = pr
         .as_ref()
         .map(|info| info.state.clone())
@@ -5221,6 +5248,7 @@ mod v15_tests {
     pub(crate) struct RunningHost {
         dir: tempfile::TempDir,
         home: std::path::PathBuf,
+        pub(crate) shared: Option<Arc<OfficeShared>>,
         server: std::thread::JoinHandle<()>,
     }
 
@@ -5229,13 +5257,19 @@ mod v15_tests {
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).expect("home");
         let host = OfficeHost::open(&home).expect("host");
+        let shared = host.shared();
         let server = host.serve_background();
         let socket = home.join(OFFICE_SOCKET_NAME);
         let deadline = Instant::now() + Duration::from_secs(5);
         while !socket.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        RunningHost { dir, home, server }
+        RunningHost {
+            dir,
+            home,
+            shared: Some(shared),
+            server,
+        }
     }
 
     impl RunningHost {
@@ -5421,7 +5455,9 @@ mod v15_tests {
         let host = start_host();
         let (_, wt_path) = seed_repo_worktree(&host, "branch-with-pr");
 
-        // Fake gh: branch-with-pr → MERGED, everything else fails (unknown).
+        // Fake gh (QA round 5): injected via the shared gh_bin seam
+        // instead of the process-global PATH — no race with parallel
+        // tests. branch-with-pr → MERGED; everything else fails.
         let fake_bin = host.home.join("fakebin");
         std::fs::create_dir_all(&fake_bin).expect("fake bin");
         let gh = fake_bin.join("gh");
@@ -5435,12 +5471,13 @@ mod v15_tests {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         }
-        let path_value = std::env::var("PATH").unwrap_or_default();
-        // SAFETY: test-only; the fake gh dir is prepended for this test and
-        // restored right after (other tests in this binary never spawn gh).
-        unsafe {
-            std::env::set_var("PATH", format!("{}:{path_value}", fake_bin.display()));
-        }
+        *host
+            .shared
+            .as_ref()
+            .expect("shared")
+            .gh_bin
+            .lock()
+            .expect("gh bin") = Some(gh.display().to_string());
 
         let mut client = host.client();
         let worktree_id = worktree_id_for(&mut client, "wt");
@@ -5530,10 +5567,6 @@ mod v15_tests {
             .expect_err("unknown PR state must refuse cleanup");
         assert!(err.to_string().contains("MERGED"), "{err}");
 
-        // SAFETY: restoring the PATH saved above.
-        unsafe {
-            std::env::set_var("PATH", path_value);
-        }
         host.shutdown();
     }
 
@@ -6368,6 +6401,312 @@ mod qa_round4_tests {
             .call(OfficeRequestKind::Shutdown { close_policy: None })
             .expect("shutdown");
         drop(work);
+        host.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod qa_round5_tests {
+    use super::*;
+    use crate::office::OfficeClient;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    struct RunningHost {
+        dir: tempfile::TempDir,
+        home: std::path::PathBuf,
+        server: std::thread::JoinHandle<()>,
+    }
+
+    fn start_host() -> RunningHost {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let host = OfficeHost::open(&home).expect("host");
+        let server = host.serve_background();
+        let socket = home.join(OFFICE_SOCKET_NAME);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !socket.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        RunningHost { dir, home, server }
+    }
+
+    impl RunningHost {
+        fn client(&self) -> OfficeClient {
+            OfficeClient::connect(&self.home).expect("client")
+        }
+        fn shutdown(self) {
+            if let Ok(mut client) = OfficeClient::connect(&self.home) {
+                let _ = client.call(OfficeRequestKind::Shutdown { close_policy: None });
+            }
+            let _ = self.server.join();
+            drop(self.dir);
+        }
+    }
+
+    fn git_seed(repo: &std::path::Path) {
+        let init = Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .arg("-C")
+            .arg(repo)
+            .args(["init", "-b", "main"])
+            .output()
+            .expect("init");
+        assert!(init.status.success());
+        std::fs::write(repo.join("f.txt"), "x\n").expect("file");
+        let add = Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .arg("-C")
+            .arg(repo)
+            .args(["add", "."])
+            .output()
+            .expect("add");
+        assert!(add.status.success());
+        let commit = Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .arg("-C")
+            .arg(repo)
+            .args(["commit", "-m", "seed"])
+            .output()
+            .expect("commit");
+        assert!(commit.status.success());
+    }
+
+    /// QA F18 restored guard (issue #57): one project whose pull cannot
+    /// run must NOT abort the cycle; both projects report and BOTH
+    /// outcomes are audited as git_auto_sync.
+    #[test]
+    fn one_untracked_project_does_not_abort_the_cycle() {
+        let host = start_host();
+        let work = tempfile::tempdir().expect("work dir");
+        let repo_a = work.path().join("repo-a");
+        let repo_b = work.path().join("repo-b");
+        std::fs::create_dir_all(&repo_a).expect("a");
+        std::fs::create_dir_all(&repo_b).expect("b");
+        git_seed(&repo_a);
+        git_seed(&repo_b);
+        {
+            let store = Store::open(
+                &crate::foundation::paths::database_path(&host.home),
+                office_migrations(),
+            )
+            .expect("store");
+            let registry = crate::projects::ProjectRegistry::new(&store);
+            registry.register(None, "proj-a", &repo_a).expect("a");
+            registry.register(None, "proj-b", &repo_b).expect("b");
+        }
+
+        let mut client = host.client();
+        client
+            .call(OfficeRequestKind::SetAutoPull { on: true })
+            .expect("auto_pull on");
+        let response = client
+            .call_with_timeout(OfficeRequestKind::SyncNow, Duration::from_secs(60))
+            .expect("the cycle must not abort on a failing project");
+        let results = response
+            .get("results")
+            .and_then(|v| v.as_array())
+            .expect("results")
+            .clone();
+        assert_eq!(results.len(), 2, "both projects report: {results:?}");
+        let failed = results
+            .iter()
+            .filter(|row| {
+                row.get("outcome")
+                    .and_then(|v| v.as_str())
+                    .map(|o| o.starts_with("failed"))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(
+            failed, 2,
+            "both remote-less pulls fail honestly: {results:?}"
+        );
+
+        {
+            let store = Store::open(
+                &crate::foundation::paths::database_path(&host.home),
+                office_migrations(),
+            )
+            .expect("store");
+            let audited: i64 = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM office_events WHERE kind = 'git_auto_sync'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("audit count");
+            assert!(audited >= 2, "each outcome audited: {audited}");
+        }
+
+        client
+            .call(OfficeRequestKind::Shutdown { close_policy: None })
+            .expect("shutdown");
+        drop(work);
+        host.shutdown();
+    }
+
+    /// QA F16 (issue #57): while a sync runs slow network git (PATH shim
+    /// sleeps 3s on fetch/pull), a STORE-BACKED request (RecoveryList)
+    /// must answer within 2s — Ping never takes the store mutex so it
+    /// could pass even with the lock held for 30s.
+    #[test]
+    fn office_stays_responsive_around_slow_sync() {
+        let host = start_host();
+        let repo = host.dir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let bare = host.dir.path().join("origin.git");
+        Command::new("git")
+            .args([
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                bare.to_str().unwrap(),
+            ])
+            .output()
+            .expect("bare");
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["init", "-b", "main"])
+            .output()
+            .expect("init");
+        std::fs::write(repo.join("f.txt"), "x\n").expect("file");
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["add", "."])
+            .output()
+            .expect("add");
+        Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .arg("-C")
+            .arg(&repo)
+            .args(["commit", "-m", "seed"])
+            .output()
+            .expect("commit");
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["remote", "add", "origin", bare.to_str().unwrap()])
+            .output()
+            .expect("remote");
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["push", "origin", "main"])
+            .output()
+            .expect("push");
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["fetch", "origin"])
+            .output()
+            .expect("fetch");
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["branch", "--set-upstream-to=origin/main", "main"])
+            .output()
+            .expect("upstream");
+
+        {
+            let store = Store::open(
+                &crate::foundation::paths::database_path(&host.home),
+                office_migrations(),
+            )
+            .expect("store");
+            crate::projects::ProjectRegistry::new(&store)
+                .register(None, "responsive-probe", &repo)
+                .expect("register project");
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO office_settings(key, value) VALUES ('auto_pull', 'true')
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    [],
+                )
+                .expect("auto_pull on");
+        }
+
+        // PATH shim: git fetch/pull sleep 3s, everything else execs the
+        // real git (resolved at setup) — delegating keeps behavior
+        // identical for parallel tests.
+        let real_git = {
+            let out = Command::new("sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .expect("locate git");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert!(!real_git.is_empty(), "real git not found");
+        let shim_dir = host.dir.path().join("shim");
+        std::fs::create_dir_all(&shim_dir).expect("shim dir");
+        let shim = shim_dir.join("git");
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = fetch ] || [ \"$1\" = pull ]; then sleep 3; fi\nexec \"{real_git}\" \"$@\"\n"
+            ),
+        )
+        .expect("shim script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let saved_path = std::env::var("PATH").unwrap_or_default();
+        unsafe {
+            std::env::set_var("PATH", format!("{}:{saved_path}", shim_dir.display()));
+        }
+
+        let sync_home = host.home.clone();
+        let syncer = std::thread::spawn(move || {
+            let mut c = OfficeClient::connect(&sync_home).expect("sync client");
+            c.call_with_timeout(OfficeRequestKind::SyncNow, Duration::from_secs(120))
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(12);
+        let mut answered = false;
+        while Instant::now() < deadline {
+            if let Ok(mut c) = OfficeClient::connect(&host.home) {
+                let started = Instant::now();
+                let result =
+                    c.call_with_timeout(OfficeRequestKind::RecoveryList, Duration::from_secs(2));
+                let elapsed = started.elapsed();
+                if result.is_ok() {
+                    assert!(
+                        elapsed <= Duration::from_secs(2),
+                        "RecoveryList latency {elapsed:?} during the slow sync — the \
+                         store lock is being held across network git (QA F3 regression)"
+                    );
+                    answered = true;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            answered,
+            "the office must keep answering during a slow sync"
+        );
+
+        let sync_outcome = syncer.join().expect("sync thread ends");
+        assert!(
+            sync_outcome.is_ok(),
+            "the SyncNow round trip must succeed under its 120s budget: {:?}",
+            sync_outcome.err()
+        );
+        // SAFETY: restoring the saved PATH.
+        unsafe {
+            std::env::set_var("PATH", saved_path);
+        }
+        let mut client = OfficeClient::connect(&host.home).expect("client after");
+        client
+            .call(OfficeRequestKind::Shutdown { close_policy: None })
+            .expect("shutdown");
         host.shutdown();
     }
 }
