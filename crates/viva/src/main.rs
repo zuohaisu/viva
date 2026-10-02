@@ -149,10 +149,10 @@ fn cmd_agent(args: &[String]) -> OfficeResult<()> {
     request.grant = get("grant");
     let response =
         if let viva::office::OfficeRequestKind::AgentWait { timeout_secs, .. } = &request.kind {
-            client.call_with_timeout(
-                request.kind.clone(),
-                std::time::Duration::from_secs(timeout_secs + 15),
-            )?
+            // call_request_with_timeout carries --member/--grant; the old
+            // call_with_timeout rebuilt the request and dropped them.
+            let budget = std::time::Duration::from_secs(timeout_secs + 15);
+            client.call_request_with_timeout(request, budget)?
         } else {
             client.call_request(request)?
         };

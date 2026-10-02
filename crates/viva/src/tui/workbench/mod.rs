@@ -205,6 +205,8 @@ pub struct FilePanel {
     /// open-in-editor action.
     pub viewing: Option<String>,
     pub full_path: Option<String>,
+    /// QA F6 residual: scroll offset into the viewed material.
+    pub scroll: usize,
 }
 
 /// The `h` handoff target picker (V15-3): a minimal overlay over the
@@ -546,6 +548,7 @@ impl WorkbenchApp {
                     if viewing {
                         panel.viewing = None;
                         panel.full_path = None;
+                        panel.scroll = 0;
                         self.file_view = None;
                         self.set_status("back to the file list");
                     } else {
@@ -586,6 +589,31 @@ impl WorkbenchApp {
                         .clone()
                         .unwrap_or_default();
                     KeyOutcome::Action(WorkbenchAction::OpenInEditor { full_path })
+                }
+                // V15 QA F6 residual: scroll the viewed material.
+                KeyCode::Up if viewing => {
+                    if let Some(panel) = self.file_panel.as_mut() {
+                        panel.scroll = panel.scroll.saturating_sub(1);
+                    }
+                    KeyOutcome::Handled
+                }
+                KeyCode::Down if viewing => {
+                    if let Some(panel) = self.file_panel.as_mut() {
+                        panel.scroll = panel.scroll.saturating_add(1);
+                    }
+                    KeyOutcome::Handled
+                }
+                KeyCode::PageUp if viewing => {
+                    if let Some(panel) = self.file_panel.as_mut() {
+                        panel.scroll = panel.scroll.saturating_sub(20);
+                    }
+                    KeyOutcome::Handled
+                }
+                KeyCode::PageDown if viewing => {
+                    if let Some(panel) = self.file_panel.as_mut() {
+                        panel.scroll = panel.scroll.saturating_add(20);
+                    }
+                    KeyOutcome::Handled
                 }
                 _ => KeyOutcome::Ignored,
             };
@@ -1017,10 +1045,34 @@ impl WorkbenchApp {
         match (&panel.viewing, self.file_view.as_ref()) {
             (Some(path), Some(text)) => {
                 let lines: Vec<Line> = text.lines().map(Line::from).collect();
+                let view_height = area.height.saturating_sub(2).max(1) as usize;
+                let max_scroll = lines.len().saturating_sub(view_height);
+                let offset = panel.scroll.min(max_scroll);
+                let total_lines = lines.len();
+                let shown: Vec<Line> = lines
+                    .iter()
+                    .skip(offset)
+                    .take(view_height.max(1))
+                    .cloned()
+                    .collect();
+                let shown_count = shown.len();
                 frame.render_widget(
-                    Paragraph::new(lines).block(
+                    Paragraph::new(shown).block(
                         Block::new()
-                            .title(format!(" {} — Esc back ", path))
+                            .title(format!(
+                                " {} — Esc back · ↑↓ scroll{} ",
+                                path,
+                                if total_lines > view_height {
+                                    format!(
+                                        " · lines {}..{} / {}",
+                                        offset + 1,
+                                        offset + shown_count,
+                                        total_lines
+                                    )
+                                } else {
+                                    String::new()
+                                }
+                            ))
                             .borders(Borders::ALL),
                     ),
                     area,
@@ -1788,6 +1840,7 @@ fn apply_client_action(
                 selected: 0,
                 viewing: None,
                 full_path: None,
+                scroll: 0,
             });
             app.file_view = None;
             if truncated {
@@ -1821,6 +1874,7 @@ fn apply_client_action(
             if let Some(panel) = app.file_panel.as_mut() {
                 panel.viewing = Some(path);
                 panel.full_path = Some(full_path);
+                panel.scroll = 0;
             }
             app.file_view = Some(format!("[{kind}]\n{text}"));
             Ok(())
