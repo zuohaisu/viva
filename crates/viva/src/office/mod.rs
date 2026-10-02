@@ -2738,7 +2738,6 @@ fn auto_sync_due(shared: &OfficeShared) -> bool {
     // markers stay fresh with the switch OFF; only the PULL half is
     // gated. Both halves share the same 5-min cadence.
     let store = shared.store.lock().expect("office store");
-    let _auto_pull = read_auto_pull(&store);
     drop(store);
     match *shared.last_sync.lock().expect("last sync") {
         Some(last) => last.elapsed() >= Duration::from_secs(5 * 60),
@@ -2842,9 +2841,16 @@ fn auto_sync_all(shared: &OfficeShared, force: bool) -> OfficeResult<serde_json:
     {
         return Ok(serde_json::json!({ "skipped": "cycle already in flight" }));
     }
-    let outcome = auto_sync_all_inner(shared, force);
-    shared.sync_in_flight.store(false, Ordering::SeqCst);
-    outcome
+    // QA round 6 G4: the clear is DROP-guarded — an inner panic cannot
+    // leave the office stuck "in flight" forever.
+    struct InFlightGuard<'a>(&'a AtomicBool);
+    impl Drop for InFlightGuard<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+    let _in_flight = InFlightGuard(&shared.sync_in_flight);
+    auto_sync_all_inner(shared, force)
 }
 
 fn auto_sync_all_inner(shared: &OfficeShared, force: bool) -> OfficeResult<serde_json::Value> {
@@ -3508,7 +3514,9 @@ fn agent_handoff(
 
 /// V15-4 manual trigger + the read-only listing.
 fn sync_now(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
-    auto_sync_all_inner(shared, true)
+    // Through the guarded wrapper (QA round 6 G2): a manual cycle must
+    // also honor the single-flight guard, not stampede a running one.
+    auto_sync_all(shared, true)
 }
 
 fn recovery_list(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
