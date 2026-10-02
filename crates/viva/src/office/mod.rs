@@ -5051,11 +5051,21 @@ mod qa_round2_tests {
             "reset_at must be normalized to UTC: {scheduled}"
         );
 
-        // The sweep fires within a couple of seconds of the reset.
-        assert!(
-            wait_for_output(&mut client, &terminal_id, "continue"),
-            "the recovery prompt must reach the terminal"
-        );
+        // The sweep fires within a couple of seconds of the reset. 10s
+        // window: the sweep is throttled to 1s and the reset is due at
+        // +2s, but a loaded CI runner adds scheduling slack — the guard
+        // verifies the sweep FIRES, not echo latency.
+        {
+            let until = Instant::now() + Duration::from_secs(10);
+            let mut seen = false;
+            while Instant::now() < until {
+                if wait_for_output(&mut client, &terminal_id, "continue") {
+                    seen = true;
+                    break;
+                }
+            }
+            assert!(seen, "the recovery prompt must reach the terminal");
+        }
 
         // Audit + plan state.
         {
