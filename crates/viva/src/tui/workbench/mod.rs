@@ -263,7 +263,7 @@ impl WorkbenchApp {
             snapshots: std::collections::HashMap::new(),
             terminal_mode: None,
             diff_view: None,
-            status_line: "Ctrl+arrows panes · | - split · x close · z zoom · o open · w worktree · 1-4 lists · Enter terminal · q detach".into(),
+            status_line: "Ctrl+arrows panes · | - split · x close · z zoom · f files · D cleanup · h handoff · g auto-pull · o open · w worktree · 1-4 lists · Enter terminal · q detach".into(),
             quit_requested: false,
             layout_dirty: false,
             file_panel: None,
@@ -2177,5 +2177,87 @@ mod tests {
         assert!(render(&app, 100, 20).contains("unknown"));
         app.on_key(KeyEvent::from(KeyCode::Char('4')));
         assert!(render(&app, 100, 20).contains("unknown"));
+    }
+}
+
+#[cfg(test)]
+mod v15_tui_fix_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn sample() -> WorkbenchModel {
+        WorkbenchModel {
+            projects: vec![ProjectRow {
+                project_id: "p1".into(),
+                name: "viva".into(),
+                repo_path: "/code/viva".into(),
+            }],
+            worktrees: vec![WorktreeRow {
+                worktree_id: "wt1".into(),
+                project_id: "p1".into(),
+                path: "/wt/dev4".into(),
+                branch: "agent/feat-x".into(),
+                dirty: Some(true),
+                task_id: Some("t1".into()),
+                source: "created".into(),
+                pr_state: None,
+                ahead: None,
+                behind: None,
+            }],
+            tasks: vec![],
+            terminals: vec![],
+            attention: vec![],
+            auto_pull: false,
+            sync_note: None,
+        }
+    }
+
+    /// QA F8: stale cleanup arming disarms on ANY key that is not the
+    /// confirming D (a later D on another row must never delete).
+    #[test]
+    fn stale_cleanup_arming_disarms_on_any_other_key() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.on_key(KeyEvent::from(KeyCode::Char('2')));
+        // Arm on the selected worktree row.
+        app.on_key(KeyEvent::from(KeyCode::Char('D')));
+        assert!(app.cleanup_armed.is_some(), "first D arms");
+        // Any unrelated key disarms.
+        app.on_key(KeyEvent::from(KeyCode::Char('r')));
+        assert!(app.cleanup_armed.is_none(), "stale arming disarmed");
+    }
+
+    /// QA F8: `g` is bound to the worktrees list — a global ambient
+    /// toggle for a workspace-wide switch was the review's concern.
+    #[test]
+    fn auto_pull_toggle_requires_the_worktrees_focus() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.on_key(KeyEvent::from(KeyCode::Char('1'))); // projects focus
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('g'))),
+            KeyOutcome::Ignored,
+            "g outside worktrees focus is ignored"
+        );
+        app.on_key(KeyEvent::from(KeyCode::Char('2'))); // worktrees focus
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('g'))),
+            KeyOutcome::Action(WorkbenchAction::ToggleAutoPull)
+        );
+    }
+
+    /// QA F8: the status line advertises the V15 keys (f/D/h/g) so the
+    /// features are discoverable (QA round-2 F12).
+    #[test]
+    fn status_line_advertises_v15_keys() {
+        let app = WorkbenchApp::new();
+        let backend = TestBackend::new(200, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal.draw(|f| app.draw(f)).expect("draw");
+        let view = terminal.backend().to_string();
+        assert!(view.contains("f files"), "{view}");
+        assert!(view.contains("D cleanup"), "{view}");
+        assert!(view.contains("h handoff"), "{view}");
+        assert!(view.contains("g auto-pull"), "{view}");
     }
 }

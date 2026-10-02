@@ -43,7 +43,7 @@ fn run(args: &[String]) -> OfficeResult<()> {
         Some(
             "start" | "server" | "server-restart" | "status" | "dispatch" | "terminals"
             | "stop-terminal" | "result" | "shutdown" | "pause" | "resume" | "brief"
-            | "create-task" | "grant" | "handoff",
+            | "create-task" | "create-project" | "grant" | "handoff",
         ) => cmd_office(args),
         Some("terminal") => cmd_terminal(args.get(1..).unwrap_or(&[])),
         Some("agent") => cmd_agent(args.get(1..).unwrap_or(&[])),
@@ -483,6 +483,10 @@ USAGE:
     viva result <task-id>
         Show the results recorded for a task.
 
+    viva create-project --name <name> --repo <dir>
+        Register the MAIN checkout of a repository (the target of the
+        V15-4 automatic fast-forward when auto_pull is enabled).
+
     viva create-task --goal <text> | viva grant --member <id>
         --task <id> --action <a> --mode <m> | viva brief <task-id> |
         viva handoff --task <id> --member <id> --summary <text>
@@ -810,6 +814,7 @@ fn cmd_office(args: &[String]) -> OfficeResult<()> {
         }
         Some("brief") => cmd_office_brief(args.get(1..).unwrap_or(&[])),
         Some("create-task") => cmd_office_create_task(args.get(1..).unwrap_or(&[])),
+        Some("create-project") => cmd_office_create_project(args.get(1..).unwrap_or(&[])),
         Some("grant") => cmd_office_grant(args.get(1..).unwrap_or(&[])),
         Some("handoff") => cmd_office_handoff(&home, args.get(1..).unwrap_or(&[])),
         _ => {
@@ -1362,6 +1367,43 @@ fn content_fingerprint(text: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("{hash:016x}")
+}
+
+/// `viva create-project --name <name> --repo <dir>` — register the MAIN
+/// checkout of a repository (V15-4, QA F11): without this row the
+/// auto-sync cycle has nothing to fast-forward. Read-only worktree
+/// adoption remains the worktree service's own flow.
+fn cmd_office_create_project(args: &[String]) -> OfficeResult<()> {
+    let mut name = None;
+    let mut repo = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--name" => {
+                i += 1;
+                name = args.get(i).cloned();
+            }
+            "--repo" => {
+                i += 1;
+                repo = args.get(i).cloned();
+            }
+            other => {
+                return Err(OfficeError::Validation(format!(
+                    "unknown create-project flag `{other}`"
+                )));
+            }
+        }
+        i += 1;
+    }
+    let (Some(name), Some(repo)) = (name, repo) else {
+        return Err(OfficeError::Validation(
+            "usage: viva create-project --name <name> --repo <dir>".into(),
+        ));
+    };
+    let store = open_office_store()?;
+    let project = viva::projects::ProjectRegistry::new(&store).register(None, name, repo)?;
+    println!("{}", serde_json::to_string_pretty(&project)?);
+    Ok(())
 }
 
 /// `viva create-task --goal <text>` — open one office task. This is

@@ -2777,10 +2777,6 @@ fn read_auto_pull(store: &Store) -> bool {
 /// `force = true` (explicit `viva sync now`) bypasses both the TTL and the
 /// pause, because a human asked. Task worktrees are fetched, NEVER pulled.
 fn auto_sync_all(shared: &OfficeShared, force: bool) -> OfficeResult<serde_json::Value> {
-    let auto_pull = {
-        let store = shared.store.lock().expect("office store");
-        read_auto_pull(&store)
-    };
     if !force {
         if shared.paused.load(Ordering::SeqCst) {
             return Ok(serde_json::json!({ "skipped": "paused" }));
@@ -2792,10 +2788,11 @@ fn auto_sync_all(shared: &OfficeShared, force: bool) -> OfficeResult<serde_json:
         }
     }
 
-    // Snapshot WHAT to sync under the store lock, then DROP it: the git
-    // probes below are network operations (30s timeout each) and the same
-    // mutex guards every office request (QA F3).
-    let (main_checkouts, worktrees) = {
+    // Phase 1 — snapshot WHAT to sync under the store lock, then DROP it
+    // for the whole git phase (QA F3 round 2: the probes are network
+    // operations with a 30s timeout each, and this same mutex guards every
+    // office request; holding it across them froze the workbench).
+    let (main_checkouts, worktrees, auto_pull) = {
         let store = shared.store.lock().expect("office store");
         let mains: Vec<(String, std::path::PathBuf)> =
             crate::projects::ProjectRegistry::new(&store)
@@ -2813,19 +2810,23 @@ fn auto_sync_all(shared: &OfficeShared, force: bool) -> OfficeResult<serde_json:
             .filter(|record| record.released_at.is_none())
             .map(|record| (record.worktree_id.to_string(), record.worktree_path))
             .collect();
-        (mains, trees)
+        let auto_pull = read_auto_pull(&store);
+        (mains, trees, auto_pull)
     };
 
-    let store = shared.store.lock().expect("office store");
+    // Phase 2 — the git work, NO store lock held (QA F3). Every outcome —
+    // success, skip, or failure — is collected as a result row (QA F10):
+    // one unreachable project must never abort the cycle or skip the
+    // remaining checkouts, worktree fetches, or the audit.
     let runner = crate::git::cli::CliRunner::default();
     let mut results: Vec<serde_json::Value> = Vec::new();
 
-    // Main checkouts: automatic fast-forward ONLY when auto_pull is on.
     for (project_id, repo_path) in &main_checkouts {
         let outcome = if !auto_pull {
             crate::git::sync::MainSyncOutcome::SkippedAutoPullDisabled
         } else {
-            crate::git::sync::sync_main_checkout(repo_path, &runner)?
+            crate::git::sync::sync_main_checkout(repo_path, &runner)
+                .unwrap_or_else(|err| crate::git::sync::MainSyncOutcome::Failed(err.to_string()))
         };
         let label = match &outcome {
             crate::git::sync::MainSyncOutcome::FastForward { from, to } => {
@@ -2844,20 +2845,10 @@ fn auto_sync_all(shared: &OfficeShared, force: bool) -> OfficeResult<serde_json:
             "path": repo_path.display().to_string(),
             "outcome": label,
         }));
-        crate::foundation::events::append(
-            &store,
-            crate::foundation::events::NewEvent {
-                domain: DOMAIN_OFFICE_HOST,
-                kind: "git_auto_sync".into(),
-                subject_type: "project".into(),
-                subject_id: project_id.clone(),
-                origin: "office_host".into(),
-                payload: serde_json::json!({ "outcome": label }),
-            },
-        )?;
     }
 
-    // Task worktrees: fetch only — the working tree is never touched.
+    // Task worktrees: fetch only — the working tree is never touched. A
+    // fetch failure is a recorded outcome, never an abort.
     for (worktree_id, worktree_path) in &worktrees {
         let outcome = match crate::git::sync::fetch_worktree(worktree_path, &runner) {
             Ok(()) => "fetched".to_string(),
@@ -2868,6 +2859,31 @@ fn auto_sync_all(shared: &OfficeShared, force: bool) -> OfficeResult<serde_json:
             "worktree": worktree_id,
             "outcome": outcome,
         }));
+    }
+
+    // Phase 3 — re-lock ONLY for the audit writes and the cycle bookkeeping.
+    let store = shared.store.lock().expect("office store");
+    for row in &results {
+        crate::foundation::events::append(
+            &store,
+            crate::foundation::events::NewEvent {
+                domain: DOMAIN_OFFICE_HOST,
+                kind: "git_auto_sync".into(),
+                subject_type: if row["kind"] == "main_checkout" {
+                    "project"
+                } else {
+                    "worktree"
+                }
+                .into(),
+                subject_id: row["project"]
+                    .as_str()
+                    .or_else(|| row["worktree"].as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                origin: "office_host".into(),
+                payload: row.clone(),
+            },
+        )?;
     }
 
     *shared.last_sync.lock().expect("last sync") = Some(Instant::now());
@@ -5565,13 +5581,37 @@ mod v15_tests {
         let after = git_head(&host.home, &repo);
         assert_ne!(before, after, "auto_pull on: main fast-forwarded");
 
-        // The task worktree fetched (behind visible) but its HEAD never moved.
+        // The task worktree fetched (behind visible) and its HEAD NEVER
+        // moved — fetch updates refs, the working tree stays put.
+        let wt_head_before = String::from_utf8_lossy(
+            &Command::new("git")
+                .arg("-C")
+                .arg(&_wt)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .expect("rev-parse")
+                .stdout,
+        )
+        .trim()
+        .to_string();
         let view = client.call(OfficeRequestKind::WorkbenchView).expect("view");
         let text = format!("{view}");
         assert!(
             text.contains("\"behind\":1") || text.contains("\"behind\": 1"),
             "behind is displayed: {text}"
         );
+        let wt_head_after = String::from_utf8_lossy(
+            &Command::new("git")
+                .arg("-C")
+                .arg(&_wt)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .expect("rev-parse")
+                .stdout,
+        )
+        .trim()
+        .to_string();
+        assert_eq!(wt_head_before, wt_head_after, "worktree HEAD unmoved");
         let _ = task_id;
         host.shutdown();
     }
@@ -5920,5 +5960,162 @@ mod qa_round2_tests {
         syncer.join().expect("sync thread");
         assert!(answered, "office must stay responsive around sync");
         host.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod qa_round3_tests {
+    use super::*;
+    use crate::office::OfficeClient;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    struct RunningHost {
+        dir: tempfile::TempDir,
+        home: std::path::PathBuf,
+        shared: Option<Arc<OfficeShared>>,
+        server: std::thread::JoinHandle<()>,
+    }
+
+    fn start_host() -> RunningHost {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let host = OfficeHost::open(&home).expect("host");
+        let shared = host.shared();
+        let server = host.serve_background();
+        let socket = home.join(OFFICE_SOCKET_NAME);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !socket.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        RunningHost {
+            dir,
+            home,
+            shared: Some(shared),
+            server,
+        }
+    }
+
+    impl RunningHost {
+        fn client(&self) -> OfficeClient {
+            OfficeClient::connect(&self.home).expect("client")
+        }
+
+        fn store(&self) -> std::sync::MutexGuard<'_, Store> {
+            self.shared
+                .as_ref()
+                .expect("shared")
+                .store
+                .lock()
+                .expect("store")
+        }
+        fn shutdown(self) {
+            if let Ok(mut client) = OfficeClient::connect(&self.home) {
+                let _ = client.call(OfficeRequestKind::Shutdown { close_policy: None });
+            }
+            let _ = self.server.join();
+            drop(self.dir);
+        }
+    }
+
+    /// QA F10 (issue #57): one project whose pull cannot run (no
+    /// tracking) must NOT abort the cycle — the other project still
+    /// reports, and EVERY outcome (including the failure) is audited.
+    #[test]
+    fn one_untracked_project_does_not_abort_the_cycle() {
+        let host = start_host();
+        let repo_a = host.dir.path().join("repo-a");
+        let repo_b = host.dir.path().join("repo-b");
+        for repo in [&repo_a, &repo_b] {
+            std::fs::create_dir_all(repo).expect("repo dir");
+            git_seed(repo);
+        }
+        // B has NO remote — its pull cannot run.
+        // A has a remote (origin/main exists after fetch? no fetch here —
+        // keep A remote-less too but WITH tracking impossible: A also
+        // fails, B also fails — the point is both REPORT).
+        {
+            let store = host.store();
+            let registry = crate::projects::ProjectRegistry::new(&store);
+            registry
+                .register(None, "proj-a", &repo_a)
+                .expect("register a");
+            registry
+                .register(None, "proj-b", &repo_b)
+                .expect("register b");
+        }
+
+        let mut client = host.client();
+        // auto_pull ON: both pulls attempt and fail honestly (no remote).
+        client
+            .call(OfficeRequestKind::SetAutoPull { on: true })
+            .expect("enable auto_pull");
+        let response = client
+            .call(OfficeRequestKind::SyncNow)
+            .expect("sync must not abort");
+        let results = response
+            .get("results")
+            .and_then(|v| v.as_array())
+            .expect("results array")
+            .clone();
+        // BOTH projects reported.
+        assert_eq!(results.len(), 2, "both projects report: {results:?}");
+        let failed = results
+            .iter()
+            .filter(|row| {
+                row.get("outcome")
+                    .and_then(|v| v.as_str())
+                    .map(|outcome| outcome.starts_with("failed"))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(
+            failed, 2,
+            "both remote-less pulls fail honestly: {results:?}"
+        );
+
+        // Every outcome is audited — one git_auto_sync event per project.
+        drop(client);
+        {
+            let store = host.store();
+            let audited: i64 = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM office_events WHERE kind = 'git_auto_sync'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("audit count");
+            assert!(audited >= 2, "each project's outcome is audited: {audited}");
+        }
+
+        client = host.client();
+        client
+            .call(OfficeRequestKind::Shutdown { close_policy: None })
+            .expect("shutdown");
+        host.shutdown();
+    }
+
+    fn git_seed(repo: &std::path::Path) {
+        let output = Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .arg("-C")
+            .arg(repo)
+            .args(["init", "-b", "main"])
+            .output()
+            .expect("init");
+        assert!(output.status.success());
+        std::fs::write(repo.join("f.txt"), "x\n").expect("file");
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["add", "."])
+            .output();
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["commit", "-m", "seed"])
+            .output();
     }
 }
