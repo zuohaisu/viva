@@ -75,14 +75,18 @@ pub enum OfficeRequestKind {
     /// All registered terminals with owner/purpose/work location.
     TerminalList,
     /// Snapshot one terminal's visible grid + scrollback.
-    TerminalSnapshot { terminal_id: String },
+    TerminalSnapshot {
+        terminal_id: String,
+    },
     /// Write bytes to one terminal's stdin.
     TerminalInput {
         terminal_id: String,
         bytes_hex: String,
     },
     /// Stop one terminal (its process group only — never the neighbors).
-    TerminalStop { terminal_id: String },
+    TerminalStop {
+        terminal_id: String,
+    },
     /// Create one terminal in the resident server. This is the headless
     /// and workbench spawn path: fixed sizes are allowed, and the owner is
     /// limited to user-owned kinds — an execution-owned terminal can only
@@ -111,7 +115,9 @@ pub enum OfficeRequestKind {
     /// tasks, terminals (+live state) and needs-attention markers.
     WorkbenchView,
     /// The real bounded diff of one worktree against HEAD.
-    WorkbenchDiff { worktree_id: String },
+    WorkbenchDiff {
+        worktree_id: String,
+    },
     /// The workbench pane-layout preference (issue #43 AC2, QA F5):
     /// `Some` saves the serialized layout, `None` returns the saved JSON
     /// (null when none was saved). A UI preference, not an office fact.
@@ -122,7 +128,9 @@ pub enum OfficeRequestKind {
     /// Open an interactive shell at a worktree's path (the workbench
     /// "open" action). The terminal is a user_shell owned by the server,
     /// attached to the worktree.
-    TerminalOpenInWorktree { worktree_id: String },
+    TerminalOpenInWorktree {
+        worktree_id: String,
+    },
     /// Create a task worktree from the task's project repo (V08 policy:
     /// protected refs, one checkout per branch). Removal is never a socket
     /// action — it stays an explicitly authorized human operation.
@@ -134,7 +142,9 @@ pub enum OfficeRequestKind {
         base_dir: Option<String>,
     },
     /// Results recorded for a task (process facts, QA conclusions, PR/CI).
-    TaskResults { task_id: String },
+    TaskResults {
+        task_id: String,
+    },
     /// Record one member's explicit handoff summary for a task. A
     /// member-reported fact: it never completes the task and never counts
     /// as a QA verdict or acceptance PASS.
@@ -149,10 +159,14 @@ pub enum OfficeRequestKind {
     AgentReport {
         terminal_id: String,
         agent: String,
-        /// working | blocked | done | idle | unknown
+        /// working | blocked | done | idle | unknown | rate_limited
         status: String,
         #[serde(default)]
         detail: String,
+        /// V15-5: RFC3339; REQUIRED when status is `rate_limited` — the
+        /// office never schedules a recovery for an unknown time.
+        #[serde(default)]
+        reset_at: Option<String>,
     },
     /// Submit agent content for the self-model container's intake (S4):
     /// what ran, which summaries formed, which tasks were done. Viva
@@ -171,7 +185,10 @@ pub enum OfficeRequestKind {
     /// Send a prompt to an agent's terminal (S5, issue #47): the text goes
     /// to the child's stdin as-is and the send is audited. Member-attributed
     /// calls need a live grant carrying `agent_prompt`.
-    AgentPrompt { terminal_id: String, prompt: String },
+    AgentPrompt {
+        terminal_id: String,
+        prompt: String,
+    },
     /// Wait, server-side, until the terminal's AUTHORITATIVE agent status
     /// matches (or the timeout passes). The wait runs on the host thread -
     /// the orchestrator may disconnect; the outcome is audited either way
@@ -215,6 +232,43 @@ pub enum OfficeRequestKind {
     /// exits only after a full ack. On any failure the old host keeps
     /// serving — the type-1 fallback, with zero interruption.
     ServerRestart,
+    /// V15-1: the file inventory of one worktree (path + porcelain status).
+    WorktreeFiles {
+        worktree_id: String,
+    },
+    /// V15-1: one file's diff (modified) or bounded content, with a path
+    /// safety check (relative, no `..`).
+    WorktreeFileContent {
+        worktree_id: String,
+        path: String,
+    },
+    /// V15-2: release + remove a worktree whose PR is MERGED (re-checked
+    /// live). The caller confirmed the exact path in the UI.
+    WorktreeCleanup {
+        worktree_id: String,
+    },
+    /// V15-3: hand a worktree to another agent with a composed brief.
+    AgentHandoff {
+        worktree_id: String,
+        to_agent: String,
+    },
+    /// V15-4: run one automatic sync cycle now (auto_pull rules still
+    /// apply to pulls; worktree fetches always run).
+    SyncNow,
+    /// V15-4: the user-facing auto_pull switch (default off).
+    SetAutoPull {
+        on: bool,
+    },
+    /// V15-5: rate-limit recovery plans.
+    RecoveryList,
+    RecoverySchedule {
+        terminal_id: String,
+        reset_at: String,
+        task_id: Option<String>,
+    },
+    RecoveryCancel {
+        plan_id: i64,
+    },
 }
 
 fn default_cols() -> u16 {
@@ -266,8 +320,23 @@ impl OfficeResponse {
 
 /// Read one framed JSON message. The frame is a single line; a peer that
 /// sends an over-long or non-JSON frame is a protocol violation, not a panic.
+///
+/// The read timeout is CALLER-OWNED: `call_with_timeout` sets the stream's
+/// timeout before dispatch, and resetting it to IO_TIMEOUT here used to
+/// silently void that (QA F14 — a 16s sync cycle errored at the client at
+/// 10.03s while the server completed the work). Default callers get
+/// [`IO_TIMEOUT`].
 pub fn read_message(stream: &mut UnixStream) -> OfficeResult<String> {
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
+    read_message_within(stream, IO_TIMEOUT)
+}
+
+/// [`read_message`] with an explicit read budget (server-side waits may
+/// legitimately outlive the default 10s).
+pub fn read_message_within(
+    stream: &mut UnixStream,
+    read_timeout: Duration,
+) -> OfficeResult<String> {
+    stream.set_read_timeout(Some(read_timeout))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
     let n = reader.read_line(&mut line)?;
@@ -302,13 +371,24 @@ pub fn write_message(stream: &mut UnixStream, value: &impl Serialize) -> OfficeR
     Ok(())
 }
 
-/// Send one request and wait for its correlated response.
+/// Send one request and wait for its correlated response (default read
+/// budget: [`IO_TIMEOUT`]).
 pub fn round_trip(
     stream: &mut UnixStream,
     request: &OfficeRequest,
 ) -> OfficeResult<OfficeResponse> {
+    round_trip_within(stream, request, IO_TIMEOUT)
+}
+
+/// [`round_trip`] with an explicit read budget — the path
+/// `call_with_timeout` relies on.
+pub fn round_trip_within(
+    stream: &mut UnixStream,
+    request: &OfficeRequest,
+    read_timeout: Duration,
+) -> OfficeResult<OfficeResponse> {
     write_message(stream, request)?;
-    let line = read_message(stream)?;
+    let line = read_message_within(stream, read_timeout)?;
     let response: OfficeResponse = serde_json::from_str(&line).map_err(|e| {
         OfficeError::Validation(format!("control channel sent a malformed response: {e}"))
     })?;

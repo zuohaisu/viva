@@ -97,6 +97,28 @@ impl Default for CliRunner {
     }
 }
 
+/// Read one pipe to EOF on a background thread, returning everything
+/// collected (QA round 6 G1: keeps the child's writes flowing while the
+/// caller waits on exit status).
+fn drain_pipe(
+    mut pipe: Option<impl std::io::Read + Send + 'static>,
+) -> Option<std::thread::JoinHandle<Vec<u8>>> {
+    pipe.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut collected = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => collected.extend_from_slice(&chunk[..n]),
+                    Err(_) => break,
+                }
+            }
+            collected
+        })
+    })
+}
+
 impl CliRunner {
     pub fn new(timeout: Duration) -> Self {
         Self { timeout }
@@ -124,10 +146,19 @@ impl CliRunner {
                 detail: format!("cannot launch `{program}`: {err}"),
             })?;
 
+        // Drain stdout/stderr CONCURRENTLY with the wait loop (QA round 6
+        // G1): piped output over the 64 KiB pipe capacity back-pressures
+        // the child the moment the buffer fills; a try_wait-only loop
+        // never drains, so the child deadlocks until the timeout kills it
+        // and the captured "output" is a silent truncation. The drainer
+        // threads read to EOF and hand the full buffers back.
+        let stdout_drainer = drain_pipe(child.stdout.take());
+        let stderr_drainer = drain_pipe(child.stderr.take());
+
         let started = Instant::now();
-        loop {
+        let status = loop {
             match child.try_wait() {
-                Ok(Some(_)) => break,
+                Ok(Some(status)) => break status,
                 Ok(None) if started.elapsed() >= self.timeout => {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -142,13 +173,19 @@ impl CliRunner {
                     });
                 }
             }
-        }
-        let output = child.wait_with_output().map_err(|err| GitFailure::Other {
-            detail: format!("`{program}` output capture failed: {err}"),
-        })?;
-        let stdout = bounded_lossy(&output.stdout);
-        let stderr = bounded_lossy(&output.stderr);
-        let exit_code = output.status.code().unwrap_or(-1);
+        };
+
+        // The child has exited; its pipe write ends are closed, so the
+        // drainers reach EOF promptly.
+        let stdout = stdout_drainer
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or_default();
+        let stderr = stderr_drainer
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or_default();
+        let stdout = bounded_lossy(&stdout);
+        let stderr = bounded_lossy(&stderr);
+        let exit_code = status.code().unwrap_or(-1);
         let out = CommandOutput {
             argv,
             exit_code,
@@ -352,5 +389,49 @@ mod tests {
             tree_state(&runner, &dir.path().join("missing")),
             TreeState::Missing
         );
+    }
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use super::*;
+
+    /// QA round 6 G1: output larger than the 64 KiB pipe capacity must be
+    /// captured in full — the old try_wait-only loop never drained the
+    /// pipe, deadlocking the child until the 30s timeout killed it and
+    /// returned a silent truncation.
+    #[test]
+    fn large_output_is_captured_in_full() {
+        let runner = CliRunner::new(Duration::from_secs(30));
+        let dir = tempfile::tempdir().expect("dir");
+        // ~200 KB of text through stdout (3x the pipe capacity).
+        let out = runner
+            .run(
+                "sh",
+                dir.path(),
+                &["-c", "yes 0123456789 | head -c 200000; echo END-MARKER"],
+            )
+            .expect("run succeeds");
+        assert!(out.stdout.contains("END-MARKER"), "full output captured");
+        assert!(out.stdout.len() >= 200_000, "all bytes flowed");
+    }
+
+    /// stderr over the pipe capacity must also drain (git writes progress
+    /// to stderr — e.g. fetch/push progress).
+    #[test]
+    fn large_stderr_is_captured_in_full() {
+        let runner = CliRunner::new(Duration::from_secs(30));
+        let dir = tempfile::tempdir().expect("dir");
+        let out = runner
+            .run(
+                "sh",
+                dir.path(),
+                &[
+                    "-c",
+                    "yes error-line | head -c 200000 >&2; echo stderr-done >&2",
+                ],
+            )
+            .expect("run succeeds");
+        assert!(out.stderr.contains("stderr-done"));
     }
 }

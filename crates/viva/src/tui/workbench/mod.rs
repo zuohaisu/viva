@@ -28,6 +28,8 @@ use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
+use std::process::Command;
+
 use crate::foundation::error::OfficeResult;
 use crate::terminal::TerminalSnapshot;
 use crate::tui::layout::{Direction, PaneContent, PaneNode, SplitAxis};
@@ -64,6 +66,14 @@ pub struct WorktreeRow {
     pub task_id: Option<String>,
     /// created (office allocated) or adopted (explicitly selected).
     pub source: String,
+    /// V15-2: the branch's PR state via gh (`open`/`merged`/`closed`).
+    #[serde(default)]
+    pub pr_state: Option<String>,
+    /// V15-4: distance vs `origin/<branch>`; None = unknown.
+    #[serde(default)]
+    pub ahead: Option<u32>,
+    #[serde(default)]
+    pub behind: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -107,6 +117,12 @@ pub struct WorkbenchModel {
     pub tasks: Vec<TaskRow>,
     pub terminals: Vec<TerminalRow>,
     pub attention: Vec<AttentionMarker>,
+    /// V15-4: the auto_pull switch state, surfaced in the workbench.
+    #[serde(default)]
+    pub auto_pull: bool,
+    /// V15-4: a human summary of the last sync cycle.
+    #[serde(default)]
+    pub sync_note: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +170,52 @@ pub enum WorkbenchAction {
     OpenWorktreeShell(String),
     /// Create the selected task's worktree (the `w` action).
     CreateTaskWorktree(String),
+    /// V15-1: open the file browser for a worktree.
+    BrowseFiles(String),
+    /// V15-1: view one file's diff/content in the panel.
+    ViewFile { worktree_id: String, path: String },
+    /// V15-1: open the viewed file with the system opener.
+    OpenInEditor { full_path: String },
+    /// V15-2: release + remove a worktree whose PR is merged.
+    CleanupWorktree(String),
+    /// V15-3: hand the worktree to the picked agent.
+    HandoffTo { worktree_id: String, agent: String },
+    /// V15-4: toggle the auto_pull switch.
+    ToggleAutoPull,
+}
+
+// ---------------------------------------------------------------------------
+// V15 workbench UI blocks (issues V15-1/V15-3): file panel, handoff
+// picker, two-step cleanup. Inserted into tui/workbench/mod.rs.
+// ---------------------------------------------------------------------------
+
+/// The file browser state for one worktree (V15-1): the inventory rows,
+/// the selection, and optionally the file currently being viewed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilePanel {
+    pub worktree_id: String,
+    /// `(path, status)` rows as served by the office (bounded: may be a
+    /// truncation of the full inventory — see `truncated`/`total`).
+    pub rows: Vec<(String, String)>,
+    pub truncated: bool,
+    pub total: usize,
+    pub selected: usize,
+    /// When set: this file's diff/content is being viewed instead of the
+    /// list. Esc returns to the list first. `full_path` backs the `e`
+    /// open-in-editor action.
+    pub viewing: Option<String>,
+    pub full_path: Option<String>,
+    /// QA F6 residual: scroll offset into the viewed material.
+    pub scroll: usize,
+}
+
+/// The `h` handoff target picker (V15-3): a minimal overlay over the
+/// detectable agent list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandoffPicker {
+    pub worktree_id: String,
+    pub agents: Vec<String>,
+    pub selected: usize,
 }
 
 /// The workbench application state. Pure view state + explicit caches;
@@ -179,6 +241,16 @@ pub struct WorkbenchApp {
     /// Set by every pane-tree mutation; the run loop persists the layout
     /// to the server (QA F5) when it sees the flag.
     layout_dirty: bool,
+    /// V15-1: the file browser overlay for one worktree.
+    file_panel: Option<FilePanel>,
+    /// V15-1: the viewed file's material (diff or bounded content).
+    file_view: Option<String>,
+    /// V15-3: the handoff target picker.
+    handoff_picker: Option<HandoffPicker>,
+    /// V15-2: armed cleanup — the first `D` names the exact path, the
+    /// second confirms. Any OTHER keypress disarms (stale arming must not
+    /// turn a later `D` into an unintended deletion).
+    cleanup_armed: Option<String>,
 }
 
 impl WorkbenchApp {
@@ -193,9 +265,13 @@ impl WorkbenchApp {
             snapshots: std::collections::HashMap::new(),
             terminal_mode: None,
             diff_view: None,
-            status_line: "Ctrl+arrows panes · | - split · x close · z zoom · o open · w worktree · 1-4 lists · Enter terminal · q detach".into(),
+            status_line: "Ctrl+arrows panes · | - split · x close · z zoom · f files · D cleanup · h handoff · g auto-pull · o open · w worktree · 1-4 lists · Enter terminal · q detach".into(),
             quit_requested: false,
             layout_dirty: false,
+            file_panel: None,
+            file_view: None,
+            handoff_picker: None,
+            cleanup_armed: None,
         }
     }
 
@@ -456,6 +532,126 @@ impl WorkbenchApp {
     /// Handle one key event.
     pub fn on_key(&mut self, key: KeyEvent) -> KeyOutcome {
         use ratatui::crossterm::event::KeyModifiers;
+        // QA F8: stale cleanup arming must never survive an unrelated
+        // keypress — only the confirming second `D` keeps it.
+        if self.cleanup_armed.is_some()
+            && !(key.code == KeyCode::Char('D') && self.focus == Focus::Worktrees)
+        {
+            self.cleanup_armed = None;
+        }
+        // Overlays own the keyboard first (V15-1 file panel).
+        if self.file_panel.is_some() {
+            let viewing = self.file_panel.as_ref().unwrap().viewing.is_some();
+            return match key.code {
+                KeyCode::Esc => {
+                    let panel = self.file_panel.as_mut().unwrap();
+                    if viewing {
+                        panel.viewing = None;
+                        panel.full_path = None;
+                        panel.scroll = 0;
+                        self.file_view = None;
+                        self.set_status("back to the file list");
+                    } else {
+                        self.file_panel = None;
+                        self.file_view = None;
+                        self.set_status("file panel closed");
+                    }
+                    KeyOutcome::Handled
+                }
+                KeyCode::Up | KeyCode::Char('k') if !viewing => {
+                    let panel = self.file_panel.as_mut().unwrap();
+                    panel.selected = panel.selected.saturating_sub(1);
+                    KeyOutcome::Handled
+                }
+                KeyCode::Down | KeyCode::Char('j') if !viewing => {
+                    let panel = self.file_panel.as_mut().unwrap();
+                    if panel.selected + 1 < panel.rows.len() {
+                        panel.selected += 1;
+                    }
+                    KeyOutcome::Handled
+                }
+                KeyCode::Enter if !viewing => {
+                    let panel = self.file_panel.as_ref().unwrap();
+                    match panel.rows.get(panel.selected) {
+                        Some((path, _)) => {
+                            let (worktree_id, path) = (panel.worktree_id.clone(), path.clone());
+                            KeyOutcome::Action(WorkbenchAction::ViewFile { worktree_id, path })
+                        }
+                        None => KeyOutcome::Ignored,
+                    }
+                }
+                KeyCode::Char('e') if viewing => {
+                    let full_path = self
+                        .file_panel
+                        .as_ref()
+                        .unwrap()
+                        .full_path
+                        .clone()
+                        .unwrap_or_default();
+                    KeyOutcome::Action(WorkbenchAction::OpenInEditor { full_path })
+                }
+                // V15 QA F6 residual: scroll the viewed material.
+                KeyCode::Up if viewing => {
+                    if let Some(panel) = self.file_panel.as_mut() {
+                        panel.scroll = panel.scroll.saturating_sub(1);
+                    }
+                    KeyOutcome::Handled
+                }
+                KeyCode::Down if viewing => {
+                    if let Some(panel) = self.file_panel.as_mut() {
+                        panel.scroll = panel.scroll.saturating_add(1);
+                    }
+                    KeyOutcome::Handled
+                }
+                KeyCode::PageUp if viewing => {
+                    if let Some(panel) = self.file_panel.as_mut() {
+                        panel.scroll = panel.scroll.saturating_sub(20);
+                    }
+                    KeyOutcome::Handled
+                }
+                KeyCode::PageDown if viewing => {
+                    if let Some(panel) = self.file_panel.as_mut() {
+                        panel.scroll = panel.scroll.saturating_add(20);
+                    }
+                    KeyOutcome::Handled
+                }
+                _ => KeyOutcome::Ignored,
+            };
+        }
+        // V15-3 handoff picker.
+        if self.handoff_picker.is_some() {
+            return match key.code {
+                KeyCode::Esc => {
+                    self.handoff_picker = None;
+                    self.set_status("handoff cancelled");
+                    KeyOutcome::Handled
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    let picker = self.handoff_picker.as_mut().unwrap();
+                    picker.selected = picker.selected.saturating_sub(1);
+                    KeyOutcome::Handled
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let picker = self.handoff_picker.as_mut().unwrap();
+                    if picker.selected + 1 < picker.agents.len() {
+                        picker.selected += 1;
+                    }
+                    KeyOutcome::Handled
+                }
+                KeyCode::Enter => {
+                    let (worktree_id, agent) = {
+                        let picker = self.handoff_picker.as_ref().unwrap();
+                        (
+                            picker.worktree_id.clone(),
+                            picker.agents[picker.selected].clone(),
+                        )
+                    };
+                    self.handoff_picker = None;
+                    KeyOutcome::Action(WorkbenchAction::HandoffTo { worktree_id, agent })
+                }
+                _ => KeyOutcome::Ignored,
+            };
+        }
         // Terminal mode owns the keyboard first: in a focused terminal,
         // even Ctrl-C belongs to the child (0x03), exactly as a real
         // terminal would deliver it. Esc releases the focus.
@@ -563,6 +759,55 @@ impl WorkbenchApp {
                     None => KeyOutcome::Ignored,
                 }
             }
+            KeyCode::Char('f') if self.focus == Focus::Worktrees => {
+                match self.selected_worktree() {
+                    Some(id) => KeyOutcome::Action(WorkbenchAction::BrowseFiles(id)),
+                    None => KeyOutcome::Ignored,
+                }
+            }
+            KeyCode::Char('D') if self.focus == Focus::Worktrees => {
+                match self.selected_worktree() {
+                    Some(id) => {
+                        if self.cleanup_armed.as_deref() == Some(id.as_str()) {
+                            self.cleanup_armed = None;
+                            KeyOutcome::Action(WorkbenchAction::CleanupWorktree(id.clone()))
+                        } else {
+                            self.cleanup_armed = Some(id.clone());
+                            let path = self
+                                .model
+                                .worktrees
+                                .iter()
+                                .find(|w| w.worktree_id == id)
+                                .map(|w| w.path.clone())
+                                .unwrap_or_default();
+                            self.set_status(format!("confirm: remove {path}? press D again"));
+                            KeyOutcome::Handled
+                        }
+                    }
+                    None => KeyOutcome::Ignored,
+                }
+            }
+            KeyCode::Char('h') if self.focus == Focus::Worktrees => {
+                match self.selected_worktree() {
+                    Some(id) => {
+                        self.handoff_picker = Some(HandoffPicker {
+                            worktree_id: id,
+                            agents: crate::agents::DETECTABLE_AGENTS
+                                .iter()
+                                .map(|agent| agent.to_string())
+                                .collect(),
+                            selected: 0,
+                        });
+                        KeyOutcome::Handled
+                    }
+                    None => KeyOutcome::Ignored,
+                }
+            }
+            // `g` flips a workspace-wide switch: keep it deliberate by
+            // binding it to the worktrees list (QA F8).
+            KeyCode::Char('g') if self.focus == Focus::Worktrees => {
+                KeyOutcome::Action(WorkbenchAction::ToggleAutoPull)
+            }
             KeyCode::Char('d') if self.focus == Focus::Worktrees => {
                 match self.selected_worktree() {
                     Some(id) => KeyOutcome::Action(WorkbenchAction::ShowDiff(id)),
@@ -638,6 +883,11 @@ impl WorkbenchApp {
                 ratatui::style::Style::new().bold(),
             ),
             Span::raw(if self.zoomed { "  [zoom]" } else { "" }),
+            Span::raw(if self.model.auto_pull {
+                "  [auto-pull]"
+            } else {
+                ""
+            }),
             Span::raw(if self.terminal_mode.is_some() {
                 "  [terminal focused]"
             } else {
@@ -661,6 +911,12 @@ impl WorkbenchApp {
             }
         }
 
+        if self.file_panel.is_some() {
+            self.draw_file_panel(frame);
+        }
+        if self.handoff_picker.is_some() {
+            self.draw_handoff_picker(frame);
+        }
         let attention = if self.model.attention.is_empty() {
             String::new()
         } else {
@@ -674,8 +930,16 @@ impl WorkbenchApp {
                     .join("; ")
             )
         };
+        let sync_note = self
+            .model
+            .sync_note
+            .as_deref()
+            .map(|note| format!("  |  {note}"))
+            .unwrap_or_default();
         frame.render_widget(
-            Paragraph::new(Line::from(format!("{}{}", self.status_line, attention)).gray()),
+            Paragraph::new(
+                Line::from(format!("{}{}{}", self.status_line, attention, sync_note)).gray(),
+            ),
             chunks[2],
         );
 
@@ -766,6 +1030,116 @@ impl WorkbenchApp {
             .join(" ")
     }
 
+    /// Draw the file browser overlay (V15-1): either the inventory list or
+    /// the viewed file's material, always bounded to the frame.
+    fn draw_file_panel(&self, frame: &mut Frame) {
+        let Some(panel) = &self.file_panel else {
+            return;
+        };
+        let area = centered(
+            frame.area(),
+            90,
+            frame.area().height.saturating_sub(4).max(6),
+        );
+        frame.render_widget(Clear, area);
+        match (&panel.viewing, self.file_view.as_ref()) {
+            (Some(path), Some(text)) => {
+                let lines: Vec<Line> = text.lines().map(Line::from).collect();
+                let view_height = area.height.saturating_sub(2).max(1) as usize;
+                let max_scroll = lines.len().saturating_sub(view_height);
+                let offset = panel.scroll.min(max_scroll);
+                let total_lines = lines.len();
+                let shown: Vec<Line> = lines
+                    .iter()
+                    .skip(offset)
+                    .take(view_height.max(1))
+                    .cloned()
+                    .collect();
+                let shown_count = shown.len();
+                frame.render_widget(
+                    Paragraph::new(shown).block(
+                        Block::new()
+                            .title(format!(
+                                " {} — Esc back · ↑↓ scroll{} ",
+                                path,
+                                if total_lines > view_height {
+                                    format!(
+                                        " · lines {}..{} / {}",
+                                        offset + 1,
+                                        offset + shown_count,
+                                        total_lines
+                                    )
+                                } else {
+                                    String::new()
+                                }
+                            ))
+                            .borders(Borders::ALL),
+                    ),
+                    area,
+                );
+            }
+            _ => {
+                let mut items: Vec<ListItem> = Vec::new();
+                if panel.truncated {
+                    items.push(ListItem::new(Line::from(Span::styled(
+                        format!(
+                            "— showing {} of {} files (truncated) —",
+                            panel.rows.len(),
+                            panel.total
+                        ),
+                        ratatui::style::Style::new().gray(),
+                    ))));
+                }
+                for (i, (path, status)) in panel.rows.iter().enumerate() {
+                    let marker = if panel.selected == i { "▶ " } else { "  " };
+                    items.push(ListItem::new(Line::from(format!(
+                        "{marker}{status:<6} {path}"
+                    ))));
+                }
+                frame.render_widget(
+                    List::new(items).block(
+                        Block::new()
+                            .title(format!(
+                                " files · {} — Enter view · Esc close ",
+                                panel.worktree_id
+                            ))
+                            .borders(Borders::ALL),
+                    ),
+                    area,
+                );
+            }
+        }
+    }
+
+    /// Draw the handoff target picker (V15-3).
+    fn draw_handoff_picker(&self, frame: &mut Frame) {
+        let Some(picker) = &self.handoff_picker else {
+            return;
+        };
+        let area = centered(frame.area(), 50, (picker.agents.len() as u16 + 2).max(5));
+        frame.render_widget(Clear, area);
+        let items: Vec<ListItem> = picker
+            .agents
+            .iter()
+            .enumerate()
+            .map(|(i, agent)| {
+                let marker = if picker.selected == i { "▶ " } else { "  " };
+                ListItem::new(Line::from(format!("{marker}{agent}")))
+            })
+            .collect();
+        frame.render_widget(
+            List::new(items).block(
+                Block::new()
+                    .title(format!(
+                        " handoff {} to — Enter confirm · Esc cancel ",
+                        picker.worktree_id
+                    ))
+                    .borders(Borders::ALL),
+            ),
+            area,
+        );
+    }
+
     fn draw_projects(&self, frame: &mut Frame, area: Rect) {
         let items: Vec<ListItem> = self
             .model
@@ -815,13 +1189,24 @@ impl WorkbenchApp {
                 Some(false) => "clean",
                 None => "unknown",
             };
+            let pr = w
+                .pr_state
+                .as_deref()
+                .map(|state| format!(" · pr:{state}"))
+                .unwrap_or_default();
+            let distance = match (w.ahead, w.behind) {
+                (Some(a), Some(b)) => format!(" · ↑{a} ↓{b}"),
+                _ => String::new(),
+            };
             items.push(ListItem::new(Line::from(format!(
-                "{marker}{} · {} · {} · task:{} · {}",
+                "{marker}{} · {} · {} · task:{} · {}{}{}",
                 w.branch,
                 dirty,
                 w.path,
                 w.task_id.as_deref().unwrap_or("-"),
-                w.source
+                w.source,
+                pr,
+                distance
             ))));
         }
         frame.render_widget(
@@ -1032,6 +1417,9 @@ impl<'a> WorkbenchStore<'a> {
                     dirty,
                     task_id: Some(r.task_id.to_string()),
                     source: r.source.as_str().to_string(),
+                    pr_state: None,
+                    ahead: None,
+                    behind: None,
                 }
             })
             .collect::<Vec<_>>();
@@ -1094,6 +1482,8 @@ impl<'a> WorkbenchStore<'a> {
             tasks,
             terminals,
             attention,
+            auto_pull: false,
+            sync_note: None,
         })
     }
 
@@ -1411,6 +1801,135 @@ fn apply_client_action(
             app.enter_terminal_mode(terminal_id);
             Ok(())
         }
+        WorkbenchAction::BrowseFiles(worktree_id) => {
+            let value = client.call(crate::office::OfficeRequestKind::WorktreeFiles {
+                worktree_id: worktree_id.clone(),
+            })?;
+            let rows = value
+                .get("files")
+                .and_then(|v| v.as_array())
+                .map(|files| {
+                    files
+                        .iter()
+                        .filter_map(|f| {
+                            Some((
+                                f.get("path")?.as_str()?.to_string(),
+                                f.get("status")?.as_str()?.to_string(),
+                            ))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if rows.is_empty() {
+                app.set_status("no files in this worktree");
+                return Ok(());
+            }
+            let truncated = value
+                .get("truncated")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let total = value
+                .get("total")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(rows.len() as u64) as usize;
+            app.file_panel = Some(FilePanel {
+                worktree_id: worktree_id.clone(),
+                rows,
+                truncated,
+                total,
+                selected: 0,
+                viewing: None,
+                full_path: None,
+                scroll: 0,
+            });
+            app.file_view = None;
+            if truncated {
+                app.set_status(format!(
+                    "file list truncated to {} of {total} — narrow the worktree first",
+                    worktree_id
+                ));
+            }
+            Ok(())
+        }
+        WorkbenchAction::ViewFile { worktree_id, path } => {
+            let value = client.call(crate::office::OfficeRequestKind::WorktreeFileContent {
+                worktree_id: worktree_id.clone(),
+                path: path.clone(),
+            })?;
+            let kind = value
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let text = value
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(binary file — no text preview)")
+                .to_string();
+            let full_path = value
+                .get("full_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if let Some(panel) = app.file_panel.as_mut() {
+                panel.viewing = Some(path);
+                panel.full_path = Some(full_path);
+                panel.scroll = 0;
+            }
+            app.file_view = Some(format!("[{kind}]\n{text}"));
+            Ok(())
+        }
+        WorkbenchAction::OpenInEditor { full_path } => {
+            let opener = if cfg!(target_os = "macos") {
+                "open"
+            } else {
+                "xdg-open"
+            };
+            let opened = Command::new(opener).arg(&full_path).spawn().is_ok();
+            app.set_status(if opened {
+                format!("opened {full_path} with {opener}")
+            } else {
+                format!("could not launch {opener} for {full_path}")
+            });
+            Ok(())
+        }
+        WorkbenchAction::CleanupWorktree(worktree_id) => {
+            let value = client.call(crate::office::OfficeRequestKind::WorktreeCleanup {
+                worktree_id: worktree_id.clone(),
+            })?;
+            let path = value
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            app.set_status(format!("worktree cleaned: {path}"));
+            Ok(())
+        }
+        WorkbenchAction::HandoffTo { worktree_id, agent } => {
+            let value = client.call(crate::office::OfficeRequestKind::AgentHandoff {
+                worktree_id: worktree_id.clone(),
+                to_agent: agent.clone(),
+            })?;
+            let terminal_id = value
+                .get("terminal_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            app.attach_terminal(terminal_id.clone());
+            app.enter_terminal_mode(terminal_id);
+            app.set_status(format!("handed to {agent} — brief delivered"));
+            Ok(())
+        }
+        WorkbenchAction::ToggleAutoPull => {
+            let on = !app.model.auto_pull;
+            client.call(crate::office::OfficeRequestKind::SetAutoPull { on })?;
+            app.model.auto_pull = on;
+            app.set_status(format!(
+                "auto_pull {} (main checkout only; worktrees stay fetch-only)",
+                if on { "ON" } else { "OFF" }
+            ));
+            Ok(())
+        }
         WorkbenchAction::CreateTaskWorktree(task_id) => {
             let value = client.call(crate::office::OfficeRequestKind::WorktreeCreateForTask {
                 task_id: task_id.clone(),
@@ -1496,6 +2015,9 @@ mod tests {
                 dirty: Some(true),
                 task_id: Some("t1".into()),
                 source: "created".into(),
+                pr_state: None,
+                ahead: None,
+                behind: None,
             }],
             tasks: vec![TaskRow {
                 task_id: "t1".into(),
@@ -1514,6 +2036,8 @@ mod tests {
                 kind: "execution_failed".into(),
                 detail: "exec-1 exit 2".into(),
             }],
+            auto_pull: false,
+            sync_note: None,
         }
     }
 
@@ -1707,5 +2231,87 @@ mod tests {
         assert!(render(&app, 100, 20).contains("unknown"));
         app.on_key(KeyEvent::from(KeyCode::Char('4')));
         assert!(render(&app, 100, 20).contains("unknown"));
+    }
+}
+
+#[cfg(test)]
+mod v15_tui_fix_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn sample() -> WorkbenchModel {
+        WorkbenchModel {
+            projects: vec![ProjectRow {
+                project_id: "p1".into(),
+                name: "viva".into(),
+                repo_path: "/code/viva".into(),
+            }],
+            worktrees: vec![WorktreeRow {
+                worktree_id: "wt1".into(),
+                project_id: "p1".into(),
+                path: "/wt/dev4".into(),
+                branch: "agent/feat-x".into(),
+                dirty: Some(true),
+                task_id: Some("t1".into()),
+                source: "created".into(),
+                pr_state: None,
+                ahead: None,
+                behind: None,
+            }],
+            tasks: vec![],
+            terminals: vec![],
+            attention: vec![],
+            auto_pull: false,
+            sync_note: None,
+        }
+    }
+
+    /// QA F8: stale cleanup arming disarms on ANY key that is not the
+    /// confirming D (a later D on another row must never delete).
+    #[test]
+    fn stale_cleanup_arming_disarms_on_any_other_key() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.on_key(KeyEvent::from(KeyCode::Char('2')));
+        // Arm on the selected worktree row.
+        app.on_key(KeyEvent::from(KeyCode::Char('D')));
+        assert!(app.cleanup_armed.is_some(), "first D arms");
+        // Any unrelated key disarms.
+        app.on_key(KeyEvent::from(KeyCode::Char('r')));
+        assert!(app.cleanup_armed.is_none(), "stale arming disarmed");
+    }
+
+    /// QA F8: `g` is bound to the worktrees list — a global ambient
+    /// toggle for a workspace-wide switch was the review's concern.
+    #[test]
+    fn auto_pull_toggle_requires_the_worktrees_focus() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.on_key(KeyEvent::from(KeyCode::Char('1'))); // projects focus
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('g'))),
+            KeyOutcome::Ignored,
+            "g outside worktrees focus is ignored"
+        );
+        app.on_key(KeyEvent::from(KeyCode::Char('2'))); // worktrees focus
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('g'))),
+            KeyOutcome::Action(WorkbenchAction::ToggleAutoPull)
+        );
+    }
+
+    /// QA F8: the status line advertises the V15 keys (f/D/h/g) so the
+    /// features are discoverable (QA round-2 F12).
+    #[test]
+    fn status_line_advertises_v15_keys() {
+        let app = WorkbenchApp::new();
+        let backend = TestBackend::new(200, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal.draw(|f| app.draw(f)).expect("draw");
+        let view = terminal.backend().to_string();
+        assert!(view.contains("f files"), "{view}");
+        assert!(view.contains("D cleanup"), "{view}");
+        assert!(view.contains("h handoff"), "{view}");
+        assert!(view.contains("g auto-pull"), "{view}");
     }
 }

@@ -521,6 +521,14 @@ impl TerminalHandle {
         self.shared.total_output_bytes.load(Ordering::SeqCst)
     }
 
+    /// True once the reader thread saw the stream end: every byte the
+    /// child ever wrote has been counted and parsed by then. Distinguishes
+    /// "child exited" from "output drained" — the CI flake was judging
+    /// the volume in the gap between the two.
+    pub fn output_stream_drained(&self) -> bool {
+        self.shared.eof_seen.load(Ordering::SeqCst)
+    }
+
     /// Non-blocking exit check. All reap discipline lives here: the core
     /// lock is held only across the non-blocking check, never across a
     /// blocking wait, so a concurrent stop() can always run its
@@ -701,7 +709,22 @@ fn spawn_reader(
                     revents: 0,
                 };
                 // SAFETY: one pollfd for our own fd, 100ms tick.
-                let ready = unsafe { libc::poll(&mut poll_fd, 1, 100) };
+                let ready = loop {
+                    // SAFETY: one pollfd for our own fd, 100ms tick.
+                    let r = unsafe { libc::poll(&mut poll_fd, 1, 100) };
+                    if r < 0 {
+                        // EINTR: retry the poll — a signal must not kill
+                        // the reader (QA round 4 CI: under parallel load a
+                        // spurious EINTR permanently killed the reader and
+                        // the child's output froze mid-stream).
+                        let err = std::io::Error::last_os_error();
+                        if err.raw_os_error() == Some(libc::EINTR) {
+                            continue;
+                        }
+                        break r;
+                    }
+                    break r;
+                };
                 if ready == 0 {
                     let Some(shared) = shared.upgrade() else {
                         break;
@@ -731,7 +754,15 @@ fn spawn_reader(
                         log.write_raw(&buf[..n]);
                     }
                 }
-                Err(_) => break,
+                Err(err) => {
+                    // EAGAIN/EINTR after POLLIN: transient — retry the
+                    // read instead of tearing the reader down.
+                    let raw = err.raw_os_error();
+                    if raw == Some(libc::EAGAIN) || raw == Some(libc::EINTR) {
+                        continue;
+                    }
+                    break;
+                }
             }
             let Some(shared) = shared.upgrade() else {
                 break;

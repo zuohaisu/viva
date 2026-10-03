@@ -44,11 +44,13 @@ fn run(args: &[String]) -> OfficeResult<()> {
         Some(
             "start" | "server" | "server-restart" | "status" | "dispatch" | "terminals"
             | "stop-terminal" | "result" | "shutdown" | "pause" | "resume" | "brief"
-            | "create-task" | "grant" | "handoff",
+            | "create-task" | "create-project" | "grant" | "handoff",
         ) => cmd_office(args),
         Some("terminal") => cmd_terminal(args.get(1..).unwrap_or(&[])),
         Some("agent") => cmd_agent(args.get(1..).unwrap_or(&[])),
         Some("events") => cmd_events(args.get(1..).unwrap_or(&[])),
+        Some("sync") => cmd_sync(args.get(1..).unwrap_or(&[])),
+        Some("recovery") => cmd_recovery(args.get(1..).unwrap_or(&[])),
         Some("conversations") => cmd_conversations(args.get(1..).unwrap_or(&[])),
         Some("workbench") => cmd_workbench(),
         Some("data") => cmd_data(args.get(1..).unwrap_or(&[])),
@@ -147,10 +149,10 @@ fn cmd_agent(args: &[String]) -> OfficeResult<()> {
     request.grant = get("grant");
     let response =
         if let viva::office::OfficeRequestKind::AgentWait { timeout_secs, .. } = &request.kind {
-            client.call_with_timeout(
-                request.kind.clone(),
-                std::time::Duration::from_secs(timeout_secs + 15),
-            )?
+            // call_request_with_timeout carries --member/--grant; the old
+            // call_with_timeout rebuilt the request and dropped them.
+            let budget = std::time::Duration::from_secs(timeout_secs + 15);
+            client.call_request_with_timeout(request, budget)?
         } else {
             client.call_request(request)?
         };
@@ -206,6 +208,104 @@ fn parse_events_args(args: &[String]) -> OfficeResult<(u64, u32)> {
         i += 1;
     }
     Ok((since, limit))
+}
+
+/// `viva sync …` (V15-4): the auto_pull switch and manual cycles.
+fn cmd_sync(args: &[String]) -> OfficeResult<()> {
+    let home = viva::foundation::paths::viva_home(None);
+    let mut client = viva::office::OfficeClient::ensure_server(&home)?;
+    match args.first().map(String::as_str) {
+        Some("now") | None => {
+            // A cycle can run several 30s-timeout git commands; the
+            // client's 10s default read timeout would report failure for
+            // work that actually succeeded (QA F14).
+            let response = client.call_with_timeout(
+                viva::office::OfficeRequestKind::SyncNow,
+                std::time::Duration::from_secs(150),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Some("auto-pull") => {
+            let on = match args.get(1).map(String::as_str) {
+                Some("on") => true,
+                Some("off") => false,
+                other => {
+                    return Err(OfficeError::Validation(format!(
+                        "auto-pull needs on|off (got {other:?})"
+                    )));
+                }
+            };
+            let response = client.call(viva::office::OfficeRequestKind::SetAutoPull { on })?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Some("status") => {
+            let response = client.call_with_timeout(
+                viva::office::OfficeRequestKind::WorkbenchView,
+                std::time::Duration::from_secs(30),
+            )?;
+            let note = response.get("sync_note").cloned().unwrap_or_default();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "auto_pull": response.get("auto_pull"),
+                    "last_sync": note,
+                }))?
+            );
+        }
+        _ => {
+            return Err(OfficeError::Validation(
+                "sync needs now | auto-pull | status".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `viva recovery …` (V15-5): the rate-limit recovery plans.
+fn cmd_recovery(args: &[String]) -> OfficeResult<()> {
+    let home = viva::foundation::paths::viva_home(None);
+    let mut client = viva::office::OfficeClient::ensure_server(&home)?;
+    let mut named: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut i = 1;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        if !flag.starts_with("--") {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let value = args
+            .get(i)
+            .cloned()
+            .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+        named.insert(flag.trim_start_matches("--").to_string(), value);
+        i += 1;
+    }
+    let get = |key: &str| named.get(key).cloned();
+    let kind = match args.first().map(String::as_str) {
+        Some("list") => viva::office::OfficeRequestKind::RecoveryList,
+        Some("schedule") => viva::office::OfficeRequestKind::RecoverySchedule {
+            terminal_id: get("terminal")
+                .ok_or_else(|| OfficeError::Validation("schedule needs --terminal".into()))?,
+            reset_at: get("at")
+                .ok_or_else(|| OfficeError::Validation("schedule needs --at <rfc3339>".into()))?,
+            task_id: get("task"),
+        },
+        Some("cancel") => viva::office::OfficeRequestKind::RecoveryCancel {
+            plan_id: get("id")
+                .ok_or_else(|| OfficeError::Validation("cancel needs --id".into()))?
+                .parse()
+                .map_err(|_| OfficeError::Validation("--id must be a number".into()))?,
+        },
+        _ => {
+            return Err(OfficeError::Validation(
+                "recovery needs list | schedule | cancel".into(),
+            ));
+        }
+    };
+    let response = client.call(kind)?;
+    println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
 }
 
 /// `viva terminal …` — headless terminal control over the resident server:
@@ -397,10 +497,24 @@ USAGE:
     viva result <task-id>
         Show the results recorded for a task.
 
+    viva create-project --name <name> --repo <dir>
+        Register the MAIN checkout of a repository (the target of the
+        V15-4 automatic fast-forward when auto_pull is enabled).
+
     viva create-task --goal <text> | viva grant --member <id>
         --task <id> --action <a> --mode <m> | viva brief <task-id> |
         viva handoff --task <id> --member <id> --summary <text>
         Task, grant, brief and handoff management.
+
+    viva sync now | viva sync auto-pull on|off | viva sync status
+        V15-4: run one sync cycle now; toggle the auto_pull switch
+        (default off — main checkout fast-forward only); show state.
+
+    viva recovery list
+    viva recovery schedule --terminal <id> --at <rfc3339> [--task <id>]
+    viva recovery cancel --id <n>
+        V15-5: rate-limit recovery plans — schedule a wakeup that prompts
+        the agent to continue, list, or cancel.
 
     viva server-restart
         Upgrade path: hand every live terminal to a freshly spawned
@@ -714,6 +828,7 @@ fn cmd_office(args: &[String]) -> OfficeResult<()> {
         }
         Some("brief") => cmd_office_brief(args.get(1..).unwrap_or(&[])),
         Some("create-task") => cmd_office_create_task(args.get(1..).unwrap_or(&[])),
+        Some("create-project") => cmd_office_create_project(args.get(1..).unwrap_or(&[])),
         Some("grant") => cmd_office_grant(args.get(1..).unwrap_or(&[])),
         Some("handoff") => cmd_office_handoff(&home, args.get(1..).unwrap_or(&[])),
         _ => {
@@ -1266,6 +1381,43 @@ fn content_fingerprint(text: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("{hash:016x}")
+}
+
+/// `viva create-project --name <name> --repo <dir>` — register the MAIN
+/// checkout of a repository (V15-4, QA F11): without this row the
+/// auto-sync cycle has nothing to fast-forward. Read-only worktree
+/// adoption remains the worktree service's own flow.
+fn cmd_office_create_project(args: &[String]) -> OfficeResult<()> {
+    let mut name = None;
+    let mut repo = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--name" => {
+                i += 1;
+                name = args.get(i).cloned();
+            }
+            "--repo" => {
+                i += 1;
+                repo = args.get(i).cloned();
+            }
+            other => {
+                return Err(OfficeError::Validation(format!(
+                    "unknown create-project flag `{other}`"
+                )));
+            }
+        }
+        i += 1;
+    }
+    let (Some(name), Some(repo)) = (name, repo) else {
+        return Err(OfficeError::Validation(
+            "usage: viva create-project --name <name> --repo <dir>".into(),
+        ));
+    };
+    let store = open_office_store()?;
+    let project = viva::projects::ProjectRegistry::new(&store).register(None, name, repo)?;
+    println!("{}", serde_json::to_string_pretty(&project)?);
+    Ok(())
 }
 
 /// `viva create-task --goal <text>` — open one office task. This is

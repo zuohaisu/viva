@@ -13,4 +13,6 @@
 
 pub mod cli;
 pub mod evidence;
+pub mod pr;
+pub mod sync;
 pub mod worktrees;

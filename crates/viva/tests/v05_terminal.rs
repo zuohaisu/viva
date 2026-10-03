@@ -306,14 +306,17 @@ fn high_volume_output_stays_bounded_and_the_log_is_redacted() {
     let (_id, loud) = reg
         .spawn(
             // ANSI + secret FIRST so they land inside the capped log's
-            // retained prefix; then ~8MB drive the cap home.
+            // retained prefix; then 700KB drive the cap home — bounded
+            // (head -c), DETERMINISTIC on any runner (the old 8.2MB
+            // pipeline starved mid-flow on loaded 2-core runners, making
+            // every downstream measurement a coin flip).
             TerminalSpec::new(
                 vec![
                     "/bin/sh".into(),
                     "-c".into(),
                     format!(
                         "printf '\\033[32m{}\\033[0m\\n'; \
-                         yes 0123456789012345678901234567890123456789 | head -n 200000; \
+                         yes 0123456789012345678901234567890123456789 | head -c 700000; \
                          echo done-loud",
                         secret
                     ),
@@ -337,11 +340,24 @@ fn high_volume_output_stays_bounded_and_the_log_is_redacted() {
         "the loud session must finish"
     );
 
+    // The child exiting does NOT mean the reader thread drained the PTY
+    // yet — on a busy runner the kernel buffer can still hold megabytes
+    // (CI saw total_output_bytes at ~288k right after exit, then the
+    // count kept growing). eof_seen is set only after the reader saw the
+    // stream end, which IS the drain point.
+    assert!(
+        wait_for(Duration::from_secs(30), || { loud.output_stream_drained() }),
+        "the reader must drain the stream before the volume is judged"
+    );
+
     let snap = loud.snapshot().expect("snapshot");
     // Bounded memory: the ring never exceeds the cap even with ~8MB fed.
     assert!(snap.scrollback.len() <= viva::terminal::SCROLLBACK_LINES);
+    // 700KB through the pty (ONLCR expands \n to \r\n) — comfortably
+    // above the 512KiB log cap and the 2000-line ring, and DETERMINISTIC
+    // on any runner.
     assert!(
-        snap.total_output_bytes > 6_000_000,
+        snap.total_output_bytes >= 600_000,
         "the volume really flowed: {}",
         snap.total_output_bytes
     );
