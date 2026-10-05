@@ -193,6 +193,88 @@ impl PaneNode {
         }
     }
 
+    /// The chrome-reserving render pass for the herdr-style merged
+    /// borders: every leaf rect INCLUDES its border cells. Sibling rects
+    /// overlap by exactly one shared divider cell (the second side steals
+    /// one cell from the first side's edge), so the grid renders a single
+    /// line between neighbors. A single leaf stays full-bleed — chrome
+    /// only exists once there is something to divide.
+    pub fn render_layout_chrome(&self, area: Rect) -> Vec<(PaneContent, Rect)> {
+        match self {
+            PaneNode::Leaf(content) => vec![(content.clone(), area)],
+            PaneNode::Split {
+                axis,
+                first,
+                second,
+                ratio,
+            } => {
+                let ratio = (*ratio).clamp(10, 90);
+                let (first_rect, second_rect) = match axis {
+                    SplitAxis::Horizontal => {
+                        let first_width = area.width.saturating_mul(ratio) / 100;
+                        let second_width = area.width.saturating_sub(first_width);
+                        (
+                            Rect {
+                                width: first_width,
+                                ..area
+                            },
+                            Rect {
+                                x: area.x + first_width,
+                                width: second_width,
+                                ..area
+                            },
+                        )
+                    }
+                    SplitAxis::Vertical => {
+                        let first_height = area.height.saturating_mul(ratio) / 100;
+                        let second_height = area.height.saturating_sub(first_height);
+                        (
+                            Rect {
+                                height: first_height,
+                                ..area
+                            },
+                            Rect {
+                                y: area.y + first_height,
+                                height: second_height,
+                                ..area
+                            },
+                        )
+                    }
+                };
+                let mut all = first.render_layout_chrome(first_rect);
+                let mut second_leaves = second.render_layout_chrome(second_rect);
+                // Steal the shared divider cell from the first side's edge
+                // so both sides draw their border on the SAME cells. The
+                // steal is skipped when either side is degenerate.
+                let stealable = match axis {
+                    SplitAxis::Horizontal => {
+                        first_rect.width > 0 && second_rect.width > 0 && second_rect.x > 0
+                    }
+                    SplitAxis::Vertical => {
+                        first_rect.height > 0 && second_rect.height > 0 && second_rect.y > 0
+                    }
+                };
+                if stealable {
+                    for ( _, rect) in second_leaves.iter_mut() {
+                        match axis {
+                            SplitAxis::Horizontal if rect.x == second_rect.x => {
+                                rect.x -= 1;
+                                rect.width += 1;
+                            }
+                            SplitAxis::Vertical if rect.y == second_rect.y => {
+                                rect.y -= 1;
+                                rect.height += 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                all.extend(second_leaves);
+                all
+            }
+        }
+    }
+
     /// Drop terminal leaves whose id is no longer live (an attach after a
     /// restart may find fewer sessions). Uses [`Self::close`], so every
     /// removal collapses its split to the surviving sibling and the tree
@@ -314,6 +396,32 @@ mod tests {
         assert_eq!(t2.y, 20);
         // No leaf overlaps the browser column.
         assert!(t1.x >= 50 && t2.x >= 50);
+    }
+
+    #[test]
+    fn chrome_layout_shares_divider_cells_for_merged_borders() {
+        let tree = sample_tree();
+        let layout = tree.render_layout_chrome(area());
+        assert_eq!(layout.len(), 3);
+        let browser = layout
+            .iter()
+            .find(|(c, _)| *c == PaneContent::Browser)
+            .unwrap()
+            .1;
+        let t1 = layout.iter().find(|(c, _)| *c == term("t1")).unwrap().1;
+        let t2 = layout.iter().find(|(c, _)| *c == term("t2")).unwrap().1;
+        // The browser's right border column IS t1/t2's left border column:
+        // one shared divider cell, not a double wall.
+        assert_eq!(browser.x + browser.width - 1, t1.x);
+        assert_eq!(t1.x, t2.x);
+        // t1's bottom border row IS t2's top border row.
+        assert_eq!(t1.y + t1.height - 1, t2.y);
+        // A single leaf stays full-bleed — no chrome to draw.
+        let single = PaneNode::leaf(term("solo"));
+        assert_eq!(
+            single.render_layout_chrome(area()),
+            vec![(term("solo"), area())]
+        );
     }
 
     #[test]

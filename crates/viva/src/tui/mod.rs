@@ -29,8 +29,10 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use crate::foundation::error::OfficeResult;
 
+pub mod chrome;
 pub mod conversations;
 pub mod layout;
+pub mod theme;
 pub mod workbench;
 
 // ---------------------------------------------------------------------------
