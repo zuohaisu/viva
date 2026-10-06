@@ -106,7 +106,7 @@ Rules enforced by `MigrationRegistry::freeze`:
 | --- | --- | --- |
 | `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` | **V01 (this issue)** | composition/shared root → V07 (lane A); install/release → V13 |
 | `crates/viva/src/foundation/` | V01; changes via coordinated contract updates | same handover |
-| `.github/workflows/rust.yml` | V01 | V13 (release builds) |
+| `.github/workflows/rust.yml` | V01 | V13 (release builds); merged into `ci.yml` (2026-10) |
 | Dependency additions | queued as small change requests — no parallel lockfile rewrites | — |
 
 Toolchain: `stable` channel via `rust-toolchain.toml`; crates declare

@@ -39,7 +39,7 @@ Status: **已退役（Rust 是唯一 `viva` 入口）** · 2026-09-28
 
 ## 4. 发行（Rust 成为产品）
 
-- CI 拆分：`rust.yml`（fmt/clippy/test）+ `ci.yml`（仅验收工具 pytest）+ `release.yml`（tag 触发，macOS arm64/Intel 双产物 + 真实启动 smoke + tar.gz/sha256 + GitHub Release）。
+- CI：单一 `ci.yml`（`rust`：fmt/clippy/test，`acceptance-tools`：pytest，`pi-extension`：tsc/node:test；2026-10 由原 `rust.yml` + `ci.yml` 合并，去掉 paths 过滤以便未来启用 required checks）+ `release.yml`（tag 触发，macOS arm64/Intel 双产物 + 真实启动 smoke + tar.gz/sha256 + GitHub Release）。
 - 干净机器安装：解包 release 产物即可运行 `./viva`（无 Rust 工具链要求）；或 `cargo install --path crates/viva`。
 - 外部依赖如实声明（README §安装）：git（必需，worktree/事实查询）、gh（可选，GitHub 证据）、Pi（可选，成员对话宿主）、模型 CLI 凭证（自备，Viva 不存储凭证）。
 
