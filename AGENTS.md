@@ -199,20 +199,28 @@ then through a pull request and a merge into the remote default branch.
   the remote default branch, publish a new version of `@zuohaisu/viva` and its
   platform packages as part of that task's delivery. Routine patch releases
   do not require a separate request from Haisu. A merged PR alone is not a
-  completed release. This rule does **not** authorize an agent to merge or
-  approve its own PR, push a protected branch, or bypass release checks.
+  completed release. There is deliberately no batching mode: Haisu's merge is
+  the release trigger, and release timing is controlled by when PRs get
+  merged, not by a separate scheduling decision — release-per-merge is
+  one rule with no exceptions. Documentation- and process-only merges
+  (charter edits, Wiki notes) are the one boundary: they do not consume a
+  version number and ride the next release's notes (precedent: PR #68).
+  This rule does **not** authorize an agent to merge or approve its own PR,
+  push a protected branch, or bypass release checks.
 - **Without Haisu's explicit instruction, change only the third (patch)
   component of `major.minor.patch`.** Preserve the first two components and
   increment the patch number: on the current `0.3.x` line, `0.3.0 → 0.3.1 →
   0.3.2`. Moving to `0.4.0`, `1.0.0`, or any other major/minor line requires
   Haisu to explicitly authorize that version change; a new feature, breaking
   change, milestone, or an agent's SemVer judgment is not that authorization.
-- Before merge, include the version bump in the task's isolated worktree/PR
-  and keep `crates/viva/Cargo.toml` and the Viva entry in `Cargo.lock` aligned.
-  Check the latest remote default branch, release tags, and npm versions;
-  choose the next unused patch on the authorized major/minor line and
-  re-check for concurrent releases before tagging. Never reuse, overwrite,
-  or force-update a released version or tag.
+- **One PR carries its own version bump — never open a version-prep PR.**
+  The delivery PR includes the bump in its isolated worktree: keep
+  `crates/viva/Cargo.toml` and the Viva entry in `Cargo.lock` aligned, and
+  branch off the latest `origin/main` so the bump inherits whatever the last
+  release already set. Check the latest remote default branch, release tags,
+  and npm versions; choose the next unused patch on the authorized major/minor
+  line and re-check for concurrent releases before tagging. Never reuse,
+  overwrite, or force-update a released version or tag.
 - Publish **only after merge**, from the validated merged source, using the
   existing `v<version>` tag flow in `.github/workflows/release.yml` and
   `packaging/npm/README.md`. Tag, binary, npm wrapper, platform package, and
