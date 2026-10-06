@@ -46,6 +46,16 @@ fn run(args: &[String]) -> OfficeResult<()> {
             | "stop-terminal" | "result" | "shutdown" | "pause" | "resume" | "brief"
             | "create-task" | "create-project" | "grant" | "handoff",
         ) => cmd_office(args),
+        Some("workspace") => cmd_workspace(args.get(1..).unwrap_or(&[])),
+        Some("open") => {
+            cmd_workspace(&[
+                "open".into(),
+                args.get(1)
+                    .cloned()
+                    .ok_or_else(|| OfficeError::Validation("open needs a path".into()))?,
+            ])?;
+            cmd_workbench()
+        }
         Some("terminal") => cmd_terminal(args.get(1..).unwrap_or(&[])),
         Some("agent") => cmd_agent(args.get(1..).unwrap_or(&[])),
         Some("events") => cmd_events(args.get(1..).unwrap_or(&[])),
@@ -2105,6 +2115,40 @@ fn write_private_export_json(
     }
     let file = options.open(path)?;
     serde_json::to_writer_pretty(file, value)?;
+    Ok(())
+}
+
+fn cmd_workspace(args: &[String]) -> OfficeResult<()> {
+    let home = viva_home(None);
+    let mut client = viva::office::OfficeClient::ensure_server(&home)?;
+    let action = args
+        .first()
+        .map(String::as_str)
+        .unwrap_or("list")
+        .to_string();
+    let mut value = args.get(1).cloned();
+    if matches!(action.as_str(), "open" | "add" | "save") {
+        if let Some(v) = &value {
+            let p = std::path::Path::new(v);
+            if !p.is_absolute() {
+                value = Some(std::env::current_dir()?.join(p).display().to_string());
+            }
+        }
+    }
+    let project_id = if action == "remove" {
+        value.take()
+    } else {
+        None
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&client.call(viva::office::OfficeRequestKind::Workspace {
+            action,
+            value,
+            project_id
+        })?)
+        .unwrap()
+    );
     Ok(())
 }
 

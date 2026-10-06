@@ -430,7 +430,7 @@ impl TerminalGuard {
     /// Enter the alternate screen with raw mode enabled.
     pub fn enter() -> OfficeResult<Self> {
         use ratatui::crossterm::ExecutableCommand as _;
-        use ratatui::crossterm::event::EnableMouseCapture;
+        use ratatui::crossterm::event::{EnableBracketedPaste, EnableMouseCapture};
         use ratatui::crossterm::terminal::{self as ct, EnterAlternateScreen};
         ct::enable_raw_mode().map_err(|e| {
             crate::foundation::OfficeError::Io(std::io::Error::other(e.to_string()))
@@ -438,6 +438,7 @@ impl TerminalGuard {
         let mut out = std::io::stdout();
         let _ = out.execute(EnterAlternateScreen);
         let _ = out.execute(EnableMouseCapture);
+        let _ = out.execute(EnableBracketedPaste);
         Ok(Self)
     }
 }
@@ -446,11 +447,12 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         use ratatui::crossterm::ExecutableCommand as _;
-        use ratatui::crossterm::event::DisableMouseCapture;
+        use ratatui::crossterm::event::{DisableBracketedPaste, DisableMouseCapture};
         use ratatui::crossterm::terminal::{self as ct, LeaveAlternateScreen};
         let mut out = std::io::stdout();
         let _ = out.execute(LeaveAlternateScreen);
         let _ = out.execute(DisableMouseCapture);
+        let _ = out.execute(DisableBracketedPaste);
         let _ = ct::disable_raw_mode();
     }
 }

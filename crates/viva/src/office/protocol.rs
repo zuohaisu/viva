@@ -28,7 +28,7 @@ use crate::foundation::error::{OfficeError, OfficeResult};
 /// per-request grant field; client and server ship in one binary.
 pub const PROTOCOL_VERSION: u32 = 2;
 /// Hard bound on one framed message (request or response), in bytes.
-pub const MAX_MESSAGE_BYTES: usize = 256 * 1024;
+pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Per-read timeout on the socket; a silent peer cannot hold a thread.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -78,6 +78,11 @@ pub enum OfficeRequestKind {
     TerminalSnapshot {
         terminal_id: String,
     },
+    /// Bounded host scrollback viewport, independent of live screen state.
+    TerminalViewport {
+        terminal_id: String,
+        scrollback: usize,
+    },
     /// Write bytes to one terminal's stdin.
     TerminalInput {
         terminal_id: String,
@@ -114,6 +119,14 @@ pub enum OfficeRequestKind {
     /// The workbench projection: projects, worktrees (+real dirty state),
     /// tasks, terminals (+live state) and needs-attention markers.
     WorkbenchView,
+    /// Owner-only local composition changes. No grants or execution changes.
+    Workspace {
+        action: String,
+        #[serde(default)]
+        value: Option<String>,
+        #[serde(default)]
+        project_id: Option<String>,
+    },
     /// The real bounded diff of one worktree against HEAD.
     WorkbenchDiff {
         worktree_id: String,
@@ -337,7 +350,10 @@ pub fn read_message_within(
     read_timeout: Duration,
 ) -> OfficeResult<String> {
     stream.set_read_timeout(Some(read_timeout))?;
-    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut reader = BufReader::new(std::io::Read::take(
+        stream.try_clone()?,
+        (MAX_MESSAGE_BYTES + 1) as u64,
+    ));
     let mut line = String::new();
     let n = reader.read_line(&mut line)?;
     if n == 0 {

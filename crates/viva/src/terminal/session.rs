@@ -26,6 +26,12 @@
 //! recorded start marker's pid and the exit STATUS is honestly unobservable
 //! (code `None`) — the handoff manifest carries the old session's
 //! scrollback as history so the pane keeps its past above the live grid.
+//! Byte-boundary preservation: the manifest's screens are taken only AFTER
+//! the old reader has stopped, and the reader's bounded raw tail supplies
+//! any trailing unfinished escape/UTF-8 bytes
+//! ([`TerminalHandle::pending_tail`]) that the parser parks privately —
+//! the adopted parser resumes mid-sequence instead of rendering the
+//! continuation as stray text.
 
 use std::io::Read as _;
 use std::io::Write as _;
@@ -49,6 +55,12 @@ use crate::terminal::pty::{OwnedMaster, spawn_child};
 pub const SCROLLBACK_LINES: usize = 2_000;
 /// Read-chunk size for the reader thread.
 const READ_CHUNK: usize = 8 * 1024;
+/// Bound of the raw-output tail ring kept for live handoff (issue #45):
+/// the parser parks in-progress sequence bytes in private state, so this
+/// ring is where [`TerminalHandle::pending_tail`] reads them back. An
+/// unfinished sequence longer than the bound is best-effort truncated
+/// (see [`super::screen::unfinished_tail_len`]).
+const TAIL_BOUND: usize = 64 * 1024;
 
 // ---------------------------------------------------------------------------
 // Spec and results
@@ -95,9 +107,14 @@ impl TerminalSpec {
                 self.cwd.display()
             )));
         }
-        if self.cols == 0 || self.rows == 0 {
+        if self.cols == 0
+            || self.rows == 0
+            || self.cols > 512
+            || self.rows > 256
+            || u32::from(self.cols) * u32::from(self.rows) > 16384
+        {
             return Err(OfficeError::Validation(
-                "terminal size must be at least 1x1".into(),
+                "terminal size must be 1..512 columns, 1..256 rows and at most 16384 cells".into(),
             ));
         }
         Ok(())
@@ -127,6 +144,8 @@ pub enum ExitVia {
 /// scrollback window, and the visible bounds metrics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSnapshot {
+    #[serde(default)]
+    pub screen: Option<super::screen::ScreenView>,
     pub cols: u16,
     pub rows: u16,
     /// Live grid contents, top to bottom.
@@ -262,7 +281,7 @@ struct SessionCore {
 }
 
 struct SessionShared {
-    parser: Mutex<Parser>,
+    parser: Mutex<Parser<super::screen::Replies>>,
     writer: Mutex<Box<dyn std::io::Write + Send>>,
     core: Mutex<SessionCore>,
     total_output_bytes: AtomicU64,
@@ -270,6 +289,11 @@ struct SessionShared {
     /// History text carried across a live handoff: the old session's
     /// scrollback, shown above the live grid. Empty for spawned sessions.
     history: Vec<String>,
+    /// The bounded raw tail of consumed output (live handoff): the last
+    /// [`TAIL_BOUND`] bytes the reader consumed. The trailing unfinished
+    /// escape/UTF-8 sequence is recovered from it at transfer time —
+    /// vt100 keeps those bytes private inside its state machine.
+    tail: Mutex<Vec<u8>>,
     /// Live handoff (issue #45): set when this server gives the session up.
     /// The reader exits on the next poll tick instead of racing the new
     /// server's reader for the same bytes.
@@ -311,7 +335,12 @@ impl TerminalHandle {
         let reader_fd = master.dup()?;
 
         let shared = Arc::new(SessionShared {
-            parser: Mutex::new(Parser::new(spec.rows, spec.cols, SCROLLBACK_LINES)),
+            parser: Mutex::new(Parser::new_with_callbacks(
+                spec.rows,
+                spec.cols,
+                SCROLLBACK_LINES,
+                super::screen::Replies::default(),
+            )),
             // SAFETY: fresh dup of our own master fd, owned by the writer.
             writer: Mutex::new(Box::new(unsafe { std::fs::File::from_raw_fd(writer_fd) })),
             core: Mutex::new(SessionCore {
@@ -323,6 +352,7 @@ impl TerminalHandle {
             total_output_bytes: AtomicU64::new(0),
             eof_seen: AtomicBool::new(false),
             history: Vec::new(),
+            tail: Mutex::new(Vec::new()),
             reader_detached: AtomicBool::new(false),
             reader_gone: AtomicBool::new(false),
         });
@@ -361,9 +391,38 @@ impl TerminalHandle {
         history: Vec<String>,
         disk_log: Option<Arc<DiskLog>>,
     ) -> OfficeResult<Self> {
+        Self::adopt_with_screen(
+            master_fd,
+            pid,
+            pid_start_marker,
+            cols,
+            rows,
+            history,
+            disk_log,
+            &[],
+            &[],
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn adopt_with_screen(
+        master_fd: std::os::fd::RawFd,
+        pid: u32,
+        pid_start_marker: String,
+        cols: u16,
+        rows: u16,
+        history: Vec<String>,
+        disk_log: Option<Arc<DiskLog>>,
+        screen: &[u8],
+        // `pending`: the old session's trailing unfinished escape/UTF-8
+        // bytes (see [`Self::pending_tail`]). Replayed into the fresh
+        // parser BEFORE the reader starts, so a sequence split by the
+        // transfer is reassembled — its continuation arrives as a
+        // sequence, not text.
+        pending: &[u8],
+    ) -> OfficeResult<Self> {
         if cols == 0 || rows == 0 {
             return Err(OfficeError::Validation(
-                "terminal size must be at least 1x1".into(),
+                "terminal size must be 1..512 columns, 1..256 rows and at most 16384 cells".into(),
             ));
         }
         // SAFETY: the received fd is a valid open master transferred to us;
@@ -372,8 +431,17 @@ impl TerminalHandle {
         let writer_fd = master.dup()?;
         let reader_fd = master.dup()?;
 
+        let mut parser = Parser::new_with_callbacks(
+            rows,
+            cols,
+            SCROLLBACK_LINES,
+            super::screen::Replies::default(),
+        );
+        parser.process(screen);
+        parser.process(pending);
+        parser.callbacks_mut().bytes.clear();
         let shared = Arc::new(SessionShared {
-            parser: Mutex::new(Parser::new(rows, cols, SCROLLBACK_LINES)),
+            parser: Mutex::new(parser),
             // SAFETY: fresh dup of the received master fd.
             writer: Mutex::new(Box::new(unsafe { std::fs::File::from_raw_fd(writer_fd) })),
             core: Mutex::new(SessionCore {
@@ -385,6 +453,11 @@ impl TerminalHandle {
             total_output_bytes: AtomicU64::new(0),
             eof_seen: AtomicBool::new(false),
             history,
+            // Seed the ring with the replayed pending bytes so a LATER
+            // handoff of this adopted session recovers the still-unfinished
+            // sequence whole (the boundary scan replays from Ground, and
+            // this parser received exactly these bytes from Ground too).
+            tail: Mutex::new(pending.to_vec()),
             reader_detached: AtomicBool::new(false),
             reader_gone: AtomicBool::new(false),
         });
@@ -446,17 +519,28 @@ impl TerminalHandle {
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> OfficeResult<()> {
-        if cols == 0 || rows == 0 {
+        if cols == 0
+            || rows == 0
+            || cols > 512
+            || rows > 256
+            || u32::from(cols) * u32::from(rows) > 16384
+        {
             return Err(OfficeError::Validation(
-                "terminal size must be at least 1x1".into(),
+                "terminal size must be 1..512 columns, 1..256 rows and at most 16384 cells".into(),
             ));
         }
-        if let Some(master) = self.master.lock().expect("pty master").as_ref() {
-            master.resize(cols, rows)?;
-        }
-        if let Ok(mut parser) = self.shared.parser.lock() {
-            parser.screen_mut().set_size(rows, cols);
-        }
+        self.master
+            .lock()
+            .expect("pty master")
+            .as_ref()
+            .ok_or_else(|| OfficeError::Validation("terminal has no live PTY master".into()))?
+            .resize(cols, rows)?;
+        self.shared
+            .parser
+            .lock()
+            .expect("pty parser")
+            .screen_mut()
+            .set_size(rows, cols);
         Ok(())
     }
 
@@ -464,6 +548,9 @@ impl TerminalHandle {
     /// temporarily moves the emulator's view; the live offset is restored.
     /// Handoff history (if any) leads the scrollback window.
     pub fn snapshot(&self) -> OfficeResult<TerminalSnapshot> {
+        self.snapshot_at(0)
+    }
+    pub fn snapshot_at(&self, offset: usize) -> OfficeResult<TerminalSnapshot> {
         let mut parser = self.shared.parser.lock().expect("pty parser");
         let (rows, cols) = parser.screen().size();
         // Total scrollback currently retained by the ring. The ring itself
@@ -479,6 +566,7 @@ impl TerminalHandle {
         let parser_scrollback: Vec<String> = parser
             .screen()
             .rows(0, cols)
+            .take(retained.min(rows as usize))
             .map(|line| line.trim_end().to_string())
             .collect();
         // Live grid.
@@ -488,10 +576,31 @@ impl TerminalHandle {
             .rows(0, cols)
             .map(|line| line.trim_end().to_string())
             .collect();
+        let history = &self.shared.history;
+        let total = (retained + history.len()).min(SCROLLBACK_LINES);
+        let requested = offset.min(total);
+        parser.screen_mut().set_scrollback(requested.min(retained));
+        let actual = parser.screen().scrollback();
+        let mut view = super::screen::project(parser.screen(), requested, total);
+        if requested > actual {
+            // Older handoff manifests carry plain history only. Keep it
+            // accessible as explicit history, without inventing old styles.
+            let count = (requested - actual).min(rows as usize);
+            let start = history.len().saturating_sub(requested - actual);
+            let mut lines: Vec<_> = history
+                .iter()
+                .skip(start)
+                .take(count)
+                .map(|line| vec![super::screen::Run(line.clone(), cols, 0, 0, 0)])
+                .collect();
+            lines.extend(view.lines.into_iter().take(rows as usize - lines.len()));
+            view.lines = lines;
+        }
+        let screen = Some(view);
+        parser.screen_mut().set_scrollback(0);
         drop(parser);
 
-        let history = &self.shared.history;
-        let mut scrollback = history.clone();
+        let mut scrollback = self.shared.history.clone();
         scrollback.extend(parser_scrollback);
         // The bound stays structural: trim the oldest lines.
         let overflow = scrollback.len().saturating_sub(SCROLLBACK_LINES);
@@ -499,6 +608,7 @@ impl TerminalHandle {
             scrollback.drain(..overflow);
         }
         Ok(TerminalSnapshot {
+            screen,
             cols,
             rows,
             visible,
@@ -513,6 +623,26 @@ impl TerminalHandle {
         })
     }
 
+    /// Reconstruct both buffers and styled primary scrollback for live
+    /// handoff. The pure core lives in
+    /// [`screen::formatted_screen_of`]; the live parser/offset and any
+    /// partially received escape sequence remain untouched.
+    pub fn formatted_screen(&self) -> Vec<u8> {
+        let parser = self.shared.parser.lock().expect("pty parser");
+        super::screen::formatted_screen_of(&parser)
+    }
+
+    /// The handoff's pending byte sequence: the trailing unfinished
+    /// escape/UTF-8 bytes the reader consumed but the parser has not yet
+    /// applied (vt100 parks them in private state machine slots, invisible
+    /// to [`Self::formatted_screen`]). Meaningful only AFTER the reader has
+    /// stopped — earlier, bytes consumed after the scan drop out of the
+    /// transfer. Bounded by the raw-tail ring (see [`TAIL_BOUND`]).
+    pub fn pending_tail(&self) -> Vec<u8> {
+        let tail = self.shared.tail.lock().expect("tail ring");
+        let unfinished = super::screen::unfinished_tail_len(&tail);
+        tail[tail.len() - unfinished..].to_vec()
+    }
     pub fn pid(&self) -> Option<u32> {
         self.pid
     }
@@ -749,6 +879,25 @@ fn spawn_reader(
                         .fetch_add(n as u64, Ordering::SeqCst);
                     if let Ok(mut parser) = shared.parser.lock() {
                         parser.process(&buf[..n]);
+                        let replies = std::mem::take(&mut parser.callbacks_mut().bytes);
+                        drop(parser);
+                        if !replies.is_empty() {
+                            if let Ok(mut writer) = shared.writer.lock() {
+                                let _ = writer.write_all(&replies);
+                                let _ = writer.flush();
+                            }
+                        }
+                    }
+                    // Raw-tail ring (live handoff): keep the newest
+                    // TAIL_BOUND consumed bytes for the pending-sequence
+                    // recovery; the oldest drop out beyond the bound.
+                    {
+                        let mut tail = shared.tail.lock().expect("tail ring");
+                        tail.extend_from_slice(&buf[..n]);
+                        let overflow = tail.len().saturating_sub(TAIL_BOUND);
+                        if overflow > 0 {
+                            tail.drain(..overflow);
+                        }
                     }
                     if let Some(log) = &log {
                         log.write_raw(&buf[..n]);

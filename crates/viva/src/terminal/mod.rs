@@ -9,10 +9,12 @@
 //! never touches its neighbors.
 
 mod pty;
+pub mod screen;
 mod session;
 
 pub use session::{
-    DiskLog, ExitVia, SCROLLBACK_LINES, StopPolicy, TerminalExit, TerminalSnapshot, TerminalSpec,
+    DiskLog, ExitVia, SCROLLBACK_LINES, StopPolicy, TerminalExit, TerminalHandle, TerminalSnapshot,
+    TerminalSpec,
 };
 
 use std::sync::{Arc, Mutex};
@@ -21,7 +23,6 @@ use crate::foundation::error::{OfficeError, OfficeResult};
 use crate::foundation::ids::{ExecutionId, TerminalId};
 use crate::foundation::records::{TerminalEventKind, TerminalOwner};
 use crate::foundation::store::Store;
-use session::TerminalHandle;
 
 /// One registered terminal: identity + ownership + the live handle.
 #[derive(Debug, Clone)]
@@ -177,7 +178,11 @@ impl TerminalRegistry {
         history: Vec<String>,
         disk_log: Option<Arc<DiskLog>>,
     ) -> OfficeResult<()> {
-        let handle = Arc::new(TerminalHandle::adopt(
+        self.adopt_with_screen(
+            terminal_id,
+            owner,
+            worktree_id,
+            purpose,
             master_fd,
             pid,
             pid_start_marker,
@@ -185,6 +190,40 @@ impl TerminalRegistry {
             rows,
             history,
             disk_log,
+            &[],
+            &[],
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn adopt_with_screen(
+        &self,
+        terminal_id: TerminalId,
+        owner: TerminalOwner,
+        worktree_id: Option<crate::foundation::ids::WorktreeId>,
+        purpose: String,
+        master_fd: std::os::fd::RawFd,
+        pid: u32,
+        pid_start_marker: String,
+        cols: u16,
+        rows: u16,
+        history: Vec<String>,
+        disk_log: Option<Arc<DiskLog>>,
+        screen: &[u8],
+        // The old session's trailing unfinished escape/UTF-8 bytes, fed to
+        // the adopted parser before its reader starts (see
+        // `TerminalHandle::adopt_with_screen`).
+        pending: &[u8],
+    ) -> OfficeResult<()> {
+        let handle = Arc::new(TerminalHandle::adopt_with_screen(
+            master_fd,
+            pid,
+            pid_start_marker,
+            cols,
+            rows,
+            history,
+            disk_log,
+            screen,
+            pending,
         )?);
         self.sessions.lock().expect("terminal registry").push((
             TerminalEntry {

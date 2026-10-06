@@ -142,6 +142,12 @@ pub fn office_migrations() -> &'static crate::foundation::store::FrozenMigration
                 "workspaces and projects v1",
                 crate::workspaces::WORKSPACES_PROJECTS_V1_SQL,
             );
+        let registry = registry.register(
+            crate::foundation::store::DOMAIN_WORKSPACES_PROJECTS,
+            2,
+            "workspace compositions and discovered checkouts",
+            crate::workspaces::navigation::V2_SQL,
+        );
         let registry = crate::tasks::register_migrations(registry);
         let registry = crate::authority::register_migrations(registry);
         let registry = crate::git::worktrees::register_migrations(registry);
@@ -187,6 +193,7 @@ pub struct OfficeShared {
     /// Agent status board (S4): controlled reports (authoritative) and
     /// screen/process observations (auxiliary), kept per source.
     pub agent_board: crate::agents::AgentStatusBoard,
+    agent_processes: Mutex<std::collections::HashMap<String, crate::agents::ProcessAgent>>,
     /// Paused (S6): no NEW dispatch, no maintenance cycles; running
     /// executions are untouched. Owner-controlled, explicitly.
     pub paused: AtomicBool,
@@ -287,6 +294,7 @@ impl OfficeHost {
             transferred: AtomicBool::new(false),
             handoff_listener: Mutex::new(None),
             agent_board: crate::agents::AgentStatusBoard::new(),
+            agent_processes: Mutex::new(std::collections::HashMap::new()),
             paused: AtomicBool::new(persisted_pause),
             pr_cache: Mutex::new(std::collections::HashMap::new()),
             last_sync: Mutex::new(None),
@@ -750,6 +758,20 @@ fn handle_request(
             worktree_id.as_deref(),
         ),
         OfficeRequestKind::TerminalList => terminal_list(&shared),
+        OfficeRequestKind::TerminalViewport {
+            terminal_id,
+            scrollback,
+        } => {
+            let id = TerminalId::from_str(terminal_id)?;
+            let handle = shared
+                .terminals
+                .handle(&id)?
+                .ok_or_else(|| OfficeError::NotFound {
+                    entity: "terminal",
+                    id: terminal_id.clone(),
+                })?;
+            Ok(serde_json::to_value(handle.snapshot_at(*scrollback)?)?)
+        }
         OfficeRequestKind::TerminalSnapshot { terminal_id } => {
             terminal_snapshot(&shared, terminal_id)
         }
@@ -783,6 +805,60 @@ fn handle_request(
             cols,
             rows,
         } => terminal_resize(&shared, terminal_id, *cols, *rows),
+        OfficeRequestKind::Workspace {
+            action,
+            value,
+            project_id,
+        } => {
+            let store = shared.store.lock().expect("office store");
+            let nav = crate::workspaces::navigation::Navigation { store: &store };
+            let required = || {
+                value
+                    .as_deref()
+                    .ok_or_else(|| OfficeError::Validation("workspace action needs value".into()))
+            };
+            let id = match action.as_str() {
+                "open" => Some(nav.open(Path::new(required()?))?),
+                "new" => Some(nav.create(required()?)?),
+                "select" => {
+                    nav.select(required()?)?;
+                    nav.selected()?
+                }
+                "add" => {
+                    let id = nav.selected()?.ok_or_else(|| {
+                        OfficeError::Validation("select a workspace first".into())
+                    })?;
+                    nav.add(&id, serde_json::json!({"path":required()?}), Path::new("/"))?;
+                    Some(id)
+                }
+                "remove" => {
+                    let id = nav.selected()?.ok_or_else(|| {
+                        OfficeError::Validation("select a workspace first".into())
+                    })?;
+                    nav.remove(
+                        &id,
+                        project_id.as_deref().ok_or_else(|| {
+                            OfficeError::Validation("remove needs project_id".into())
+                        })?,
+                    )?;
+                    Some(id)
+                }
+                "save" => {
+                    let id = nav.selected()?.ok_or_else(|| {
+                        OfficeError::Validation("select a workspace first".into())
+                    })?;
+                    nav.save_as(&id, Path::new(required()?))?;
+                    Some(id)
+                }
+                "list" => nav.selected()?,
+                _ => {
+                    return Err(OfficeError::Validation(
+                        "workspace action: open | new | select | add | remove | save | list".into(),
+                    ));
+                }
+            };
+            Ok(serde_json::json!({"workspace_id":id,"workspaces":nav.list()?}))
+        }
         OfficeRequestKind::WorkbenchView => workbench_view(Arc::clone(&shared)),
         OfficeRequestKind::WorkbenchDiff { worktree_id } => workbench_diff(&shared, worktree_id),
         OfficeRequestKind::WorkbenchLayout { layout_json } => {
@@ -890,6 +966,9 @@ fn is_member_gated_kind(kind: &OfficeRequestKind) -> bool {
     matches!(
         kind,
         OfficeRequestKind::Dispatch { .. }
+            | OfficeRequestKind::Workspace { .. }
+            | OfficeRequestKind::WorkbenchLayout { .. }
+            | OfficeRequestKind::TerminalOpenInWorktree { .. }
             | OfficeRequestKind::TerminalCreate { .. }
             | OfficeRequestKind::TerminalInput { .. }
             | OfficeRequestKind::TerminalResize { .. }
@@ -986,6 +1065,8 @@ fn authorize_socket_request(shared: &OfficeShared, request: &OfficeRequest) -> O
         if matches!(
             request.kind,
             OfficeRequestKind::Shutdown { .. }
+                | OfficeRequestKind::Workspace { .. }
+                | OfficeRequestKind::WorkbenchLayout { .. }
                 | OfficeRequestKind::Pause
                 | OfficeRequestKind::Resume
                 | OfficeRequestKind::SetAutoPull { .. }
@@ -995,7 +1076,7 @@ fn authorize_socket_request(shared: &OfficeShared, request: &OfficeRequest) -> O
             return Err(audit_grant_denial(
                 shared,
                 request,
-                "shutdown/pause/resume/auto-pull and recovery-plan changes are owner \
+                "workspace/layout, shutdown/pause/resume/auto-pull and recovery-plan changes are owner \
                  actions; member grants cannot carry them",
             ));
         }
@@ -1134,22 +1215,56 @@ fn workbench_view(shared: Arc<OfficeShared>) -> OfficeResult<serde_json::Value> 
     let store = shared.store.lock().expect("office store");
     let mut model = crate::tui::workbench::assemble_view(&store, &shared.terminals)?;
 
-    // S4 sweep: for every live terminal, refresh the AUXILIARY screen
-    // observation (display-only) and project all sources onto the rows.
+    // Process identification is independent of screen text and refreshed for
+    // shell → agent → shell. A single ps snapshot serves all terminals.
+    let process_table = crate::agents::ProcessTable::capture().ok();
+    let mut incarnations = shared.agent_processes.lock().expect("agent incarnations");
     for row in &mut model.terminals {
-        if let Ok(Some(handle)) = shared.terminals.handle(
-            &crate::foundation::ids::TerminalId::from_str(&row.terminal_id).expect("row id"),
-        ) {
-            if handle.try_wait().ok().flatten().is_none() {
-                if let Ok(snapshot) = handle.snapshot() {
+        let handle = shared
+            .terminals
+            .handle(&TerminalId::from_str(&row.terminal_id)?)
+            .ok()
+            .flatten();
+        if row.live == Some(true) {
+            if let Some(table) = &process_table {
+                let current = table.identify(handle.as_ref().and_then(|h| h.pid()));
+                let previous = incarnations.get(&row.terminal_id).cloned();
+                if previous.is_some() && previous != current {
+                    shared.agent_board.clear(&row.terminal_id);
+                }
+                shared
+                    .agent_board
+                    .clear_source(&row.terminal_id, crate::agents::StatusSource::ProcessTree);
+                shared.agent_board.clear_source(
+                    &row.terminal_id,
+                    crate::agents::StatusSource::ScreenInference,
+                );
+                if let Some(found) = current {
+                    shared
+                        .agent_board
+                        .observe(crate::agents::AgentStatusRecord {
+                            terminal_id: row.terminal_id.clone(),
+                            agent: found.agent.clone(),
+                            status: crate::agents::AgentStatus::Unknown,
+                            source: crate::agents::StatusSource::ProcessTree,
+                            detail: format!("process {} started {}", found.pid, found.started),
+                            updated_at: utc_now(),
+                        });
+                    incarnations.insert(row.terminal_id.clone(), found);
+                } else {
+                    incarnations.remove(&row.terminal_id);
+                }
+            }
+            let records = shared.agent_board.project(&row.terminal_id);
+            if let (Some(agent), Some(h)) = (
+                records
+                    .first()
+                    .map(|r| r.agent.clone())
+                    .or_else(|| (row.owner_label == "agent_cli").then(|| "unknown".into())),
+                handle,
+            ) {
+                if let Ok(snapshot) = h.snapshot() {
                     if let Some(status) = crate::agents::infer_from_screen(&snapshot) {
-                        let agent = shared
-                            .agent_board
-                            .project(&row.terminal_id)
-                            .into_iter()
-                            .find(|r| r.source == crate::agents::StatusSource::ProcessTree)
-                            .map(|r| r.agent)
-                            .unwrap_or_else(|| "unknown".into());
                         shared
                             .agent_board
                             .observe(crate::agents::AgentStatusRecord {
@@ -1162,10 +1277,55 @@ fn workbench_view(shared: Arc<OfficeShared>) -> OfficeResult<serde_json::Value> 
                             });
                     }
                 }
-            };
-        };
+            }
+        }
         row.agent_status = shared.agent_board.project(&row.terminal_id);
+        if !row.agent_status.is_empty() {
+            let stale = row.agent_status.iter().any(|r| {
+                r.source == crate::agents::StatusSource::ControlledReport
+                    && crate::agents::report_stale(r)
+            });
+            let worktree = row
+                .worktree_id
+                .as_ref()
+                .and_then(|id| model.worktrees.iter().find(|w| &w.worktree_id == id));
+            let in_workspace = model.workspace_id.is_none() || worktree.is_some();
+            let location = worktree
+                .map(|w| {
+                    let project = model
+                        .projects
+                        .iter()
+                        .find(|p| p.project_id == w.project_id)
+                        .map(|p| p.name.as_str())
+                        .unwrap_or("project");
+                    format!("{project} / {}", w.branch)
+                })
+                .unwrap_or_else(|| {
+                    row.worktree_id
+                        .clone()
+                        .unwrap_or_else(|| "floating / directory".into())
+                });
+            model.agents.push(crate::agents::AgentSessionRow {
+                terminal_id: row.terminal_id.clone(),
+                tool: row.agent_status[0].agent.clone(),
+                name: row.purpose.clone(),
+                worktree_id: row.worktree_id.clone(),
+                location,
+                live: row.live,
+                records: row.agent_status.clone(),
+                stale,
+                in_workspace,
+            });
+        }
     }
+    drop(incarnations);
+    model.agents.sort_by_key(|a| {
+        (
+            !a.needs_attention(),
+            a.location.clone(),
+            a.terminal_id.clone(),
+        )
+    });
 
     // V15-4 switch + note surface on the model. The note falls back to
     // the persisted one after a restart (QA F17).
@@ -1270,6 +1430,7 @@ fn workbench_layout(
             // Must parse: a layout the client cannot restore is junk.
             serde_json::from_str::<serde_json::Value>(json)
                 .map_err(|e| OfficeError::Validation(format!("layout is not valid JSON: {e}")))?;
+            store.connection().execute("INSERT OR IGNORE INTO office_settings(key,value) SELECT 'workbench_layout_legacy',value FROM office_settings WHERE key='workbench_layout' AND json_extract(value,'$.version') IS NULL",[])?;
             store.connection().execute(
                 "INSERT INTO office_settings(key, value) VALUES ('workbench_layout', ?1)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1316,33 +1477,54 @@ fn terminal_open_in_worktree(
     shared: &OfficeShared,
     worktree_id: &str,
 ) -> OfficeResult<serde_json::Value> {
+    if let Some(pid) = worktree_id.strip_prefix("directory:") {
+        let store = shared.store.lock().expect("office store");
+        let project = crate::projects::ProjectRegistry::new(&store)
+            .require(&crate::foundation::ids::ProjectId::from_str(pid)?)?;
+        let spec = crate::terminal::TerminalSpec::new(
+            vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())],
+            project.repo_path,
+        )?;
+        let (id, handle) = shared.terminals.spawn(
+            spec,
+            TerminalOwner::UserShell,
+            None,
+            "directory shell",
+            None,
+            Some(&store),
+        )?;
+        return Ok(serde_json::json!({"terminal_id":id.to_string(),"pid":handle.pid()}));
+    }
     let worktree_id = WorktreeId::from_str(worktree_id)?;
     let store = shared.store.lock().expect("office store");
     let service = crate::git::worktrees::WorktreeService::new(
         &store,
         crate::git::worktrees::ProtectedRefs::new(vec![]),
     );
-    let record = service
-        .record(&worktree_id)?
-        .ok_or_else(|| OfficeError::NotFound {
-            entity: "worktree",
-            id: worktree_id.to_string(),
-        })?;
+    let (path, branch) = match service.record(&worktree_id)? {
+        Some(r) => (r.worktree_path, r.branch),
+        None => crate::workspaces::navigation::Navigation { store: &store }
+            .checkout(worktree_id.as_str())?
+            .ok_or_else(|| OfficeError::NotFound {
+                entity: "worktree",
+                id: worktree_id.to_string(),
+            })?,
+    };
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let spec = crate::terminal::TerminalSpec::new(vec![shell], record.worktree_path.clone())?;
+    let spec = crate::terminal::TerminalSpec::new(vec![shell], path.clone())?;
     let (terminal_id, handle) = shared.terminals.spawn(
         spec,
         TerminalOwner::UserShell,
         Some(worktree_id),
-        format!("shell · {}", record.branch),
+        format!("shell · {}", branch),
         None,
         Some(&store),
     )?;
     Ok(serde_json::json!({
         "terminal_id": terminal_id.to_string(),
         "pid": handle.pid(),
-        "cwd": record.worktree_path.display().to_string(),
-        "branch": record.branch,
+        "cwd": path.display().to_string(),
+        "branch": branch,
     }))
 }
 
@@ -1897,12 +2079,12 @@ fn perform_handoff(
     listener: UnixListener,
     handoff_path: std::path::PathBuf,
 ) {
-    // Collect BEFORE accepting so the sender-side snapshot is one
-    // consistent set. Hoisted: the failure branch needs `entries` to put
-    // every reader back.
-    let collect = (|| -> OfficeResult<(Vec<HandoffEntry>, Vec<RawFd>)> {
-        let mut entries = Vec::new();
-        let mut fds = Vec::new();
+    // Pass 1 (readers still live): liveness + one master-fd duplicate per
+    // terminal — nothing is read or frozen yet, so a failure here leaves
+    // the host byte-for-byte as it was. `collected` stays alive for the
+    // failure branch, which needs every id to put the readers back.
+    let collect = (|| -> OfficeResult<Vec<(crate::terminal::TerminalEntry, RawFd, std::sync::Arc<crate::terminal::TerminalHandle>)>> {
+        let mut collected = Vec::new();
         for entry in shared.terminals.list() {
             let handle = match shared.terminals.handle(&entry.terminal_id).ok().flatten() {
                 Some(handle) => handle,
@@ -1915,24 +2097,12 @@ fn perform_handoff(
             let Some(fd) = handle.master_fd_for_transfer()? else {
                 continue;
             };
-            let snapshot = handle.snapshot()?;
-            entries.push(HandoffEntry {
-                terminal_id: entry.terminal_id.to_string(),
-                owner: owner_label(&entry.owner),
-                worktree_id: entry.worktree_id.map(|w| w.to_string()),
-                purpose: entry.purpose,
-                pid: handle.pid().unwrap_or(0),
-                pid_start_marker: handle.pid_start_marker.clone(),
-                cols: snapshot.cols,
-                rows: snapshot.rows,
-                history: snapshot.scrollback,
-            });
-            fds.push(fd);
+            collected.push((entry, fd, handle));
         }
-        Ok((entries, fds))
+        Ok(collected)
     })();
-    let (entries, fds) = match collect {
-        Ok(pair) => pair,
+    let collected = match collect {
+        Ok(list) => list,
         Err(err) => {
             let store = shared.store.lock().expect("office store");
             let _ = record_recovery(
@@ -1949,17 +2119,41 @@ fn perform_handoff(
         }
     };
     let outcome = (|| -> OfficeResult<usize> {
-        // Stop OUR readers first: two readers on one master would split
-        // the child's bytes between the old and the new server. The ack is
-        // sent only after every old reader has exited.
-        for (entry, _) in entries.iter().zip(&fds) {
-            if let Ok(Some(handle)) = shared
-                .terminals
-                .handle(&TerminalId::from_str(&entry.terminal_id).expect("entry id"))
-            {
-                handle.detach_reader();
-            }
+        // Stop OUR readers FIRST, before any screen is taken — not only
+        // because two readers on one master would split the child's bytes
+        // between the old and the new server, but because the manifest's
+        // screens must include every byte consumed up to this point: a
+        // snapshot taken while the reader still runs loses whatever it
+        // consumes in between, and a read that happens to stop mid-sequence
+        // would leave the adopted parser rendering the sequence's
+        // continuation as plain text (issue #45 handoff QA).
+        for (_, _, handle) in &collected {
+            handle.detach_reader();
         }
+
+        // Pass 2 (readers stopped): the transfer manifest. Stable by
+        // construction — nobody consumes the masters anymore, so these
+        // screens carry every byte the old sessions ever consumed, and the
+        // pending tails carry the trailing bytes the parsers have not yet
+        // applied.
+        let mut entries = Vec::new();
+        for (entry, _, handle) in &collected {
+            let snapshot = handle.snapshot()?;
+            entries.push(HandoffEntry {
+                terminal_id: entry.terminal_id.to_string(),
+                owner: owner_label(&entry.owner),
+                worktree_id: entry.worktree_id.as_ref().map(|w| w.to_string()),
+                purpose: entry.purpose.clone(),
+                pid: handle.pid().unwrap_or(0),
+                pid_start_marker: handle.pid_start_marker.clone(),
+                cols: snapshot.cols,
+                rows: snapshot.rows,
+                screen_hex: hex_encode(&handle.formatted_screen()),
+                pending_hex: hex_encode(&handle.pending_tail()),
+                history: Vec::new(), // styled replay includes the full primary ring
+            });
+        }
+        let fds: Vec<RawFd> = collected.iter().map(|(_, fd, _)| *fd).collect();
 
         // Wait, bounded, for the resumed server to connect. On timeout the
         // dups are closed and nothing happened.
@@ -2036,11 +2230,8 @@ fn perform_handoff(
             // with live output. A reader that cannot return names its
             // terminal as degraded (input works, output frozen until
             // restart) instead of pretending.
-            for entry in &entries {
-                let Ok(terminal_id) = TerminalId::from_str(&entry.terminal_id) else {
-                    continue;
-                };
-                if let Ok(Some(handle)) = shared.terminals.handle(&terminal_id) {
+            for (entry, _, _) in &collected {
+                if let Ok(Some(handle)) = shared.terminals.handle(&entry.terminal_id) {
                     if let Err(reattach_err) = handle.reattach_reader() {
                         let store = shared.store.lock().expect("office store");
                         let _ = record_recovery(
@@ -2133,7 +2324,7 @@ pub fn resume_server(home: &Path) -> OfficeResult<()> {
                     .as_deref()
                     .map(WorktreeId::from_str)
                     .transpose()?;
-                shared.terminals.adopt(
+                shared.terminals.adopt_with_screen(
                     terminal_id,
                     owner,
                     worktree,
@@ -2145,6 +2336,8 @@ pub fn resume_server(home: &Path) -> OfficeResult<()> {
                     entry.rows,
                     entry.history.clone(),
                     None,
+                    &hex_decode(&entry.screen_hex)?,
+                    &hex_decode(&entry.pending_hex)?,
                 )
             })();
             if let Err(err) = adopt {
@@ -3878,6 +4071,34 @@ mod server_split_tests {
             .call_request(request)
             .expect_err("member mutation without grant must be denied");
         assert!(err.to_string().contains("denied"), "got: {err}");
+        for kind in [
+            OfficeRequestKind::Workspace {
+                action: "new".into(),
+                value: Some("must not exist".into()),
+                project_id: None,
+            },
+            OfficeRequestKind::WorkbenchLayout {
+                layout_json: Some("{}".into()),
+            },
+            OfficeRequestKind::TerminalOpenInWorktree {
+                worktree_id: "wt-00000000000000000000000000000000".into(),
+            },
+        ] {
+            let mut request = new_request(kind);
+            request.member = Some("member-00000000-0000-0000-0000-000000000000".into());
+            let err = client
+                .call_request(request)
+                .expect_err("new navigation controls require owner/grant authority");
+            assert!(err.to_string().contains("denied"), "{err}");
+        }
+        let model = client.call(OfficeRequestKind::WorkbenchView).unwrap();
+        assert!(model["workspaces"].as_array().unwrap().is_empty());
+        assert!(
+            client
+                .call(OfficeRequestKind::WorkbenchLayout { layout_json: None })
+                .unwrap()["layout"]
+                .is_null()
+        );
         host.shutdown();
     }
 
@@ -4270,6 +4491,160 @@ mod s3_handoff_tests {
         }
 
         // Clean teardown: the resumed host shuts down like any other.
+        client2
+            .call(OfficeRequestKind::Shutdown { close_policy: None })
+            .expect("shutdown");
+        drop(client2);
+        {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while socket.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        resume_thread
+            .join()
+            .expect("resumed host thread joins")
+            .expect("resumed host ends cleanly");
+        drop(dir);
+    }
+
+    /// The handoff byte-boundary regression (issue #45 QA): the transfer
+    /// happens while the child's output is parked MID-ESCAPE-SEQUENCE —
+    /// `\x1b[31` written, `m` not yet — so the old reader has consumed
+    /// bytes its parser has not applied. The manifest must carry them as
+    /// the pending tail: after the restart the `m` completes the SGR and
+    /// the marker renders RED, instead of the sequence's continuation
+    /// being printed as plain text.
+    #[test]
+    fn live_handoff_reassembles_a_sequence_split_mid_flight() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let host = OfficeHost::open(&home).expect("host");
+        let server = host.serve_background();
+        let socket = home.join(OFFICE_SOCKET_NAME);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !socket.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // The child prints text, then HALF of an SGR, then goes quiet:
+        // any handoff during the quiet window is guaranteed mid-sequence.
+        let mut client = OfficeClient::connect(&home).expect("first client");
+        let created = client
+            .call(OfficeRequestKind::TerminalCreate {
+                argv: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "printf before; printf '\\033[31'; sleep 8; printf 'mRED-MARKER\\n'; sleep 60"
+                        .into(),
+                ],
+                cwd: std::env::temp_dir().to_string_lossy().into(),
+                env: vec![],
+                cols: 80,
+                rows: 24,
+                purpose: "split-sequence handoff".into(),
+                worktree_id: None,
+                owner: "user_shell".into(),
+            })
+            .expect("create");
+        let terminal_id = created
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .expect("terminal id")
+            .to_string();
+        // Wait until BOTH writes are consumed: 6 bytes of "before" + 4
+        // bytes of the half SGR. Quiescent from here until the sleep ends.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            let view = client
+                .call(OfficeRequestKind::TerminalSnapshot {
+                    terminal_id: terminal_id.clone(),
+                })
+                .expect("snapshot");
+            if view.get("total_output_bytes").and_then(|v| v.as_u64()) >= Some(10) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // Restart during the quiet window — the transfer splits the SGR.
+        let response = client
+            .call(OfficeRequestKind::ServerRestart)
+            .expect("restart");
+        assert_eq!(
+            response.get("state").and_then(|v| v.as_str()),
+            Some("handoff_ready")
+        );
+        drop(client);
+        let resume_home = home.clone();
+        let resume_thread = std::thread::spawn(move || resume_server(&resume_home));
+        {
+            let deadline = Instant::now() + Duration::from_secs(45);
+            while socket.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            assert!(
+                !socket.exists(),
+                "the old host never released the control socket — the handoff failed"
+            );
+        }
+        server.join().expect("old host exits cleanly");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut client2 = loop {
+            if let Ok(client) = OfficeClient::connect(&home) {
+                break client;
+            }
+            assert!(Instant::now() < deadline, "the resumed host never answered");
+            std::thread::sleep(Duration::from_millis(100));
+        };
+
+        // The continuation arrives AFTER the adoption (the child's sleep
+        // must outlast the restart dance): `m` completes the transferred
+        // SGR and the marker must render red (palette index 1 → fg 2 in
+        // the projected runs), never as plain "m" text.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let view = client2
+                .call(OfficeRequestKind::TerminalSnapshot {
+                    terminal_id: terminal_id.clone(),
+                })
+                .expect("snapshot after restart");
+            let arrived = format!("{view}").contains("RED-MARKER");
+            let marker_run_red = view
+                .get("screen")
+                .and_then(|s| s.get("lines"))
+                .and_then(|l| l.as_array())
+                .map(|rows| {
+                    rows.iter().any(|row| {
+                        row.as_array()
+                            .map(|runs| {
+                                runs.iter().any(|run| {
+                                    run.get(0)
+                                        .and_then(|t| t.as_str())
+                                        .unwrap_or("")
+                                        .contains("RED-MARKER")
+                                        && run.get(2).and_then(|fg| fg.as_u64()) == Some(2)
+                                })
+                            })
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+            if arrived {
+                assert!(
+                    marker_run_red,
+                    "the marker must carry the transferred red style: {view}"
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the split sequence's continuation never rendered after the restart"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
         client2
             .call(OfficeRequestKind::Shutdown { close_policy: None })
             .expect("shutdown");

@@ -42,6 +42,15 @@ pub struct HandoffEntry {
     /// The old session's scrollback lines (plain text), rendered above the
     /// live grid by the adopted session.
     pub history: Vec<String>,
+    #[serde(default)]
+    pub screen_hex: String,
+    /// Trailing unfinished escape/UTF-8 bytes the old reader consumed but
+    /// its parser had not yet applied — replayed into the adopted parser
+    /// before its own reader starts, so a sequence split by the transfer
+    /// is reassembled. Empty for old senders (serde default) and for tails
+    /// that ended on a sequence boundary.
+    #[serde(default)]
+    pub pending_hex: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -70,6 +79,11 @@ pub fn send_entries(
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     let mut text = serde_json::to_string(manifest)?;
     text.push('\n');
+    if text.len() > 64 * 1024 * 1024 {
+        return Err(OfficeError::Validation(
+            "handoff manifest exceeds 64 MiB; old server stays resident".into(),
+        ));
+    }
     stream.write_all(text.as_bytes())?;
     stream.flush()?;
     for fd in fds {
@@ -146,6 +160,11 @@ pub fn receive_entries(stream: &UnixStream) -> OfficeResult<(HandoffManifest, Ve
             }
             let n = n as usize;
             data.extend_from_slice(&chunk[..n]);
+            if data.len() > 64 * 1024 * 1024 {
+                break Err(OfficeError::Validation(
+                    "handoff manifest exceeds 64 MiB".into(),
+                ));
+            }
             if manifest.is_none() {
                 if let Some(pos) = data.iter().position(|b| *b == b'\n') {
                     let line: Vec<u8> = data.drain(..=pos).collect();
@@ -269,6 +288,9 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 history: vec!["old line".into()],
+                screen_hex: String::new(),
+                // `\x1b[3` — a handoff that stopped mid-SGR (hex: 1b 5b 33).
+                pending_hex: "1b5b33".into(),
             }],
         };
         let fds = [file.as_raw_fd()];
@@ -292,5 +314,15 @@ mod tests {
             .expect("write via received fd");
         drop(file);
         assert_eq!(std::fs::read(&path).expect("read"), b"probe-write");
+    }
+
+    /// A manifest from an OLDER sender (no `pending_hex`) still parses —
+    /// the field defaults to empty, so an upgraded resumed server adopts
+    /// sessions from a pre-update host.
+    #[test]
+    fn manifest_without_pending_hex_parses() {
+        let text = r#"{"protocol":1,"host_id":"h","entries":[{"terminal_id":"t","owner":"user_shell","worktree_id":null,"purpose":"p","pid":1,"pid_start_marker":"pid=1","cols":80,"rows":24,"history":[],"screen_hex":""}]}"#;
+        let manifest: HandoffManifest = serde_json::from_str(text).expect("old manifest");
+        assert_eq!(manifest.entries[0].pending_hex, "");
     }
 }

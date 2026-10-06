@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use crate::foundation::error::{OfficeError, OfficeResult};
 use crate::office::OFFICE_SOCKET_NAME;
 use crate::office::protocol::{
-    OfficeRequest, OfficeRequestKind, OfficeResponse, new_request, round_trip, round_trip_within,
+    OfficeRequest, OfficeRequestKind, OfficeResponse, new_request, round_trip_within,
 };
 
 /// How long `ensure_server` waits for a freshly spawned server to bind its
@@ -34,6 +34,9 @@ const START_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// server handles each connection on its own thread.
 pub struct OfficeClient {
     stream: UnixStream,
+    home: std::path::PathBuf,
+    last_activity: Instant,
+    reconnect: bool,
 }
 
 impl OfficeClient {
@@ -49,7 +52,12 @@ impl OfficeClient {
             )));
         }
         let stream = UnixStream::connect(&socket_path)?;
-        let mut client = Self { stream };
+        let mut client = Self {
+            stream,
+            home: home.to_path_buf(),
+            last_activity: Instant::now(),
+            reconnect: false,
+        };
         // Prove the peer is a healthy host before handing out the session.
         let response = client.call(OfficeRequestKind::Ping)?;
         if response.get("pid").is_none() {
@@ -98,6 +106,27 @@ impl OfficeClient {
         }
     }
 
+    /// A separate socket for background view/input work; never clone a stream
+    /// whose request/response correlation belongs to another thread.
+    pub fn independent(&self) -> OfficeResult<Self> {
+        Self::connect(&self.home)
+    }
+    /// The host bounds an idle connection at 10s. Reconnect BEFORE sending
+    /// after 8s idle. A transport failure marks the socket for the NEXT call;
+    /// it never retries an already sent, possibly applied mutation.
+    fn exchange(
+        &mut self,
+        request: &OfficeRequest,
+        timeout: Duration,
+    ) -> OfficeResult<OfficeResponse> {
+        if self.reconnect || self.last_activity.elapsed() >= Duration::from_secs(8) {
+            *self = Self::connect(&self.home)?;
+        }
+        let result = round_trip_within(&mut self.stream, request, timeout);
+        self.last_activity = Instant::now();
+        self.reconnect = result.is_err();
+        result
+    }
     /// One request → result value, or the server's error text as a
     /// validation error.
     pub fn call(&mut self, kind: OfficeRequestKind) -> OfficeResult<serde_json::Value> {
@@ -108,7 +137,7 @@ impl OfficeClient {
     pub fn call_request(&mut self, request: OfficeRequest) -> OfficeResult<serde_json::Value> {
         let OfficeResponse {
             ok, result, error, ..
-        } = round_trip(&mut self.stream, &request)?;
+        } = self.exchange(&request, crate::office::protocol::IO_TIMEOUT)?;
         if ok {
             Ok(result.unwrap_or(serde_json::Value::Null))
         } else {
@@ -120,7 +149,7 @@ impl OfficeClient {
 
     /// Raw access for callers that need the response envelope (rare).
     pub fn round_trip_raw(&mut self, request: &OfficeRequest) -> OfficeResult<OfficeResponse> {
-        round_trip(&mut self.stream, request)
+        self.exchange(request, crate::office::protocol::IO_TIMEOUT)
     }
 
     /// One request with an explicit read budget. The budget is carried
@@ -144,7 +173,7 @@ impl OfficeClient {
     ) -> OfficeResult<serde_json::Value> {
         let OfficeResponse {
             ok, result, error, ..
-        } = round_trip_within(&mut self.stream, &request, read_timeout)?;
+        } = self.exchange(&request, read_timeout)?;
         if ok {
             Ok(result.unwrap_or(serde_json::Value::Null))
         } else {
@@ -251,5 +280,76 @@ pub fn restart_server_with(home: &Path, server_entry: &Path) -> OfficeResult<u32
             ));
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+    use crate::office::protocol::{read_message, write_message};
+    use std::os::unix::net::UnixListener;
+    #[test]
+    fn expired_idle_socket_reconnects_but_an_ambiguous_mutation_is_never_replayed() {
+        let home = tempfile::tempdir().unwrap();
+        let listener = UnixListener::bind(home.path().join(OFFICE_SOCKET_NAME)).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut first, _) = listener.accept().unwrap();
+            let ping: OfficeRequest =
+                serde_json::from_str(&read_message(&mut first).unwrap()).unwrap();
+            write_message(
+                &mut first,
+                &OfficeResponse::ok(ping.request_id, serde_json::json!({"pid":1})),
+            )
+            .unwrap();
+            // Idle connection is deliberately closed; the next operation must
+            // arrive on a fresh connection rather than the stale fd.
+            drop(first);
+            let (mut second, _) = listener.accept().unwrap();
+            let ping: OfficeRequest =
+                serde_json::from_str(&read_message(&mut second).unwrap()).unwrap();
+            assert!(matches!(ping.kind, OfficeRequestKind::Ping));
+            write_message(
+                &mut second,
+                &OfficeResponse::ok(ping.request_id, serde_json::json!({"pid":1})),
+            )
+            .unwrap();
+            let mutation: OfficeRequest =
+                serde_json::from_str(&read_message(&mut second).unwrap()).unwrap();
+            assert!(matches!(mutation.kind, OfficeRequestKind::Workspace { .. }));
+            drop(second); // applied, but its response was lost
+            let (mut third, _) = listener.accept().unwrap();
+            let ping: OfficeRequest =
+                serde_json::from_str(&read_message(&mut third).unwrap()).unwrap();
+            assert!(matches!(ping.kind, OfficeRequestKind::Ping));
+            write_message(
+                &mut third,
+                &OfficeResponse::ok(ping.request_id, serde_json::json!({"pid":1})),
+            )
+            .unwrap();
+            let request: OfficeRequest =
+                serde_json::from_str(&read_message(&mut third).unwrap()).unwrap();
+            assert!(matches!(request.kind, OfficeRequestKind::Status));
+            write_message(
+                &mut third,
+                &OfficeResponse::ok(request.request_id, serde_json::json!({"safe":true})),
+            )
+            .unwrap();
+        });
+        let mut client = OfficeClient::connect(home.path()).unwrap();
+        client.last_activity = Instant::now() - Duration::from_secs(12);
+        assert!(
+            client
+                .call(OfficeRequestKind::Workspace {
+                    action: "new".into(),
+                    value: Some("once".into()),
+                    project_id: None
+                })
+                .is_err()
+        );
+        assert_eq!(
+            client.call(OfficeRequestKind::Status).unwrap()["safe"],
+            true
+        );
+        worker.join().unwrap();
     }
 }

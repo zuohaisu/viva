@@ -21,11 +21,16 @@
 //! - Quit is a detach: worktree contents and records are left exactly as
 //!   they are, nothing is re-run when the client reattaches.
 
+mod polling;
+pub mod scenes;
+pub mod terminal_view;
+
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
+use scenes::{FLOATING, MAX_SCENES, MAX_TABS, Scene, SceneBook, TabView};
 
 use std::process::Command;
 
@@ -136,6 +141,14 @@ pub struct AttentionMarker {
 /// from the real registries, the client renders it.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorkbenchModel {
+    #[serde(default)]
+    pub agents: Vec<crate::agents::AgentSessionRow>,
+    #[serde(default)]
+    pub workspaces: Vec<crate::workspaces::navigation::WorkspaceRow>,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub workspace_diagnostics: Vec<String>,
     pub projects: Vec<ProjectRow>,
     pub worktrees: Vec<WorktreeRow>,
     pub tasks: Vec<TaskRow>,
@@ -160,6 +173,8 @@ pub enum Focus {
     Tasks,
     /// The `agents` sidebar section: terminals and their agent states.
     Terminals,
+    /// Right-hand pane navigation, independent of sidebar selection.
+    Panes,
 }
 
 /// What one key press decided.
@@ -198,15 +213,30 @@ pub enum WorkbenchAction {
     /// V15-1: open the file browser for a worktree.
     BrowseFiles(String),
     /// V15-1: view one file's diff/content in the panel.
-    ViewFile { worktree_id: String, path: String },
+    ViewFile {
+        worktree_id: String,
+        path: String,
+    },
     /// V15-1: open the viewed file with the system opener.
-    OpenInEditor { full_path: String },
+    OpenInEditor {
+        full_path: String,
+    },
     /// V15-2: release + remove a worktree whose PR is merged.
     CleanupWorktree(String),
     /// V15-3: hand the worktree to the picked agent.
-    HandoffTo { worktree_id: String, agent: String },
+    HandoffTo {
+        worktree_id: String,
+        agent: String,
+    },
     /// V15-4: toggle the auto_pull switch.
     ToggleAutoPull,
+    SelectWorktree(String),
+    NewTab,
+    Workspace {
+        action: String,
+        value: Option<String>,
+        project_id: Option<String>,
+    },
 }
 
 /// An in-progress mouse drag (herdr-parity interaction). A pane-split drag
@@ -319,6 +349,16 @@ pub struct WorkbenchApp {
     /// The last divider click for double-click detection: (when, column,
     /// row). Cleared by any click that is not on a divider.
     last_divider_click: Option<(std::time::Instant, u16, u16)>,
+    workspace_prompt: Option<(String, String)>,
+    scenes: SceneBook,
+    tab_prompt: Option<String>,
+    tab_hits: Vec<(String, Rect)>,
+    terminal_picker: Option<usize>,
+    global_attention: bool,
+    sidebar_hits: Vec<(Focus, usize, Rect)>,
+    mouse_action: Option<WorkbenchAction>,
+    pane_geometry: Vec<(String, Rect)>,
+    scroll_offsets: std::collections::HashMap<String, usize>,
 }
 
 impl WorkbenchApp {
@@ -346,6 +386,16 @@ impl WorkbenchApp {
             sidebar_width: SIDEBAR_WIDTH,
             drag: DragState::None,
             last_divider_click: None,
+            workspace_prompt: None,
+            scenes:SceneBook::default(),
+            tab_prompt:None,
+            tab_hits:vec![],
+            terminal_picker:None,
+            global_attention:false,
+            sidebar_hits:vec![],
+            mouse_action:None,
+            pane_geometry:vec![],
+            scroll_offsets:std::collections::HashMap::new(),
         }
     }
 
@@ -362,6 +412,12 @@ impl WorkbenchApp {
     }
 
     pub fn set_model(&mut self, model: WorkbenchModel) {
+        if !model.workspace_diagnostics.is_empty()
+            && (model.workspace_id != self.model.workspace_id
+                || model.workspace_diagnostics != self.model.workspace_diagnostics)
+        {
+            self.set_status(model.workspace_diagnostics.join(" · "));
+        }
         self.model = model;
         self.clamp_selection();
     }
@@ -382,9 +438,94 @@ impl WorkbenchApp {
     }
 
     pub fn set_snapshot(&mut self, terminal_id: impl Into<String>, snapshot: TerminalSnapshot) {
-        self.snapshots.insert(terminal_id.into(), snapshot);
+        let id = terminal_id.into();
+        if self.terminal_leaves().contains(&id) {
+            self.snapshots.insert(id, snapshot);
+        }
     }
 
+    pub fn visible_geometry(&self) -> &[(String, Rect)] {
+        &self.pane_geometry
+    }
+    pub fn scroll_offset(&self, id: &str) -> usize {
+        self.scroll_offsets.get(id).copied().unwrap_or(0)
+    }
+    fn input_modes(&self) -> crate::terminal::screen::InputModes {
+        self.terminal_mode
+            .as_ref()
+            .and_then(|id| self.snapshots.get(id))
+            .and_then(|s| s.screen.as_ref())
+            .map(|s| s.modes.clone())
+            .unwrap_or_default()
+    }
+    fn scroll_terminal(&mut self, id: String, delta: isize) {
+        let old = self.scroll_offset(&id);
+        let retained = self
+            .snapshots
+            .get(&id)
+            .and_then(|s| s.screen.as_ref())
+            .map(|s| s.retained)
+            .unwrap_or(crate::terminal::SCROLLBACK_LINES);
+        let value = old.saturating_add_signed(delta).min(retained);
+        self.scroll_offsets.insert(id, value);
+    }
+    pub fn on_paste(&mut self, text: &str) -> KeyOutcome {
+        if self.terminal_mode.is_none() {
+            return KeyOutcome::Ignored;
+        }
+        if text.len() > 64 * 1024 {
+            self.set_status("paste exceeds 64 KiB; nothing sent");
+            return KeyOutcome::Handled;
+        }
+        KeyOutcome::Forward(terminal_view::paste(text, &self.input_modes()))
+    }
+    pub fn terminal_mouse(
+        &mut self,
+        event: ratatui::crossterm::event::MouseEvent,
+    ) -> Option<(String, Vec<u8>)> {
+        use ratatui::crossterm::event::{KeyModifiers, MouseEventKind};
+        if self.file_panel.is_some()
+            || self.diff_view.is_some()
+            || self.handoff_picker.is_some()
+            || self.workspace_prompt.is_some()
+            || self.tab_prompt.is_some()
+            || self.terminal_picker.is_some()
+            || !matches!(self.drag, DragState::None)
+        {
+            return None;
+        }
+        let (id, rect) = self
+            .pane_geometry
+            .iter()
+            .find(|(_, r)| contains_point(*r, event.column, event.row))
+            .cloned()?;
+        // Divider grab bands always belong to Viva, including their tolerance.
+        if self.last_pane_area.is_some_and(|area| {
+            !self.zoomed
+                && self.grid.splits(area).iter().any(|hit| match hit.axis {
+                    SplitAxis::Horizontal => event.column.abs_diff(hit.pos) <= 1,
+                    SplitAxis::Vertical => event.row.abs_diff(hit.pos) <= 1,
+                })
+        }) {
+            return None;
+        }
+        if self.terminal_mode.as_deref() == Some(&id)
+            && !event.modifiers.contains(KeyModifiers::SHIFT)
+            && self.scroll_offset(&id) == 0
+        {
+            let modes = self.input_modes();
+            if let Some(bytes) = terminal_view::mouse(event, rect, &modes) {
+                return Some((id, bytes));
+            }
+        }
+        let delta = match event.kind {
+            MouseEventKind::ScrollUp => 3,
+            MouseEventKind::ScrollDown => -3,
+            _ => return None,
+        };
+        self.scroll_terminal(id, delta);
+        None
+    }
     /// Terminal ids currently placed in the pane tree (fetch budget: the
     /// tree never exceeds the layout cap).
     pub fn terminal_leaves(&self) -> Vec<String> {
@@ -417,52 +558,230 @@ impl WorkbenchApp {
     /// The persisted layout payload: the pane tree plus the focused pane
     /// and the sidebar width (restored with a default when absent, so
     /// older saved layouts keep loading).
-    pub fn serialize_layout(&self) -> String {
-        serde_json::json!({
-            "grid": self.grid,
-            "focus": self.pane_focus,
-            "sidebar": self.sidebar_width,
-        })
-        .to_string()
+    fn save_scene(&mut self) {
+        let key = self.scenes.selected.clone();
+        let scene = self.scenes.scenes.entry(key).or_default();
+        if let Some(tab) = scene.tabs.iter_mut().find(|t| t.id == scene.active) {
+            tab.grid = self.grid.clone();
+            tab.focus = self.pane_focus.clone();
+            tab.zoom = self.zoomed;
+        }
     }
-
-    /// Rebuild the pane tree from a saved layout (QA F5): terminal leaves
-    /// whose session is gone are pruned, and the focus falls back to the
-    /// browser unless it survived. Never fails — a broken layout degrades
-    /// to the default view.
-    pub fn restore_layout(&mut self, json: &str, live: &std::collections::HashSet<String>) {
+    fn load_scene(&mut self) {
+        let tab = self
+            .scenes
+            .scenes
+            .get(&self.scenes.selected)
+            .and_then(|s| s.tabs.iter().find(|t| t.id == s.active && !t.hidden));
+        if let Some(t) = tab {
+            self.grid = t.grid.clone();
+            self.pane_focus = t.focus.clone();
+            self.zoomed = t.zoom;
+        } else {
+            self.grid = PaneNode::leaf(PaneContent::Browser);
+            self.pane_focus = PaneContent::Browser;
+            self.zoomed = false;
+        }
+        self.terminal_mode = None;
+        self.drag = DragState::None;
+        self.snapshots.clear();
+    }
+    pub fn select_worktree(&mut self, key: String) {
+        self.save_scene();
+        if !self.scenes.scenes.contains_key(&key) && self.scenes.scenes.len() >= MAX_SCENES {
+            self.set_status("scene limit reached");
+            return;
+        }
+        self.scenes.selected = key;
+        self.load_scene();
+        self.layout_dirty = true;
+        self.set_status(
+            "existing scene · n new tab · o new shell · t all terminals · no process started",
+        );
+    }
+    pub fn selected_scene(&self) -> &str {
+        &self.scenes.selected
+    }
+    pub fn new_tab(&mut self, name: String) -> bool {
+        self.save_scene();
+        let scene = self
+            .scenes
+            .scenes
+            .entry(self.scenes.selected.clone())
+            .or_default();
+        if scene.tabs.len() >= MAX_TABS {
+            self.set_status("tab limit reached (including hidden tabs)");
+            return false;
+        }
+        let tab = TabView::new(name);
+        scene.active = tab.id.clone();
+        scene.tabs.push(tab);
+        self.load_scene();
+        self.layout_dirty = true;
+        true
+    }
+    pub fn switch_tab(&mut self, id: &str) -> bool {
+        self.save_scene();
+        let Some(scene) = self.scenes.scenes.get_mut(&self.scenes.selected) else {
+            return false;
+        };
+        if !scene.tabs.iter().any(|t| t.id == id && !t.hidden) {
+            return false;
+        }
+        scene.active = id.into();
+        self.load_scene();
+        self.focus = Focus::Panes;
+        self.layout_dirty = true;
+        true
+    }
+    pub fn close_tab(&mut self) {
+        self.save_scene();
+        if let Some(scene) = self.scenes.scenes.get_mut(&self.scenes.selected) {
+            if let Some(t) = scene.tabs.iter_mut().find(|t| t.id == scene.active) {
+                t.hidden = true;
+            }
+            scene.active = scene
+                .tabs
+                .iter()
+                .find(|t| !t.hidden)
+                .map(|t| t.id.clone())
+                .unwrap_or_default();
+        }
+        self.load_scene();
+        self.layout_dirty = true;
+        self.set_status("tab hidden · t finds sessions · processes continue");
+    }
+    pub fn terminal_location(&self, id: &str) -> Option<scenes::TerminalLocation> {
+        let mut book = self.scenes.clone();
+        if let Some(s) = book.scenes.get_mut(&book.selected) {
+            if let Some(t) = s.tabs.iter_mut().find(|t| t.id == s.active) {
+                t.grid = self.grid.clone();
+                t.focus = self.pane_focus.clone();
+            }
+        }
+        book.locate(id)
+    }
+    pub fn serialize_layout(&self) -> String {
+        let mut book = self.scenes.clone();
+        book.sidebar = self.sidebar_width;
+        if let Some(scene) = book.scenes.get_mut(&book.selected) {
+            if let Some(tab) = scene.tabs.iter_mut().find(|t| t.id == scene.active) {
+                tab.grid = self.grid.clone();
+                tab.focus = self.pane_focus.clone();
+                tab.zoom = self.zoomed;
+            }
+        }
+        serde_json::to_string(&book).expect("scene serialization")
+    }
+    pub fn restore_layout(&mut self, json: &str, _live: &std::collections::HashSet<String>) {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+            self.set_status("unavailable layout: invalid JSON; original retained");
             return;
         };
-        let Ok(mut grid) =
+        if value.get("version").is_some() {
+            match serde_json::from_value::<SceneBook>(value) {
+                Ok(book) if book.valid() => {
+                    self.scenes = book;
+                    self.sidebar_width = self
+                        .scenes
+                        .sidebar
+                        .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+                    self.load_scene();
+                    self.layout_dirty = false;
+                }
+                _ => self
+                    .set_status("unavailable layout: invalid scene references; original retained"),
+            };
+            return;
+        }
+        let Ok(grid) =
             serde_json::from_value::<PaneNode>(value.get("grid").cloned().unwrap_or_default())
         else {
+            self.set_status("unavailable legacy layout; original retained");
             return;
         };
-        grid.prune_dead_terminals(live);
-        self.grid = grid;
-        let leaves = self.grid.leaves();
-        self.pane_focus = value
-            .get("focus")
-            .and_then(|focus| serde_json::from_value::<PaneContent>(focus.clone()).ok())
-            .filter(|focus| leaves.contains(focus))
-            .unwrap_or(PaneContent::Browser);
-        if let Some(width) = value.get("sidebar").and_then(|w| w.as_u64()) {
-            self.sidebar_width = u16::try_from(width)
-                .unwrap_or(SIDEBAR_WIDTH)
-                .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+        let mut book = SceneBook {
+            legacy: Some(value.clone()),
+            ..Default::default()
+        };
+        // Preserve the old tree, partitioned by terminal ownership; the full
+        // original payload remains embedded and is backed up server-side.
+        let mut keys = std::collections::BTreeSet::new();
+        for c in grid.leaves() {
+            if let PaneContent::Terminal(id) = c {
+                keys.insert(
+                    self.model
+                        .terminals
+                        .iter()
+                        .find(|t| t.terminal_id == id)
+                        .and_then(|t| t.worktree_id.clone())
+                        .unwrap_or_else(|| FLOATING.into()),
+                );
+            }
         }
-        self.layout_dirty = false;
+        if keys.is_empty() {
+            keys.insert(FLOATING.into());
+        }
+        for key in keys {
+            let mut tree = grid.clone();
+            let own = self
+                .model
+                .terminals
+                .iter()
+                .filter(|t| t.worktree_id.as_deref().unwrap_or(FLOATING) == key)
+                .map(|t| t.terminal_id.clone())
+                .collect::<std::collections::HashSet<_>>();
+            // Dead/unavailable references stay in floating, never replayed.
+            let keep = tree
+                .leaves()
+                .into_iter()
+                .filter_map(|c| match c {
+                    PaneContent::Terminal(id)
+                        if own.contains(&id)
+                            || (key == FLOATING
+                                && !self.model.terminals.iter().any(|t| t.terminal_id == id)) =>
+                    {
+                        Some(id)
+                    }
+                    _ => None,
+                })
+                .collect();
+            tree.prune_dead_terminals(&keep);
+            let mut tab = TabView::new("Migrated".into());
+            tab.grid = tree;
+            tab.focus = value
+                .get("focus")
+                .and_then(|f| serde_json::from_value(f.clone()).ok())
+                .filter(|f| tab.grid.leaves().contains(f))
+                .unwrap_or_else(|| tab.grid.leaves()[0].clone());
+            book.scenes.insert(
+                key.clone(),
+                Scene {
+                    active: tab.id.clone(),
+                    tabs: vec![tab],
+                },
+            );
+            book.selected = key;
+        }
+        self.scenes = book;
+        self.load_scene();
+        self.layout_dirty = true;
+        self.set_status(
+            "legacy layout migrated · original retained · unavailable terminals never replay",
+        );
     }
 
     /// Move pane focus geometrically (Ctrl+Arrows in the keymap).
     pub fn move_pane_focus(&mut self, direction: Direction) -> bool {
-        match self
-            .grid
-            .neighbor(PANE_REF_AREA, &self.pane_focus, direction)
-        {
+        match self.grid.neighbor(
+            self.last_pane_area.unwrap_or(PANE_REF_AREA),
+            &self.pane_focus,
+            direction,
+        ) {
             Some(next) => {
                 self.pane_focus = next;
+                self.focus = Focus::Panes;
+                self.layout_dirty = true;
                 true
             }
             None => false,
@@ -479,68 +798,78 @@ impl WorkbenchApp {
             .position(|c| *c == self.pane_focus)
             .unwrap_or(0);
         self.pane_focus = leaves[(index + 1) % leaves.len()].clone();
+        self.focus = Focus::Panes;
+        self.layout_dirty = true;
     }
 
-    /// Point the focused pane at a terminal. From the browser: split a new
-    /// pane whenever capacity allows — an existing pane is never silently
-    /// consumed (QA F7); only at the pane cap does the first terminal pane
-    /// get reused, with an explicit status note and its snapshot dropped.
-    /// From a terminal pane: retarget it (the old terminal keeps running
-    /// server-side; its snapshot cache entry goes with the pane).
+    /// Locate the original scene/tab/pane, including hidden views. An
+    /// unplaced terminal gets a new leaf or tab; neighbors are never replaced.
     pub fn attach_terminal(&mut self, terminal_id: String) {
-        // Attaching a terminal that already has a pane is just focusing it
-        // — never a duplicate pane.
-        let already_placed = PaneContent::Terminal(terminal_id.clone());
-        if self.grid.leaves().contains(&already_placed) {
-            self.pane_focus = already_placed;
+        self.save_scene();
+        if let Some(location) = self.scenes.locate(&terminal_id) {
+            self.select_worktree(location.scene_id.clone());
+            if let Some(scene) = self.scenes.scenes.get_mut(&location.scene_id) {
+                scene.active = location.tab_id.clone();
+                if let Some(tab) = scene.tabs.iter_mut().find(|t| t.id == location.tab_id) {
+                    tab.hidden = false;
+                }
+            }
+            self.load_scene();
+            let content = PaneContent::Terminal(terminal_id.clone());
+            if !self.grid.leaves().contains(&content) {
+                if self.grid == PaneNode::leaf(PaneContent::Browser) {
+                    self.grid = PaneNode::leaf(content.clone());
+                } else if !self
+                    .grid
+                    .split(&self.pane_focus, SplitAxis::Horizontal, content.clone())
+                {
+                    if !self.new_tab("Recovered terminal".into()) {
+                        return;
+                    }
+                    self.grid = PaneNode::leaf(content.clone());
+                }
+            }
+            if let Some(s) = self.scenes.scenes.get_mut(&self.scenes.selected) {
+                for t in &mut s.tabs {
+                    t.closed.retain(|id| id != &terminal_id);
+                }
+            }
+            self.pane_focus = content;
+            self.layout_dirty = true;
             return;
         }
-        self.layout_dirty = true;
-        let content = PaneContent::Terminal(terminal_id.clone());
-        match self.pane_focus.clone() {
-            PaneContent::Browser => {
-                let existing = self
-                    .grid
-                    .leaves()
-                    .into_iter()
-                    .find(|c| matches!(c, PaneContent::Terminal(_)));
-                let at_cap = self.grid.leaves().len() >= crate::tui::layout::MAX_PANES;
-                match (existing, at_cap) {
-                    (Some(first), true) => {
-                        if let PaneContent::Terminal(old) = &first {
-                            self.snapshots.remove(old);
-                            self.set_status(format!(
-                                "pane limit reached — reused {old}'s pane for {terminal_id} \
-                                 ({old} keeps running server-side)"
-                            ));
-                        }
-                        self.grid.replace(&first, content.clone());
-                    }
-                    _ => {
-                        // No terminal pane yet, or capacity to spare: the
-                        // browser leaf keeps its place and the new pane
-                        // splits off beside it.
-                        self.grid.split(
-                            &PaneContent::Browser,
-                            SplitAxis::Horizontal,
-                            content.clone(),
-                        );
-                    }
-                }
-                self.pane_focus = content;
-            }
-            PaneContent::Terminal(old) => {
-                if old != terminal_id {
-                    self.snapshots.remove(&old);
-                    self.set_status(format!(
-                        "pane retargeted to {terminal_id} ({old} keeps running server-side)"
-                    ));
-                }
-                self.grid
-                    .replace(&PaneContent::Terminal(old), content.clone());
-                self.pane_focus = content;
-            }
+        let key = self
+            .model
+            .terminals
+            .iter()
+            .find(|t| t.terminal_id == terminal_id)
+            .and_then(|t| t.worktree_id.clone())
+            .unwrap_or_else(|| self.scenes.selected.clone());
+        if key != self.scenes.selected {
+            self.select_worktree(key);
         }
+        let has_tab = self
+            .scenes
+            .scenes
+            .get(&self.scenes.selected)
+            .is_some_and(|s| s.tabs.iter().any(|t| t.id == s.active && !t.hidden));
+        if !has_tab && !self.new_tab("Terminal".into()) {
+            return;
+        }
+        let content = PaneContent::Terminal(terminal_id);
+        if self.grid == PaneNode::leaf(PaneContent::Browser) {
+            self.grid = PaneNode::leaf(content.clone());
+        } else if !self
+            .grid
+            .split(&self.pane_focus, SplitAxis::Horizontal, content.clone())
+        {
+            if !self.new_tab("Terminal".into()) {
+                return;
+            }
+            self.grid = PaneNode::leaf(content.clone());
+        }
+        self.pane_focus = content;
+        self.layout_dirty = true;
     }
 
     /// Whether the pane tree can take one more leaf (the run loop checks
@@ -591,8 +920,28 @@ impl WorkbenchApp {
     /// server — closing is a view operation, never a stop.
     pub fn close_pane(&mut self) {
         if let PaneContent::Terminal(id) = self.pane_focus.clone() {
+            self.save_scene();
+            if let Some(scene) = self.scenes.scenes.get_mut(&self.scenes.selected) {
+                if let Some(t) = scene.tabs.iter_mut().find(|t| t.id == scene.active) {
+                    if !t.closed.contains(&id) {
+                        if t.closed.len() >= 256 {
+                            self.set_status(
+                                "closed-pane reference limit reached; view remains open",
+                            );
+                            return;
+                        }
+                        t.closed.push(id.clone());
+                    }
+                }
+            }
             self.layout_dirty = true;
-            if let Some(removed) = self.grid.close(&PaneContent::Terminal(id)) {
+            let removed = if self.grid == PaneNode::leaf(PaneContent::Terminal(id.clone())) {
+                self.grid = PaneNode::leaf(PaneContent::Browser);
+                Some(PaneContent::Terminal(id))
+            } else {
+                self.grid.close(&PaneContent::Terminal(id))
+            };
+            if let Some(removed) = removed {
                 if let PaneContent::Terminal(removed_id) = removed {
                     self.snapshots.remove(&removed_id);
                     self.set_status(format!(
@@ -611,6 +960,7 @@ impl WorkbenchApp {
 
     pub fn toggle_zoom(&mut self) {
         self.zoomed = !self.zoomed;
+        self.layout_dirty = true;
     }
 
     /// The focused terminal's worktree, for split-cwd decisions.
@@ -624,15 +974,22 @@ impl WorkbenchApp {
                 .worktree_id
                 .clone();
         }
-        None
+        if self.scenes.selected != FLOATING {
+            Some(self.scenes.selected.clone())
+        } else {
+            None
+        }
     }
 
     /// Explicitly enter terminal-forwarding mode (run loop decides when —
     /// usually the Enter key on a terminals row, executed as
     /// [`WorkbenchAction::EnterTerminal`]).
     pub fn enter_terminal_mode(&mut self, terminal_id: impl Into<String>) {
+        self.focus = Focus::Panes;
         self.terminal_mode = Some(terminal_id.into());
-        self.status_line = "terminal focused — Esc to release".into();
+        self.status_line =
+            "terminal focused · Ctrl+] navigation · Esc CLI · Shift+PgUp/wheel history · classic keys; no graphics"
+                .into();
     }
 
     pub fn leave_terminal_mode(&mut self) {
@@ -644,7 +1001,8 @@ impl WorkbenchApp {
         match self.focus {
             Focus::Worktrees => self.model.worktrees.len(),
             Focus::Tasks => self.model.tasks.len(),
-            Focus::Terminals => self.model.terminals.len(),
+            Focus::Terminals => self.agent_rows().len(),
+            Focus::Panes => 0,
         }
     }
 
@@ -657,11 +1015,26 @@ impl WorkbenchApp {
         };
     }
 
-    fn selected_terminal(&self) -> Option<String> {
+    fn agent_rows(&self) -> Vec<&crate::agents::AgentSessionRow> {
         self.model
-            .terminals
+            .agents
+            .iter()
+            .filter(|a| {
+                if self.global_attention {
+                    a.needs_attention()
+                } else {
+                    a.in_workspace
+                }
+            })
+            .collect()
+    }
+    fn selected_terminal(&self) -> Option<String> {
+        self.agent_rows()
             .get(self.selected)
-            .map(|t| t.terminal_id.clone())
+            .map(|a| a.terminal_id.clone())
+    }
+    pub fn take_mouse_action(&mut self) -> Option<WorkbenchAction> {
+        self.mouse_action.take()
     }
 
     fn selected_worktree(&self) -> Option<String> {
@@ -674,6 +1047,77 @@ impl WorkbenchApp {
     /// Handle one key event.
     pub fn on_key(&mut self, key: KeyEvent) -> KeyOutcome {
         use ratatui::crossterm::event::KeyModifiers;
+        if let Some(index) = &mut self.terminal_picker {
+            match key.code {
+                KeyCode::Esc => self.terminal_picker = None,
+                KeyCode::Up => *index = index.saturating_sub(1),
+                KeyCode::Down => {
+                    *index = (*index + 1).min(self.model.terminals.len().saturating_sub(1))
+                }
+                KeyCode::Enter | KeyCode::Char('s') => {
+                    let id = self
+                        .model
+                        .terminals
+                        .get(*index)
+                        .map(|t| t.terminal_id.clone());
+                    self.terminal_picker = None;
+                    if let Some(id) = id {
+                        return KeyOutcome::Action(if key.code == KeyCode::Enter {
+                            WorkbenchAction::EnterTerminal(id)
+                        } else {
+                            WorkbenchAction::StopTerminal(id)
+                        });
+                    }
+                }
+                _ => {}
+            }
+            return KeyOutcome::Handled;
+        }
+        if let Some(text) = &mut self.tab_prompt {
+            match key.code {
+                KeyCode::Esc => self.tab_prompt = None,
+                KeyCode::Backspace => {
+                    text.pop();
+                }
+                KeyCode::Char(c) if text.len() < 252 => text.push(c),
+                KeyCode::Enter => {
+                    let name = text.trim().to_string();
+                    self.tab_prompt = None;
+                    if !name.is_empty() {
+                        self.save_scene();
+                        if let Some(s) = self.scenes.scenes.get_mut(&self.scenes.selected) {
+                            if let Some(t) = s.tabs.iter_mut().find(|t| t.id == s.active) {
+                                t.name = name;
+                                self.layout_dirty = true;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return KeyOutcome::Handled;
+        }
+        if let Some((action, text)) = &mut self.workspace_prompt {
+            match key.code {
+                KeyCode::Esc => self.workspace_prompt = None,
+                KeyCode::Backspace => {
+                    text.pop();
+                }
+                KeyCode::Char(c) => text.push(c),
+                KeyCode::Enter => {
+                    let action = action.clone();
+                    let value = Some(text.clone());
+                    self.workspace_prompt = None;
+                    return KeyOutcome::Action(WorkbenchAction::Workspace {
+                        action,
+                        value,
+                        project_id: None,
+                    });
+                }
+                _ => {}
+            }
+            return KeyOutcome::Handled;
+        }
         // QA F8: stale cleanup arming must never survive an unrelated
         // keypress — only the confirming second `D` keeps it.
         if self.cleanup_armed.is_some()
@@ -828,31 +1272,28 @@ impl WorkbenchApp {
                 _ => KeyOutcome::Ignored,
             };
         }
-        // Terminal mode owns the keyboard first: in a focused terminal,
-        // even Ctrl-C belongs to the child (0x03), exactly as a real
-        // terminal would deliver it. Esc releases the focus.
+        // Ctrl+] is the explicit outer prefix; Esc and other common CLI keys
+        // are forwarded according to this terminal's modes.
         if self.terminal_mode.is_some() {
-            return match key.code {
-                KeyCode::Esc => {
-                    self.leave_terminal_mode();
-                    KeyOutcome::Handled
-                }
-                KeyCode::Char(c) => KeyOutcome::Forward(encode_char(key.modifiers, c)),
-                KeyCode::Enter => KeyOutcome::Forward(b"\r".to_vec()),
-                KeyCode::Backspace => KeyOutcome::Forward(b"\x7f".to_vec()),
-                KeyCode::Tab => KeyOutcome::Forward(b"\t".to_vec()),
-                KeyCode::Up => KeyOutcome::Forward(b"\x1b[A".to_vec()),
-                KeyCode::Down => KeyOutcome::Forward(b"\x1b[B".to_vec()),
-                KeyCode::Right => KeyOutcome::Forward(b"\x1b[C".to_vec()),
-                KeyCode::Left => KeyOutcome::Forward(b"\x1b[D".to_vec()),
-                KeyCode::Home => KeyOutcome::Forward(b"\x1b[H".to_vec()),
-                KeyCode::End => KeyOutcome::Forward(b"\x1b[F".to_vec()),
-                KeyCode::PageUp => KeyOutcome::Forward(b"\x1b[5~".to_vec()),
-                KeyCode::PageDown => KeyOutcome::Forward(b"\x1b[6~".to_vec()),
-                KeyCode::Delete => KeyOutcome::Forward(b"\x1b[3~".to_vec()),
-                KeyCode::Insert => KeyOutcome::Forward(b"\x1b[2~".to_vec()),
-                _ => KeyOutcome::Ignored,
-            };
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char(']') | KeyCode::Char('5'))
+            {
+                self.leave_terminal_mode();
+                return KeyOutcome::Handled;
+            }
+            if key.modifiers.contains(KeyModifiers::SHIFT)
+                && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
+            {
+                let id = self.terminal_mode.clone().unwrap();
+                self.scroll_terminal(id, if key.code == KeyCode::PageUp { 20 } else { -20 });
+                return KeyOutcome::Handled;
+            }
+            if let Some(id) = self.terminal_mode.clone() {
+                self.scroll_offsets.insert(id, 0);
+            }
+            return terminal_view::key(key, &self.input_modes())
+                .map(KeyOutcome::Forward)
+                .unwrap_or(KeyOutcome::Ignored);
         }
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
@@ -883,6 +1324,11 @@ impl WorkbenchApp {
                 self.quit_requested = true;
                 KeyOutcome::QuitRequested
             }
+            KeyCode::Char('0') => {
+                self.select_worktree(FLOATING.into());
+                self.focus = Focus::Panes;
+                KeyOutcome::Handled
+            }
             // Sidebar sections (herdr order: spaces, agents, tasks).
             KeyCode::Char('1') => {
                 self.focus = Focus::Worktrees;
@@ -904,7 +1350,7 @@ impl WorkbenchApp {
                     self.focus = match self.focus {
                         Focus::Worktrees => Focus::Terminals,
                         Focus::Terminals => Focus::Tasks,
-                        Focus::Tasks => Focus::Worktrees,
+                        Focus::Tasks | Focus::Panes => Focus::Worktrees,
                     };
                     self.selected = 0;
                 } else {
@@ -926,7 +1372,7 @@ impl WorkbenchApp {
             },
             // Enter on a space row opens a shell at that worktree.
             KeyCode::Enter if self.focus == Focus::Worktrees => match self.selected_worktree() {
-                Some(id) => KeyOutcome::Action(WorkbenchAction::OpenWorktreeShell(id)),
+                Some(id) => KeyOutcome::Action(WorkbenchAction::SelectWorktree(id)),
                 None => KeyOutcome::Ignored,
             },
             KeyCode::Char('s') if self.focus == Focus::Terminals => {
@@ -1026,6 +1472,92 @@ impl WorkbenchApp {
                     None => KeyOutcome::Ignored,
                 }
             }
+            KeyCode::Char('!') => {
+                self.global_attention = !self.global_attention;
+                self.focus = Focus::Terminals;
+                self.selected = 0;
+                KeyOutcome::Handled
+            }
+            KeyCode::Char('t') => {
+                self.terminal_picker = Some(0);
+                KeyOutcome::Handled
+            }
+            KeyCode::Char('n') => KeyOutcome::Action(WorkbenchAction::NewTab),
+            KeyCode::Char('T') => {
+                self.tab_prompt = Some(String::new());
+                KeyOutcome::Handled
+            }
+            KeyCode::Char('X') => {
+                self.close_tab();
+                KeyOutcome::Handled
+            }
+            KeyCode::Char(',' | '.') => {
+                let tabs = self
+                    .scenes
+                    .scenes
+                    .get(&self.scenes.selected)
+                    .map(|s| {
+                        s.tabs
+                            .iter()
+                            .filter(|t| !t.hidden)
+                            .map(|t| t.id.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if !tabs.is_empty() {
+                    let current = self.scenes.scenes[&self.scenes.selected].active.clone();
+                    let i = tabs.iter().position(|t| t == &current).unwrap_or(0);
+                    let j = if key.code == KeyCode::Char('.') {
+                        (i + 1) % tabs.len()
+                    } else {
+                        (i + tabs.len() - 1) % tabs.len()
+                    };
+                    self.switch_tab(&tabs[j]);
+                }
+                KeyOutcome::Handled
+            }
+            KeyCode::Char('W' | 'N' | 'A' | 'S') => {
+                let action = match key.code {
+                    KeyCode::Char('W') => "open",
+                    KeyCode::Char('N') => "new",
+                    KeyCode::Char('A') => "add",
+                    _ => "save",
+                };
+                self.workspace_prompt = Some((action.into(), String::new()));
+                KeyOutcome::Handled
+            }
+            KeyCode::Char('[' | ']') => {
+                let ws = &self.model.workspaces;
+                if ws.is_empty() {
+                    return KeyOutcome::Ignored;
+                }
+                let i = ws
+                    .iter()
+                    .position(|w| Some(&w.workspace_id) == self.model.workspace_id.as_ref())
+                    .unwrap_or(0);
+                let next = if key.code == KeyCode::Char(']') {
+                    (i + 1) % ws.len()
+                } else {
+                    (i + ws.len() - 1) % ws.len()
+                };
+                KeyOutcome::Action(WorkbenchAction::Workspace {
+                    action: "select".into(),
+                    value: Some(ws[next].workspace_id.clone()),
+                    project_id: None,
+                })
+            }
+            KeyCode::Char('R') if self.focus == Focus::Worktrees => {
+                let project_id = self
+                    .model
+                    .worktrees
+                    .get(self.selected)
+                    .map(|w| w.project_id.clone());
+                KeyOutcome::Action(WorkbenchAction::Workspace {
+                    action: "remove".into(),
+                    value: None,
+                    project_id,
+                })
+            }
             KeyCode::Char('r') => KeyOutcome::Action(WorkbenchAction::Refresh),
             _ => KeyOutcome::Ignored,
         }
@@ -1047,7 +1579,39 @@ impl WorkbenchApp {
 
     fn on_left_down(&mut self, column: u16, row: u16) {
         // Overlays are modal: clicks must not fall through to the grid.
-        if self.file_panel.is_some() || self.handoff_picker.is_some() || self.diff_view.is_some() {
+        if self.workspace_prompt.is_some()
+            || self.tab_prompt.is_some()
+            || self.file_panel.is_some()
+            || self.handoff_picker.is_some()
+            || self.diff_view.is_some()
+        {
+            return;
+        }
+        if let Some((id, _)) = self
+            .tab_hits
+            .iter()
+            .find(|(_, r)| contains_point(*r, column, row))
+        {
+            let id = id.clone();
+            self.switch_tab(&id);
+            return;
+        }
+        if let Some((focus, index, _)) = self
+            .sidebar_hits
+            .iter()
+            .find(|(_, _, r)| contains_point(*r, column, row))
+            .cloned()
+        {
+            self.leave_terminal_mode();
+            self.focus = focus;
+            self.selected = index;
+            self.mouse_action = match focus {
+                Focus::Worktrees => self
+                    .selected_worktree()
+                    .map(WorkbenchAction::SelectWorktree),
+                Focus::Terminals => self.selected_terminal().map(WorkbenchAction::EnterTerminal),
+                Focus::Tasks | Focus::Panes => None,
+            };
             return;
         }
         // Sidebar edge first: the band is the sidebar's last column and
@@ -1123,8 +1687,10 @@ impl WorkbenchApp {
             .find(|(_, rect)| contains_point(*rect, column, row))
             .map(|(content, _)| content);
         if let Some(content) = hit_leaf {
+            self.focus = Focus::Panes;
             if self.pane_focus != content {
                 self.pane_focus = content;
+                self.layout_dirty = true;
                 if self.terminal_mode.is_some() {
                     self.leave_terminal_mode();
                 }
@@ -1178,9 +1744,21 @@ impl WorkbenchApp {
     /// panel, handoff picker, diff) sit on top of everything.
     pub fn draw(&mut self, frame: &mut Frame) {
         let palette = crate::tui::theme::Palette::catppuccin_mocha();
-        let rows =
-            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
-        let main = rows[0];
+        let rows = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(frame.area());
+        let name = self
+            .model
+            .workspaces
+            .iter()
+            .find(|w| Some(&w.workspace_id) == self.model.workspace_id.as_ref())
+            .map(|w| w.name.as_str())
+            .unwrap_or("All projects");
+        frame.render_widget(Paragraph::new(format!(" Workspace: {name} · [ ] switch/recent · W open · N new · A add · R remove · S save as")),rows[0]);
+        let main = rows[1];
 
         // herdr hides the sidebar on narrow terminals; so do we. The
         // user-chosen width applies, clamped so the pane grid keeps a
@@ -1192,7 +1770,30 @@ impl WorkbenchApp {
         };
         let columns =
             Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(0)]).split(main);
-        let pane_area = columns[1];
+        let right = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(columns[1]);
+        self.tab_hits.clear();
+        let mut x = right[0].x;
+        if let Some(scene) = self.scenes.scenes.get(&self.scenes.selected) {
+            for tab in scene.tabs.iter().filter(|t| !t.hidden) {
+                let label = format!(
+                    " {}{} ",
+                    if tab.id == scene.active { "● " } else { "" },
+                    tab.name
+                );
+                let w = (label.chars().count() as u16).min(right[0].right().saturating_sub(x));
+                let rect = Rect::new(x, right[0].y, w, 1);
+                frame.render_widget(Paragraph::new(label), rect);
+                self.tab_hits.push((tab.id.clone(), rect));
+                x += w;
+            }
+        }
+        if self.tab_hits.is_empty() {
+            frame.render_widget(
+                Paragraph::new(" 0 Unassigned · n New tab · o New shell · t All terminals"),
+                right[0],
+            );
+        }
+        let pane_area = right[1];
         self.last_pane_area = Some(pane_area);
         self.last_sidebar_edge = if sidebar_width > 0 {
             Some(sidebar_width)
@@ -1230,6 +1831,7 @@ impl WorkbenchApp {
             })
             .collect();
         crate::tui::chrome::render_pane_borders(frame, &rects, focused_index, &palette, &titles);
+        self.pane_geometry.clear();
         for (index, (content, rect)) in layout.iter().enumerate() {
             let content_area = if layout.len() >= 2 {
                 crate::tui::chrome::inner_rect(*rect)
@@ -1238,7 +1840,10 @@ impl WorkbenchApp {
             };
             match content {
                 PaneContent::Browser => self.draw_overview(frame, content_area),
-                PaneContent::Terminal(id) => self.draw_terminal_pane(frame, content_area, id),
+                PaneContent::Terminal(id) => {
+                    self.pane_geometry.push((id.clone(), content_area));
+                    self.draw_terminal_pane(frame, content_area, id);
+                }
             }
         }
 
@@ -1287,7 +1892,58 @@ impl WorkbenchApp {
         if self.handoff_picker.is_some() {
             self.draw_handoff_picker(frame);
         }
-        self.draw_status_bar(frame, rows[1], &palette);
+        self.draw_status_bar(frame, rows[2], &palette);
+        if let Some(selected) = self.terminal_picker {
+            let area = centered(frame.area(), 90, frame.area().height.saturating_sub(4));
+            frame.render_widget(Clear, area);
+            let items = self
+                .model
+                .terminals
+                .iter()
+                .enumerate()
+                .skip(selected.saturating_sub(area.height.saturating_sub(3) as usize))
+                .map(|(i, t)| {
+                    ListItem::new(format!(
+                        "{} {} · {} · {} · {}",
+                        if i == selected { "▶" } else { " " },
+                        t.terminal_id,
+                        t.purpose,
+                        t.worktree_id.as_deref().unwrap_or("floating/directory"),
+                        if t.live == Some(true) {
+                            "running"
+                        } else {
+                            "exited/unavailable"
+                        }
+                    ))
+                })
+                .collect::<Vec<_>>();
+            frame.render_widget(
+                List::new(items).block(Block::bordered().title(
+                    " All terminals (including hidden) · Enter locate · s Stop session · Esc ",
+                )),
+                area,
+            );
+        }
+        if let Some(text) = &self.tab_prompt {
+            let area = centered(frame.area(), 60, 3);
+            frame.render_widget(Clear, area);
+            frame.render_widget(
+                Paragraph::new(text.as_str())
+                    .block(Block::bordered().title(" Rename tab · Enter / Esc ")),
+                area,
+            );
+        }
+        if let Some((action, text)) = &self.workspace_prompt {
+            let area = centered(frame.area(), 80, 3);
+            frame.render_widget(Clear, area);
+            frame.render_widget(
+                Paragraph::new(text.as_str()).block(
+                    Block::bordered()
+                        .title(format!(" Workspace {action} · Enter confirm / Esc cancel ")),
+                ),
+                area,
+            );
+        }
         if let Some(diff) = &self.diff_view {
             self.draw_diff(frame, frame.area(), diff);
         }
@@ -1347,6 +2003,17 @@ impl WorkbenchApp {
     /// reattached client sees the server-kept history. Borders and the
     /// title are chrome (see `render_pane_borders`); this draws content.
     fn draw_terminal_pane(&self, frame: &mut Frame, area: Rect, id: &str) {
+        if let Some(view) = self.snapshots.get(id).and_then(|s| s.screen.as_ref()) {
+            let cursor = self.terminal_mode.as_deref() == Some(id)
+                && self.file_panel.is_none()
+                && self.handoff_picker.is_none()
+                && self.diff_view.is_none()
+                && self.tab_prompt.is_none()
+                && self.workspace_prompt.is_none()
+                && self.terminal_picker.is_none();
+            terminal_view::draw(frame, area, view, cursor);
+            return;
+        }
         let lines: Vec<Line> = match self.snapshots.get(id) {
             Some(view) => {
                 let mut lines: Vec<Line> = view
@@ -1374,7 +2041,18 @@ impl WorkbenchApp {
                 )));
                 lines
             }
-            None => vec![Line::from(" waiting for the first server snapshot… ")],
+            None => vec![Line::from(
+                if self
+                    .model
+                    .terminals
+                    .iter()
+                    .any(|t| t.terminal_id == id && t.live == Some(true))
+                {
+                    " waiting for the first server snapshot… "
+                } else {
+                    " exited/unavailable terminal reference · no command replayed · x hides view "
+                },
+            )],
         };
         frame.render_widget(Paragraph::new(lines), area);
     }
@@ -1491,7 +2169,7 @@ impl WorkbenchApp {
     /// follows the keyboard selection (QA F2) — with no mouse, a selected
     /// row that scrolled off-screen would be unreachable. Facts only —
     /// unknown stays unknown.
-    fn draw_sidebar(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+    fn draw_sidebar(&mut self, frame: &mut Frame, area: Rect, palette: &Palette) {
         let width = area.width as usize;
         // Each line carries the entity it belongs to (section + model
         // index); headers and dividers carry None. The viewport window is
@@ -1591,20 +2269,29 @@ impl WorkbenchApp {
             }
         }
 
+        let agent_start = lines.len();
         // -- agents --
         lines.push((Self::section_divider(width, palette), None));
         lines.push((
-            Self::section_header(" agents", self.focus == Focus::Terminals, palette),
+            Self::section_header(
+                if self.global_attention {
+                    " agents · global attention (! returns)"
+                } else {
+                    " agents · workspace (! global)"
+                },
+                self.focus == Focus::Terminals,
+                palette,
+            ),
             None,
         ));
-        for (index, terminal) in self.model.terminals.iter().enumerate() {
+        for (index, terminal) in self.agent_rows().into_iter().enumerate() {
             let selected = self.focus == Focus::Terminals && self.selected == index;
             // The dot shows the best observation's state. Honesty (S4,
             // ruling §5.3): only a controlled report may look authoritative
             // — screen/process-tree dots stay muted.
-            let (dot, dot_color) = match terminal.agent_status.first() {
+            let (dot, dot_color) = match terminal.records.first() {
                 Some(record) => {
-                    let color = if record.source.is_authoritative() {
+                    let color = if record.source.is_authoritative() && !terminal.stale {
                         crate::tui::theme::status_color(record.status, palette)
                     } else {
                         palette.overlay0
@@ -1618,7 +2305,7 @@ impl WorkbenchApp {
                     vec![
                         Span::styled(dot.to_string(), ratatui::style::Style::new().fg(dot_color)),
                         Span::styled(
-                            format!(" {}", fit(&terminal.purpose, width.saturating_sub(3))),
+                            format!(" {}", fit(&terminal.name, width.saturating_sub(3))),
                             ratatui::style::Style::new().fg(palette.text),
                         ),
                     ],
@@ -1633,8 +2320,16 @@ impl WorkbenchApp {
                 Some(false) => "exited",
                 None => "unknown",
             };
-            let mut detail = format!("{} · {live_word}", terminal.owner_label);
-            let records = Self::format_agent_status(&terminal.agent_status);
+            let mut detail = format!(
+                "{} · {live_word}{}",
+                terminal.location,
+                if terminal.stale {
+                    " · stale report"
+                } else {
+                    ""
+                }
+            );
+            let records = Self::format_agent_status(&terminal.records);
             if !records.is_empty() {
                 detail.push_str(&format!(" · {records}"));
             }
@@ -1652,6 +2347,7 @@ impl WorkbenchApp {
             ));
         }
 
+        let task_start = lines.len();
         // -- tasks --
         lines.push((Self::section_divider(width, palette), None));
         lines.push((
@@ -1689,32 +2385,42 @@ impl WorkbenchApp {
             ));
         }
 
-        // Viewport window: keep the selected entity's whole block visible.
-        let viewport = area.height as usize;
-        let selected_key = Some((self.focus, self.selected));
-        let first = lines.iter().position(|(_, key)| *key == selected_key);
-        let mut offset = 0usize;
-        if let Some(first) = first {
-            let span = lines
+        // Two stable regions; Tasks are an explicit alternate lower view.
+        let regions =
+            Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
+        self.sidebar_hits.clear();
+        for (range, rect) in [
+            (0..agent_start, regions[0]),
+            (
+                if self.focus == Focus::Tasks {
+                    task_start..lines.len()
+                } else {
+                    agent_start..task_start
+                },
+                regions[1],
+            ),
+        ] {
+            let section = &lines[range];
+            let height = rect.height as usize;
+            let selected_key = Some((self.focus, self.selected));
+            let last = section
                 .iter()
-                .filter(|(_, key)| *key == selected_key)
-                .count()
-                .max(1);
-            let end = first + span;
-            if end > offset + viewport {
-                offset = end - viewport;
+                .rposition(|(_, key)| *key == selected_key)
+                .unwrap_or(0);
+            let offset = (last + 1).saturating_sub(height);
+            let mut visible = Vec::new();
+            for (y, (line, key)) in section.iter().skip(offset).take(height).enumerate() {
+                visible.push(line.clone());
+                if let Some((focus, index)) = key {
+                    self.sidebar_hits.push((
+                        *focus,
+                        *index,
+                        Rect::new(rect.x, rect.y + y as u16, rect.width.saturating_sub(1), 1),
+                    ));
+                }
             }
-            if first < offset {
-                offset = first;
-            }
+            frame.render_widget(Paragraph::new(visible), rect);
         }
-        let visible: Vec<Line<'static>> = lines
-            .into_iter()
-            .skip(offset)
-            .take(viewport)
-            .map(|(line, _)| line)
-            .collect();
-        frame.render_widget(Paragraph::new(visible), area);
         // herdr's sidebar separator: one dim vertical line on the right.
         let buffer = frame.buffer_mut();
         let x = area.x + area.width.saturating_sub(1);
@@ -2175,7 +2881,92 @@ impl<'a> WorkbenchStore<'a> {
             });
         }
 
+        let nav = crate::workspaces::navigation::Navigation { store: self.store };
+        let workspaces = nav.list()?;
+        let workspace_id = nav.selected()?;
+        let folders = workspace_id
+            .as_deref()
+            .map(|id| nav.folders(id))
+            .transpose()?
+            .unwrap_or_default();
+        let workspace_diagnostics = folders
+            .iter()
+            .filter_map(|f| f.diagnostic.as_ref().map(|d| format!("{}: {d}", f.name)))
+            .collect();
+        let projects = projects
+            .into_iter()
+            .filter(|p| {
+                workspace_id.is_none()
+                    || folders
+                        .iter()
+                        .any(|f| f.project_id.as_deref() == Some(&p.project_id))
+            })
+            .map(|mut p| {
+                if let Some(f) = folders
+                    .iter()
+                    .find(|f| f.project_id.as_deref() == Some(&p.project_id))
+                {
+                    p.name = f.name.clone();
+                }
+                p
+            })
+            .collect::<Vec<_>>();
+        let mut st = self
+            .store
+            .connection()
+            .prepare("SELECT worktree_id,project_id,path,branch FROM navigation_checkouts")?;
+        for row in st.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })? {
+            let (id, project_id, path, branch) = row?;
+            if !worktrees.iter().any(|w| w.path == path) {
+                worktrees.push(WorktreeRow {
+                    worktree_id: id,
+                    project_id,
+                    path: path.clone(),
+                    branch,
+                    dirty: self.dirty_state(std::path::Path::new(&path)),
+                    task_id: None,
+                    source: "discovered (read-only)".into(),
+                    pr_state: None,
+                    ahead: None,
+                    behind: None,
+                });
+            }
+        }
+        for p in &projects {
+            if folders.iter().any(|f| {
+                f.project_id.as_deref() == Some(&p.project_id)
+                    && f.diagnostic.as_deref() == Some("non-Git directory: shell only")
+            }) && !worktrees.iter().any(|w| w.project_id == p.project_id)
+            {
+                worktrees.push(WorktreeRow {
+                    worktree_id: format!("directory:{}", p.project_id),
+                    project_id: p.project_id.clone(),
+                    path: p.repo_path.clone(),
+                    branch: "(directory — not Git)".into(),
+                    dirty: None,
+                    task_id: None,
+                    source: "directory".into(),
+                    pr_state: None,
+                    ahead: None,
+                    behind: None,
+                });
+            }
+        }
+        worktrees.retain(|w| {
+            workspace_id.is_none() || projects.iter().any(|p| p.project_id == w.project_id)
+        });
         Ok(WorkbenchModel {
+            agents: vec![],
+            workspaces,
+            workspace_id,
+            workspace_diagnostics,
             projects,
             worktrees,
             tasks,
@@ -2352,57 +3143,62 @@ fn run_client_inner(client: &mut crate::office::OfficeClient) -> OfficeResult<()
         .map_err(|e| crate::foundation::OfficeError::Io(std::io::Error::other(e.to_string())))?;
 
     let mut app = WorkbenchApp::new();
-    // First facts, then the saved layout (QA F5): attach rebuilds the same
-    // pane view, pruned to the terminals that still exist.
-    match client.call(crate::office::OfficeRequestKind::WorkbenchView) {
-        Ok(value) => {
-            if let Ok(model) = serde_json::from_value::<WorkbenchModel>(value) {
-                let live: std::collections::HashSet<String> = model
-                    .terminals
-                    .iter()
-                    .map(|terminal| terminal.terminal_id.clone())
-                    .collect();
-                app.set_model(model);
-                if let Ok(value) = client
-                    .call(crate::office::OfficeRequestKind::WorkbenchLayout { layout_json: None })
-                {
-                    if let Some(json) = value.get("layout").and_then(|layout| layout.as_str()) {
-                        app.restore_layout(json, &live);
+    let polling = polling::Polling::start(client)?;
+    let mut saved_layout = client
+        .call(crate::office::OfficeRequestKind::WorkbenchLayout { layout_json: None })
+        .ok()
+        .and_then(|v| v.get("layout").and_then(|v| v.as_str()).map(str::to_string));
+    loop {
+        while let Ok(result) = polling.models.try_recv() {
+            match result {
+                Ok(model) => {
+                    let known = model
+                        .terminals
+                        .iter()
+                        .map(|t| t.terminal_id.clone())
+                        .collect();
+                    app.set_model(model);
+                    if let Some(json) = saved_layout.take() {
+                        app.restore_layout(&json, &known);
                     }
+                }
+                Err(e) => app.set_status(format!("view failed: {e}")),
+            }
+        }
+        while let Ok((id, result)) = polling.screens.try_recv() {
+            match result {
+                Ok(snapshot) => app.set_snapshot(id, snapshot),
+                Err(e) => {
+                    app.snapshots.remove(&id);
+                    app.set_status(format!("terminal unavailable: {e}"));
                 }
             }
         }
-        Err(err) => app.set_status(format!("server error: {err}")),
-    }
-    loop {
-        // Refresh from the server projection (never inside draw).
-        match client.call(crate::office::OfficeRequestKind::WorkbenchView) {
-            Ok(value) => match serde_json::from_value::<WorkbenchModel>(value) {
-                Ok(model) => app.set_model(model),
-                Err(err) => app.set_status(format!("view decode error: {err}")),
-            },
-            Err(err) => app.set_status(format!("server error: {err}")),
-        }
-        // Fetch one snapshot per terminal leaf (bounded by the pane cap):
-        // every rendered pane stays live, focused or not.
-        for id in app.terminal_leaves() {
-            match client.call(crate::office::OfficeRequestKind::TerminalSnapshot {
-                terminal_id: id.clone(),
-            }) {
-                Ok(value) => match serde_json::from_value::<TerminalSnapshot>(value) {
-                    Ok(view) => app.set_snapshot(id, view),
-                    Err(err) => app.set_status(format!("snapshot decode error: {err}")),
-                },
-                Err(err) => app.set_status(format!("snapshot error: {err}")),
-            }
+        while let Ok(error) = polling.errors.try_recv() {
+            app.set_status(error);
         }
         terminal.draw(|frame| app.draw(frame)).map_err(|e| {
             crate::foundation::OfficeError::Io(std::io::Error::other(e.to_string()))
         })?;
 
-        if !event::poll(std::time::Duration::from_millis(200))
+        polling.request(
+            app.visible_geometry()
+                .iter()
+                .filter(|(_, r)| r.width > 0 && r.height > 0)
+                .map(|(id, r)| (id.clone(), r.width, r.height, app.scroll_offset(id)))
+                .collect(),
+        );
+        if !event::poll(std::time::Duration::from_millis(32))
             .map_err(|e| crate::foundation::OfficeError::Io(std::io::Error::other(e.to_string())))?
         {
+            if app.layout_dirty() {
+                match client.call(crate::office::OfficeRequestKind::WorkbenchLayout {
+                    layout_json: Some(app.serialize_layout()),
+                }) {
+                    Ok(_) => app.clear_layout_dirty(),
+                    Err(e) => app.set_status(format!("layout save pending: {e}")),
+                }
+            }
             continue;
         }
         let event = event::read().map_err(|e| {
@@ -2411,10 +3207,17 @@ fn run_client_inner(client: &mut crate::office::OfficeClient) -> OfficeResult<()
         match event {
             // Key handling is the existing flow; mouse events feed the
             // drag/click layer (herdr parity). Everything else is dropped.
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
+            Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
                 match app.on_key(key) {
                     // Detach, not shutdown: the resident server keeps running.
-                    KeyOutcome::QuitRequested => break,
+                    KeyOutcome::QuitRequested => {
+                        if app.layout_dirty() {
+                            client.call(crate::office::OfficeRequestKind::WorkbenchLayout {
+                                layout_json: Some(app.serialize_layout()),
+                            })?;
+                        }
+                        break;
+                    }
                     KeyOutcome::Action(action) => {
                         if let Err(err) = apply_client_action(client, &mut app, action) {
                             app.set_status(format!("action failed: {err}"));
@@ -2422,20 +3225,38 @@ fn run_client_inner(client: &mut crate::office::OfficeClient) -> OfficeResult<()
                     }
                     KeyOutcome::Forward(bytes) => {
                         if let Some(id) = app.terminal_mode().map(str::to_string) {
-                            if let Err(err) =
-                                client.call(crate::office::OfficeRequestKind::TerminalInput {
-                                    terminal_id: id,
-                                    bytes_hex: crate::office::hex_encode(&bytes),
-                                })
-                            {
-                                app.set_status(format!("input failed: {err}"));
+                            if let Err(e) = polling.send(id, bytes) {
+                                app.set_status(e);
                             }
                         }
                     }
                     KeyOutcome::Handled | KeyOutcome::Ignored => {}
                 }
             }
-            Event::Mouse(mouse) => app.on_mouse(mouse),
+            Event::Paste(text) => {
+                if let KeyOutcome::Forward(bytes) = app.on_paste(&text) {
+                    if let Some(id) = app.terminal_mode().map(str::to_string) {
+                        if let Err(e) = polling.send(id, bytes) {
+                            app.set_status(e);
+                        }
+                    }
+                }
+            }
+            Event::Resize(_, _) => {}
+            Event::Mouse(mouse) => {
+                if let Some((id, bytes)) = app.terminal_mouse(mouse) {
+                    if let Err(e) = polling.send(id, bytes) {
+                        app.set_status(e);
+                    }
+                } else {
+                    app.on_mouse(mouse);
+                    if let Some(action) = app.take_mouse_action() {
+                        if let Err(err) = apply_client_action(client, &mut app, action) {
+                            app.set_status(format!("navigation failed: {err}"));
+                        }
+                    }
+                }
+            }
             _ => {}
         }
         // Persist pane-tree changes so the next attach restores them.
@@ -2461,6 +3282,42 @@ fn apply_client_action(
     action: WorkbenchAction,
 ) -> OfficeResult<()> {
     match action {
+        WorkbenchAction::Workspace {
+            action,
+            mut value,
+            project_id,
+        } => {
+            if matches!(action.as_str(), "open" | "add" | "save") {
+                if let Some(v) = &value {
+                    let path = std::path::Path::new(v);
+                    if !path.is_absolute() {
+                        value = Some(std::env::current_dir()?.join(path).display().to_string());
+                    }
+                }
+            }
+            let v = client.call(crate::office::OfficeRequestKind::Workspace {
+                action,
+                value,
+                project_id,
+            })?;
+            app.set_status(format!("workspace selected: {}", v["workspace_id"]));
+            Ok(())
+        }
+        WorkbenchAction::SelectWorktree(id) => {
+            app.select_worktree(id);
+            Ok(())
+        }
+        WorkbenchAction::NewTab => {
+            if !app.new_tab("Terminal".into()) {
+                return Ok(());
+            }
+            let id = app.selected_scene().to_string();
+            if id == FLOATING {
+                spawn_and_split(client, app, SplitAxis::Horizontal)
+            } else {
+                apply_client_action(client, app, WorkbenchAction::OpenWorktreeShell(id))
+            }
+        }
         WorkbenchAction::EnterTerminal(id) => {
             app.attach_terminal(id.clone());
             app.enter_terminal_mode(id);
@@ -2489,6 +3346,17 @@ fn apply_client_action(
         WorkbenchAction::SplitRight => spawn_and_split(client, app, SplitAxis::Horizontal),
         WorkbenchAction::SplitBelow => spawn_and_split(client, app, SplitAxis::Vertical),
         WorkbenchAction::OpenWorktreeShell(worktree_id) => {
+            if app.selected_scene() != worktree_id {
+                app.select_worktree(worktree_id.clone());
+            }
+            let has_tab = app
+                .scenes
+                .scenes
+                .get(app.selected_scene())
+                .is_some_and(|s| !s.active.is_empty());
+            if !has_tab && !app.new_tab("Terminal".into()) {
+                return Ok(());
+            }
             let value = client
                 .call(crate::office::OfficeRequestKind::TerminalOpenInWorktree { worktree_id })?;
             let terminal_id = value
@@ -2668,8 +3536,18 @@ fn spawn_and_split(
         ));
         return Ok(());
     }
-    let worktree_id = app.focused_worktree_id();
-    let cwd = worktree_id
+    if app
+        .scenes
+        .scenes
+        .get(app.selected_scene())
+        .is_none_or(|s| s.active.is_empty())
+        && !app.new_tab("Terminal".into())
+    {
+        return Ok(());
+    }
+    let scene = app.focused_worktree_id();
+    let worktree_id = scene.clone().filter(|id| !id.starts_with("directory:"));
+    let cwd = scene
         .as_ref()
         .and_then(|wid| app.model().worktrees.iter().find(|w| &w.worktree_id == wid))
         .map(|w| w.path.clone())
@@ -2766,6 +3644,10 @@ mod tests {
             }],
             auto_pull: false,
             sync_note: None,
+            agents: vec![],
+            workspaces: vec![],
+            workspace_id: None,
+            workspace_diagnostics: vec![],
         }
     }
 
@@ -2788,8 +3670,11 @@ mod tests {
         );
         assert_eq!(app.focus(), Focus::Terminals);
         let agents = render(&mut app, 100, 24);
-        assert!(agents.contains("user_shell"));
-        assert!(agents.contains("live"));
+        assert!(
+            !agents.contains("user_shell"),
+            "ordinary shell is not an agent row"
+        );
+        assert!(app.agent_rows().is_empty());
 
         assert_eq!(
             app.on_key(KeyEvent::from(KeyCode::Char('3'))),
@@ -2815,10 +3700,11 @@ mod tests {
     }
 
     #[test]
-    fn terminal_mode_forwards_bytes_and_esc_releases() {
+    fn terminal_mode_forwards_bytes_and_esc_reaches_cli() {
         let mut app = WorkbenchApp::new();
         app.set_model(sample());
         app.on_key(KeyEvent::from(KeyCode::Char('2')));
+        app.on_key(KeyEvent::from(KeyCode::Char('t')));
         assert_eq!(
             app.on_key(KeyEvent::from(KeyCode::Enter)),
             KeyOutcome::Action(WorkbenchAction::EnterTerminal("term-1".into()))
@@ -2842,8 +3728,13 @@ mod tests {
         );
         assert_eq!(
             app.on_key(KeyEvent::from(KeyCode::Esc)),
-            KeyOutcome::Handled
+            KeyOutcome::Forward(vec![27])
         );
+        assert_eq!(app.terminal_mode(), Some("term-1"));
+        app.on_key(KeyEvent::new(
+            KeyCode::Char(']'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        ));
         assert!(app.terminal_mode().is_none());
     }
 
@@ -2886,6 +3777,7 @@ mod tests {
 
     fn snapshot_with(lines: &[&str]) -> TerminalSnapshot {
         TerminalSnapshot {
+            screen: None,
             cols: 80,
             rows: 12,
             visible: lines.iter().map(|s| s.to_string()).collect(),
@@ -2954,8 +3846,11 @@ mod tests {
         // Focus is on t2 after the split; move up to t1, left to the browser.
         app.move_pane_focus(Direction::Up);
         assert_eq!(app.pane_focus(), &PaneContent::Terminal("t1".into()));
-        app.move_pane_focus(Direction::Left);
-        assert_eq!(app.pane_focus(), &PaneContent::Browser);
+        assert!(
+            !app.move_pane_focus(Direction::Left),
+            "single terminal column has no browser neighbor"
+        );
+        assert_eq!(app.pane_focus(), &PaneContent::Terminal("t1".into()));
     }
 
     #[test]
@@ -3028,6 +3923,17 @@ mod tests {
 
         let mut model = sample();
         model.terminals[0].agent_status = vec![record(StatusSource::ScreenInference)];
+        model.agents = vec![crate::agents::AgentSessionRow {
+            terminal_id: "term-1".into(),
+            tool: "pi".into(),
+            name: "Pi".into(),
+            worktree_id: Some("wt1".into()),
+            location: "viva / agent/feat-x".into(),
+            live: Some(true),
+            records: vec![record(StatusSource::ScreenInference)],
+            stale: false,
+            in_workspace: true,
+        }];
         let mut app = WorkbenchApp::new();
         app.set_model(model);
         assert_eq!(
@@ -3038,6 +3944,17 @@ mod tests {
 
         let mut model = sample();
         model.terminals[0].agent_status = vec![record(StatusSource::ControlledReport)];
+        model.agents = vec![crate::agents::AgentSessionRow {
+            terminal_id: "term-1".into(),
+            tool: "pi".into(),
+            name: "Pi".into(),
+            worktree_id: Some("wt1".into()),
+            location: "viva / agent/feat-x".into(),
+            live: Some(true),
+            records: vec![record(StatusSource::ControlledReport)],
+            stale: false,
+            in_workspace: true,
+        }];
         let mut app = WorkbenchApp::new();
         app.set_model(model);
         assert_eq!(
@@ -3081,6 +3998,7 @@ mod tests {
         app.set_snapshot(
             "t1",
             TerminalSnapshot {
+                screen: None,
                 total_output_bytes: 123_456,
                 ..view
             },
@@ -3307,6 +4225,10 @@ mod v15_tui_fix_tests {
             attention: vec![],
             auto_pull: false,
             sync_note: None,
+            agents: vec![],
+            workspaces: vec![],
+            workspace_id: None,
+            workspace_diagnostics: vec![],
         }
     }
 
@@ -3394,6 +4316,11 @@ mod v15_tui_fix_tests {
     fn app_with_two_panes() -> WorkbenchApp {
         let mut app = WorkbenchApp::new();
         app.attach_terminal("t1".into());
+        app.grid = PaneNode::split_new(
+            PaneContent::Browser,
+            SplitAxis::Horizontal,
+            PaneContent::Terminal("t1".into()),
+        );
         app.last_pane_area = Some(Rect::new(0, 0, 100, 40));
         app.last_sidebar_edge = None;
         app

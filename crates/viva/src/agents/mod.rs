@@ -150,6 +150,13 @@ impl AgentStatusBoard {
             .insert((record.terminal_id.clone(), record.source), record);
     }
 
+    /// End an agent incarnation without deleting the durable report audit.
+    pub fn clear_source(&self, terminal_id: &str, source: StatusSource) {
+        self.records
+            .lock()
+            .expect("agent status board")
+            .remove(&(terminal_id.into(), source));
+    }
     /// Drop everything known about one terminal (it stopped or was
     /// transferred).
     pub fn clear(&self, terminal_id: &str) {
@@ -222,60 +229,144 @@ pub fn infer_from_screen(snapshot: &TerminalSnapshot) -> Option<AgentStatus> {
 /// The agent CLI running inside a terminal's process tree, if any of the
 /// seven detectable ones is there. Identification only: this says WHO
 /// runs, never WHAT state they are in.
-pub fn identify_by_process_tree(child_pid: Option<u32>) -> OfficeResult<Option<String>> {
-    use std::process::Command;
-    let Some(pid) = child_pid else {
-        return Ok(None);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessAgent {
+    pub agent: String,
+    pub pid: u32,
+    pub started: String,
+}
+
+/// Match executable/script position, never arbitrary arguments or prefixes.
+pub fn agent_from_command(command: &str) -> Option<String> {
+    let mut words = command.split_whitespace();
+    let exe = words.next()?;
+    let classify = |word: &str| {
+        let base = word.rsplit('/').next().unwrap_or(word).to_ascii_lowercase();
+        DETECTABLE_AGENTS
+            .iter()
+            .find(|agent| {
+                base == **agent || base == format!("{agent}.js") || base == format!("{agent}.py")
+            })
+            .map(|a| a.to_string())
+            .or_else(|| {
+                if word.contains("/pi-coding-agent/") && word.ends_with("/cli.js") {
+                    Some("pi".into())
+                } else {
+                    None
+                }
+            })
     };
-    let output = Command::new("ps")
-        .args(["-eo", "pid=,ppid=,command="])
-        .output()
-        .map_err(crate::foundation::error::OfficeError::Io)?;
-    if !output.status.success() {
-        // A failing ps is an honest unknown, not a guess.
-        return Ok(None);
+    if let Some(agent) = classify(exe) {
+        return Some(agent);
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-    let mut commands: HashMap<u32, String> = HashMap::new();
-    for line in text.lines() {
-        let mut parts = line.split_whitespace();
-        let Some(p) = parts.next().and_then(|p| p.parse::<u32>().ok()) else {
-            continue;
-        };
-        let Some(ppid) = parts.next().and_then(|p| p.parse::<u32>().ok()) else {
-            continue;
-        };
-        let command = parts.collect::<Vec<_>>().join(" ");
-        children.entry(ppid).or_default().push(p);
-        commands.insert(p, command);
-    }
-    // Walk the session's tree breadth-first from the terminal's child.
-    let mut queue = vec![pid];
-    let mut seen = std::collections::HashSet::new();
-    while let Some(current) = queue.pop() {
-        if !seen.insert(current) {
-            continue;
+    let base = exe.rsplit('/').next().unwrap_or(exe);
+    if matches!(
+        base,
+        "node" | "nodejs" | "python" | "python3" | "sh" | "bash" | "zsh"
+    ) {
+        let script = words.next()?;
+        if !script.starts_with('-') {
+            return classify(script);
         }
-        if let Some(command) = commands.get(&current) {
-            let lower = command.to_ascii_lowercase();
-            for agent in DETECTABLE_AGENTS {
-                // Match the binary name in the command line (argv0 or
-                // path head) rather than anywhere in the arguments.
-                let matches = command.split_whitespace().any(|word| {
-                    let base = word.rsplit('/').next().unwrap_or(word);
-                    base.to_ascii_lowercase().starts_with(agent)
-                }) || lower.starts_with(agent);
-                if matches {
-                    return Ok(Some(agent.to_string()));
+    }
+    None
+}
+#[derive(Default)]
+pub struct ProcessTable {
+    children: HashMap<u32, Vec<u32>>,
+    commands: HashMap<u32, (String, String)>,
+}
+impl ProcessTable {
+    pub fn capture() -> OfficeResult<Self> {
+        let output = std::process::Command::new("ps")
+            .args(["-eo", "pid=,ppid=,lstart=,command="])
+            .output()?;
+        if !output.status.success() {
+            return Err(crate::foundation::OfficeError::Validation(
+                "process detection unavailable".into(),
+            ));
+        }
+        Ok(Self::parse(&String::from_utf8_lossy(&output.stdout)))
+    }
+    pub fn parse(text: &str) -> Self {
+        let mut table = Self::default();
+        for line in text.lines() {
+            let mut w = line.split_whitespace();
+            let Some(pid) = w.next().and_then(|v| v.parse::<u32>().ok()) else {
+                continue;
+            };
+            let Some(ppid) = w.next().and_then(|v| v.parse::<u32>().ok()) else {
+                continue;
+            };
+            let started = w.by_ref().take(5).collect::<Vec<_>>().join(" ");
+            let command = w.collect::<Vec<_>>().join(" ");
+            table.children.entry(ppid).or_default().push(pid);
+            table.commands.insert(pid, (started, command));
+        }
+        table
+    }
+    pub fn identify(&self, pid: Option<u32>) -> Option<ProcessAgent> {
+        let mut queue = vec![pid?];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(p) = queue.pop() {
+            if !seen.insert(p) {
+                continue;
+            }
+            if let Some((started, command)) = self.commands.get(&p) {
+                if let Some(agent) = agent_from_command(command) {
+                    return Some(ProcessAgent {
+                        agent,
+                        pid: p,
+                        started: started.clone(),
+                    });
                 }
             }
+            if let Some(kids) = self.children.get(&p) {
+                queue.extend(kids);
+            }
         }
-        if let Some(kids) = children.get(&current) {
-            queue.extend(kids.iter().copied());
-        }
+        None
     }
-    Ok(None)
+}
+pub fn identify_by_process_tree(child_pid: Option<u32>) -> OfficeResult<Option<String>> {
+    if child_pid.is_none() {
+        return Ok(None);
+    }
+    Ok(ProcessTable::capture()?
+        .identify(child_pid)
+        .map(|a| a.agent))
+}
+
+/// A session projection; a terminal is the stable session identity, not a Resident.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AgentSessionRow {
+    pub terminal_id: String,
+    pub tool: String,
+    pub name: String,
+    pub worktree_id: Option<String>,
+    pub location: String,
+    pub live: Option<bool>,
+    pub records: Vec<AgentStatusRecord>,
+    pub stale: bool,
+    pub in_workspace: bool,
+}
+impl AgentSessionRow {
+    pub fn needs_attention(&self) -> bool {
+        self.stale
+            || self
+                .records
+                .iter()
+                .any(|r| matches!(r.status, AgentStatus::Blocked | AgentStatus::RateLimited))
+    }
+}
+
+pub fn report_stale(record: &AgentStatusRecord) -> bool {
+    time::OffsetDateTime::parse(
+        &record.updated_at,
+        &time::format_description::well_known::Rfc3339,
+    )
+    .map(|t| (time::OffsetDateTime::now_utc() - t).whole_seconds() > 120)
+    .unwrap_or(true)
 }
 
 #[cfg(test)]
@@ -285,6 +376,7 @@ mod tests {
 
     fn snapshot(visible: &[&str]) -> TerminalSnapshot {
         TerminalSnapshot {
+            screen: None,
             cols: 80,
             rows: visible.len() as u16,
             visible: visible.iter().map(|s| s.to_string()).collect(),

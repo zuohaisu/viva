@@ -5,7 +5,7 @@ What this script actually does (all real, no mocks):
 - creates an isolated VIVA_HOME and initializes the office store;
 - seeds one member, three tasks and three live dispatch grants (the same
   shape the owner would create interactively);
-- starts the real `viva office start` host process;
+- starts the real `viva server` host process;
 - dispatches SIXTEEN real supervised terminal processes (sleep stand-ins)
   through the real UDS channel with distinct request keys;
 - samples the host's process tree at peak, plus whole-machine memory;
@@ -171,7 +171,7 @@ def _run(binary: Path, home: Path, window: Path, out: Path) -> int:
             )
         home.mkdir(parents=True, exist_ok=True)
         host = subprocess.Popen(
-            [str(binary), "office", "start"],
+            [str(binary), "server"],
             env={"VIVA_HOME": str(home), "PATH": "/usr/bin:/bin"},
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -187,7 +187,7 @@ def _run(binary: Path, home: Path, window: Path, out: Path) -> int:
                 task = seeded["tasks"][i % 3]
                 start = time.monotonic()
                 result = viva(
-                    binary, home, "office", "dispatch",
+                    binary, home, "dispatch",
                     "--task", task["task_id"],
                     "--member", seeded["member_id"],
                     "--grant", task["grant_id"],
@@ -227,12 +227,12 @@ def _run(binary: Path, home: Path, window: Path, out: Path) -> int:
             }
 
             # 5. Stop isolation: stop two, verify a third still live.
-            status = viva(binary, home, "office", "status")
+            status = viva(binary, home, "status")
             live_before = {t["terminal_id"] for t in status["terminals"] if t["live"]}
-            viva(binary, home, "office", "stop-terminal", terminal_ids[0])
-            viva(binary, home, "office", "stop-terminal", terminal_ids[1])
+            viva(binary, home, "stop-terminal", terminal_ids[0])
+            viva(binary, home, "stop-terminal", terminal_ids[1])
             time.sleep(0.5)
-            status = viva(binary, home, "office", "status")
+            status = viva(binary, home, "status")
             live_after = {t["terminal_id"] for t in status["terminals"] if t["live"]}
             survivor = terminal_ids[2]
             record["stop_isolation"] = {
@@ -244,7 +244,7 @@ def _run(binary: Path, home: Path, window: Path, out: Path) -> int:
             assert record["stop_isolation"]["survivor_still_live"], "neighbor was killed"
 
             # 6. Graceful shutdown; verify every owned process is reaped.
-            viva(binary, home, "office", "shutdown")
+            viva(binary, home, "shutdown")
             host.wait(timeout=30)
             time.sleep(1.0)
             table = process_table()
@@ -263,7 +263,7 @@ def _run(binary: Path, home: Path, window: Path, out: Path) -> int:
                 f"graceful shutdown left owned processes alive: {still_alive}"
             )
 
-            record["offline_status_after"] = viva(binary, home, "office", "status", check=False)
+            record["offline_status_after"] = viva(binary, home, "status", check=False)
         finally:
             if host.poll() is None:
                 host.kill()
