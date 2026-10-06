@@ -11,6 +11,42 @@
 
 use ratatui::layout::Rect;
 
+/// One draggable split boundary (the mouse hit model for the pane grid).
+/// Geometry matches [`PaneNode::render_layout_chrome`] exactly: `pos` IS
+/// the shared divider cell the chrome draws.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitHit {
+    pub axis: SplitAxis,
+    /// Column of the shared divider cell (Horizontal) or row (Vertical).
+    pub pos: u16,
+    /// The split node's own rect — the drag's denominator: the pointer
+    /// position maps into this rect to compute the new ratio.
+    pub area: Rect,
+    /// The grab band: the divider cell plus one cell of tolerance on each
+    /// side, clamped to `area`.
+    pub hit_rect: Rect,
+    /// Path from the root to the split node: `true` descends into the
+    /// second child. [`PaneNode::set_ratio_at_path`] consumes it.
+    pub path: Vec<bool>,
+}
+
+/// The split ratio (10..=90, first-side percent) implied by placing the
+/// divider at `pos`. The divider cell is the FIRST side's last cell, so
+/// `first = pos - origin + 1`. `pos` is an `i32` because a drag can carry
+/// it past the area edges; the result clamps into the legal band either
+/// way. `None` only when the area is degenerate (zero length).
+pub fn ratio_for_divider(axis: SplitAxis, pos: i32, area: Rect) -> Option<u16> {
+    let (origin, length) = match axis {
+        SplitAxis::Horizontal => (i32::from(area.x), i32::from(area.width)),
+        SplitAxis::Vertical => (i32::from(area.y), i32::from(area.height)),
+    };
+    if length == 0 {
+        return None;
+    }
+    let first = (pos - origin + 1).clamp(0, length);
+    Some(((first * 100 / length) as u16).clamp(10, 90))
+}
+
 /// Hard cap on rendered panes per frame (the draw budget): a snapshot fetch
 /// per terminal leaf per cycle, at most this many leaves. Splitting refuses
 /// beyond the cap instead of silently degrading rendering.
@@ -295,6 +331,133 @@ impl PaneNode {
         pruned
     }
 
+    /// Every split boundary, outermost first, with the tree path to each
+    /// split node. The parent is pushed before its children, so a hit test
+    /// over the list resolves coinciding dividers to the outer split —
+    /// the one whose band the pointer actually grabbed first.
+    pub fn splits(&self, area: Rect) -> Vec<SplitHit> {
+        fn walk(node: &PaneNode, area: Rect, path: Vec<bool>, out: &mut Vec<SplitHit>) {
+            let PaneNode::Split {
+                axis,
+                first,
+                second,
+                ratio,
+            } = node
+            else {
+                return;
+            };
+            let ratio = (*ratio).clamp(10, 90) as u32;
+            let (first_len, second_len) = match axis {
+                SplitAxis::Horizontal => {
+                    let first_len = (area.width as u32 * ratio / 100) as u16;
+                    (first_len, area.width.saturating_sub(first_len))
+                }
+                SplitAxis::Vertical => {
+                    let first_len = (area.height as u32 * ratio / 100) as u16;
+                    (first_len, area.height.saturating_sub(first_len))
+                }
+            };
+            // A degenerate side has no divider cell between the siblings —
+            // nothing to grab (the chrome skips these rects too).
+            if first_len == 0 || second_len == 0 {
+                return;
+            }
+            let (pos, hit_rect) = match axis {
+                SplitAxis::Horizontal => {
+                    let pos = area.x + first_len - 1;
+                    let hit_x = pos.saturating_sub(1).max(area.x);
+                    let hit_right = (pos + 1).min(area.x + area.width - 1);
+                    (
+                        pos,
+                        Rect {
+                            x: hit_x,
+                            y: area.y,
+                            width: hit_right - hit_x + 1,
+                            height: area.height,
+                        },
+                    )
+                }
+                SplitAxis::Vertical => {
+                    let pos = area.y + first_len - 1;
+                    let hit_y = pos.saturating_sub(1).max(area.y);
+                    let hit_bottom = (pos + 1).min(area.y + area.height - 1);
+                    (
+                        pos,
+                        Rect {
+                            x: area.x,
+                            y: hit_y,
+                            width: area.width,
+                            height: hit_bottom - hit_y + 1,
+                        },
+                    )
+                }
+            };
+            out.push(SplitHit {
+                axis: *axis,
+                pos,
+                area,
+                hit_rect,
+                path: path.clone(),
+            });
+            let (first_rect, second_rect) = match axis {
+                SplitAxis::Horizontal => (
+                    Rect {
+                        width: first_len,
+                        ..area
+                    },
+                    Rect {
+                        x: area.x + first_len,
+                        width: second_len,
+                        ..area
+                    },
+                ),
+                SplitAxis::Vertical => (
+                    Rect {
+                        height: first_len,
+                        ..area
+                    },
+                    Rect {
+                        y: area.y + first_len,
+                        height: second_len,
+                        ..area
+                    },
+                ),
+            };
+            let mut first_path = path.clone();
+            first_path.push(false);
+            let mut second_path = path;
+            second_path.push(true);
+            walk(first, first_rect, first_path, out);
+            walk(second, second_rect, second_path, out);
+        }
+        let mut out = Vec::new();
+        walk(self, area, Vec::new(), &mut out);
+        out
+    }
+
+    /// Set the ratio of the split at `path` (clamped 10..=90). Returns
+    /// false when the path no longer resolves to a split — the tree's
+    /// topology changed under a drag, which must then be cancelled.
+    pub fn set_ratio_at_path(&mut self, path: &[bool], ratio: u16) -> bool {
+        let ratio = ratio.clamp(10, 90);
+        let mut node = self;
+        for &go_second in path {
+            match node {
+                PaneNode::Split { first, second, .. } => {
+                    node = if go_second { second } else { first };
+                }
+                PaneNode::Leaf(_) => return false,
+            }
+        }
+        match node {
+            PaneNode::Split { ratio: target, .. } => {
+                *target = ratio;
+                true
+            }
+            PaneNode::Leaf(_) => false,
+        }
+    }
+
     /// The geometric neighbor of the focused leaf in `direction`: among all
     /// leaves whose rect touches the focused rect across that direction's
     /// edge, the one with the largest overlap along the shared edge wins.
@@ -396,6 +559,127 @@ mod tests {
         assert_eq!(t2.y, 20);
         // No leaf overlaps the browser column.
         assert!(t1.x >= 50 && t2.x >= 50);
+    }
+
+    #[test]
+    fn split_hit_positions_are_the_drawn_divider_cells() {
+        // The hit model must agree with the chrome pass cell-for-cell: a
+        // grabbed divider is exactly the line the user sees.
+        let tree = sample_tree(); // browser | (t1 / t2)
+        let a = area();
+        let chrome = tree.render_layout_chrome(a);
+        let browser = chrome
+            .iter()
+            .find(|(c, _)| *c == PaneContent::Browser)
+            .unwrap()
+            .1;
+        let t1 = chrome.iter().find(|(c, _)| *c == term("t1")).unwrap().1;
+        let t2 = chrome.iter().find(|(c, _)| *c == term("t2")).unwrap().1;
+
+        let hits = tree.splits(a);
+        assert_eq!(hits.len(), 2, "one hit per split node");
+        let root = &hits[0];
+        assert_eq!(root.path, Vec::<bool>::new());
+        assert_eq!(root.axis, SplitAxis::Horizontal);
+        assert_eq!(root.pos, browser.x + browser.width - 1, "root divider");
+        assert_eq!(root.area, a);
+        // The grab band covers the divider cell ±1, clamped to the area.
+        assert!(root.hit_rect.x <= root.pos && root.pos <= root.hit_rect.x + root.hit_rect.width);
+        assert!(contains_point(root.hit_rect, root.pos, 20));
+        assert!(contains_point(root.hit_rect, root.pos - 1, 20));
+        assert!(!contains_point(root.hit_rect, root.pos - 2, 20));
+
+        let nested = &hits[1];
+        assert_eq!(
+            nested.path,
+            vec![true],
+            "the t1/t2 split is the second child"
+        );
+        assert_eq!(nested.axis, SplitAxis::Vertical);
+        assert_eq!(nested.pos, t1.y + t1.height - 1, "nested divider");
+        assert_eq!(nested.pos, t2.y, "t1's bottom border IS t2's top border");
+        assert!(contains_point(nested.hit_rect, 60, nested.pos));
+    }
+
+    #[test]
+    fn ratio_for_divider_round_trips_the_integer_geometry() {
+        let a = area();
+        for ratio in [10u16, 25, 50, 73, 90] {
+            let mut tree = sample_tree();
+            assert!(tree.set_ratio_at_path(&[], ratio));
+            let pos = tree.splits(a)[0].pos;
+            assert_eq!(
+                ratio_for_divider(SplitAxis::Horizontal, i32::from(pos), a),
+                Some(ratio),
+                "pos {pos} must read back as ratio {ratio}"
+            );
+        }
+        // Past the edges clamps into the legal band; degenerate area is None.
+        assert_eq!(
+            ratio_for_divider(SplitAxis::Horizontal, -50, a),
+            Some(10),
+            "far left clamps to the floor"
+        );
+        assert_eq!(
+            ratio_for_divider(SplitAxis::Horizontal, 10_000, a),
+            Some(90),
+            "far right clamps to the ceiling"
+        );
+        assert_eq!(
+            ratio_for_divider(SplitAxis::Horizontal, 0, Rect::new(0, 0, 0, 10)),
+            None
+        );
+    }
+
+    #[test]
+    fn set_ratio_at_path_writes_clamps_and_reports_dead_paths() {
+        let mut tree = sample_tree();
+        assert!(tree.set_ratio_at_path(&[true], 30));
+        match &tree {
+            PaneNode::Split { second, ratio, .. } => {
+                assert_eq!(*ratio, 50, "the root's own ratio is untouched");
+                assert!(matches!(**second, PaneNode::Split { ratio: 30, .. }));
+            }
+            _ => panic!("root is a split"),
+        }
+        // Clamped into the never-zero band on both sides.
+        assert!(tree.set_ratio_at_path(&[], 5));
+        assert!(matches!(tree, PaneNode::Split { ratio: 10, .. }));
+        assert!(tree.set_ratio_at_path(&[], 95));
+        assert!(matches!(tree, PaneNode::Split { ratio: 90, .. }));
+        // A path through a leaf is dead: the caller cancels the drag.
+        assert!(
+            !tree.set_ratio_at_path(&[false], 50),
+            "first child is a leaf"
+        );
+        assert!(
+            !tree.set_ratio_at_path(&[true, true, true], 50),
+            "past the leaves"
+        );
+        let mut leaf = PaneNode::leaf(PaneContent::Browser);
+        assert!(!leaf.set_ratio_at_path(&[], 50));
+    }
+
+    #[test]
+    fn splits_skip_degenerate_splits_but_still_walk_live_children() {
+        // A 1-wide area makes the root's first side zero: no divider to
+        // grab, and no hits at all from this subtree.
+        let tree = sample_tree();
+        assert!(tree.splits(Rect::new(0, 0, 1, 40)).is_empty());
+        // A degenerate SECOND side (ratio 90 of a 10-wide area = 9/1) still
+        // has a divider; its children are walked with their real rects —
+        // the nested split stays live even in a 1-cell-wide column.
+        let mut narrow = sample_tree();
+        assert!(narrow.set_ratio_at_path(&[], 90));
+        let hits = narrow.splits(Rect::new(0, 0, 10, 40));
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].pos, 8);
+        assert_eq!(hits[1].area.width, 1, "the t1/t2 column is one cell wide");
+        assert_eq!(hits[1].pos, 19);
+    }
+
+    fn contains_point(rect: Rect, x: u16, y: u16) -> bool {
+        x >= rect.x && y >= rect.y && x < rect.x + rect.width && y < rect.y + rect.height
     }
 
     #[test]
