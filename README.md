@@ -141,6 +141,8 @@ entry.
 - [AGENTS.md](AGENTS.md) — the working charter for agents in this repo.
 - [docs/product/](docs/product/) — vision, product model, customer zero,
   workflows, phase-1 scope, first-usable-version gate.
+- [Product roadmap (proposed)](docs/product/roadmap.md) — implementation baseline,
+  phased acceptance gates, continuity, orchestration, synchronization and self-model boundaries.
 - [docs/architecture/](docs/architecture/) — conceptual architecture, domain
   model, temporal model, and the migration/retirement record.
 - [docs/decisions/](docs/decisions/) — ADRs 0001–0011.

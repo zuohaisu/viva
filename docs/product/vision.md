@@ -120,6 +120,7 @@ Viva 的存在就是把这些变成**Viva 持续保留的资产**：成员持续
 | Haisu 的真实场景 | `product/customer-zero.md` |
 | 办公流与验收线 | `product/workflows.md` |
 | 本轮范围与未实现项 | `product/phase-1.md` |
+| 最新代码基线与后续路线提案（非验收 PASS） | [roadmap.md](roadmap.md) |
 | 概念架构 / 时间轴 | `architecture/conceptual-architecture.md`、`architecture/temporal-model.md` |
 | 关键决策（含被取代的） | `decisions/0001`–`0011` |
 | Rust/Pi 与 SQLite 技术裁决（目标与现状） | [ADR 0011](../decisions/0011-rust-host-and-tui.md) |
