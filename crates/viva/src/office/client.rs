@@ -166,11 +166,7 @@ fn spawn_detached_server(home: &Path, extra_args: &[&str]) -> OfficeResult<()> {
 /// [`spawn_detached_server`] with an explicit entry point. The update flow
 /// passes the freshly installed wrapper/binary: the updating process itself
 /// is the OLD generation, and its on-disk executable has just been replaced.
-fn spawn_detached_server_from(
-    home: &Path,
-    entry: &Path,
-    extra_args: &[&str],
-) -> OfficeResult<()> {
+fn spawn_detached_server_from(home: &Path, entry: &Path, extra_args: &[&str]) -> OfficeResult<()> {
     let log_path = home.join("server.log");
     let log = std::fs::OpenOptions::new()
         .create(true)

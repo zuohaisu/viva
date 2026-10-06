@@ -116,10 +116,9 @@ pub fn run(args: &[String]) -> OfficeResult<()> {
     match (installed, &mode) {
         // The freshly installed entry takes over the running server: the
         // handover IS the upgrade (S3). Nothing to spawn when none runs.
-        (Some(entry), Mode::Install { restart: true }) => restart_running_server(
-            &crate::foundation::paths::viva_home(None),
-            &entry,
-        ),
+        (Some(entry), Mode::Install { restart: true }) => {
+            restart_running_server(&crate::foundation::paths::viva_home(None), &entry)
+        }
         (Some(_), Mode::Install { restart: false }) => print_restart_skipped(),
         _ => {}
     }
