@@ -129,6 +129,41 @@ then through a pull request and a merge into the remote default branch.
   assumptions or skipped checks, and — when the workflow applies — the branch,
   commit, worktree location, and PR URL.
 
+## Post-Merge npm Releases and Version Policy
+
+- **Every merged delivery must produce a new npm release.** After the
+  repository owner (or an explicitly authorized Controller) merges a task into
+  the remote default branch, publish a new version of `@zuohaisu/viva` and its
+  platform packages as part of that task's delivery. Routine patch releases
+  do not require a separate request from Haisu. A merged PR alone is not a
+  completed release. This rule does **not** authorize an agent to merge or
+  approve its own PR, push a protected branch, or bypass release checks.
+- **Without Haisu's explicit instruction, change only the third (patch)
+  component of `major.minor.patch`.** Preserve the first two components and
+  increment the patch number: on the current `0.3.x` line, `0.3.0 → 0.3.1 →
+  0.3.2`. Moving to `0.4.0`, `1.0.0`, or any other major/minor line requires
+  Haisu to explicitly authorize that version change; a new feature, breaking
+  change, milestone, or an agent's SemVer judgment is not that authorization.
+- Before merge, include the version bump in the task's isolated worktree/PR
+  and keep `crates/viva/Cargo.toml` and the Viva entry in `Cargo.lock` aligned.
+  Check the latest remote default branch, release tags, and npm versions;
+  choose the next unused patch on the authorized major/minor line and
+  re-check for concurrent releases before tagging. Never reuse, overwrite,
+  or force-update a released version or tag.
+- Publish **only after merge**, from the validated merged source, using the
+  existing `v<version>` tag flow in `.github/workflows/release.yml` and
+  `packaging/npm/README.md`. Tag, binary, npm wrapper, platform package, and
+  wrapper dependency versions must agree. Publish platform packages before
+  the wrapper; do not add a parallel publishing pipeline or change token
+  permissions to work around a failure.
+- Verify the official npm registry exposes the new version and expected
+  `latest` tags for all release packages, then perform a clean install and
+  confirm `viva --version`. npm upload acceptance, queued processing, or a
+  green workflow alone is **not** proof of a usable release. Report pending
+  propagation, missing credentials, failed checks, or rejected publication
+  honestly, with the release/PR links and the smallest required owner action;
+  do not blindly republish an accepted version.
+
 ## Boundaries With Sibling Repos
 
 ```text
