@@ -1144,8 +1144,29 @@ impl WorkbenchApp {
     /// The 1-row status/mode bar (herdr's mode bar). Facts come first —
     /// mode chips, needs-attention markers, sync note — and the key hints
     /// go last, truncated with an ellipsis. Honesty never loses its row to
-    /// decoration on a narrow terminal (QA F5).
+    /// decoration on a narrow terminal (QA F5). The client version sits
+    /// dim at the right edge: provenance without noise.
     fn draw_status_bar(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        // The version badge reserves its columns at the right edge first
+        // (dim, unobtrusive provenance); the hints budget shrinks around
+        // it, so the two never overlap.
+        let version = format!(" v{}", env!("CARGO_PKG_VERSION"));
+        let version_width = version.chars().count() as u16;
+        let (bar_area, version_area) = if area.width > version_width {
+            (
+                Rect {
+                    width: area.width - version_width,
+                    ..area
+                },
+                Rect {
+                    x: area.x + area.width - version_width,
+                    width: version_width,
+                    ..area
+                },
+            )
+        } else {
+            (area, Rect::new(area.x, area.y, 0, area.height))
+        };
         let mut spans: Vec<Span> = Vec::new();
         if self.terminal_mode.is_some() {
             spans.push(Self::chip(" TERMINAL ", palette.accent, palette));
@@ -1174,7 +1195,7 @@ impl WorkbenchApp {
         // The hints are decoration: they get whatever columns remain, with
         // an ellipsis when they do not fit.
         let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-        let budget = (area.width as usize).saturating_sub(used);
+        let budget = (bar_area.width as usize).saturating_sub(used);
         if budget > 1 {
             let body_budget = budget - 1; // one leading space
             let truncated = self.status_line.chars().count() > body_budget;
@@ -1187,7 +1208,16 @@ impl WorkbenchApp {
                 ratatui::style::Style::new().fg(palette.overlay0),
             ));
         }
-        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        frame.render_widget(Paragraph::new(Line::from(spans)), bar_area);
+        if version_area.width > 0 {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    version,
+                    ratatui::style::Style::new().fg(palette.overlay0),
+                ))),
+                version_area,
+            );
+        }
     }
 
     fn chip(label: &str, bg: ratatui::style::Color, palette: &Palette) -> Span<'static> {
@@ -2933,6 +2963,23 @@ mod tests {
         assert!(
             frame.contains("too small"),
             "the refusal is explained: {frame}"
+        );
+    }
+
+    /// The client version is shown dim at the status bar's right edge,
+    /// and the hints budget shrinks around it (the two never overlap).
+    #[test]
+    fn version_is_shown_dim_at_the_status_bar_edge() {
+        let mut app = WorkbenchApp::new();
+        let expected = concat!("v", env!("CARGO_PKG_VERSION"));
+        let frame = render(&mut app, 100, 24);
+        assert!(frame.contains(expected), "{frame}");
+        // Narrow terminal: the hints yield, the version badge stays.
+        let frame = render(&mut app, 40, 24);
+        assert!(frame.contains(expected), "{frame}");
+        assert!(
+            frame.contains("…"),
+            "hints truncate before the badge: {frame}"
         );
     }
 }
