@@ -2118,27 +2118,6 @@ fn write_private_export_json(
     Ok(())
 }
 
-#[cfg(test)]
-mod cli_arg_tests {
-    use super::*;
-
-    #[test]
-    fn events_flags_parse_from_index_zero_qa_f2() {
-        let args: Vec<String> = ["--since", "7", "--limit", "25"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let (since, limit) = parse_events_args(&args).expect("parse");
-        assert_eq!(since, 7);
-        assert_eq!(limit, 25);
-        // Defaults when no flags are given.
-        let (since, limit) = parse_events_args(&[]).expect("parse defaults");
-        assert_eq!((since, limit), (0, 100));
-        // Unknown flags still fail loudly.
-        assert!(parse_events_args(&["--bogus".to_string()]).is_err());
-    }
-}
-
 fn cmd_workspace(args: &[String]) -> OfficeResult<()> {
     let home = viva_home(None);
     let mut client = viva::office::OfficeClient::ensure_server(&home)?;
@@ -2171,4 +2150,25 @@ fn cmd_workspace(args: &[String]) -> OfficeResult<()> {
         .unwrap()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_arg_tests {
+    use super::*;
+
+    #[test]
+    fn events_flags_parse_from_index_zero_qa_f2() {
+        let args: Vec<String> = ["--since", "7", "--limit", "25"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (since, limit) = parse_events_args(&args).expect("parse");
+        assert_eq!(since, 7);
+        assert_eq!(limit, 25);
+        // Defaults when no flags are given.
+        let (since, limit) = parse_events_args(&[]).expect("parse defaults");
+        assert_eq!((since, limit), (0, 100));
+        // Unknown flags still fail loudly.
+        assert!(parse_events_args(&["--bogus".to_string()]).is_err());
+    }
 }
