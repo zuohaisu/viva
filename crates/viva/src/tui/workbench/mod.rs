@@ -21,11 +21,14 @@
 //! - Quit is a detach: worktree contents and records are left exactly as
 //!   they are, nothing is re-run when the client reattaches.
 
+pub mod scenes;
+
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
+use scenes::{FLOATING, MAX_SCENES, MAX_TABS, Scene, SceneBook, TabView};
 
 use std::process::Command;
 
@@ -204,15 +207,25 @@ pub enum WorkbenchAction {
     /// V15-1: open the file browser for a worktree.
     BrowseFiles(String),
     /// V15-1: view one file's diff/content in the panel.
-    ViewFile { worktree_id: String, path: String },
+    ViewFile {
+        worktree_id: String,
+        path: String,
+    },
     /// V15-1: open the viewed file with the system opener.
-    OpenInEditor { full_path: String },
+    OpenInEditor {
+        full_path: String,
+    },
     /// V15-2: release + remove a worktree whose PR is merged.
     CleanupWorktree(String),
     /// V15-3: hand the worktree to the picked agent.
-    HandoffTo { worktree_id: String, agent: String },
+    HandoffTo {
+        worktree_id: String,
+        agent: String,
+    },
     /// V15-4: toggle the auto_pull switch.
     ToggleAutoPull,
+    SelectWorktree(String),
+    NewTab,
     Workspace {
         action: String,
         value: Option<String>,
@@ -331,6 +344,10 @@ pub struct WorkbenchApp {
     /// row). Cleared by any click that is not on a divider.
     last_divider_click: Option<(std::time::Instant, u16, u16)>,
     workspace_prompt: Option<(String, String)>,
+    scenes: SceneBook,
+    tab_prompt: Option<String>,
+    tab_hits: Vec<(String, Rect)>,
+    terminal_picker: Option<usize>,
 }
 
 impl WorkbenchApp {
@@ -359,6 +376,10 @@ impl WorkbenchApp {
             drag: DragState::None,
             last_divider_click: None,
             workspace_prompt: None,
+            scenes:SceneBook::default(),
+            tab_prompt:None,
+            tab_hits:vec![],
+            terminal_picker:None,
         }
     }
 
@@ -433,42 +454,214 @@ impl WorkbenchApp {
     /// The persisted layout payload: the pane tree plus the focused pane
     /// and the sidebar width (restored with a default when absent, so
     /// older saved layouts keep loading).
-    pub fn serialize_layout(&self) -> String {
-        serde_json::json!({
-            "grid": self.grid,
-            "focus": self.pane_focus,
-            "sidebar": self.sidebar_width,
-        })
-        .to_string()
+    fn save_scene(&mut self) {
+        let key = self.scenes.selected.clone();
+        let scene = self.scenes.scenes.entry(key).or_default();
+        if let Some(tab) = scene.tabs.iter_mut().find(|t| t.id == scene.active) {
+            tab.grid = self.grid.clone();
+            tab.focus = self.pane_focus.clone();
+            tab.zoom = self.zoomed;
+        }
     }
-
-    /// Rebuild the pane tree from a saved layout (QA F5): terminal leaves
-    /// whose session is gone are pruned, and the focus falls back to the
-    /// browser unless it survived. Never fails — a broken layout degrades
-    /// to the default view.
-    pub fn restore_layout(&mut self, json: &str, live: &std::collections::HashSet<String>) {
+    fn load_scene(&mut self) {
+        let tab = self
+            .scenes
+            .scenes
+            .get(&self.scenes.selected)
+            .and_then(|s| s.tabs.iter().find(|t| t.id == s.active && !t.hidden));
+        if let Some(t) = tab {
+            self.grid = t.grid.clone();
+            self.pane_focus = t.focus.clone();
+            self.zoomed = t.zoom;
+        } else {
+            self.grid = PaneNode::leaf(PaneContent::Browser);
+            self.pane_focus = PaneContent::Browser;
+            self.zoomed = false;
+        }
+        self.terminal_mode = None;
+        self.drag = DragState::None;
+        self.snapshots.clear();
+    }
+    pub fn select_worktree(&mut self, key: String) {
+        self.save_scene();
+        if !self.scenes.scenes.contains_key(&key) && self.scenes.scenes.len() >= MAX_SCENES {
+            self.set_status("scene limit reached");
+            return;
+        }
+        self.scenes.selected = key;
+        self.load_scene();
+        self.layout_dirty = true;
+        self.set_status(
+            "existing scene · n new tab · o new shell · t all terminals · no process started",
+        );
+    }
+    pub fn selected_scene(&self) -> &str {
+        &self.scenes.selected
+    }
+    pub fn new_tab(&mut self, name: String) -> bool {
+        self.save_scene();
+        let scene = self
+            .scenes
+            .scenes
+            .entry(self.scenes.selected.clone())
+            .or_default();
+        if scene.tabs.len() >= MAX_TABS {
+            self.set_status("tab limit reached (including hidden tabs)");
+            return false;
+        }
+        let tab = TabView::new(name);
+        scene.active = tab.id.clone();
+        scene.tabs.push(tab);
+        self.load_scene();
+        self.layout_dirty = true;
+        true
+    }
+    pub fn switch_tab(&mut self, id: &str) -> bool {
+        self.save_scene();
+        let Some(scene) = self.scenes.scenes.get_mut(&self.scenes.selected) else {
+            return false;
+        };
+        if !scene.tabs.iter().any(|t| t.id == id && !t.hidden) {
+            return false;
+        }
+        scene.active = id.into();
+        self.load_scene();
+        self.layout_dirty = true;
+        true
+    }
+    pub fn close_tab(&mut self) {
+        self.save_scene();
+        if let Some(scene) = self.scenes.scenes.get_mut(&self.scenes.selected) {
+            if let Some(t) = scene.tabs.iter_mut().find(|t| t.id == scene.active) {
+                t.hidden = true;
+            }
+            scene.active = scene
+                .tabs
+                .iter()
+                .find(|t| !t.hidden)
+                .map(|t| t.id.clone())
+                .unwrap_or_default();
+        }
+        self.load_scene();
+        self.layout_dirty = true;
+        self.set_status("tab hidden · t finds sessions · processes continue");
+    }
+    pub fn terminal_location(&self, id: &str) -> Option<scenes::TerminalLocation> {
+        let mut book = self.scenes.clone();
+        if let Some(s) = book.scenes.get_mut(&book.selected) {
+            if let Some(t) = s.tabs.iter_mut().find(|t| t.id == s.active) {
+                t.grid = self.grid.clone();
+                t.focus = self.pane_focus.clone();
+            }
+        }
+        book.locate(id)
+    }
+    pub fn serialize_layout(&self) -> String {
+        let mut book = self.scenes.clone();
+        book.sidebar = self.sidebar_width;
+        if let Some(scene) = book.scenes.get_mut(&book.selected) {
+            if let Some(tab) = scene.tabs.iter_mut().find(|t| t.id == scene.active) {
+                tab.grid = self.grid.clone();
+                tab.focus = self.pane_focus.clone();
+                tab.zoom = self.zoomed;
+            }
+        }
+        serde_json::to_string(&book).expect("scene serialization")
+    }
+    pub fn restore_layout(&mut self, json: &str, _live: &std::collections::HashSet<String>) {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+            self.set_status("unavailable layout: invalid JSON; original retained");
             return;
         };
-        let Ok(mut grid) =
+        if value.get("version").is_some() {
+            match serde_json::from_value::<SceneBook>(value) {
+                Ok(book) if book.valid() => {
+                    self.scenes = book;
+                    self.sidebar_width = self
+                        .scenes
+                        .sidebar
+                        .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+                    self.load_scene();
+                    self.layout_dirty = false;
+                }
+                _ => self
+                    .set_status("unavailable layout: invalid scene references; original retained"),
+            };
+            return;
+        }
+        let Ok(grid) =
             serde_json::from_value::<PaneNode>(value.get("grid").cloned().unwrap_or_default())
         else {
+            self.set_status("unavailable legacy layout; original retained");
             return;
         };
-        grid.prune_dead_terminals(live);
-        self.grid = grid;
-        let leaves = self.grid.leaves();
-        self.pane_focus = value
-            .get("focus")
-            .and_then(|focus| serde_json::from_value::<PaneContent>(focus.clone()).ok())
-            .filter(|focus| leaves.contains(focus))
-            .unwrap_or(PaneContent::Browser);
-        if let Some(width) = value.get("sidebar").and_then(|w| w.as_u64()) {
-            self.sidebar_width = u16::try_from(width)
-                .unwrap_or(SIDEBAR_WIDTH)
-                .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+        let mut book = SceneBook::default();
+        book.legacy = Some(value.clone());
+        // Preserve the old tree, partitioned by terminal ownership; the full
+        // original payload remains embedded and is backed up server-side.
+        let mut keys = std::collections::BTreeSet::new();
+        for c in grid.leaves() {
+            if let PaneContent::Terminal(id) = c {
+                keys.insert(
+                    self.model
+                        .terminals
+                        .iter()
+                        .find(|t| t.terminal_id == id)
+                        .and_then(|t| t.worktree_id.clone())
+                        .unwrap_or_else(|| FLOATING.into()),
+                );
+            }
         }
-        self.layout_dirty = false;
+        if keys.is_empty() {
+            keys.insert(FLOATING.into());
+        }
+        for key in keys {
+            let mut tree = grid.clone();
+            let own = self
+                .model
+                .terminals
+                .iter()
+                .filter(|t| t.worktree_id.as_deref().unwrap_or(FLOATING) == key)
+                .map(|t| t.terminal_id.clone())
+                .collect::<std::collections::HashSet<_>>();
+            // Dead/unavailable references stay in floating, never replayed.
+            let keep = tree
+                .leaves()
+                .into_iter()
+                .filter_map(|c| match c {
+                    PaneContent::Terminal(id)
+                        if own.contains(&id)
+                            || (key == FLOATING
+                                && !self.model.terminals.iter().any(|t| t.terminal_id == id)) =>
+                    {
+                        Some(id)
+                    }
+                    _ => None,
+                })
+                .collect();
+            tree.prune_dead_terminals(&keep);
+            let mut tab = TabView::new("Migrated".into());
+            tab.grid = tree;
+            tab.focus = value
+                .get("focus")
+                .and_then(|f| serde_json::from_value(f.clone()).ok())
+                .filter(|f| tab.grid.leaves().contains(f))
+                .unwrap_or_else(|| tab.grid.leaves()[0].clone());
+            book.scenes.insert(
+                key.clone(),
+                Scene {
+                    active: tab.id.clone(),
+                    tabs: vec![tab],
+                },
+            );
+            book.selected = key;
+        }
+        self.scenes = book;
+        self.load_scene();
+        self.layout_dirty = true;
+        self.set_status(
+            "legacy layout migrated · original retained · unavailable terminals never replay",
+        );
     }
 
     /// Move pane focus geometrically (Ctrl+Arrows in the keymap).
@@ -479,6 +672,7 @@ impl WorkbenchApp {
         {
             Some(next) => {
                 self.pane_focus = next;
+                self.layout_dirty = true;
                 true
             }
             None => false,
@@ -495,6 +689,7 @@ impl WorkbenchApp {
             .position(|c| *c == self.pane_focus)
             .unwrap_or(0);
         self.pane_focus = leaves[(index + 1) % leaves.len()].clone();
+        self.layout_dirty = true;
     }
 
     /// Point the focused pane at a terminal. From the browser: split a new
@@ -504,59 +699,71 @@ impl WorkbenchApp {
     /// From a terminal pane: retarget it (the old terminal keeps running
     /// server-side; its snapshot cache entry goes with the pane).
     pub fn attach_terminal(&mut self, terminal_id: String) {
-        // Attaching a terminal that already has a pane is just focusing it
-        // — never a duplicate pane.
-        let already_placed = PaneContent::Terminal(terminal_id.clone());
-        if self.grid.leaves().contains(&already_placed) {
-            self.pane_focus = already_placed;
+        self.save_scene();
+        if let Some(location) = self.scenes.locate(&terminal_id) {
+            self.select_worktree(location.scene_id.clone());
+            if let Some(scene) = self.scenes.scenes.get_mut(&location.scene_id) {
+                scene.active = location.tab_id.clone();
+                if let Some(tab) = scene.tabs.iter_mut().find(|t| t.id == location.tab_id) {
+                    tab.hidden = false;
+                }
+            }
+            self.load_scene();
+            let content = PaneContent::Terminal(terminal_id.clone());
+            if !self.grid.leaves().contains(&content) {
+                if self.grid == PaneNode::leaf(PaneContent::Browser) {
+                    self.grid = PaneNode::leaf(content.clone());
+                } else if !self
+                    .grid
+                    .split(&self.pane_focus, SplitAxis::Horizontal, content.clone())
+                {
+                    if !self.new_tab("Recovered terminal".into()) {
+                        return;
+                    }
+                    self.grid = PaneNode::leaf(content.clone());
+                }
+            }
+            if let Some(s) = self.scenes.scenes.get_mut(&self.scenes.selected) {
+                for t in &mut s.tabs {
+                    t.closed.retain(|id| id != &terminal_id);
+                }
+            }
+            self.pane_focus = content;
+            self.layout_dirty = true;
             return;
         }
-        self.layout_dirty = true;
-        let content = PaneContent::Terminal(terminal_id.clone());
-        match self.pane_focus.clone() {
-            PaneContent::Browser => {
-                let existing = self
-                    .grid
-                    .leaves()
-                    .into_iter()
-                    .find(|c| matches!(c, PaneContent::Terminal(_)));
-                let at_cap = self.grid.leaves().len() >= crate::tui::layout::MAX_PANES;
-                match (existing, at_cap) {
-                    (Some(first), true) => {
-                        if let PaneContent::Terminal(old) = &first {
-                            self.snapshots.remove(old);
-                            self.set_status(format!(
-                                "pane limit reached — reused {old}'s pane for {terminal_id} \
-                                 ({old} keeps running server-side)"
-                            ));
-                        }
-                        self.grid.replace(&first, content.clone());
-                    }
-                    _ => {
-                        // No terminal pane yet, or capacity to spare: the
-                        // browser leaf keeps its place and the new pane
-                        // splits off beside it.
-                        self.grid.split(
-                            &PaneContent::Browser,
-                            SplitAxis::Horizontal,
-                            content.clone(),
-                        );
-                    }
-                }
-                self.pane_focus = content;
-            }
-            PaneContent::Terminal(old) => {
-                if old != terminal_id {
-                    self.snapshots.remove(&old);
-                    self.set_status(format!(
-                        "pane retargeted to {terminal_id} ({old} keeps running server-side)"
-                    ));
-                }
-                self.grid
-                    .replace(&PaneContent::Terminal(old), content.clone());
-                self.pane_focus = content;
-            }
+        let key = self
+            .model
+            .terminals
+            .iter()
+            .find(|t| t.terminal_id == terminal_id)
+            .and_then(|t| t.worktree_id.clone())
+            .unwrap_or_else(|| self.scenes.selected.clone());
+        if key != self.scenes.selected {
+            self.select_worktree(key);
         }
+        let has_tab = self
+            .scenes
+            .scenes
+            .get(&self.scenes.selected)
+            .is_some_and(|s| s.tabs.iter().any(|t| t.id == s.active && !t.hidden));
+        if !has_tab && !self.new_tab("Terminal".into()) {
+            return;
+        }
+        let content = PaneContent::Terminal(terminal_id);
+        if self.grid == PaneNode::leaf(PaneContent::Browser) {
+            self.grid = PaneNode::leaf(content.clone());
+        } else if !self
+            .grid
+            .split(&self.pane_focus, SplitAxis::Horizontal, content.clone())
+        {
+            if !self.new_tab("Terminal".into()) {
+                return;
+            }
+            self.grid = PaneNode::leaf(content.clone());
+        }
+        self.pane_focus = content;
+        self.layout_dirty = true;
     }
 
     /// Whether the pane tree can take one more leaf (the run loop checks
@@ -607,8 +814,22 @@ impl WorkbenchApp {
     /// server — closing is a view operation, never a stop.
     pub fn close_pane(&mut self) {
         if let PaneContent::Terminal(id) = self.pane_focus.clone() {
+            self.save_scene();
+            if let Some(scene) = self.scenes.scenes.get_mut(&self.scenes.selected) {
+                if let Some(t) = scene.tabs.iter_mut().find(|t| t.id == scene.active) {
+                    if !t.closed.contains(&id) {
+                        t.closed.push(id.clone());
+                    }
+                }
+            }
             self.layout_dirty = true;
-            if let Some(removed) = self.grid.close(&PaneContent::Terminal(id)) {
+            let removed = if self.grid == PaneNode::leaf(PaneContent::Terminal(id.clone())) {
+                self.grid = PaneNode::leaf(PaneContent::Browser);
+                Some(PaneContent::Terminal(id))
+            } else {
+                self.grid.close(&PaneContent::Terminal(id))
+            };
+            if let Some(removed) = removed {
                 if let PaneContent::Terminal(removed_id) = removed {
                     self.snapshots.remove(&removed_id);
                     self.set_status(format!(
@@ -627,6 +848,7 @@ impl WorkbenchApp {
 
     pub fn toggle_zoom(&mut self) {
         self.zoomed = !self.zoomed;
+        self.layout_dirty = true;
     }
 
     /// The focused terminal's worktree, for split-cwd decisions.
@@ -640,7 +862,11 @@ impl WorkbenchApp {
                 .worktree_id
                 .clone();
         }
-        None
+        if self.scenes.selected != FLOATING {
+            Some(self.scenes.selected.clone())
+        } else {
+            None
+        }
     }
 
     /// Explicitly enter terminal-forwarding mode (run loop decides when —
@@ -690,6 +916,56 @@ impl WorkbenchApp {
     /// Handle one key event.
     pub fn on_key(&mut self, key: KeyEvent) -> KeyOutcome {
         use ratatui::crossterm::event::KeyModifiers;
+        if let Some(index) = &mut self.terminal_picker {
+            match key.code {
+                KeyCode::Esc => self.terminal_picker = None,
+                KeyCode::Up => *index = index.saturating_sub(1),
+                KeyCode::Down => {
+                    *index = (*index + 1).min(self.model.terminals.len().saturating_sub(1))
+                }
+                KeyCode::Enter | KeyCode::Char('s') => {
+                    let id = self
+                        .model
+                        .terminals
+                        .get(*index)
+                        .map(|t| t.terminal_id.clone());
+                    self.terminal_picker = None;
+                    if let Some(id) = id {
+                        return KeyOutcome::Action(if key.code == KeyCode::Enter {
+                            WorkbenchAction::EnterTerminal(id)
+                        } else {
+                            WorkbenchAction::StopTerminal(id)
+                        });
+                    }
+                }
+                _ => {}
+            }
+            return KeyOutcome::Handled;
+        }
+        if let Some(text) = &mut self.tab_prompt {
+            match key.code {
+                KeyCode::Esc => self.tab_prompt = None,
+                KeyCode::Backspace => {
+                    text.pop();
+                }
+                KeyCode::Char(c) if text.len() < 252 => text.push(c),
+                KeyCode::Enter => {
+                    let name = text.trim().to_string();
+                    self.tab_prompt = None;
+                    if !name.is_empty() {
+                        self.save_scene();
+                        if let Some(s) = self.scenes.scenes.get_mut(&self.scenes.selected) {
+                            if let Some(t) = s.tabs.iter_mut().find(|t| t.id == s.active) {
+                                t.name = name;
+                                self.layout_dirty = true;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return KeyOutcome::Handled;
+        }
         if let Some((action, text)) = &mut self.workspace_prompt {
             match key.code {
                 KeyCode::Esc => self.workspace_prompt = None,
@@ -963,7 +1239,7 @@ impl WorkbenchApp {
             },
             // Enter on a space row opens a shell at that worktree.
             KeyCode::Enter if self.focus == Focus::Worktrees => match self.selected_worktree() {
-                Some(id) => KeyOutcome::Action(WorkbenchAction::OpenWorktreeShell(id)),
+                Some(id) => KeyOutcome::Action(WorkbenchAction::SelectWorktree(id)),
                 None => KeyOutcome::Ignored,
             },
             KeyCode::Char('s') if self.focus == Focus::Terminals => {
@@ -1063,6 +1339,44 @@ impl WorkbenchApp {
                     None => KeyOutcome::Ignored,
                 }
             }
+            KeyCode::Char('t') => {
+                self.terminal_picker = Some(0);
+                KeyOutcome::Handled
+            }
+            KeyCode::Char('n') => KeyOutcome::Action(WorkbenchAction::NewTab),
+            KeyCode::Char('T') => {
+                self.tab_prompt = Some(String::new());
+                KeyOutcome::Handled
+            }
+            KeyCode::Char('X') => {
+                self.close_tab();
+                KeyOutcome::Handled
+            }
+            KeyCode::Char(',' | '.') => {
+                let tabs = self
+                    .scenes
+                    .scenes
+                    .get(&self.scenes.selected)
+                    .map(|s| {
+                        s.tabs
+                            .iter()
+                            .filter(|t| !t.hidden)
+                            .map(|t| t.id.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if !tabs.is_empty() {
+                    let current = self.scenes.scenes[&self.scenes.selected].active.clone();
+                    let i = tabs.iter().position(|t| t == &current).unwrap_or(0);
+                    let j = if key.code == KeyCode::Char('.') {
+                        (i + 1) % tabs.len()
+                    } else {
+                        (i + tabs.len() - 1) % tabs.len()
+                    };
+                    self.switch_tab(&tabs[j]);
+                }
+                KeyOutcome::Handled
+            }
             KeyCode::Char('W' | 'N' | 'A' | 'S') => {
                 let action = match key.code {
                     KeyCode::Char('W') => "open",
@@ -1126,7 +1440,21 @@ impl WorkbenchApp {
 
     fn on_left_down(&mut self, column: u16, row: u16) {
         // Overlays are modal: clicks must not fall through to the grid.
-        if self.file_panel.is_some() || self.handoff_picker.is_some() || self.diff_view.is_some() {
+        if self.workspace_prompt.is_some()
+            || self.tab_prompt.is_some()
+            || self.file_panel.is_some()
+            || self.handoff_picker.is_some()
+            || self.diff_view.is_some()
+        {
+            return;
+        }
+        if let Some((id, _)) = self
+            .tab_hits
+            .iter()
+            .find(|(_, r)| contains_point(*r, column, row))
+        {
+            let id = id.clone();
+            self.switch_tab(&id);
             return;
         }
         // Sidebar edge first: the band is the sidebar's last column and
@@ -1204,6 +1532,7 @@ impl WorkbenchApp {
         if let Some(content) = hit_leaf {
             if self.pane_focus != content {
                 self.pane_focus = content;
+                self.layout_dirty = true;
                 if self.terminal_mode.is_some() {
                     self.leave_terminal_mode();
                 }
@@ -1283,7 +1612,30 @@ impl WorkbenchApp {
         };
         let columns =
             Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(0)]).split(main);
-        let pane_area = columns[1];
+        let right = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(columns[1]);
+        self.tab_hits.clear();
+        let mut x = right[0].x;
+        if let Some(scene) = self.scenes.scenes.get(&self.scenes.selected) {
+            for tab in scene.tabs.iter().filter(|t| !t.hidden) {
+                let label = format!(
+                    " {}{} ",
+                    if tab.id == scene.active { "● " } else { "" },
+                    tab.name
+                );
+                let w = (label.chars().count() as u16).min(right[0].right().saturating_sub(x));
+                let rect = Rect::new(x, right[0].y, w, 1);
+                frame.render_widget(Paragraph::new(label), rect);
+                self.tab_hits.push((tab.id.clone(), rect));
+                x += w;
+            }
+        }
+        if self.tab_hits.is_empty() {
+            frame.render_widget(
+                Paragraph::new(" n New tab · o New shell · t All terminals"),
+                right[0],
+            );
+        }
+        let pane_area = right[1];
         self.last_pane_area = Some(pane_area);
         self.last_sidebar_edge = if sidebar_width > 0 {
             Some(sidebar_width)
@@ -1379,6 +1731,46 @@ impl WorkbenchApp {
             self.draw_handoff_picker(frame);
         }
         self.draw_status_bar(frame, rows[2], &palette);
+        if let Some(selected) = self.terminal_picker {
+            let area = centered(frame.area(), 90, frame.area().height.saturating_sub(4));
+            frame.render_widget(Clear, area);
+            let items = self
+                .model
+                .terminals
+                .iter()
+                .enumerate()
+                .skip(selected.saturating_sub(area.height.saturating_sub(3) as usize))
+                .map(|(i, t)| {
+                    ListItem::new(format!(
+                        "{} {} · {} · {} · {}",
+                        if i == selected { "▶" } else { " " },
+                        t.terminal_id,
+                        t.purpose,
+                        t.worktree_id.as_deref().unwrap_or("floating/directory"),
+                        if t.live == Some(true) {
+                            "running"
+                        } else {
+                            "exited/unavailable"
+                        }
+                    ))
+                })
+                .collect::<Vec<_>>();
+            frame.render_widget(
+                List::new(items).block(Block::bordered().title(
+                    " All terminals (including hidden) · Enter locate · s Stop session · Esc ",
+                )),
+                area,
+            );
+        }
+        if let Some(text) = &self.tab_prompt {
+            let area = centered(frame.area(), 60, 3);
+            frame.render_widget(Clear, area);
+            frame.render_widget(
+                Paragraph::new(text.as_str())
+                    .block(Block::bordered().title(" Rename tab · Enter / Esc ")),
+                area,
+            );
+        }
         if let Some((action, text)) = &self.workspace_prompt {
             let area = centered(frame.area(), 80, 3);
             frame.render_widget(Clear, area);
@@ -1476,7 +1868,18 @@ impl WorkbenchApp {
                 )));
                 lines
             }
-            None => vec![Line::from(" waiting for the first server snapshot… ")],
+            None => vec![Line::from(
+                if self
+                    .model
+                    .terminals
+                    .iter()
+                    .any(|t| t.terminal_id == id && t.live == Some(true))
+                {
+                    " waiting for the first server snapshot… "
+                } else {
+                    " exited/unavailable terminal reference · no command replayed · x hides view "
+                },
+            )],
         };
         frame.render_widget(Paragraph::new(lines), area);
     }
@@ -2336,7 +2739,11 @@ impl<'a> WorkbenchStore<'a> {
             }
         }
         for p in &projects {
-            if folders.iter().any(|f| f.project_id.as_deref() == Some(&p.project_id) && f.diagnostic.as_deref() == Some("non-Git directory: shell only")) && !worktrees.iter().any(|w| w.project_id == p.project_id) {
+            if folders.iter().any(|f| {
+                f.project_id.as_deref() == Some(&p.project_id)
+                    && f.diagnostic.as_deref() == Some("non-Git directory: shell only")
+            }) && !worktrees.iter().any(|w| w.project_id == p.project_id)
+            {
                 worktrees.push(WorktreeRow {
                     worktree_id: format!("directory:{}", p.project_id),
                     project_id: p.project_id.clone(),
@@ -2656,6 +3063,21 @@ fn apply_client_action(
             app.set_status(format!("workspace selected: {}", v["workspace_id"]));
             Ok(())
         }
+        WorkbenchAction::SelectWorktree(id) => {
+            app.select_worktree(id);
+            Ok(())
+        }
+        WorkbenchAction::NewTab => {
+            if !app.new_tab("Terminal".into()) {
+                return Ok(());
+            }
+            let id = app.selected_scene().to_string();
+            if id == FLOATING {
+                spawn_and_split(client, app, SplitAxis::Horizontal)
+            } else {
+                apply_client_action(client, app, WorkbenchAction::OpenWorktreeShell(id))
+            }
+        }
         WorkbenchAction::EnterTerminal(id) => {
             app.attach_terminal(id.clone());
             app.enter_terminal_mode(id);
@@ -2684,6 +3106,17 @@ fn apply_client_action(
         WorkbenchAction::SplitRight => spawn_and_split(client, app, SplitAxis::Horizontal),
         WorkbenchAction::SplitBelow => spawn_and_split(client, app, SplitAxis::Vertical),
         WorkbenchAction::OpenWorktreeShell(worktree_id) => {
+            if app.selected_scene() != worktree_id {
+                app.select_worktree(worktree_id.clone());
+            }
+            let has_tab = app
+                .scenes
+                .scenes
+                .get(app.selected_scene())
+                .is_some_and(|s| !s.active.is_empty());
+            if !has_tab && !app.new_tab("Terminal".into()) {
+                return Ok(());
+            }
             let value = client
                 .call(crate::office::OfficeRequestKind::TerminalOpenInWorktree { worktree_id })?;
             let terminal_id = value
@@ -2863,8 +3296,18 @@ fn spawn_and_split(
         ));
         return Ok(());
     }
-    let worktree_id = app.focused_worktree_id();
-    let cwd = worktree_id
+    if !app
+        .scenes
+        .scenes
+        .get(app.selected_scene())
+        .is_some_and(|s| !s.active.is_empty())
+        && !app.new_tab("Terminal".into())
+    {
+        return Ok(());
+    }
+    let scene = app.focused_worktree_id();
+    let worktree_id = scene.clone().filter(|id| !id.starts_with("directory:"));
+    let cwd = scene
         .as_ref()
         .and_then(|wid| app.model().worktrees.iter().find(|w| &w.worktree_id == wid))
         .map(|w| w.path.clone())
@@ -3152,8 +3595,11 @@ mod tests {
         // Focus is on t2 after the split; move up to t1, left to the browser.
         app.move_pane_focus(Direction::Up);
         assert_eq!(app.pane_focus(), &PaneContent::Terminal("t1".into()));
-        app.move_pane_focus(Direction::Left);
-        assert_eq!(app.pane_focus(), &PaneContent::Browser);
+        assert!(
+            !app.move_pane_focus(Direction::Left),
+            "single terminal column has no browser neighbor"
+        );
+        assert_eq!(app.pane_focus(), &PaneContent::Terminal("t1".into()));
     }
 
     #[test]
@@ -3595,6 +4041,11 @@ mod v15_tui_fix_tests {
     fn app_with_two_panes() -> WorkbenchApp {
         let mut app = WorkbenchApp::new();
         app.attach_terminal("t1".into());
+        app.grid = PaneNode::split_new(
+            PaneContent::Browser,
+            SplitAxis::Horizontal,
+            PaneContent::Terminal("t1".into()),
+        );
         app.last_pane_area = Some(Rect::new(0, 0, 100, 40));
         app.last_sidebar_edge = None;
         app

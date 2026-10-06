@@ -1335,6 +1335,7 @@ fn workbench_layout(
             // Must parse: a layout the client cannot restore is junk.
             serde_json::from_str::<serde_json::Value>(json)
                 .map_err(|e| OfficeError::Validation(format!("layout is not valid JSON: {e}")))?;
+            store.connection().execute("INSERT OR IGNORE INTO office_settings(key,value) SELECT 'workbench_layout_legacy',value FROM office_settings WHERE key='workbench_layout' AND json_extract(value,'$.version') IS NULL",[])?;
             store.connection().execute(
                 "INSERT INTO office_settings(key, value) VALUES ('workbench_layout', ?1)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
