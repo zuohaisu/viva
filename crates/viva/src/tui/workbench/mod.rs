@@ -346,6 +346,12 @@ pub struct WorkbenchApp {
     sidebar_width: u16,
     /// Mouse drag state; see [`DragState`].
     drag: DragState,
+    /// Whether the live drag has actually moved something. A drag that
+    /// moved the layout must never count as the first click of a
+    /// double-click reset: grab → nudge → release → grab again is how a
+    /// human repositions a divider, and the second grab must START a drag,
+    /// not reset the split to 50/50.
+    drag_moved: bool,
     /// The last divider click for double-click detection: (when, column,
     /// row). Cleared by any click that is not on a divider.
     last_divider_click: Option<(std::time::Instant, u16, u16)>,
@@ -385,6 +391,7 @@ impl WorkbenchApp {
             last_sidebar_edge: None,
             sidebar_width: SIDEBAR_WIDTH,
             drag: DragState::None,
+            drag_moved: false,
             last_divider_click: None,
             workspace_prompt: None,
             scenes:SceneBook::default(),
@@ -1572,7 +1579,15 @@ impl WorkbenchApp {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => self.on_left_down(mouse.column, mouse.row),
             MouseEventKind::Drag(MouseButton::Left) => self.on_left_drag(mouse.column, mouse.row),
-            MouseEventKind::Up(MouseButton::Left) => self.drag = DragState::None,
+            MouseEventKind::Up(MouseButton::Left) => {
+                // A drag that moved the layout breaks any double-click
+                // sequence: the next grab starts a fresh drag.
+                if self.drag_moved {
+                    self.last_divider_click = None;
+                }
+                self.drag_moved = false;
+                self.drag = DragState::None;
+            }
             _ => {}
         }
     }
@@ -1629,6 +1644,7 @@ impl WorkbenchApp {
                     return;
                 }
                 self.last_divider_click = Some((now, column, row));
+                self.drag_moved = false;
                 self.drag = DragState::Sidebar;
                 return;
             }
@@ -1664,6 +1680,7 @@ impl WorkbenchApp {
                     SplitAxis::Horizontal => i32::from(column),
                     SplitAxis::Vertical => i32::from(row),
                 };
+                self.drag_moved = false;
                 self.drag = DragState::PaneSplit {
                     path: hit.path,
                     axis: hit.axis,
@@ -1706,6 +1723,7 @@ impl WorkbenchApp {
                 if self.sidebar_width != width {
                     self.sidebar_width = width;
                     self.layout_dirty = true;
+                    self.drag_moved = true;
                 }
             }
             DragState::PaneSplit {
@@ -1731,6 +1749,7 @@ impl WorkbenchApp {
                 {
                     if self.grid.set_ratio_at_path(&path, ratio) {
                         self.layout_dirty = true;
+                        self.drag_moved = true;
                     }
                 }
             }
@@ -4484,6 +4503,43 @@ mod v15_tui_fix_tests {
         app.on_mouse(mouse_up(92, 10));
     }
 
+    /// Haisu's follow-up QA: grab → nudge → release → grab again is how a
+    /// human repositions a divider. The second grab must START a drag, not
+    /// fire the double-click reset (which silently snapped the split back
+    /// to 50/50 and looked exactly like "the divider won't move").
+    #[test]
+    fn regrabbing_after_a_real_drag_is_a_drag_not_a_reset() {
+        let mut app = app_with_two_panes();
+        assert!(app.grid.set_ratio_at_path(&[], 65));
+        app.clear_layout_dirty();
+        // Drag one: grab at the divider (pos 64 on the 100-wide pane
+        // area), move, release.
+        app.on_mouse(mouse_down(64, 10));
+        app.on_mouse(mouse_drag(54, 10));
+        app.on_mouse(mouse_up(54, 10));
+        assert!(matches!(app.grid, PaneNode::Split { ratio: 55, .. }));
+        // Immediate re-grab at the SAME cell, inside the double-click
+        // window: must be a drag, never a reset.
+        app.on_mouse(mouse_down(54, 10));
+        assert!(
+            matches!(app.drag, DragState::PaneSplit { .. }),
+            "a re-grab after a moved drag starts a drag, not a reset"
+        );
+        app.on_mouse(mouse_drag(74, 10));
+        assert!(matches!(app.grid, PaneNode::Split { ratio: 75, .. }));
+        app.on_mouse(mouse_up(74, 10));
+
+        // A TRUE double-click (two clicks, no drag movement in between)
+        // still resets.
+        let mut app = app_with_two_panes();
+        assert!(app.grid.set_ratio_at_path(&[], 70));
+        app.clear_layout_dirty();
+        app.on_mouse(mouse_down(69, 10));
+        app.on_mouse(mouse_up(69, 10));
+        app.on_mouse(mouse_down(69, 10));
+        assert!(matches!(app.grid, PaneNode::Split { ratio: 50, .. }));
+    }
+
     #[test]
     fn sidebar_width_round_trips_through_the_layout_payload() {
         let mut app = WorkbenchApp::new();
@@ -4497,5 +4553,102 @@ mod v15_tui_fix_tests {
         let mut other = WorkbenchApp::new();
         other.restore_layout(&legacy, &std::collections::HashSet::new());
         assert_eq!(other.sidebar_width, SIDEBAR_WIDTH);
+    }
+
+    /// Haisu's 0.3.4 hands-on QA: with two panes stacked on the LEFT
+    /// (root horizontal split whose first child is a vertical split),
+    /// the stacked pair's divider would not drag. Reproduction at the
+    /// real geometry: sidebar 26, terminal 160x44.
+    #[test]
+    fn nested_first_child_vertical_divider_drags() {
+        let mut app = WorkbenchApp::new();
+        app.grid = PaneNode::Split {
+            axis: SplitAxis::Horizontal,
+            first: Box::new(PaneNode::split_new(
+                PaneContent::Browser,
+                SplitAxis::Vertical,
+                PaneContent::Terminal("t2".into()),
+            )),
+            second: Box::new(PaneNode::leaf(PaneContent::Terminal("t1".into()))),
+            ratio: 50,
+        };
+        app.pane_focus = PaneContent::Browser;
+        app.last_pane_area = Some(Rect::new(26, 0, 134, 43));
+        app.last_sidebar_edge = Some(26);
+        let pane_area = app.last_pane_area.unwrap();
+
+        // The hit model must report the stacked divider on the row the
+        // chrome actually draws.
+        let hits = app.grid.splits(pane_area);
+        let vertical = hits
+            .iter()
+            .find(|hit| hit.axis == SplitAxis::Vertical)
+            .expect("a vertical split exists");
+        let (cx, cy) = (60, vertical.pos);
+        app.clear_layout_dirty();
+
+        app.on_mouse(mouse_down(cx, cy));
+        assert!(
+            matches!(app.drag, DragState::PaneSplit { .. }),
+            "grabbing the stacked divider at ({cx},{cy}) must start a drag, band {:?}",
+            vertical.hit_rect
+        );
+        app.on_mouse(mouse_drag(cx, cy + 6));
+        let ratio_after = match &app.grid {
+            PaneNode::Split { first, .. } => match **first {
+                PaneNode::Split { ratio, .. } => Some(ratio),
+                _ => None,
+            },
+            _ => None,
+        };
+        assert_eq!(
+            ratio_after,
+            Some(62),
+            "dragging 6 rows down must grow the top pane (row 26 -> 27/43 = 62%)"
+        );
+        assert!(app.layout_dirty());
+        app.on_mouse(mouse_up(cx, cy + 6));
+
+        // And the same for a stacked pair on the RIGHT side (the second
+        // child of the root): browser | (t1 / t2).
+        let mut app = WorkbenchApp::new();
+        app.grid = PaneNode::Split {
+            axis: SplitAxis::Horizontal,
+            first: Box::new(PaneNode::leaf(PaneContent::Browser)),
+            second: Box::new(PaneNode::split_new(
+                PaneContent::Terminal("t1".into()),
+                SplitAxis::Vertical,
+                PaneContent::Terminal("t2".into()),
+            )),
+            ratio: 50,
+        };
+        app.pane_focus = PaneContent::Browser;
+        app.last_pane_area = Some(Rect::new(26, 0, 134, 43));
+        app.last_sidebar_edge = Some(26);
+        let pane_area = app.last_pane_area.unwrap();
+        let vertical = app
+            .grid
+            .splits(pane_area)
+            .into_iter()
+            .find(|hit| hit.axis == SplitAxis::Vertical)
+            .expect("nested vertical split");
+        let (cx, cy) = (100, vertical.pos);
+        app.clear_layout_dirty();
+        app.on_mouse(mouse_down(cx, cy));
+        assert!(matches!(app.drag, DragState::PaneSplit { .. }));
+        app.on_mouse(mouse_drag(cx, cy - 5));
+        let ratio_after = match &app.grid {
+            PaneNode::Split { second, .. } => match **second {
+                PaneNode::Split { ratio, .. } => Some(ratio),
+                _ => None,
+            },
+            _ => None,
+        };
+        assert_eq!(
+            ratio_after,
+            Some(37),
+            "dragging 5 rows up must shrink the top pane of the right column (row 15 -> 16/43 = 37%)"
+        );
+        assert!(app.layout_dirty());
     }
 }
