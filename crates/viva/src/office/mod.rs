@@ -32,7 +32,7 @@ mod client;
 mod handoff;
 mod protocol;
 
-pub use client::{OfficeClient, restart_server};
+pub use client::{OfficeClient, restart_server, restart_server_with};
 pub use handoff::{HandoffEntry, HandoffManifest};
 pub use protocol::{
     MAX_MESSAGE_BYTES, OfficeRequest, OfficeRequestKind, OfficeResponse, PROTOCOL_VERSION,

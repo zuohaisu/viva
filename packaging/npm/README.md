@@ -37,7 +37,12 @@ write access to the original prefix; it never uses sudo or changes npm's
 configuration. npm owns package installation/failure behavior (this is not
 an atomic binary-only swap). Local installs are checkable, but updates must
 be made explicitly with `npm install @zuohaisu/viva@latest` in their project.
-Running servers and agents are left alone; restart the server explicitly.
+
+After installing, `viva update` hands a running resident server to the fresh
+wrapper through the live handoff — the terminals survive and the old host
+exits; reconnect the TUI afterwards. `--no-restart` skips the restart
+(`viva server-restart` does it later). With no server running the next
+`viva` start simply uses the new version.
 
 ## Local checks (no registry, no token)
 
