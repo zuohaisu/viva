@@ -658,7 +658,7 @@ mod peer_tests {
     /// by this process must pass. The cross-uid refusal path cannot be
     /// constructed on a single-uid machine; it rests on the OS contract
     /// (getpeereid/SO_PEERCRED report the peer's real uid) and is recorded
-    /// in docs/validation/v12-final-acceptance.md §5.
+    /// in the Wiki (V12-Final-Acceptance §5): https://github.com/zuohaisu/viva/wiki/V12-Final-Acceptance.
     #[test]
     fn peer_check_accepts_same_owner_sockets() {
         let (a, b) = UnixStream::pair().expect("pair");

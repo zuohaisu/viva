@@ -10,7 +10,9 @@
 > `Samuel`, `Deven` and `Alice` are records you create — configuration data,
 > never hard-coded identity.
 >
-> Canonical product definition: [docs/product/vision.md](docs/product/vision.md).
+> Canonical product definition and project knowledge: the
+> [GitHub Wiki](https://github.com/zuohaisu/viva/wiki) — see
+> [Vision](https://github.com/zuohaisu/viva/wiki/Vision).
 
 ## The core distinctions
 
@@ -124,28 +126,32 @@ viva start               # the active host for this VIVA_HOME
 viva status              # from any second terminal/process
 ```
 
+## Documentation
+
+Project documentation — product definition, architecture, roadmap, research,
+decisions (ADRs), development records, validation records and release history
+— is maintained in the **GitHub Wiki**, Viva's canonical documentation and
+project knowledge source:
+
+**<https://github.com/zuohaisu/viva/wiki>**
+
+Start with [Home](https://github.com/zuohaisu/viva/wiki/Home) and
+[Roadmap](https://github.com/zuohaisu/viva/wiki/Roadmap). The working charter
+for agents — including how to read and update the Wiki — is
+[AGENTS.md](AGENTS.md).
+
 ## Technology decision
 
 The approved target is **Rust + Ratatui/Crossterm** for the Viva host and
 terminal surface, **Pi + a small TypeScript extension** for member
 conversation, and **SQLite + ordinary files** for Viva state.
-[ADR 0011](docs/decisions/0011-rust-host-and-tui.md) is the authoritative
+[ADR 0011](https://github.com/zuohaisu/viva/wiki/ADR-0011) is the authoritative
 selection. The Python runtime was retired in V13
-([retirement record](docs/validation/v13-python-retirement.md) maps every
-retired behavior to its Rust evidence); the Rust binary is the only `viva`
-entry.
+([retirement record](https://github.com/zuohaisu/viva/wiki/V13-Python-Retirement)
+maps every retired behavior to its Rust evidence); the Rust binary is the only
+`viva` entry.
 
-## Architecture
-
-- [IDEA.md](IDEA.md) — the charter and the ontology invariants.
-- [AGENTS.md](AGENTS.md) — the working charter for agents in this repo.
-- [docs/product/](docs/product/) — vision, product model, customer zero,
-  workflows, phase-1 scope, first-usable-version gate.
-- [docs/architecture/](docs/architecture/) — conceptual architecture, domain
-  model, temporal model, and the migration/retirement record.
-- [docs/decisions/](docs/decisions/) — ADRs 0001–0011.
-- [docs/validation/](docs/validation/) — V12 baselines and final acceptance
-  records with raw evidence.
+## Code layout
 
 ```text
 crates/viva/src/

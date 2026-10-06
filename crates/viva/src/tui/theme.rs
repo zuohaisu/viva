@@ -1,6 +1,6 @@
 //! The workbench chrome palette and status vocabulary (herdr-aligned look;
 //! route A: our own implementation, no herdr code — see
-//! docs/research/herdr-runtime-parity-2026-10-01.md §5/§7).
+//! https://github.com/zuohaisu/viva/wiki/Research-Herdr-Runtime-Parity §5/§7).
 //!
 //! Scope honesty: this is ONE fixed default palette, not a theme system.
 //! The 2026-10-01 ruling keeps multi-theme/custom-TOML/auto-light-dark out

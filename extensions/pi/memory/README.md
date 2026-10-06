@@ -18,7 +18,8 @@ Verified on 2026-09-29 against the machine's actual installation:
 | Deployment note | the user's cron runs a bidirectional content-merge sync to a second machine every 24 h — the store is live, treat it with care |
 
 This resolves the "which variant" question the research doc
-(`docs/research/hermes-holographic-memory-2026-09-28.md`) left open: the
+(https://github.com/zuohaisu/viva/wiki/Research-Hermes-Holographic-Memory)
+left open: the
 user runs the **bundled** provider from a canary checkout, newer than the
 research snapshot.
 
