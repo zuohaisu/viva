@@ -165,31 +165,31 @@ pub fn receive_entries(stream: &UnixStream) -> OfficeResult<(HandoffManifest, Ve
                     "handoff manifest exceeds 64 MiB".into(),
                 ));
             }
-            if manifest.is_none() {
-                if let Some(pos) = data.iter().position(|b| *b == b'\n') {
-                    let line: Vec<u8> = data.drain(..=pos).collect();
-                    match serde_json::from_slice::<HandoffManifest>(&line[..line.len() - 1]) {
-                        Ok(parsed) => {
-                            if parsed.protocol != HANDOFF_PROTOCOL {
-                                break Err(OfficeError::Validation(format!(
-                                    "handoff protocol {} (expected {HANDOFF_PROTOCOL})",
-                                    parsed.protocol
-                                )));
-                            }
-                            manifest = Some(parsed);
-                        }
-                        Err(e) => {
+            if manifest.is_none()
+                && let Some(pos) = data.iter().position(|b| *b == b'\n')
+            {
+                let line: Vec<u8> = data.drain(..=pos).collect();
+                match serde_json::from_slice::<HandoffManifest>(&line[..line.len() - 1]) {
+                    Ok(parsed) => {
+                        if parsed.protocol != HANDOFF_PROTOCOL {
                             break Err(OfficeError::Validation(format!(
-                                "bad handoff manifest: {e}"
+                                "handoff protocol {} (expected {HANDOFF_PROTOCOL})",
+                                parsed.protocol
                             )));
                         }
+                        manifest = Some(parsed);
+                    }
+                    Err(e) => {
+                        break Err(OfficeError::Validation(format!(
+                            "bad handoff manifest: {e}"
+                        )));
                     }
                 }
             }
-            if let Some(parsed) = &manifest {
-                if received_fds.len() >= parsed.entries.len() {
-                    break Ok((parsed.clone(), std::mem::take(&mut received_fds)));
-                }
+            if let Some(parsed) = &manifest
+                && received_fds.len() >= parsed.entries.len()
+            {
+                break Ok((parsed.clone(), std::mem::take(&mut received_fds)));
             }
             if n == 0 {
                 break Err(OfficeError::Validation(

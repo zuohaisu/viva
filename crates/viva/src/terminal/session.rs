@@ -222,11 +222,11 @@ impl DiskLog {
         if self.truncated.load(Ordering::SeqCst) {
             return;
         }
-        if let Some(max) = self.max_bytes {
-            if self.written.load(Ordering::SeqCst) >= max {
-                self.truncated.store(true, Ordering::SeqCst);
-                return;
-            }
+        if let Some(max) = self.max_bytes
+            && self.written.load(Ordering::SeqCst) >= max
+        {
+            self.truncated.store(true, Ordering::SeqCst);
+            return;
         }
         let safe = self.redactor.lock().expect("log redactor").push(bytes);
         let mut file = self.file.lock().expect("log file");
@@ -237,10 +237,10 @@ impl DiskLog {
             return;
         }
         let total = self.written.fetch_add(safe.len() as u64, Ordering::SeqCst) + safe.len() as u64;
-        if let Some(max) = self.max_bytes {
-            if total >= max {
-                self.truncated.store(true, Ordering::SeqCst);
-            }
+        if let Some(max) = self.max_bytes
+            && total >= max
+        {
+            self.truncated.store(true, Ordering::SeqCst);
         }
     }
 
@@ -881,11 +881,11 @@ fn spawn_reader(
                         parser.process(&buf[..n]);
                         let replies = std::mem::take(&mut parser.callbacks_mut().bytes);
                         drop(parser);
-                        if !replies.is_empty() {
-                            if let Ok(mut writer) = shared.writer.lock() {
-                                let _ = writer.write_all(&replies);
-                                let _ = writer.flush();
-                            }
+                        if !replies.is_empty()
+                            && let Ok(mut writer) = shared.writer.lock()
+                        {
+                            let _ = writer.write_all(&replies);
+                            let _ = writer.flush();
                         }
                     }
                     // Raw-tail ring (live handoff): keep the newest

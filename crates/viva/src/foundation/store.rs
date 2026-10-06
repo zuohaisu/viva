@@ -332,10 +332,10 @@ impl Store {
     /// Open (creating if needed) the database at `path` and apply all pending
     /// migrations from `migrations`.
     pub fn open(path: &Path, migrations: &FrozenMigrations) -> OfficeResult<Store> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path)?;
         Self::configure(&conn)?;

@@ -123,10 +123,10 @@ impl vt100::Callbacks for Replies {
             }
             _ => None,
         };
-        if let Some(reply) = reply {
-            if self.bytes.len() + reply.len() <= 4096 {
-                self.bytes.extend(reply.as_bytes());
-            }
+        if let Some(reply) = reply
+            && self.bytes.len() + reply.len() <= 4096
+        {
+            self.bytes.extend(reply.as_bytes());
         }
     }
 }

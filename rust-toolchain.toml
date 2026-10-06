@@ -1,4 +1,5 @@
 # Viva pins the stable channel; CI and local builds resolve the same file.
-# The minimum supported compiler is declared per crate (rust-version = "1.85").
+# The minimum supported compiler is declared per crate (rust-version = "1.99",
+# raised from 1.85 with the Atomic::fetch_update → try_update rename).
 [toolchain]
 channel = "stable"

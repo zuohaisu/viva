@@ -120,7 +120,7 @@ impl Polling {
         let len = data.len();
         if self
             .queued
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 (n + len <= 64 * 1024).then_some(n + len)
             })
             .is_err()

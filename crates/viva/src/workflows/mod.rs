@@ -292,15 +292,15 @@ impl WorkflowConfig {
                     step.step_id
                 )));
             }
-            if let Some(action) = &step.action {
-                if PROTECTED_ACTIONS.contains(&action.as_str()) {
-                    return Err(OfficeError::Validation(format!(
-                        "step `{}` names protected action `{action}` — no workflow may \
+            if let Some(action) = &step.action
+                && PROTECTED_ACTIONS.contains(&action.as_str())
+            {
+                return Err(OfficeError::Validation(format!(
+                    "step `{}` names protected action `{action}` — no workflow may \
                          carry a protected action (merge/approve are owner-only, never \
                          workflow steps)",
-                        step.step_id
-                    )));
-                }
+                    step.step_id
+                )));
             }
             if ids.iter().filter(|id| **id == step.step_id).count() > 1 {
                 return Err(OfficeError::Validation(format!(

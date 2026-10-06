@@ -227,14 +227,14 @@ impl<'a> ConversationRegistry<'a> {
     ) -> OfficeResult<()> {
         let node = self.require_node(node_id)?;
         let native_session_id = native_session_id.into();
-        if let Some(existing) = &node.native_session_id {
-            if existing != &native_session_id {
-                return Err(OfficeError::Validation(format!(
-                    "node `{}` already points at native session `{existing}`; \
+        if let Some(existing) = &node.native_session_id
+            && existing != &native_session_id
+        {
+            return Err(OfficeError::Validation(format!(
+                "node `{}` already points at native session `{existing}`; \
                      the office never rewrites a harness-native reference",
-                    node.display_name
-                )));
-            }
+                node.display_name
+            )));
         }
         self.store.connection().execute(
             "UPDATE conversation_nodes SET native_session_id = ?2, native_node_id = ?3

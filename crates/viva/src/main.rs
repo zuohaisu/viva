@@ -2018,10 +2018,10 @@ fn cmd_data_export(args: &[String]) -> OfficeResult<()> {
     // Create a new private directory, never widen or overwrite an existing
     // location. The export keeps raw facts for preservation, including
     // machine-private audit data; it is not safe to commit/share.
-    if let Some(parent) = out_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = out_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
     }
     #[cfg(unix)]
     {
@@ -2127,12 +2127,12 @@ fn cmd_workspace(args: &[String]) -> OfficeResult<()> {
         .unwrap_or("list")
         .to_string();
     let mut value = args.get(1).cloned();
-    if matches!(action.as_str(), "open" | "add" | "save") {
-        if let Some(v) = &value {
-            let p = std::path::Path::new(v);
-            if !p.is_absolute() {
-                value = Some(std::env::current_dir()?.join(p).display().to_string());
-            }
+    if matches!(action.as_str(), "open" | "add" | "save")
+        && let Some(v) = &value
+    {
+        let p = std::path::Path::new(v);
+        if !p.is_absolute() {
+            value = Some(std::env::current_dir()?.join(p).display().to_string());
         }
     }
     let project_id = if action == "remove" {

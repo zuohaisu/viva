@@ -994,12 +994,12 @@ impl<'a> ComputerEngine<'a> {
                 OfficeError::Validation(format!("post-action verify failed: {failure}"))
             })?;
         let mut failures: Vec<String> = Vec::new();
-        if let (Some(marker), Some(output)) = (&spec.expect_action_output, &action_output) {
-            if !output.contains(marker) {
-                failures.push(format!(
-                    "the action's own output does not show the expected observation `{marker}`"
-                ));
-            }
+        if let (Some(marker), Some(output)) = (&spec.expect_action_output, &action_output)
+            && !output.contains(marker)
+        {
+            failures.push(format!(
+                "the action's own output does not show the expected observation `{marker}`"
+            ));
         }
         if !post_text.contains(&spec.expect_post) {
             failures.push(format!(

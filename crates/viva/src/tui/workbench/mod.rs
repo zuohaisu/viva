@@ -660,23 +660,23 @@ impl WorkbenchApp {
     }
     pub fn terminal_location(&self, id: &str) -> Option<scenes::TerminalLocation> {
         let mut book = self.scenes.clone();
-        if let Some(s) = book.scenes.get_mut(&book.selected) {
-            if let Some(t) = s.tabs.iter_mut().find(|t| t.id == s.active) {
-                t.grid = self.grid.clone();
-                t.focus = self.pane_focus.clone();
-            }
+        if let Some(s) = book.scenes.get_mut(&book.selected)
+            && let Some(t) = s.tabs.iter_mut().find(|t| t.id == s.active)
+        {
+            t.grid = self.grid.clone();
+            t.focus = self.pane_focus.clone();
         }
         book.locate(id)
     }
     pub fn serialize_layout(&self) -> String {
         let mut book = self.scenes.clone();
         book.sidebar = self.sidebar_width;
-        if let Some(scene) = book.scenes.get_mut(&book.selected) {
-            if let Some(tab) = scene.tabs.iter_mut().find(|t| t.id == scene.active) {
-                tab.grid = self.grid.clone();
-                tab.focus = self.pane_focus.clone();
-                tab.zoom = self.zoomed;
-            }
+        if let Some(scene) = book.scenes.get_mut(&book.selected)
+            && let Some(tab) = scene.tabs.iter_mut().find(|t| t.id == scene.active)
+        {
+            tab.grid = self.grid.clone();
+            tab.focus = self.pane_focus.clone();
+            tab.zoom = self.zoomed;
         }
         serde_json::to_string(&book).expect("scene serialization")
     }
@@ -928,18 +928,15 @@ impl WorkbenchApp {
     pub fn close_pane(&mut self) {
         if let PaneContent::Terminal(id) = self.pane_focus.clone() {
             self.save_scene();
-            if let Some(scene) = self.scenes.scenes.get_mut(&self.scenes.selected) {
-                if let Some(t) = scene.tabs.iter_mut().find(|t| t.id == scene.active) {
-                    if !t.closed.contains(&id) {
-                        if t.closed.len() >= 256 {
-                            self.set_status(
-                                "closed-pane reference limit reached; view remains open",
-                            );
-                            return;
-                        }
-                        t.closed.push(id.clone());
-                    }
+            if let Some(scene) = self.scenes.scenes.get_mut(&self.scenes.selected)
+                && let Some(t) = scene.tabs.iter_mut().find(|t| t.id == scene.active)
+                && !t.closed.contains(&id)
+            {
+                if t.closed.len() >= 256 {
+                    self.set_status("closed-pane reference limit reached; view remains open");
+                    return;
                 }
+                t.closed.push(id.clone());
             }
             self.layout_dirty = true;
             let removed = if self.grid == PaneNode::leaf(PaneContent::Terminal(id.clone())) {
@@ -1092,11 +1089,11 @@ impl WorkbenchApp {
                     self.tab_prompt = None;
                     if !name.is_empty() {
                         self.save_scene();
-                        if let Some(s) = self.scenes.scenes.get_mut(&self.scenes.selected) {
-                            if let Some(t) = s.tabs.iter_mut().find(|t| t.id == s.active) {
-                                t.name = name;
-                                self.layout_dirty = true;
-                            }
+                        if let Some(s) = self.scenes.scenes.get_mut(&self.scenes.selected)
+                            && let Some(t) = s.tabs.iter_mut().find(|t| t.id == s.active)
+                        {
+                            t.name = name;
+                            self.layout_dirty = true;
                         }
                     }
                 }
@@ -1631,23 +1628,23 @@ impl WorkbenchApp {
         }
         // Sidebar edge first: the band is the sidebar's last column and
         // the pane area's first column (the pane border the user sees).
-        if let Some(edge) = self.last_sidebar_edge {
-            if column.saturating_add(1) == edge || column == edge {
-                let now = std::time::Instant::now();
-                let double_click = self.last_divider_click.take().is_some_and(|(at, x, y)| {
-                    now.duration_since(at) <= DOUBLE_CLICK_WINDOW && x == column && y == row
-                });
-                if double_click {
-                    self.sidebar_width = SIDEBAR_WIDTH;
-                    self.layout_dirty = true;
-                    self.set_status("sidebar width reset");
-                    return;
-                }
-                self.last_divider_click = Some((now, column, row));
-                self.drag_moved = false;
-                self.drag = DragState::Sidebar;
+        if let Some(edge) = self.last_sidebar_edge
+            && (column.saturating_add(1) == edge || column == edge)
+        {
+            let now = std::time::Instant::now();
+            let double_click = self.last_divider_click.take().is_some_and(|(at, x, y)| {
+                now.duration_since(at) <= DOUBLE_CLICK_WINDOW && x == column && y == row
+            });
+            if double_click {
+                self.sidebar_width = SIDEBAR_WIDTH;
+                self.layout_dirty = true;
+                self.set_status("sidebar width reset");
                 return;
             }
+            self.last_divider_click = Some((now, column, row));
+            self.drag_moved = false;
+            self.drag = DragState::Sidebar;
+            return;
         }
         let Some(pane_area) = self.last_pane_area else {
             return;
@@ -1746,11 +1743,10 @@ impl WorkbenchApp {
                 };
                 if let Some(ratio) =
                     crate::tui::layout::ratio_for_divider(axis, pointer + grab_offset, area)
+                    && self.grid.set_ratio_at_path(&path, ratio)
                 {
-                    if self.grid.set_ratio_at_path(&path, ratio) {
-                        self.layout_dirty = true;
-                        self.drag_moved = true;
-                    }
+                    self.layout_dirty = true;
+                    self.drag_moved = true;
                 }
             }
         }
@@ -3243,22 +3239,21 @@ fn run_client_inner(client: &mut crate::office::OfficeClient) -> OfficeResult<()
                         }
                     }
                     KeyOutcome::Forward(bytes) => {
-                        if let Some(id) = app.terminal_mode().map(str::to_string) {
-                            if let Err(e) = polling.send(id, bytes) {
-                                app.set_status(e);
-                            }
+                        if let Some(id) = app.terminal_mode().map(str::to_string)
+                            && let Err(e) = polling.send(id, bytes)
+                        {
+                            app.set_status(e);
                         }
                     }
                     KeyOutcome::Handled | KeyOutcome::Ignored => {}
                 }
             }
             Event::Paste(text) => {
-                if let KeyOutcome::Forward(bytes) = app.on_paste(&text) {
-                    if let Some(id) = app.terminal_mode().map(str::to_string) {
-                        if let Err(e) = polling.send(id, bytes) {
-                            app.set_status(e);
-                        }
-                    }
+                if let KeyOutcome::Forward(bytes) = app.on_paste(&text)
+                    && let Some(id) = app.terminal_mode().map(str::to_string)
+                    && let Err(e) = polling.send(id, bytes)
+                {
+                    app.set_status(e);
                 }
             }
             Event::Resize(_, _) => {}
@@ -3269,10 +3264,10 @@ fn run_client_inner(client: &mut crate::office::OfficeClient) -> OfficeResult<()
                     }
                 } else {
                     app.on_mouse(mouse);
-                    if let Some(action) = app.take_mouse_action() {
-                        if let Err(err) = apply_client_action(client, &mut app, action) {
-                            app.set_status(format!("navigation failed: {err}"));
-                        }
+                    if let Some(action) = app.take_mouse_action()
+                        && let Err(err) = apply_client_action(client, &mut app, action)
+                    {
+                        app.set_status(format!("navigation failed: {err}"));
                     }
                 }
             }
@@ -3306,12 +3301,12 @@ fn apply_client_action(
             mut value,
             project_id,
         } => {
-            if matches!(action.as_str(), "open" | "add" | "save") {
-                if let Some(v) = &value {
-                    let path = std::path::Path::new(v);
-                    if !path.is_absolute() {
-                        value = Some(std::env::current_dir()?.join(path).display().to_string());
-                    }
+            if matches!(action.as_str(), "open" | "add" | "save")
+                && let Some(v) = &value
+            {
+                let path = std::path::Path::new(v);
+                if !path.is_absolute() {
+                    value = Some(std::env::current_dir()?.join(path).display().to_string());
                 }
             }
             let v = client.call(crate::office::OfficeRequestKind::Workspace {
@@ -3991,10 +3986,10 @@ mod tests {
         terminal.draw(|f| app.draw(f)).expect("draw");
         let buffer = terminal.backend().buffer();
         for y in 0..h {
-            if let Some(cell) = buffer.cell(ratatui::layout::Position::new(0, y)) {
-                if cell.symbol() == "●" {
-                    return cell.fg;
-                }
+            if let Some(cell) = buffer.cell(ratatui::layout::Position::new(0, y))
+                && cell.symbol() == "●"
+            {
+                return cell.fg;
             }
         }
         panic!("no status dot found in the sidebar");

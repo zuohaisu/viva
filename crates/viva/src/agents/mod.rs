@@ -312,14 +312,14 @@ impl ProcessTable {
             if !seen.insert(p) {
                 continue;
             }
-            if let Some((started, command)) = self.commands.get(&p) {
-                if let Some(agent) = agent_from_command(command) {
-                    return Some(ProcessAgent {
-                        agent,
-                        pid: p,
-                        started: started.clone(),
-                    });
-                }
+            if let Some((started, command)) = self.commands.get(&p)
+                && let Some(agent) = agent_from_command(command)
+            {
+                return Some(ProcessAgent {
+                    agent,
+                    pid: p,
+                    started: started.clone(),
+                });
             }
             if let Some(kids) = self.children.get(&p) {
                 queue.extend(kids);

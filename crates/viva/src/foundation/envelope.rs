@@ -350,15 +350,14 @@ impl<'a> ControlDispatcher<'a> {
             return self.reject(request, RejectionReason::UntrustedCaller { detail });
         }
 
-        if let Some(key) = &request.idempotency_key {
-            if let Some(existing) = self.lookup_by_key(key)? {
-                if existing.request_id != request.request_id.as_str() {
-                    return self.reject(
-                        request,
-                        RejectionReason::IdempotencyConflict { key: key.clone() },
-                    );
-                }
-            }
+        if let Some(key) = &request.idempotency_key
+            && let Some(existing) = self.lookup_by_key(key)?
+            && existing.request_id != request.request_id.as_str()
+        {
+            return self.reject(
+                request,
+                RejectionReason::IdempotencyConflict { key: key.clone() },
+            );
         }
 
         self.record(

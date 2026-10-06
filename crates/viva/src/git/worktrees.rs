@@ -227,10 +227,10 @@ impl<'a> WorktreeService<'a> {
                 if let Some(entry) = current.as_mut() {
                     entry.locked = Some(locked.trim_start().to_string());
                 }
-            } else if let Some(prunable) = line.strip_prefix("prunable") {
-                if let Some(entry) = current.as_mut() {
-                    entry.prunable = Some(prunable.trim_start().to_string());
-                }
+            } else if let Some(prunable) = line.strip_prefix("prunable")
+                && let Some(entry) = current.as_mut()
+            {
+                entry.prunable = Some(prunable.trim_start().to_string());
             }
         }
         if let Some(prev) = current.take() {

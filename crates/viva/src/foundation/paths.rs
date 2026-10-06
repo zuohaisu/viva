@@ -21,10 +21,10 @@ pub fn viva_home(override_dir: Option<&Path>) -> PathBuf {
     if let Some(explicit) = override_dir {
         return explicit.to_path_buf();
     }
-    if let Ok(from_env) = std::env::var(VIVA_HOME_ENV) {
-        if !from_env.is_empty() {
-            return PathBuf::from(from_env);
-        }
+    if let Ok(from_env) = std::env::var(VIVA_HOME_ENV)
+        && !from_env.is_empty()
+    {
+        return PathBuf::from(from_env);
     }
     if let Some(home) = std::env::var_os("HOME") {
         return PathBuf::from(home).join(DEFAULT_HOME_NAME);

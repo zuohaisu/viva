@@ -89,10 +89,10 @@ impl OfficeClient {
         spawn_detached_server(home, &[])?;
         let deadline = Instant::now() + SERVER_START_TIMEOUT;
         loop {
-            if socket_path.exists() {
-                if let Ok(client) = OfficeClient::connect(home) {
-                    return Ok(client);
-                }
+            if socket_path.exists()
+                && let Ok(client) = OfficeClient::connect(home)
+            {
+                return Ok(client);
             }
             if Instant::now() >= deadline {
                 return Err(OfficeError::Validation(format!(
@@ -263,14 +263,12 @@ pub fn restart_server_with(home: &Path, server_entry: &Path) -> OfficeResult<u32
     // old host answering forever and times out honestly here.
     let deadline = Instant::now() + Duration::from_secs(45);
     loop {
-        if let Ok(mut client) = OfficeClient::connect(home) {
-            if let Ok(status) = client.call(OfficeRequestKind::Ping) {
-                if let Some(pid) = status.get("pid").and_then(|p| p.as_u64()) {
-                    if Some(pid) != old_pid {
-                        return Ok(pid as u32);
-                    }
-                }
-            }
+        if let Ok(mut client) = OfficeClient::connect(home)
+            && let Ok(status) = client.call(OfficeRequestKind::Ping)
+            && let Some(pid) = status.get("pid").and_then(|p| p.as_u64())
+            && Some(pid) != old_pid
+        {
+            return Ok(pid as u32);
         }
         if Instant::now() >= deadline {
             return Err(OfficeError::Validation(

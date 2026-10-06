@@ -1030,22 +1030,21 @@ fn authorize_socket_request(shared: &OfficeShared, request: &OfficeRequest) -> O
                     grant.status
                 )));
             }
-            if let Some(expires_at) = &grant.expires_at {
-                if expires_at.as_str() <= utc_now().as_str() {
-                    return Err(OfficeError::Validation(format!(
-                        "grant `{grant_text}` expired at {expires_at}"
-                    )));
-                }
+            if let Some(expires_at) = &grant.expires_at
+                && expires_at.as_str() <= utc_now().as_str()
+            {
+                return Err(OfficeError::Validation(format!(
+                    "grant `{grant_text}` expired at {expires_at}"
+                )));
             }
-            if let Some(member_text) = &request.member {
-                if let Some(principal) = &grant.principal_member_id {
-                    if principal.to_string() != *member_text {
-                        return Err(OfficeError::Validation(format!(
-                            "grant `{grant_text}` belongs to member `{principal}`, not `{member_text}`; \
+            if let Some(member_text) = &request.member
+                && let Some(principal) = &grant.principal_member_id
+                && principal.to_string() != *member_text
+            {
+                return Err(OfficeError::Validation(format!(
+                    "grant `{grant_text}` belongs to member `{principal}`, not `{member_text}`; \
                              grants are not transferable between members"
-                        )));
-                    }
-                }
+                )));
             }
             Ok(grant)
         })()
@@ -1262,21 +1261,19 @@ fn workbench_view(shared: Arc<OfficeShared>) -> OfficeResult<serde_json::Value> 
                     .map(|r| r.agent.clone())
                     .or_else(|| (row.owner_label == "agent_cli").then(|| "unknown".into())),
                 handle,
-            ) {
-                if let Ok(snapshot) = h.snapshot() {
-                    if let Some(status) = crate::agents::infer_from_screen(&snapshot) {
-                        shared
-                            .agent_board
-                            .observe(crate::agents::AgentStatusRecord {
-                                terminal_id: row.terminal_id.clone(),
-                                agent,
-                                status,
-                                source: crate::agents::StatusSource::ScreenInference,
-                                detail: "screen rules (auxiliary, never a fact)".into(),
-                                updated_at: utc_now(),
-                            });
-                    }
-                }
+            ) && let Ok(snapshot) = h.snapshot()
+                && let Some(status) = crate::agents::infer_from_screen(&snapshot)
+            {
+                shared
+                    .agent_board
+                    .observe(crate::agents::AgentStatusRecord {
+                        terminal_id: row.terminal_id.clone(),
+                        agent,
+                        status,
+                        source: crate::agents::StatusSource::ScreenInference,
+                        detail: "screen rules (auxiliary, never a fact)".into(),
+                        updated_at: utc_now(),
+                    });
             }
         }
         row.agent_status = shared.agent_board.project(&row.terminal_id);
@@ -1354,10 +1351,10 @@ fn workbench_view(shared: Arc<OfficeShared>) -> OfficeResult<serde_json::Value> 
             crate::git::worktrees::ProtectedRefs::new(vec![]),
         );
         for row in &model.worktrees {
-            if let Ok(wid) = crate::foundation::ids::WorktreeId::from_str(&row.worktree_id) {
-                if let Some(record) = service.record(&wid).ok().flatten() {
-                    records.push((row.worktree_id.clone(), record));
-                }
+            if let Ok(wid) = crate::foundation::ids::WorktreeId::from_str(&row.worktree_id)
+                && let Some(record) = service.record(&wid).ok().flatten()
+            {
+                records.push((row.worktree_id.clone(), record));
             }
         }
     }
@@ -2231,21 +2228,21 @@ fn perform_handoff(
             // terminal as degraded (input works, output frozen until
             // restart) instead of pretending.
             for (entry, _, _) in &collected {
-                if let Ok(Some(handle)) = shared.terminals.handle(&entry.terminal_id) {
-                    if let Err(reattach_err) = handle.reattach_reader() {
-                        let store = shared.store.lock().expect("office store");
-                        let _ = record_recovery(
-                            &store,
-                            &shared.host_id,
-                            "live_handoff_reader_lost",
-                            &format!(
-                                "terminal `{}` could not reattach its output reader \
+                if let Ok(Some(handle)) = shared.terminals.handle(&entry.terminal_id)
+                    && let Err(reattach_err) = handle.reattach_reader()
+                {
+                    let store = shared.store.lock().expect("office store");
+                    let _ = record_recovery(
+                        &store,
+                        &shared.host_id,
+                        "live_handoff_reader_lost",
+                        &format!(
+                            "terminal `{}` could not reattach its output reader \
                                  ({reattach_err}); input still reaches the child but new \
                                  output is not captured until the server restarts",
-                                entry.terminal_id
-                            ),
-                        );
-                    }
+                            entry.terminal_id
+                        ),
+                    );
                 }
             }
             let store = shared.store.lock().expect("office store");
@@ -2275,10 +2272,10 @@ pub fn resume_server(home: &Path) -> OfficeResult<()> {
     // poll for it (the CLI starts this process right after that response).
     let deadline = Instant::now() + HANDOFF_TIMEOUT;
     let stream = loop {
-        if handoff_path.exists() {
-            if let Ok(stream) = UnixStream::connect(&handoff_path) {
-                break stream;
-            }
+        if handoff_path.exists()
+            && let Ok(stream) = UnixStream::connect(&handoff_path)
+        {
+            break stream;
         }
         if Instant::now() >= deadline {
             return Err(OfficeError::Validation(format!(
@@ -3051,10 +3048,10 @@ fn auto_sync_all_inner(shared: &OfficeShared, force: bool) -> OfficeResult<serde
         if shared.paused.load(Ordering::SeqCst) {
             return Ok(serde_json::json!({ "skipped": "paused" }));
         }
-        if let Some(last) = *shared.last_sync.lock().expect("last sync") {
-            if last.elapsed() < Duration::from_secs(5 * 60) {
-                return Ok(serde_json::json!({ "skipped": "recent" }));
-            }
+        if let Some(last) = *shared.last_sync.lock().expect("last sync")
+            && last.elapsed() < Duration::from_secs(5 * 60)
+        {
+            return Ok(serde_json::json!({ "skipped": "recent" }));
         }
     }
 
@@ -3187,10 +3184,10 @@ fn sweep_recovery_plans(shared: &OfficeShared) {
     }
     {
         let mut last = shared.last_recovery_sweep.lock().expect("sweep clock");
-        if let Some(last) = *last {
-            if last.elapsed() < Duration::from_secs(1) {
-                return;
-            }
+        if let Some(last) = *last
+            && last.elapsed() < Duration::from_secs(1)
+        {
+            return;
         }
         *last = Some(Instant::now());
     }
@@ -3794,7 +3791,7 @@ fn recovery_cancel(shared: &OfficeShared, plan_id: i64) -> OfficeResult<serde_js
 
 fn hex_decode(text: &str) -> OfficeResult<Vec<u8>> {
     let text = text.as_bytes();
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return Err(OfficeError::Validation(
             "hex input must be even-length".into(),
         ));
@@ -3896,10 +3893,9 @@ mod server_split_tests {
         while Instant::now() < deadline {
             if let Ok(view) = client.call(OfficeRequestKind::TerminalSnapshot {
                 terminal_id: terminal_id.to_string(),
-            }) {
-                if format!("{view}").contains(needle) {
-                    return true;
-                }
+            }) && format!("{view}").contains(needle)
+            {
+                return true;
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -4239,10 +4235,9 @@ mod s2_workbench_tests {
         while Instant::now() < deadline {
             if let Ok(view) = client.call(OfficeRequestKind::TerminalSnapshot {
                 terminal_id: terminal_id.to_string(),
-            }) {
-                if format!("{view}").contains(needle) {
-                    return true;
-                }
+            }) && format!("{view}").contains(needle)
+            {
+                return true;
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -4348,10 +4343,9 @@ mod s3_handoff_tests {
         while Instant::now() < deadline {
             if let Ok(view) = client.call(OfficeRequestKind::TerminalSnapshot {
                 terminal_id: terminal_id.to_string(),
-            }) {
-                if format!("{view}").contains(needle) {
-                    return true;
-                }
+            }) && format!("{view}").contains(needle)
+            {
+                return true;
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -5645,10 +5639,9 @@ mod v15_tests {
         while Instant::now() < deadline {
             if let Ok(view) = client.call(OfficeRequestKind::TerminalSnapshot {
                 terminal_id: terminal_id.to_string(),
-            }) {
-                if format!("{view}").contains(needle) {
-                    return true;
-                }
+            }) && format!("{view}").contains(needle)
+            {
+                return true;
             }
             std::thread::sleep(Duration::from_millis(50));
         }

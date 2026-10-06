@@ -306,12 +306,12 @@ impl<'a> AuthorityEngine<'a> {
         }
         // Child never widens: the ceiling holds in TIME too. An expired
         // parent delegates nothing, and a child never outlives its parent.
-        if let Some(expires_at) = &parent.expires_at {
-            if expires_at.as_str() <= utc_now().as_str() {
-                return Err(OfficeError::Validation(
-                    "an expired grant cannot delegate — refresh or reissue the parent first".into(),
-                ));
-            }
+        if let Some(expires_at) = &parent.expires_at
+            && expires_at.as_str() <= utc_now().as_str()
+        {
+            return Err(OfficeError::Validation(
+                "an expired grant cannot delegate — refresh or reissue the parent first".into(),
+            ));
         }
         // Child never widens: action subset.
         for action in &actions {
@@ -445,19 +445,19 @@ impl<'a> AuthorityEngine<'a> {
             GrantStatus::Live => {}
             GrantStatus::Revoked => return Ok(Err(DenialReason::GrantNotLive)),
         }
-        if let Some(expires_at) = &grant.expires_at {
-            if expires_at.as_str() <= utc_now().as_str() {
-                return Ok(Err(DenialReason::GrantExpired));
-            }
+        if let Some(expires_at) = &grant.expires_at
+            && expires_at.as_str() <= utc_now().as_str()
+        {
+            return Ok(Err(DenialReason::GrantExpired));
         }
         // A grant is bound to its principal: presenting someone else's
         // grant id is impersonation, not authorization. Principal-less
         // grants are owner-issued shared authority (documented) and stay
         // usable by any member.
-        if let Some(principal) = &grant.principal_member_id {
-            if principal != member {
-                return Ok(Err(DenialReason::NotPrincipal));
-            }
+        if let Some(principal) = &grant.principal_member_id
+            && principal != member
+        {
+            return Ok(Err(DenialReason::NotPrincipal));
         }
         // Cross-task scope: a grant scoped to a task cannot serve another.
         if let Some(scoped) = &grant.task_id {

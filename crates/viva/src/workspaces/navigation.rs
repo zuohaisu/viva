@@ -356,10 +356,10 @@ impl<'a> Navigation<'a> {
                 serde_json::from_str(&row?).map_err(|e| OfficeError::Validation(e.to_string()))?;
             if let Some(p) = f.get("path").and_then(Value::as_str) {
                 let p = PathBuf::from(p);
-                if !p.is_absolute() {
-                    if let Some(base) = base {
-                        f["path"] = json!(base.join(p));
-                    }
+                if !p.is_absolute()
+                    && let Some(base) = base
+                {
+                    f["path"] = json!(base.join(p));
                 }
             }
             folders.push(f);
