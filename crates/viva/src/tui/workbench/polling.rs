@@ -118,14 +118,23 @@ impl Polling {
     }
     pub fn send(&self, id: String, data: Vec<u8>) -> Result<(), String> {
         let len = data.len();
-        if self
-            .queued
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                (n + len <= 64 * 1024).then_some(n + len)
-            })
-            .is_err()
-        {
-            return Err("input queue full (64 KiB); input was not sent".into());
+        // CAS loop instead of `fetch_update`: the std method was renamed
+        // to `try_update` in newer Rust, so `fetch_update` is deprecated
+        // (clippy -D warnings) on CI's toolchain while older stables lack
+        // `try_update`. A plain compare_exchange compiles everywhere.
+        let mut observed = self.queued.load(Ordering::Relaxed);
+        loop {
+            let next = observed + len;
+            if next > 64 * 1024 {
+                return Err("input queue full (64 KiB); input was not sent".into());
+            }
+            match self
+                .queued
+                .compare_exchange(observed, next, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => break,
+                Err(now) => observed = now,
+            }
         }
         if self.input.try_send((id, data)).is_err() {
             self.queued.fetch_sub(len, Ordering::Relaxed);
