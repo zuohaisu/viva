@@ -172,6 +172,28 @@ then through a pull request and a merge into the remote default branch.
   and an inspection of the final diff for secrets and generated
   artifacts. Report blocked or unrun checks honestly; never weaken
   or skip tests to make them pass.
+
+  #### Docs-only fast path
+
+  When a delivery branch's entire diff — `git diff --name-only
+  origin/main...HEAD`, after a fresh `git fetch origin` — contains only
+  `.md` documentation files, the executed code is identical to a state
+  whose required CI is already green (for a docs-only diff that is
+  current `origin/main`, and usually the branch's latest head run too).
+  In that case the local requirement drops from a full
+  `cargo test --workspace` run to:
+
+      git diff --check    # whitespace damage and stray conflict markers
+      git status --short  # confirm only intentional files changed
+
+  and full validation is delegated to required CI, which runs the
+  complete suite on every PR regardless of changed paths (`ci.yml` carries
+  no `paths` filter on purpose). This fast path relaxes only the local
+  suite run — never the branch/PR workflow, worktree isolation, scope
+  boundaries, the inspection of the final diff for secrets and generated
+  artifacts, or the CI gate itself. As soon as the diff gains any
+  non-`.md` path, or the branch's CI baseline is red or unknown, the
+  full local check requirement applies again.
 - Stage paths explicitly; do not use `git add .` or `git add -A`. Use concise
   imperative commits describing the delivered behavior. Push the task branch
   to `origin` with upstream tracking. Never force-push, delete remote
