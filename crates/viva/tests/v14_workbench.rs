@@ -107,7 +107,7 @@ fn bench() -> Bench {
     }
 }
 
-fn render(app: &WorkbenchApp, w: u16, h: u16) -> String {
+fn render(app: &mut WorkbenchApp, w: u16, h: u16) -> String {
     let backend = TestBackend::new(w, h);
     let mut terminal = Terminal::new(backend).expect("terminal");
     terminal.draw(|f| app.draw(f)).expect("draw");
@@ -249,7 +249,7 @@ fn workbench_spans_projects_tasks_worktrees_with_real_git_facts() {
     app.on_key(ratatui::crossterm::event::KeyEvent::from(
         ratatui::crossterm::event::KeyCode::Char('1'),
     ));
-    let view = render(&app, 240, 24);
+    let view = render(&mut app, 240, 24);
     assert!(view.contains("agent/ship-workbench"));
     assert!(view.contains("clean"));
     assert!(view.contains("└─"), "tree glyphs group worktrees");
@@ -293,7 +293,7 @@ fn dirty_state_and_diff_are_real_facts() {
     let mut app = WorkbenchApp::new();
     app.set_model(model);
     app.set_diff_view(Some(diff));
-    let view = render(&app, 120, 24);
+    let view = render(&mut app, 120, 24);
     assert!(view.contains("changed line"));
 }
 

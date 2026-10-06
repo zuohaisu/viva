@@ -65,14 +65,14 @@ impl Palette {
     /// The default: Catppuccin Mocha.
     pub fn catppuccin_mocha() -> Self {
         Self {
-            accent: Color::Rgb(137, 180, 250),   // blue
-            panel_bg: Color::Rgb(24, 24, 37),    // mantle
+            accent: Color::Rgb(137, 180, 250), // blue
+            panel_bg: Color::Rgb(24, 24, 37),  // mantle
             sidebar_bg: Color::Reset,
-            active_row_bg: Color::Rgb(30, 30, 46),   // base
-            selection_bg: Color::Rgb(49, 50, 68),    // surface0
+            active_row_bg: Color::Rgb(30, 30, 46), // base
+            selection_bg: Color::Rgb(49, 50, 68),  // surface0
             surface0: Color::Rgb(49, 50, 68),
-            surface1: Color::Rgb(69, 71, 90),        // surface1
-            surface_dim: Color::Rgb(30, 30, 46),     // base
+            surface1: Color::Rgb(69, 71, 90),    // surface1
+            surface_dim: Color::Rgb(30, 30, 46), // base
             overlay0: Color::Rgb(108, 112, 134),
             overlay1: Color::Rgb(127, 132, 156),
             text: Color::Rgb(205, 214, 244),
@@ -136,7 +136,13 @@ mod tests {
         assert_eq!(status_color(AgentStatus::Blocked, &palette), palette.red);
         assert_eq!(status_color(AgentStatus::Done, &palette), palette.teal);
         assert_eq!(status_color(AgentStatus::Idle, &palette), palette.green);
-        assert_eq!(status_color(AgentStatus::RateLimited, &palette), palette.peach);
-        assert_eq!(status_color(AgentStatus::Unknown, &palette), palette.overlay0);
+        assert_eq!(
+            status_color(AgentStatus::RateLimited, &palette),
+            palette.peach
+        );
+        assert_eq!(
+            status_color(AgentStatus::Unknown, &palette),
+            palette.overlay0
+        );
     }
 }

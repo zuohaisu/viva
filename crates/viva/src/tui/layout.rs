@@ -255,7 +255,7 @@ impl PaneNode {
                     }
                 };
                 if stealable {
-                    for ( _, rect) in second_leaves.iter_mut() {
+                    for (_, rect) in second_leaves.iter_mut() {
                         match axis {
                             SplitAxis::Horizontal if rect.x == second_rect.x => {
                                 rect.x -= 1;

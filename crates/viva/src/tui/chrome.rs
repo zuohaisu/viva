@@ -136,7 +136,20 @@ pub fn render_pane_borders(
             palette.overlay1
         });
         let budget = rect.width.saturating_sub(4) as usize; // corners + padding
-        let text: String = format!(" {} ", title.text).chars().take(budget).collect();
+        // Truncate with an ellipsis instead of cutting mid-word: the
+        // reported/screen labels in titles are an honesty boundary (QA P3)
+        // and must not silently lose their closing paren.
+        let full: String = format!(" {} ", title.text);
+        let text: String = if full.chars().count() > budget {
+            format!(
+                "{}…",
+                full.chars()
+                    .take(budget.saturating_sub(1))
+                    .collect::<String>()
+            )
+        } else {
+            full
+        };
         for (offset, ch) in text.chars().enumerate() {
             let x = rect.x + 1 + offset as u16;
             if x >= rect.x + rect.width - 1 {
@@ -174,37 +187,34 @@ fn junction_glyph(dirs: u8, flags: CellFlags) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn draw_with(rects: Vec<Rect>, focused: Option<usize>) -> ratatui::buffer::Buffer {
         let backend = TestBackend::new(40, 12);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| {
-                render_pane_borders(
-                    frame,
-                    &rects,
-                    focused,
-                    &Palette::catppuccin_mocha(),
-                    &[],
-                )
+                render_pane_borders(frame, &rects, focused, &Palette::catppuccin_mocha(), &[])
             })
             .expect("draw");
         terminal.backend().buffer().clone()
     }
 
     fn cell_char(buffer: &ratatui::buffer::Buffer, x: u16, y: u16) -> char {
-        buffer.cell(Position::new(x, y)).expect("cell").symbol().chars().next().unwrap_or(' ')
+        buffer
+            .cell(Position::new(x, y))
+            .expect("cell")
+            .symbol()
+            .chars()
+            .next()
+            .unwrap_or(' ')
     }
 
     #[test]
     fn two_side_by_side_panes_share_one_divider_column() {
         // [0,0,10x10] and [10,0,10x10] overlap on x=9 by the layout steal.
-        let rects = vec![
-            Rect::new(0, 0, 10, 10),
-            Rect::new(9, 0, 11, 10),
-        ];
+        let rects = vec![Rect::new(0, 0, 10, 10), Rect::new(9, 0, 11, 10)];
         let buffer = draw_with(rects, None);
         assert_eq!(cell_char(&buffer, 9, 5), '│', "shared divider");
         // Outer frame corners and edges exist once.
@@ -261,5 +271,31 @@ mod tests {
     fn a_single_pane_gets_no_chrome_at_all() {
         let buffer = draw_with(vec![Rect::new(0, 0, 20, 8)], Some(0));
         assert_eq!(cell_char(&buffer, 0, 0), ' ', "full-bleed single pane");
+    }
+
+    #[test]
+    fn titles_truncate_with_an_ellipsis_not_mid_word() {
+        let rects = vec![Rect::new(0, 0, 20, 8), Rect::new(19, 0, 20, 8)];
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render_pane_borders(
+                    frame,
+                    &rects,
+                    Some(0),
+                    &Palette::catppuccin_mocha(),
+                    &[PaneTitle {
+                        pane: 0,
+                        text: "terminal t0 · pi:working(reported)".into(),
+                    }],
+                )
+            })
+            .expect("draw");
+        let view = terminal.backend().to_string();
+        assert!(
+            view.contains("…"),
+            "a too-long title truncates gracefully: {view}"
+        );
     }
 }

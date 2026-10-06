@@ -47,6 +47,11 @@ const PANE_REF_AREA: ratatui::layout::Rect = ratatui::layout::Rect {
 /// terminals instead of squeezing the pane grid to death.
 const SIDEBAR_WIDTH: u16 = 26;
 
+/// Minimum usable pane size (P3): a split that would leave any pane below
+/// this is refused instead of crushing a neighbor into a sliver.
+const MIN_PANE_WIDTH: u16 = 8;
+const MIN_PANE_HEIGHT: u16 = 3;
+
 /// Clip `text` to `max` characters (display width is approximated by char
 /// count; the sidebar rows are ASCII in practice).
 fn fit(text: &str, max: usize) -> String {
@@ -262,6 +267,11 @@ pub struct WorkbenchApp {
     /// second confirms. Any OTHER keypress disarms (stale arming must not
     /// turn a later `D` into an unintended deletion).
     cleanup_armed: Option<String>,
+    /// QA F4: scroll offset into the diff overlay.
+    diff_scroll: usize,
+    /// The pane area as last drawn (P3): split refuses to create panes
+    /// smaller than the minimum usable size at this real terminal size.
+    last_pane_area: Option<Rect>,
 }
 
 impl WorkbenchApp {
@@ -283,6 +293,8 @@ impl WorkbenchApp {
             file_view: None,
             handoff_picker: None,
             cleanup_armed: None,
+            diff_scroll: 0,
+            last_pane_area: None,
         }
     }
 
@@ -308,6 +320,9 @@ impl WorkbenchApp {
     }
 
     pub fn set_diff_view(&mut self, diff: Option<String>) {
+        if diff.is_some() {
+            self.diff_scroll = 0;
+        }
         self.diff_view = diff;
     }
 
@@ -403,12 +418,22 @@ impl WorkbenchApp {
         self.pane_focus = leaves[(index + 1) % leaves.len()].clone();
     }
 
-    /// Point the focused pane at a terminal. From the browser: reuse the
-    /// first terminal pane, or split one off when none exists. From a
-    /// terminal pane: retarget it.
+    /// Point the focused pane at a terminal. From the browser: split a new
+    /// pane whenever capacity allows — an existing pane is never silently
+    /// consumed (QA F7); only at the pane cap does the first terminal pane
+    /// get reused, with an explicit status note and its snapshot dropped.
+    /// From a terminal pane: retarget it (the old terminal keeps running
+    /// server-side; its snapshot cache entry goes with the pane).
     pub fn attach_terminal(&mut self, terminal_id: String) {
+        // Attaching a terminal that already has a pane is just focusing it
+        // — never a duplicate pane.
+        let already_placed = PaneContent::Terminal(terminal_id.clone());
+        if self.grid.leaves().contains(&already_placed) {
+            self.pane_focus = already_placed;
+            return;
+        }
         self.layout_dirty = true;
-        let content = PaneContent::Terminal(terminal_id);
+        let content = PaneContent::Terminal(terminal_id.clone());
         match self.pane_focus.clone() {
             PaneContent::Browser => {
                 let existing = self
@@ -416,11 +441,22 @@ impl WorkbenchApp {
                     .leaves()
                     .into_iter()
                     .find(|c| matches!(c, PaneContent::Terminal(_)));
-                match existing {
-                    Some(first) => {
+                let at_cap = self.grid.leaves().len() >= crate::tui::layout::MAX_PANES;
+                match (existing, at_cap) {
+                    (Some(first), true) => {
+                        if let PaneContent::Terminal(old) = &first {
+                            self.snapshots.remove(old);
+                            self.set_status(format!(
+                                "pane limit reached — reused {old}'s pane for {terminal_id} \
+                                 ({old} keeps running server-side)"
+                            ));
+                        }
                         self.grid.replace(&first, content.clone());
                     }
-                    None => {
+                    _ => {
+                        // No terminal pane yet, or capacity to spare: the
+                        // browser leaf keeps its place and the new pane
+                        // splits off beside it.
                         self.grid.split(
                             &PaneContent::Browser,
                             SplitAxis::Horizontal,
@@ -431,6 +467,12 @@ impl WorkbenchApp {
                 self.pane_focus = content;
             }
             PaneContent::Terminal(old) => {
+                if old != terminal_id {
+                    self.snapshots.remove(&old);
+                    self.set_status(format!(
+                        "pane retargeted to {terminal_id} ({old} keeps running server-side)"
+                    ));
+                }
                 self.grid
                     .replace(&PaneContent::Terminal(old), content.clone());
                 self.pane_focus = content;
@@ -438,12 +480,34 @@ impl WorkbenchApp {
         }
     }
 
+    /// Whether the pane tree can take one more leaf (the run loop checks
+    /// BEFORE spawning a terminal, so no terminal is ever created that no
+    /// pane can hold — QA F6).
+    pub fn can_split(&self) -> bool {
+        self.grid.leaves().len() < crate::tui::layout::MAX_PANES
+    }
+
     /// Split the focused pane and put a new terminal in the new leaf.
-    /// Returns false (with a status message) at the pane cap.
+    /// Returns false (with a status message) at the pane cap, or when the
+    /// split would crush a pane below the minimum usable size at the last
+    /// drawn terminal size — the split is undone in that case (P3).
     pub fn split_pane(&mut self, axis: SplitAxis, terminal_id: String) -> bool {
         self.layout_dirty = true;
         let content = PaneContent::Terminal(terminal_id);
         if self.grid.split(&self.pane_focus, axis, content.clone()) {
+            if let Some(area) = self.last_pane_area {
+                let too_small = self.grid.render_layout_chrome(area).iter().any(|(c, r)| {
+                    *c == content && (r.width < MIN_PANE_WIDTH || r.height < MIN_PANE_HEIGHT)
+                });
+                if too_small {
+                    // Undo: the new leaf collapses back into its sibling.
+                    self.grid.close(&content);
+                    self.set_status(format!(
+                        "pane too small to split at this terminal size (min {MIN_PANE_WIDTH}×{MIN_PANE_HEIGHT})"
+                    ));
+                    return false;
+                }
+            }
             self.pane_focus = content;
             true
         } else {
@@ -662,6 +726,40 @@ impl WorkbenchApp {
                 _ => KeyOutcome::Ignored,
             };
         }
+        // QA F4: the diff overlay is modal. It used to be unclosable (the
+        // setter only ever set it) and unscrollable (the truncation note
+        // sat below the fold) — Esc closes, ↑↓/PageUp/PageDown scroll.
+        if self.diff_view.is_some() {
+            return match key.code {
+                KeyCode::Esc => {
+                    self.diff_view = None;
+                    self.diff_scroll = 0;
+                    self.set_status("diff closed");
+                    KeyOutcome::Handled
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.diff_scroll = self.diff_scroll.saturating_sub(1);
+                    KeyOutcome::Handled
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.diff_scroll = self.diff_scroll.saturating_add(1);
+                    KeyOutcome::Handled
+                }
+                KeyCode::PageUp => {
+                    self.diff_scroll = self.diff_scroll.saturating_sub(20);
+                    KeyOutcome::Handled
+                }
+                KeyCode::PageDown => {
+                    self.diff_scroll = self.diff_scroll.saturating_add(20);
+                    KeyOutcome::Handled
+                }
+                KeyCode::Char('q') | KeyCode::Char('Q') => {
+                    self.quit_requested = true;
+                    KeyOutcome::QuitRequested
+                }
+                _ => KeyOutcome::Ignored,
+            };
+        }
         // Terminal mode owns the keyboard first: in a focused terminal,
         // even Ctrl-C belongs to the child (0x03), exactly as a real
         // terminal would deliver it. Esc releases the focus.
@@ -870,7 +968,7 @@ impl WorkbenchApp {
     /// borders, one status/mode bar at the bottom. The browser leaf is a
     /// facts card now — the lists live in the sidebar. Overlays (file
     /// panel, handoff picker, diff) sit on top of everything.
-    pub fn draw(&self, frame: &mut Frame) {
+    pub fn draw(&mut self, frame: &mut Frame) {
         let palette = crate::tui::theme::Palette::catppuccin_mocha();
         let rows =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
@@ -885,6 +983,7 @@ impl WorkbenchApp {
         let columns =
             Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(0)]).split(main);
         let pane_area = columns[1];
+        self.last_pane_area = Some(pane_area);
         if sidebar_width > 0 {
             self.draw_sidebar(frame, columns[0], &palette);
         }
@@ -904,15 +1003,15 @@ impl WorkbenchApp {
         let titles: Vec<crate::tui::chrome::PaneTitle> = layout
             .iter()
             .enumerate()
-            .filter_map(|(index, (content, _))| match content {
-                PaneContent::Browser => Some(crate::tui::chrome::PaneTitle {
+            .map(|(index, (content, _))| match content {
+                PaneContent::Browser => crate::tui::chrome::PaneTitle {
                     pane: index,
                     text: "viva".into(),
-                }),
-                PaneContent::Terminal(id) => Some(crate::tui::chrome::PaneTitle {
+                },
+                PaneContent::Terminal(id) => crate::tui::chrome::PaneTitle {
                     pane: index,
                     text: self.terminal_title(id),
-                }),
+                },
             })
             .collect();
         crate::tui::chrome::render_pane_borders(frame, &rects, focused_index, &palette, &titles);
@@ -964,7 +1063,10 @@ impl WorkbenchApp {
                 ratatui::style::Style::new().bold().fg(palette.text),
             )),
             Line::from(""),
-            Line::from(Span::styled(facts, ratatui::style::Style::new().fg(palette.subtext0))),
+            Line::from(Span::styled(
+                facts,
+                ratatui::style::Style::new().fg(palette.subtext0),
+            )),
             Line::from(Span::styled(
                 "o/Enter opens a worktree shell · 1 spaces · 2 agents · 3 tasks",
                 ratatui::style::Style::new().fg(palette.overlay0),
@@ -999,7 +1101,7 @@ impl WorkbenchApp {
                     .chain(view.visible.iter())
                     .map(|row| Line::from(row.clone()))
                     .collect();
-                let max_lines = area.height as usize;
+                let max_lines = area.height.saturating_sub(1) as usize;
                 if lines.len() > max_lines {
                     let skip = lines.len() - max_lines;
                     lines.drain(..skip);
@@ -1039,9 +1141,10 @@ impl WorkbenchApp {
         }
     }
 
-    /// The 1-row status/mode bar (herdr's mode bar): mode chips first,
-    /// then the hint/error line, needs-attention markers in red, and the
-    /// sync note. Everything here is a fact the client was told.
+    /// The 1-row status/mode bar (herdr's mode bar). Facts come first —
+    /// mode chips, needs-attention markers, sync note — and the key hints
+    /// go last, truncated with an ellipsis. Honesty never loses its row to
+    /// decoration on a narrow terminal (QA F5).
     fn draw_status_bar(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
         let mut spans: Vec<Span> = Vec::new();
         if self.terminal_mode.is_some() {
@@ -1056,13 +1159,6 @@ impl WorkbenchApp {
         if self.cleanup_armed.is_some() {
             spans.push(Self::chip(" CLEANUP ARMED ", palette.red, palette));
         }
-        if !spans.is_empty() {
-            spans.push(Span::raw(" "));
-        }
-        spans.push(Span::styled(
-            self.status_line.clone(),
-            ratatui::style::Style::new().fg(palette.overlay0),
-        ));
         for marker in &self.model.attention {
             spans.push(Span::styled(
                 format!("  ● needs attention: {}: {}", marker.kind, marker.detail),
@@ -1072,6 +1168,22 @@ impl WorkbenchApp {
         if let Some(note) = &self.model.sync_note {
             spans.push(Span::styled(
                 format!("  |  {note}"),
+                ratatui::style::Style::new().fg(palette.overlay0),
+            ));
+        }
+        // The hints are decoration: they get whatever columns remain, with
+        // an ellipsis when they do not fit.
+        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let budget = (area.width as usize).saturating_sub(used);
+        if budget > 1 {
+            let body_budget = budget - 1; // one leading space
+            let truncated = self.status_line.chars().count() > body_budget;
+            let mut body = fit(&self.status_line, body_budget);
+            if truncated {
+                body = fit(&body, body_budget.saturating_sub(1));
+            }
+            spans.push(Span::styled(
+                format!(" {body}{}", if truncated { "…" } else { "" }),
                 ratatui::style::Style::new().fg(palette.overlay0),
             ));
         }
@@ -1091,32 +1203,40 @@ impl WorkbenchApp {
     /// The herdr-style sidebar: `spaces` (projects → worktrees as a tree),
     /// `agents` (terminals with status dots), `tasks`. The active
     /// section's header is accented; the selected row carries the
-    /// selection background. Facts only — unknown stays unknown.
+    /// selection background across its whole entity block. The viewport
+    /// follows the keyboard selection (QA F2) — with no mouse, a selected
+    /// row that scrolled off-screen would be unreachable. Facts only —
+    /// unknown stays unknown.
     fn draw_sidebar(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
         let width = area.width as usize;
-        let mut lines: Vec<Line<'static>> = Vec::new();
+        // Each line carries the entity it belongs to (section + model
+        // index); headers and dividers carry None. The viewport window is
+        // computed over the SELECTED entity's whole block.
+        let mut lines: Vec<(Line<'static>, Option<(Focus, usize)>)> = Vec::new();
 
         // -- spaces --
-        lines.push(Self::section_header(
-            " spaces",
-            self.focus == Focus::Worktrees,
-            palette,
+        lines.push((
+            Self::section_header(" spaces", self.focus == Focus::Worktrees, palette),
+            None,
         ));
         for (name, indices) in self.sidebar_space_groups() {
-            lines.push(Self::row(
-                vec![
-                    Span::styled(
-                        fit(&name, width.saturating_sub(4)),
-                        ratatui::style::Style::new().bold().fg(palette.text),
-                    ),
-                    Span::styled(
-                        format!(" {}", indices.len()),
-                        ratatui::style::Style::new().fg(palette.overlay0),
-                    ),
-                ],
-                false,
-                width,
-                palette,
+            lines.push((
+                Self::row(
+                    vec![
+                        Span::styled(
+                            fit(&name, width.saturating_sub(4)),
+                            ratatui::style::Style::new().bold().fg(palette.text),
+                        ),
+                        Span::styled(
+                            format!(" {}", indices.len()),
+                            ratatui::style::Style::new().fg(palette.overlay0),
+                        ),
+                    ],
+                    false,
+                    width,
+                    palette,
+                ),
+                None,
             ));
             let count = indices.len();
             for (position, index) in indices.iter().enumerate() {
@@ -1133,21 +1253,27 @@ impl WorkbenchApp {
                     None => ("·", palette.overlay0),
                 };
                 let selected = self.focus == Focus::Worktrees && self.selected == *index;
-                lines.push(Self::row(
-                    vec![
-                        Span::styled(
-                            prefix.to_string(),
-                            ratatui::style::Style::new().fg(palette.overlay0),
-                        ),
-                        Span::styled(dot.to_string(), ratatui::style::Style::new().fg(dot_color)),
-                        Span::styled(
-                            format!(" {}", fit(&worktree.branch, width.saturating_sub(5))),
-                            ratatui::style::Style::new().fg(palette.mauve),
-                        ),
-                    ],
-                    selected,
-                    width,
-                    palette,
+                lines.push((
+                    Self::row(
+                        vec![
+                            Span::styled(
+                                prefix.to_string(),
+                                ratatui::style::Style::new().fg(palette.overlay0),
+                            ),
+                            Span::styled(
+                                dot.to_string(),
+                                ratatui::style::Style::new().fg(dot_color),
+                            ),
+                            Span::styled(
+                                format!(" {}", fit(&worktree.branch, width.saturating_sub(5))),
+                                ratatui::style::Style::new().fg(palette.mauve),
+                            ),
+                        ],
+                        selected,
+                        width,
+                        palette,
+                    ),
+                    Some((Focus::Worktrees, *index)),
                 ));
                 let mut detail = format!(
                     "{continuation}{}",
@@ -1166,24 +1292,26 @@ impl WorkbenchApp {
                 if let (Some(ahead), Some(behind)) = (worktree.ahead, worktree.behind) {
                     detail.push_str(&format!(" · ↑{ahead}↓{behind}"));
                 }
-                lines.push(Self::row(
-                    vec![Span::styled(
-                        fit(&detail, width.saturating_sub(1)),
-                        ratatui::style::Style::new().fg(palette.overlay0),
-                    )],
-                    false,
-                    width,
-                    palette,
+                lines.push((
+                    Self::row(
+                        vec![Span::styled(
+                            fit(&detail, width.saturating_sub(1)),
+                            ratatui::style::Style::new().fg(palette.overlay0),
+                        )],
+                        selected,
+                        width,
+                        palette,
+                    ),
+                    Some((Focus::Worktrees, *index)),
                 ));
             }
         }
 
         // -- agents --
-        lines.push(Self::section_divider(width, palette));
-        lines.push(Self::section_header(
-            " agents",
-            self.focus == Focus::Terminals,
-            palette,
+        lines.push((Self::section_divider(width, palette), None));
+        lines.push((
+            Self::section_header(" agents", self.focus == Focus::Terminals, palette),
+            None,
         ));
         for (index, terminal) in self.model.terminals.iter().enumerate() {
             let selected = self.focus == Focus::Terminals && self.selected == index;
@@ -1201,17 +1329,20 @@ impl WorkbenchApp {
                 }
                 None => ("·", palette.overlay0),
             };
-            lines.push(Self::row(
-                vec![
-                    Span::styled(dot.to_string(), ratatui::style::Style::new().fg(dot_color)),
-                    Span::styled(
-                        format!(" {}", fit(&terminal.purpose, width.saturating_sub(3))),
-                        ratatui::style::Style::new().fg(palette.text),
-                    ),
-                ],
-                selected,
-                width,
-                palette,
+            lines.push((
+                Self::row(
+                    vec![
+                        Span::styled(dot.to_string(), ratatui::style::Style::new().fg(dot_color)),
+                        Span::styled(
+                            format!(" {}", fit(&terminal.purpose, width.saturating_sub(3))),
+                            ratatui::style::Style::new().fg(palette.text),
+                        ),
+                    ],
+                    selected,
+                    width,
+                    palette,
+                ),
+                Some((Focus::Terminals, index)),
             ));
             let live_word = match terminal.live {
                 Some(true) => "live",
@@ -1223,49 +1354,83 @@ impl WorkbenchApp {
             if !records.is_empty() {
                 detail.push_str(&format!(" · {records}"));
             }
-            lines.push(Self::row(
-                vec![Span::styled(
-                    fit(&detail, width.saturating_sub(1)),
-                    ratatui::style::Style::new().fg(palette.overlay0),
-                )],
-                false,
-                width,
-                palette,
+            lines.push((
+                Self::row(
+                    vec![Span::styled(
+                        fit(&detail, width.saturating_sub(1)),
+                        ratatui::style::Style::new().fg(palette.overlay0),
+                    )],
+                    selected,
+                    width,
+                    palette,
+                ),
+                Some((Focus::Terminals, index)),
             ));
         }
 
         // -- tasks --
-        lines.push(Self::section_divider(width, palette));
-        lines.push(Self::section_header(
-            " tasks",
-            self.focus == Focus::Tasks,
-            palette,
+        lines.push((Self::section_divider(width, palette), None));
+        lines.push((
+            Self::section_header(" tasks", self.focus == Focus::Tasks, palette),
+            None,
         ));
         for (index, task) in self.model.tasks.iter().enumerate() {
             let selected = self.focus == Focus::Tasks && self.selected == index;
             // Two rows per task (herdr's two-row workspaces): the colored
             // status word, then the goal on its own line so it fits.
-            lines.push(Self::row(
-                vec![Span::styled(
-                    task.status.clone(),
-                    ratatui::style::Style::new().fg(Self::task_status_color(&task.status, palette)),
-                )],
-                selected,
-                width,
-                palette,
+            lines.push((
+                Self::row(
+                    vec![Span::styled(
+                        task.status.clone(),
+                        ratatui::style::Style::new()
+                            .fg(Self::task_status_color(&task.status, palette)),
+                    )],
+                    selected,
+                    width,
+                    palette,
+                ),
+                Some((Focus::Tasks, index)),
             ));
-            lines.push(Self::row(
-                vec![Span::styled(
-                    format!(" {}", fit(&task.goal, width.saturating_sub(2))),
-                    ratatui::style::Style::new().fg(palette.text),
-                )],
-                false,
-                width,
-                palette,
+            lines.push((
+                Self::row(
+                    vec![Span::styled(
+                        format!(" {}", fit(&task.goal, width.saturating_sub(2))),
+                        ratatui::style::Style::new().fg(palette.text),
+                    )],
+                    selected,
+                    width,
+                    palette,
+                ),
+                Some((Focus::Tasks, index)),
             ));
         }
 
-        frame.render_widget(Paragraph::new(lines), area);
+        // Viewport window: keep the selected entity's whole block visible.
+        let viewport = area.height as usize;
+        let selected_key = Some((self.focus, self.selected));
+        let first = lines.iter().position(|(_, key)| *key == selected_key);
+        let mut offset = 0usize;
+        if let Some(first) = first {
+            let span = lines
+                .iter()
+                .filter(|(_, key)| *key == selected_key)
+                .count()
+                .max(1);
+            let end = first + span;
+            if end > offset + viewport {
+                offset = end - viewport;
+            }
+            if first < offset {
+                offset = first;
+            }
+        }
+        let visible: Vec<Line<'static>> = lines
+            .into_iter()
+            .skip(offset)
+            .take(viewport)
+            .map(|(line, _)| line)
+            .collect();
+        frame.render_widget(Paragraph::new(visible), area);
         // herdr's sidebar separator: one dim vertical line on the right.
         let buffer = frame.buffer_mut();
         let x = area.x + area.width.saturating_sub(1);
@@ -1302,7 +1467,13 @@ impl WorkbenchApp {
             .worktrees
             .iter()
             .enumerate()
-            .filter(|(_, w)| !self.model.projects.iter().any(|p| p.project_id == w.project_id))
+            .filter(|(_, w)| {
+                !self
+                    .model
+                    .projects
+                    .iter()
+                    .any(|p| p.project_id == w.project_id)
+            })
             .map(|(index, _)| index)
             .collect();
         if !orphans.is_empty() {
@@ -1493,11 +1664,36 @@ impl WorkbenchApp {
     fn draw_diff(&self, frame: &mut Frame, area: Rect, diff: &str) {
         let inner = centered(area, 80, area.height.saturating_sub(4).max(5));
         let lines: Vec<Line> = diff.lines().map(Line::from).collect();
+        // Scrolled (QA F4): the bounded material may be truncated — the
+        // position/truncation note must be reachable, so the view scrolls
+        // instead of clipping.
+        let view_height = inner.height.saturating_sub(2) as usize;
+        let max_scroll = lines.len().saturating_sub(view_height);
+        let offset = self.diff_scroll.min(max_scroll);
+        let shown: Vec<Line> = lines
+            .iter()
+            .skip(offset)
+            .take(view_height.max(1))
+            .cloned()
+            .collect();
+        let shown_count = shown.len();
         frame.render_widget(Clear, inner);
         frame.render_widget(
-            Paragraph::new(lines).block(
+            Paragraph::new(shown).block(
                 Block::new()
-                    .title(" worktree diff (HEAD) ")
+                    .title(format!(
+                        " worktree diff (HEAD) — Esc close · ↑↓ scroll{} ",
+                        if lines.len() > view_height {
+                            format!(
+                                " · lines {}..{} / {}",
+                                offset + 1,
+                                offset + shown_count,
+                                lines.len()
+                            )
+                        } else {
+                            String::new()
+                        }
+                    ))
                     .borders(Borders::ALL),
             ),
             inner,
@@ -1538,7 +1734,9 @@ fn encode_char(modifiers: ratatui::crossterm::event::KeyModifiers, c: char) -> V
 }
 
 fn centered(area: Rect, percent_x: u16, height: u16) -> Rect {
-    let width = area.width * percent_x / 100;
+    // u32 math: 90% of 730+ columns overflows u16 in debug builds and
+    // wraps silently in release.
+    let width = ((area.width as u32) * (percent_x as u32) / 100) as u16;
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     Rect {
@@ -2163,6 +2361,16 @@ fn spawn_and_split(
     app: &mut WorkbenchApp,
     axis: SplitAxis,
 ) -> OfficeResult<()> {
+    // Capacity BEFORE spawning (QA F6): a terminal the grid cannot place
+    // would run orphaned server-side — visible in the agents list, with no
+    // pane and no way to close it from the grid.
+    if !app.can_split() {
+        app.set_status(format!(
+            "pane limit reached ({}) — close one first",
+            crate::tui::layout::MAX_PANES
+        ));
+        return Ok(());
+    }
     let worktree_id = app.focused_worktree_id();
     let cwd = worktree_id
         .as_ref()
@@ -2191,7 +2399,15 @@ fn spawn_and_split(
             crate::foundation::OfficeError::Validation("spawn returned no terminal id".into())
         })?
         .to_string();
-    app.split_pane(axis, terminal_id);
+    if !app.split_pane(axis, terminal_id.clone()) {
+        // The split was refused after the spawn (e.g. a pane would fall
+        // below the minimum size): roll the terminal back so nothing runs
+        // orphaned.
+        let _ = client.call(crate::office::OfficeRequestKind::TerminalStop {
+            terminal_id: terminal_id.clone(),
+        });
+        app.set_status(format!("split refused — terminal {terminal_id} stopped"));
+    }
     Ok(())
 }
 
@@ -2201,7 +2417,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    fn render(app: &WorkbenchApp, w: u16, h: u16) -> String {
+    fn render(app: &mut WorkbenchApp, w: u16, h: u16) -> String {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal.draw(|f| app.draw(f)).expect("draw");
@@ -2257,7 +2473,7 @@ mod tests {
         // Spaces is the first section; the worktree is a tree child row
         // with its real state beside it.
         assert_eq!(app.focus(), Focus::Worktrees);
-        let view = render(&app, 100, 24);
+        let view = render(&mut app, 100, 24);
         assert!(view.contains("agent/feat-x"), "{view}");
         assert!(view.contains("dirty"), "real dirty state is a fact: {view}");
         assert!(view.contains("└─"), "tree glyphs group worktrees: {view}");
@@ -2267,7 +2483,7 @@ mod tests {
             KeyOutcome::Handled
         );
         assert_eq!(app.focus(), Focus::Terminals);
-        let agents = render(&app, 100, 24);
+        let agents = render(&mut app, 100, 24);
         assert!(agents.contains("user_shell"));
         assert!(agents.contains("live"));
 
@@ -2275,7 +2491,7 @@ mod tests {
             app.on_key(KeyEvent::from(KeyCode::Char('3'))),
             KeyOutcome::Handled
         );
-        assert!(render(&app, 100, 24).contains("ship the workbench"));
+        assert!(render(&mut app, 100, 24).contains("ship the workbench"));
 
         // Tab cycles the sections and wraps back to spaces.
         app.on_key(KeyEvent::from(KeyCode::Tab));
@@ -2287,7 +2503,7 @@ mod tests {
         let mut app = WorkbenchApp::new();
         app.set_model(sample());
         // Wide enough that the attention suffix is not clipped.
-        let view = render(&app, 200, 20);
+        let view = render(&mut app, 200, 20);
         assert!(
             view.contains("needs attention") && view.contains("execution_failed"),
             "markers are visible facts: {view}"
@@ -2388,7 +2604,7 @@ mod tests {
         app.set_snapshot("t2", snapshot_with(&["beta-out"]));
         app.set_snapshot("t3", snapshot_with(&["gamma-out"]));
 
-        let view = render(&app, 160, 44);
+        let view = render(&mut app, 160, 44);
         assert!(view.contains("terminal t1"), "{view}");
         assert!(view.contains("terminal t2"));
         assert!(view.contains("terminal t3"));
@@ -2410,7 +2626,7 @@ mod tests {
         app.attach_terminal("t1".into());
         app.toggle_zoom();
         app.set_snapshot("t1", snapshot_with(&["solo-out"]));
-        let view = render(&app, 160, 44);
+        let view = render(&mut app, 160, 44);
         assert!(view.contains("solo-out"), "{view}");
         assert!(view.contains("ZOOM"), "zoom shows as a mode chip: {view}");
         // Zoom shows only the focused pane: the overview card is not part
@@ -2420,7 +2636,7 @@ mod tests {
             "zoom hides the overview card: {view}"
         );
         app.toggle_zoom();
-        let view = render(&app, 160, 44);
+        let view = render(&mut app, 160, 44);
         assert!(view.contains("solo-out"));
         // The sidebar survives zoom, like herdr's.
         assert!(view.contains("spaces") && view.contains("agents"));
@@ -2446,10 +2662,10 @@ mod tests {
         let mut app = WorkbenchApp::new();
         app.set_model(model);
         // Spaces section: unreadable tree shown as unknown.
-        assert!(render(&app, 100, 24).contains("unknown"));
+        assert!(render(&mut app, 100, 24).contains("unknown"));
         // Agents section: unreadable wait state shown as unknown.
         app.on_key(KeyEvent::from(KeyCode::Char('2')));
-        assert!(render(&app, 100, 24).contains("unknown"));
+        assert!(render(&mut app, 100, 24).contains("unknown"));
     }
 
     #[test]
@@ -2469,7 +2685,7 @@ mod tests {
         });
         let mut app = WorkbenchApp::new();
         app.set_model(model);
-        let view = render(&app, 100, 24);
+        let view = render(&mut app, 100, 24);
         assert!(
             view.contains("├─") && view.contains("└─"),
             "tree glyphs nest children: {view}"
@@ -2483,7 +2699,7 @@ mod tests {
     fn overview_card_shows_real_counts_only() {
         let mut app = WorkbenchApp::new();
         app.set_model(sample());
-        let view = render(&app, 100, 24);
+        let view = render(&mut app, 100, 24);
         assert!(
             view.contains("1 projects · 1 worktrees · 1 terminals (1 live) · 1 tasks"),
             "{view}"
@@ -2511,7 +2727,7 @@ mod tests {
         let mut app = WorkbenchApp::new();
         app.set_model(model);
         assert_eq!(
-            sidebar_dot(&app, 100, 24),
+            sidebar_dot(&mut app, 100, 24),
             palette.overlay0,
             "screen inference stays muted"
         );
@@ -2521,7 +2737,7 @@ mod tests {
         let mut app = WorkbenchApp::new();
         app.set_model(model);
         assert_eq!(
-            sidebar_dot(&app, 100, 24),
+            sidebar_dot(&mut app, 100, 24),
             palette.yellow,
             "a controlled report may carry the state color"
         );
@@ -2529,7 +2745,7 @@ mod tests {
 
     /// The first filled dot in the sidebar's leftmost column: the agents
     /// section's status dot for the first terminal row.
-    fn sidebar_dot(app: &WorkbenchApp, w: u16, h: u16) -> ratatui::style::Color {
+    fn sidebar_dot(app: &mut WorkbenchApp, w: u16, h: u16) -> ratatui::style::Color {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal.draw(|f| app.draw(f)).expect("draw");
@@ -2542,6 +2758,182 @@ mod tests {
             }
         }
         panic!("no status dot found in the sidebar");
+    }
+
+    // ------------------------------------------------------------------
+    // QA-round regressions (branch agent/feat-herdr-style-workbench-ui)
+    // ------------------------------------------------------------------
+
+    /// F1: the snapshot facts footer (scrollback size, output bytes) must
+    /// stay visible when the output is BUSY — that is exactly when the
+    /// honest history reading matters.
+    #[test]
+    fn terminal_pane_footer_line_stays_visible_on_busy_output() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.attach_terminal("t1".into());
+        let busy: Vec<String> = (0..45).map(|i| format!("out-{i}")).collect();
+        let view = snapshot_with(&busy.iter().map(String::as_str).collect::<Vec<_>>());
+        app.set_snapshot(
+            "t1",
+            TerminalSnapshot {
+                total_output_bytes: 123_456,
+                ..view
+            },
+        );
+        let frame = render(&mut app, 160, 44);
+        assert!(
+            frame.contains("output bytes: 123456"),
+            "the facts footer must survive clipping on busy output: {frame}"
+        );
+        assert!(frame.contains("out-44"), "the newest output stays: {frame}");
+    }
+
+    /// F2: the sidebar viewport follows the keyboard selection — the
+    /// agents/tasks sections stay reachable on tall workspaces.
+    #[test]
+    fn sidebar_viewport_follows_the_selection() {
+        let mut model = sample();
+        for i in 0..12 {
+            model.worktrees.push(WorktreeRow {
+                worktree_id: format!("wt-{i}"),
+                project_id: "p1".into(),
+                path: format!("/wt/dev-{i}"),
+                branch: format!("agent/feat-{i}"),
+                dirty: Some(false),
+                task_id: None,
+                source: "created".into(),
+                pr_state: None,
+                ahead: None,
+                behind: None,
+            });
+        }
+        let mut app = WorkbenchApp::new();
+        app.set_model(model);
+        // Walk to the last worktree row (index 12): it must be on screen.
+        for _ in 0..12 {
+            app.on_key(KeyEvent::from(KeyCode::Char('j')));
+        }
+        let frame = render(&mut app, 100, 24);
+        assert!(
+            frame.contains("agent/feat-11"),
+            "the selected row must follow the viewport: {frame}"
+        );
+    }
+
+    /// F4: the diff overlay closes with Esc (it used to be unclosable)
+    /// and scrolls, so a bounded/truncated diff stays readable.
+    #[test]
+    fn diff_overlay_closes_with_esc_and_scrolls() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        let diff = (0..50)
+            .map(|i| format!("line-{i} +added"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.set_diff_view(Some(diff));
+        let frame = render(&mut app, 120, 24);
+        assert!(frame.contains("line-1 +added"), "{frame}");
+        assert!(
+            frame.contains("Esc close"),
+            "the close affordance is advertised: {frame}"
+        );
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Esc)),
+            KeyOutcome::Handled
+        );
+        assert!(
+            !render(&mut app, 120, 24).contains("+added"),
+            "the diff overlay closed"
+        );
+
+        // Scrolling moves the window and shows the range note.
+        app.set_diff_view(Some(
+            (0..50)
+                .map(|i| format!("line-{i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ));
+        app.on_key(KeyEvent::from(KeyCode::PageDown));
+        let frame = render(&mut app, 120, 24);
+        assert!(frame.contains("lines 21"), "scroll range shown: {frame}");
+    }
+
+    /// F5: needs-attention markers are facts — they stay visible on a
+    /// narrow terminal; the key hints are what get truncated.
+    #[test]
+    fn attention_markers_survive_narrow_terminals() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        let frame = render(&mut app, 100, 24);
+        assert!(
+            frame.contains("needs attention") && frame.contains("execution_failed"),
+            "{frame}"
+        );
+    }
+
+    /// F7: attaching from the browser never silently consumes an existing
+    /// pane; re-attaching a placed terminal just focuses it.
+    #[test]
+    fn attach_from_browser_splits_and_never_consumes_a_pane() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.attach_terminal("t1".into());
+        app.move_pane_focus(Direction::Left); // back to the browser leaf
+        app.attach_terminal("t2".into());
+        let leaves = app.terminal_leaves();
+        assert!(
+            leaves.contains(&"t1".to_string()) && leaves.contains(&"t2".to_string()),
+            "no pane may vanish: {leaves:?}"
+        );
+        // Re-attaching a placed terminal only moves focus.
+        app.attach_terminal("t1".into());
+        assert_eq!(app.pane_focus(), &PaneContent::Terminal("t1".into()));
+        assert_eq!(app.terminal_leaves().len(), 2);
+    }
+
+    /// F6: `can_split` gates before the pane cap, so the run loop can
+    /// refuse a spawn before creating an orphaned terminal.
+    #[test]
+    fn can_split_gates_before_the_pane_cap() {
+        let mut app = WorkbenchApp::new();
+        assert!(app.can_split());
+        for i in 0..8 {
+            assert!(app.split_pane(SplitAxis::Horizontal, format!("t{i}")));
+        }
+        assert_eq!(app.terminal_leaves().len(), 8, "browser + 8 terminals");
+        assert!(
+            !app.can_split(),
+            "at the cap no further split may be attempted"
+        );
+    }
+
+    /// P3: split refuses — with a status note — instead of crushing a
+    /// neighbor into an unusable sliver at small terminal sizes.
+    #[test]
+    fn split_refuses_panes_below_the_minimum_size() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        render(&mut app, 100, 24); // records the real pane area (74×23)
+        let mut placed = 0;
+        for i in 1..=8 {
+            if app.split_pane(SplitAxis::Horizontal, format!("t{i}")) {
+                placed += 1;
+            } else {
+                break;
+            }
+        }
+        assert!(placed < 8, "some split must be refused at 74 columns");
+        assert_eq!(
+            app.terminal_leaves().len(),
+            placed,
+            "a refused split never enters the tree"
+        );
+        let frame = render(&mut app, 100, 24);
+        assert!(
+            frame.contains("too small"),
+            "the refusal is explained: {frame}"
+        );
     }
 }
 
@@ -2615,7 +3007,7 @@ mod v15_tui_fix_tests {
     /// features are discoverable (QA round-2 F12).
     #[test]
     fn status_line_advertises_v15_keys() {
-        let app = WorkbenchApp::new();
+        let mut app = WorkbenchApp::new();
         let backend = TestBackend::new(200, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         terminal.draw(|f| app.draw(f)).expect("draw");
