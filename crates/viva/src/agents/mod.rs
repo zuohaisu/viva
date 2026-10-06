@@ -376,6 +376,7 @@ mod tests {
 
     fn snapshot(visible: &[&str]) -> TerminalSnapshot {
         TerminalSnapshot {
+            screen: None,
             cols: 80,
             rows: visible.len() as u16,
             visible: visible.iter().map(|s| s.to_string()).collect(),

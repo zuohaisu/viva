@@ -106,12 +106,16 @@ impl SceneBook {
             && self.scenes.len() <= MAX_SCENES
             && self.scenes.values().all(|s| {
                 s.tabs.len() <= MAX_TABS
+                    && (s.tabs.iter().any(|t| t.id == s.active && !t.hidden)
+                        || (s.active.is_empty() && s.tabs.iter().all(|t| t.hidden)))
                     && s.tabs.iter().all(|t| {
                         ids.insert(t.id.clone())
                             && t.name.len() <= 256
                             && node(&t.grid, 0)
                             && t.grid.leaves().len() <= MAX_PANES
                             && t.closed.len() <= 256
+                            && t.grid.leaves().contains(&t.focus)
+                            && t.closed.iter().all(|id| terminals.insert(id.clone()))
                             && t.grid.leaves().iter().all(|c| match c {
                                 PaneContent::Terminal(id) => terminals.insert(id.clone()),
                                 _ => true,

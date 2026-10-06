@@ -113,7 +113,13 @@ impl OwnedMaster {
                     return Err(OfficeError::Validation(format!("ptsname: {e}")));
                 }
             };
-            let slave = libc::open(slave_name.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC);
+            // A detached resident server is itself a session leader. Opening
+            // the slave must not make it the server's controlling terminal;
+            // only the child acquires it after setsid in spawn_child.
+            let slave = libc::open(
+                slave_name.as_ptr(),
+                libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOCTTY,
+            );
             if slave < 0 {
                 let err = io::Error::last_os_error();
                 libc::close(master);

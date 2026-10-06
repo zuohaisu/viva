@@ -21,7 +21,9 @@
 //! - Quit is a detach: worktree contents and records are left exactly as
 //!   they are, nothing is re-run when the client reattaches.
 
+mod polling;
 pub mod scenes;
+pub mod terminal_view;
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
@@ -171,6 +173,8 @@ pub enum Focus {
     Tasks,
     /// The `agents` sidebar section: terminals and their agent states.
     Terminals,
+    /// Right-hand pane navigation, independent of sidebar selection.
+    Panes,
 }
 
 /// What one key press decided.
@@ -353,6 +357,8 @@ pub struct WorkbenchApp {
     global_attention: bool,
     sidebar_hits: Vec<(Focus, usize, Rect)>,
     mouse_action: Option<WorkbenchAction>,
+    pane_geometry: Vec<(String, Rect)>,
+    scroll_offsets: std::collections::HashMap<String, usize>,
 }
 
 impl WorkbenchApp {
@@ -388,6 +394,8 @@ impl WorkbenchApp {
             global_attention:false,
             sidebar_hits:vec![],
             mouse_action:None,
+            pane_geometry:vec![],
+            scroll_offsets:std::collections::HashMap::new(),
         }
     }
 
@@ -404,7 +412,10 @@ impl WorkbenchApp {
     }
 
     pub fn set_model(&mut self, model: WorkbenchModel) {
-        if !model.workspace_diagnostics.is_empty() {
+        if !model.workspace_diagnostics.is_empty()
+            && (model.workspace_id != self.model.workspace_id
+                || model.workspace_diagnostics != self.model.workspace_diagnostics)
+        {
             self.set_status(model.workspace_diagnostics.join(" · "));
         }
         self.model = model;
@@ -427,9 +438,94 @@ impl WorkbenchApp {
     }
 
     pub fn set_snapshot(&mut self, terminal_id: impl Into<String>, snapshot: TerminalSnapshot) {
-        self.snapshots.insert(terminal_id.into(), snapshot);
+        let id = terminal_id.into();
+        if self.terminal_leaves().contains(&id) {
+            self.snapshots.insert(id, snapshot);
+        }
     }
 
+    pub fn visible_geometry(&self) -> &[(String, Rect)] {
+        &self.pane_geometry
+    }
+    pub fn scroll_offset(&self, id: &str) -> usize {
+        self.scroll_offsets.get(id).copied().unwrap_or(0)
+    }
+    fn input_modes(&self) -> crate::terminal::screen::InputModes {
+        self.terminal_mode
+            .as_ref()
+            .and_then(|id| self.snapshots.get(id))
+            .and_then(|s| s.screen.as_ref())
+            .map(|s| s.modes.clone())
+            .unwrap_or_default()
+    }
+    fn scroll_terminal(&mut self, id: String, delta: isize) {
+        let old = self.scroll_offset(&id);
+        let retained = self
+            .snapshots
+            .get(&id)
+            .and_then(|s| s.screen.as_ref())
+            .map(|s| s.retained)
+            .unwrap_or(crate::terminal::SCROLLBACK_LINES);
+        let value = old.saturating_add_signed(delta).min(retained);
+        self.scroll_offsets.insert(id, value);
+    }
+    pub fn on_paste(&mut self, text: &str) -> KeyOutcome {
+        if self.terminal_mode.is_none() {
+            return KeyOutcome::Ignored;
+        }
+        if text.len() > 64 * 1024 {
+            self.set_status("paste exceeds 64 KiB; nothing sent");
+            return KeyOutcome::Handled;
+        }
+        KeyOutcome::Forward(terminal_view::paste(text, &self.input_modes()))
+    }
+    pub fn terminal_mouse(
+        &mut self,
+        event: ratatui::crossterm::event::MouseEvent,
+    ) -> Option<(String, Vec<u8>)> {
+        use ratatui::crossterm::event::{KeyModifiers, MouseEventKind};
+        if self.file_panel.is_some()
+            || self.diff_view.is_some()
+            || self.handoff_picker.is_some()
+            || self.workspace_prompt.is_some()
+            || self.tab_prompt.is_some()
+            || self.terminal_picker.is_some()
+            || !matches!(self.drag, DragState::None)
+        {
+            return None;
+        }
+        let (id, rect) = self
+            .pane_geometry
+            .iter()
+            .find(|(_, r)| contains_point(*r, event.column, event.row))
+            .cloned()?;
+        // Divider grab bands always belong to Viva, including their tolerance.
+        if self.last_pane_area.is_some_and(|area| {
+            !self.zoomed
+                && self.grid.splits(area).iter().any(|hit| match hit.axis {
+                    SplitAxis::Horizontal => event.column.abs_diff(hit.pos) <= 1,
+                    SplitAxis::Vertical => event.row.abs_diff(hit.pos) <= 1,
+                })
+        }) {
+            return None;
+        }
+        if self.terminal_mode.as_deref() == Some(&id)
+            && !event.modifiers.contains(KeyModifiers::SHIFT)
+            && self.scroll_offset(&id) == 0
+        {
+            let modes = self.input_modes();
+            if let Some(bytes) = terminal_view::mouse(event, rect, &modes) {
+                return Some((id, bytes));
+            }
+        }
+        let delta = match event.kind {
+            MouseEventKind::ScrollUp => 3,
+            MouseEventKind::ScrollDown => -3,
+            _ => return None,
+        };
+        self.scroll_terminal(id, delta);
+        None
+    }
     /// Terminal ids currently placed in the pane tree (fetch budget: the
     /// tree never exceeds the layout cap).
     pub fn terminal_leaves(&self) -> Vec<String> {
@@ -534,6 +630,7 @@ impl WorkbenchApp {
         }
         scene.active = id.into();
         self.load_scene();
+        self.focus = Focus::Panes;
         self.layout_dirty = true;
         true
     }
@@ -603,8 +700,10 @@ impl WorkbenchApp {
             self.set_status("unavailable legacy layout; original retained");
             return;
         };
-        let mut book = SceneBook::default();
-        book.legacy = Some(value.clone());
+        let mut book = SceneBook {
+            legacy: Some(value.clone()),
+            ..Default::default()
+        };
         // Preserve the old tree, partitioned by terminal ownership; the full
         // original payload remains embedded and is backed up server-side.
         let mut keys = std::collections::BTreeSet::new();
@@ -674,12 +773,14 @@ impl WorkbenchApp {
 
     /// Move pane focus geometrically (Ctrl+Arrows in the keymap).
     pub fn move_pane_focus(&mut self, direction: Direction) -> bool {
-        match self
-            .grid
-            .neighbor(PANE_REF_AREA, &self.pane_focus, direction)
-        {
+        match self.grid.neighbor(
+            self.last_pane_area.unwrap_or(PANE_REF_AREA),
+            &self.pane_focus,
+            direction,
+        ) {
             Some(next) => {
                 self.pane_focus = next;
+                self.focus = Focus::Panes;
                 self.layout_dirty = true;
                 true
             }
@@ -697,15 +798,12 @@ impl WorkbenchApp {
             .position(|c| *c == self.pane_focus)
             .unwrap_or(0);
         self.pane_focus = leaves[(index + 1) % leaves.len()].clone();
+        self.focus = Focus::Panes;
         self.layout_dirty = true;
     }
 
-    /// Point the focused pane at a terminal. From the browser: split a new
-    /// pane whenever capacity allows — an existing pane is never silently
-    /// consumed (QA F7); only at the pane cap does the first terminal pane
-    /// get reused, with an explicit status note and its snapshot dropped.
-    /// From a terminal pane: retarget it (the old terminal keeps running
-    /// server-side; its snapshot cache entry goes with the pane).
+    /// Locate the original scene/tab/pane, including hidden views. An
+    /// unplaced terminal gets a new leaf or tab; neighbors are never replaced.
     pub fn attach_terminal(&mut self, terminal_id: String) {
         self.save_scene();
         if let Some(location) = self.scenes.locate(&terminal_id) {
@@ -826,6 +924,12 @@ impl WorkbenchApp {
             if let Some(scene) = self.scenes.scenes.get_mut(&self.scenes.selected) {
                 if let Some(t) = scene.tabs.iter_mut().find(|t| t.id == scene.active) {
                     if !t.closed.contains(&id) {
+                        if t.closed.len() >= 256 {
+                            self.set_status(
+                                "closed-pane reference limit reached; view remains open",
+                            );
+                            return;
+                        }
                         t.closed.push(id.clone());
                     }
                 }
@@ -881,8 +985,11 @@ impl WorkbenchApp {
     /// usually the Enter key on a terminals row, executed as
     /// [`WorkbenchAction::EnterTerminal`]).
     pub fn enter_terminal_mode(&mut self, terminal_id: impl Into<String>) {
+        self.focus = Focus::Panes;
         self.terminal_mode = Some(terminal_id.into());
-        self.status_line = "terminal focused — Esc to release".into();
+        self.status_line =
+            "terminal focused · Ctrl+] navigation · Esc CLI · Shift+PgUp/wheel history · classic keys; no graphics"
+                .into();
     }
 
     pub fn leave_terminal_mode(&mut self) {
@@ -895,6 +1002,7 @@ impl WorkbenchApp {
             Focus::Worktrees => self.model.worktrees.len(),
             Focus::Tasks => self.model.tasks.len(),
             Focus::Terminals => self.agent_rows().len(),
+            Focus::Panes => 0,
         }
     }
 
@@ -1164,31 +1272,28 @@ impl WorkbenchApp {
                 _ => KeyOutcome::Ignored,
             };
         }
-        // Terminal mode owns the keyboard first: in a focused terminal,
-        // even Ctrl-C belongs to the child (0x03), exactly as a real
-        // terminal would deliver it. Esc releases the focus.
+        // Ctrl+] is the explicit outer prefix; Esc and other common CLI keys
+        // are forwarded according to this terminal's modes.
         if self.terminal_mode.is_some() {
-            return match key.code {
-                KeyCode::Esc => {
-                    self.leave_terminal_mode();
-                    KeyOutcome::Handled
-                }
-                KeyCode::Char(c) => KeyOutcome::Forward(encode_char(key.modifiers, c)),
-                KeyCode::Enter => KeyOutcome::Forward(b"\r".to_vec()),
-                KeyCode::Backspace => KeyOutcome::Forward(b"\x7f".to_vec()),
-                KeyCode::Tab => KeyOutcome::Forward(b"\t".to_vec()),
-                KeyCode::Up => KeyOutcome::Forward(b"\x1b[A".to_vec()),
-                KeyCode::Down => KeyOutcome::Forward(b"\x1b[B".to_vec()),
-                KeyCode::Right => KeyOutcome::Forward(b"\x1b[C".to_vec()),
-                KeyCode::Left => KeyOutcome::Forward(b"\x1b[D".to_vec()),
-                KeyCode::Home => KeyOutcome::Forward(b"\x1b[H".to_vec()),
-                KeyCode::End => KeyOutcome::Forward(b"\x1b[F".to_vec()),
-                KeyCode::PageUp => KeyOutcome::Forward(b"\x1b[5~".to_vec()),
-                KeyCode::PageDown => KeyOutcome::Forward(b"\x1b[6~".to_vec()),
-                KeyCode::Delete => KeyOutcome::Forward(b"\x1b[3~".to_vec()),
-                KeyCode::Insert => KeyOutcome::Forward(b"\x1b[2~".to_vec()),
-                _ => KeyOutcome::Ignored,
-            };
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char(']') | KeyCode::Char('5'))
+            {
+                self.leave_terminal_mode();
+                return KeyOutcome::Handled;
+            }
+            if key.modifiers.contains(KeyModifiers::SHIFT)
+                && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
+            {
+                let id = self.terminal_mode.clone().unwrap();
+                self.scroll_terminal(id, if key.code == KeyCode::PageUp { 20 } else { -20 });
+                return KeyOutcome::Handled;
+            }
+            if let Some(id) = self.terminal_mode.clone() {
+                self.scroll_offsets.insert(id, 0);
+            }
+            return terminal_view::key(key, &self.input_modes())
+                .map(KeyOutcome::Forward)
+                .unwrap_or(KeyOutcome::Ignored);
         }
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
@@ -1219,6 +1324,11 @@ impl WorkbenchApp {
                 self.quit_requested = true;
                 KeyOutcome::QuitRequested
             }
+            KeyCode::Char('0') => {
+                self.select_worktree(FLOATING.into());
+                self.focus = Focus::Panes;
+                KeyOutcome::Handled
+            }
             // Sidebar sections (herdr order: spaces, agents, tasks).
             KeyCode::Char('1') => {
                 self.focus = Focus::Worktrees;
@@ -1240,7 +1350,7 @@ impl WorkbenchApp {
                     self.focus = match self.focus {
                         Focus::Worktrees => Focus::Terminals,
                         Focus::Terminals => Focus::Tasks,
-                        Focus::Tasks => Focus::Worktrees,
+                        Focus::Tasks | Focus::Panes => Focus::Worktrees,
                     };
                     self.selected = 0;
                 } else {
@@ -1500,7 +1610,7 @@ impl WorkbenchApp {
                     .selected_worktree()
                     .map(WorkbenchAction::SelectWorktree),
                 Focus::Terminals => self.selected_terminal().map(WorkbenchAction::EnterTerminal),
-                Focus::Tasks => None,
+                Focus::Tasks | Focus::Panes => None,
             };
             return;
         }
@@ -1577,6 +1687,7 @@ impl WorkbenchApp {
             .find(|(_, rect)| contains_point(*rect, column, row))
             .map(|(content, _)| content);
         if let Some(content) = hit_leaf {
+            self.focus = Focus::Panes;
             if self.pane_focus != content {
                 self.pane_focus = content;
                 self.layout_dirty = true;
@@ -1678,7 +1789,7 @@ impl WorkbenchApp {
         }
         if self.tab_hits.is_empty() {
             frame.render_widget(
-                Paragraph::new(" n New tab · o New shell · t All terminals"),
+                Paragraph::new(" 0 Unassigned · n New tab · o New shell · t All terminals"),
                 right[0],
             );
         }
@@ -1720,6 +1831,7 @@ impl WorkbenchApp {
             })
             .collect();
         crate::tui::chrome::render_pane_borders(frame, &rects, focused_index, &palette, &titles);
+        self.pane_geometry.clear();
         for (index, (content, rect)) in layout.iter().enumerate() {
             let content_area = if layout.len() >= 2 {
                 crate::tui::chrome::inner_rect(*rect)
@@ -1728,7 +1840,10 @@ impl WorkbenchApp {
             };
             match content {
                 PaneContent::Browser => self.draw_overview(frame, content_area),
-                PaneContent::Terminal(id) => self.draw_terminal_pane(frame, content_area, id),
+                PaneContent::Terminal(id) => {
+                    self.pane_geometry.push((id.clone(), content_area));
+                    self.draw_terminal_pane(frame, content_area, id);
+                }
             }
         }
 
@@ -1888,6 +2003,17 @@ impl WorkbenchApp {
     /// reattached client sees the server-kept history. Borders and the
     /// title are chrome (see `render_pane_borders`); this draws content.
     fn draw_terminal_pane(&self, frame: &mut Frame, area: Rect, id: &str) {
+        if let Some(view) = self.snapshots.get(id).and_then(|s| s.screen.as_ref()) {
+            let cursor = self.terminal_mode.as_deref() == Some(id)
+                && self.file_panel.is_none()
+                && self.handoff_picker.is_none()
+                && self.diff_view.is_none()
+                && self.tab_prompt.is_none()
+                && self.workspace_prompt.is_none()
+                && self.terminal_picker.is_none();
+            terminal_view::draw(frame, area, view, cursor);
+            return;
+        }
         let lines: Vec<Line> = match self.snapshots.get(id) {
             Some(view) => {
                 let mut lines: Vec<Line> = view
@@ -2165,7 +2291,7 @@ impl WorkbenchApp {
             // — screen/process-tree dots stay muted.
             let (dot, dot_color) = match terminal.records.first() {
                 Some(record) => {
-                    let color = if record.source.is_authoritative() {
+                    let color = if record.source.is_authoritative() && !terminal.stale {
                         crate::tui::theme::status_color(record.status, palette)
                     } else {
                         palette.overlay0
@@ -3017,57 +3143,62 @@ fn run_client_inner(client: &mut crate::office::OfficeClient) -> OfficeResult<()
         .map_err(|e| crate::foundation::OfficeError::Io(std::io::Error::other(e.to_string())))?;
 
     let mut app = WorkbenchApp::new();
-    // First facts, then the saved layout (QA F5): attach rebuilds the same
-    // pane view, pruned to the terminals that still exist.
-    match client.call(crate::office::OfficeRequestKind::WorkbenchView) {
-        Ok(value) => {
-            if let Ok(model) = serde_json::from_value::<WorkbenchModel>(value) {
-                let live: std::collections::HashSet<String> = model
-                    .terminals
-                    .iter()
-                    .map(|terminal| terminal.terminal_id.clone())
-                    .collect();
-                app.set_model(model);
-                if let Ok(value) = client
-                    .call(crate::office::OfficeRequestKind::WorkbenchLayout { layout_json: None })
-                {
-                    if let Some(json) = value.get("layout").and_then(|layout| layout.as_str()) {
-                        app.restore_layout(json, &live);
+    let polling = polling::Polling::start(client)?;
+    let mut saved_layout = client
+        .call(crate::office::OfficeRequestKind::WorkbenchLayout { layout_json: None })
+        .ok()
+        .and_then(|v| v.get("layout").and_then(|v| v.as_str()).map(str::to_string));
+    loop {
+        while let Ok(result) = polling.models.try_recv() {
+            match result {
+                Ok(model) => {
+                    let known = model
+                        .terminals
+                        .iter()
+                        .map(|t| t.terminal_id.clone())
+                        .collect();
+                    app.set_model(model);
+                    if let Some(json) = saved_layout.take() {
+                        app.restore_layout(&json, &known);
                     }
+                }
+                Err(e) => app.set_status(format!("view failed: {e}")),
+            }
+        }
+        while let Ok((id, result)) = polling.screens.try_recv() {
+            match result {
+                Ok(snapshot) => app.set_snapshot(id, snapshot),
+                Err(e) => {
+                    app.snapshots.remove(&id);
+                    app.set_status(format!("terminal unavailable: {e}"));
                 }
             }
         }
-        Err(err) => app.set_status(format!("server error: {err}")),
-    }
-    loop {
-        // Refresh from the server projection (never inside draw).
-        match client.call(crate::office::OfficeRequestKind::WorkbenchView) {
-            Ok(value) => match serde_json::from_value::<WorkbenchModel>(value) {
-                Ok(model) => app.set_model(model),
-                Err(err) => app.set_status(format!("view decode error: {err}")),
-            },
-            Err(err) => app.set_status(format!("server error: {err}")),
-        }
-        // Fetch one snapshot per terminal leaf (bounded by the pane cap):
-        // every rendered pane stays live, focused or not.
-        for id in app.terminal_leaves() {
-            match client.call(crate::office::OfficeRequestKind::TerminalSnapshot {
-                terminal_id: id.clone(),
-            }) {
-                Ok(value) => match serde_json::from_value::<TerminalSnapshot>(value) {
-                    Ok(view) => app.set_snapshot(id, view),
-                    Err(err) => app.set_status(format!("snapshot decode error: {err}")),
-                },
-                Err(err) => app.set_status(format!("snapshot error: {err}")),
-            }
+        while let Ok(error) = polling.errors.try_recv() {
+            app.set_status(error);
         }
         terminal.draw(|frame| app.draw(frame)).map_err(|e| {
             crate::foundation::OfficeError::Io(std::io::Error::other(e.to_string()))
         })?;
 
-        if !event::poll(std::time::Duration::from_millis(200))
+        polling.request(
+            app.visible_geometry()
+                .iter()
+                .filter(|(_, r)| r.width > 0 && r.height > 0)
+                .map(|(id, r)| (id.clone(), r.width, r.height, app.scroll_offset(id)))
+                .collect(),
+        );
+        if !event::poll(std::time::Duration::from_millis(32))
             .map_err(|e| crate::foundation::OfficeError::Io(std::io::Error::other(e.to_string())))?
         {
+            if app.layout_dirty() {
+                match client.call(crate::office::OfficeRequestKind::WorkbenchLayout {
+                    layout_json: Some(app.serialize_layout()),
+                }) {
+                    Ok(_) => app.clear_layout_dirty(),
+                    Err(e) => app.set_status(format!("layout save pending: {e}")),
+                }
+            }
             continue;
         }
         let event = event::read().map_err(|e| {
@@ -3076,10 +3207,17 @@ fn run_client_inner(client: &mut crate::office::OfficeClient) -> OfficeResult<()
         match event {
             // Key handling is the existing flow; mouse events feed the
             // drag/click layer (herdr parity). Everything else is dropped.
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
+            Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
                 match app.on_key(key) {
                     // Detach, not shutdown: the resident server keeps running.
-                    KeyOutcome::QuitRequested => break,
+                    KeyOutcome::QuitRequested => {
+                        if app.layout_dirty() {
+                            client.call(crate::office::OfficeRequestKind::WorkbenchLayout {
+                                layout_json: Some(app.serialize_layout()),
+                            })?;
+                        }
+                        break;
+                    }
                     KeyOutcome::Action(action) => {
                         if let Err(err) = apply_client_action(client, &mut app, action) {
                             app.set_status(format!("action failed: {err}"));
@@ -3087,24 +3225,35 @@ fn run_client_inner(client: &mut crate::office::OfficeClient) -> OfficeResult<()
                     }
                     KeyOutcome::Forward(bytes) => {
                         if let Some(id) = app.terminal_mode().map(str::to_string) {
-                            if let Err(err) =
-                                client.call(crate::office::OfficeRequestKind::TerminalInput {
-                                    terminal_id: id,
-                                    bytes_hex: crate::office::hex_encode(&bytes),
-                                })
-                            {
-                                app.set_status(format!("input failed: {err}"));
+                            if let Err(e) = polling.send(id, bytes) {
+                                app.set_status(e);
                             }
                         }
                     }
                     KeyOutcome::Handled | KeyOutcome::Ignored => {}
                 }
             }
+            Event::Paste(text) => {
+                if let KeyOutcome::Forward(bytes) = app.on_paste(&text) {
+                    if let Some(id) = app.terminal_mode().map(str::to_string) {
+                        if let Err(e) = polling.send(id, bytes) {
+                            app.set_status(e);
+                        }
+                    }
+                }
+            }
+            Event::Resize(_, _) => {}
             Event::Mouse(mouse) => {
-                app.on_mouse(mouse);
-                if let Some(action) = app.take_mouse_action() {
-                    if let Err(err) = apply_client_action(client, &mut app, action) {
-                        app.set_status(format!("navigation failed: {err}"));
+                if let Some((id, bytes)) = app.terminal_mouse(mouse) {
+                    if let Err(e) = polling.send(id, bytes) {
+                        app.set_status(e);
+                    }
+                } else {
+                    app.on_mouse(mouse);
+                    if let Some(action) = app.take_mouse_action() {
+                        if let Err(err) = apply_client_action(client, &mut app, action) {
+                            app.set_status(format!("navigation failed: {err}"));
+                        }
                     }
                 }
             }
@@ -3135,9 +3284,17 @@ fn apply_client_action(
     match action {
         WorkbenchAction::Workspace {
             action,
-            value,
+            mut value,
             project_id,
         } => {
+            if matches!(action.as_str(), "open" | "add" | "save") {
+                if let Some(v) = &value {
+                    let path = std::path::Path::new(v);
+                    if !path.is_absolute() {
+                        value = Some(std::env::current_dir()?.join(path).display().to_string());
+                    }
+                }
+            }
             let v = client.call(crate::office::OfficeRequestKind::Workspace {
                 action,
                 value,
@@ -3379,11 +3536,11 @@ fn spawn_and_split(
         ));
         return Ok(());
     }
-    if !app
+    if app
         .scenes
         .scenes
         .get(app.selected_scene())
-        .is_some_and(|s| !s.active.is_empty())
+        .is_none_or(|s| s.active.is_empty())
         && !app.new_tab("Terminal".into())
     {
         return Ok(());
@@ -3543,7 +3700,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_mode_forwards_bytes_and_esc_releases() {
+    fn terminal_mode_forwards_bytes_and_esc_reaches_cli() {
         let mut app = WorkbenchApp::new();
         app.set_model(sample());
         app.on_key(KeyEvent::from(KeyCode::Char('2')));
@@ -3571,8 +3728,13 @@ mod tests {
         );
         assert_eq!(
             app.on_key(KeyEvent::from(KeyCode::Esc)),
-            KeyOutcome::Handled
+            KeyOutcome::Forward(vec![27])
         );
+        assert_eq!(app.terminal_mode(), Some("term-1"));
+        app.on_key(KeyEvent::new(
+            KeyCode::Char(']'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        ));
         assert!(app.terminal_mode().is_none());
     }
 
@@ -3615,6 +3777,7 @@ mod tests {
 
     fn snapshot_with(lines: &[&str]) -> TerminalSnapshot {
         TerminalSnapshot {
+            screen: None,
             cols: 80,
             rows: 12,
             visible: lines.iter().map(|s| s.to_string()).collect(),
@@ -3835,6 +3998,7 @@ mod tests {
         app.set_snapshot(
             "t1",
             TerminalSnapshot {
+                screen: None,
                 total_output_bytes: 123_456,
                 ..view
             },
