@@ -80,6 +80,22 @@ resident runtime, detach/attach, terminal orchestration API and close/pause
 semantics, read `ADR-0012`. The architecture and migration record is
 `Transition-Record`. Goal-drift incidents are recorded in `Goal-Drift-Log`.
 
+## On-demand Independent QA
+
+The project-specific, agent-independent review prompt is
+[`.agents/prompts/independent-qa.md`](.agents/prompts/independent-qa.md).
+It is a machine-consumed task instruction, not a second Wiki knowledge base.
+Any agent that can read repository files can use it; no Pi command or
+agent-specific automatic discovery is required.
+
+When explicitly asked to perform independent QA, read that file and apply it
+to the named PR, branch or commit range. Reading this charter alone does not
+activate QA or add a mandatory dev→QA pipeline. Prefer a fresh review session.
+
+One-line invocation:
+
+> 读取 `.agents/prompts/independent-qa.md`，按其中要求对 PR #编号进行独立 QA；只读审核，不修改代码，报告发现、证据和未验证项。
+
 ## Mandatory Alignment Check
 
 Before starting research, planning, or implementation, emit one concise line in

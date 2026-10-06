@@ -177,6 +177,15 @@ python -m pytest tests/acceptance -q   # acceptance tooling (stdlib-only)
 cd extensions/pi && npm ci && npm run typecheck && npm test   # Pi extension
 ```
 
+### Independent QA
+
+Any agent can read the project-specific
+[QA prompt](.agents/prompts/independent-qa.md) in a fresh session:
+
+> 读取 `.agents/prompts/independent-qa.md`，按其中要求对 PR #编号进行独立 QA；只读审核，不修改代码，报告发现、证据和未验证项。
+
+This is an on-demand review instruction, not an automatic CI gate or approval.
+
 ## Security and boundaries
 
 Members and workers never gain repository-owner authority: no protected-branch
