@@ -20,18 +20,65 @@ raw event ≠ experience ≠ memory ≠ self-model ≠ identity
 Session dies. Resident persists.
 ```
 
-The product charter is `IDEA.md`; the canonical product definition lives in
-`docs/product/` (vision.md first). Boundary-level decisions are `docs/decisions/`
-(ADR 0001–0012; several early ADRs are explicitly superseded — read the status
-line before relying on one). For host-language, TUI, Pi/member-host integration,
+The product charter and canonical product definition live in the GitHub Wiki
+(`Core-Thesis`, `Vision`) — see "Documentation and Project Knowledge" below.
+
+## Documentation and Project Knowledge
+
+**GitHub Wiki is the canonical documentation and long-term knowledge base for
+Viva**: <https://github.com/zuohaisu/viva/wiki> — vision, product model,
+architecture, roadmap, research, decisions (ADRs), development records,
+validation records, release notes and history.
+
+Agents should consult the Wiki before making decisions involving architecture,
+roadmap, terminology, research conclusions, experiments, or project direction.
+For important tasks, at minimum read:
+
+1. `Home` — what Viva is and where knowledge lives;
+2. `Roadmap` — current stage, current milestone, next steps;
+3. the relevant domain page;
+4. `Core-Thesis` / `ADR-0011` / `ADR-0012` when the task touches foundational
+   assumptions.
+
+Long-lived project knowledge is maintained in the Wiki rather than added as
+new Markdown documents inside the main repository. Unless there is a clear
+reason, do not:
+
+- create new long-lived research or knowledge Markdown in the repo;
+- grow a second project knowledge base under `docs/`;
+- copy Wiki content back into the repo;
+- maintain duplicate canonical documentation in both the repository and Wiki.
+
+The main repository primarily contains implementation, tests, configuration,
+code-local documentation, machine-consumed specifications, and raw research
+assets (for example `research/`, `docs/validation/evidence/`, `tasks/`
+archives, `tooling/`, and the Start-Prompt track under `research/` and
+`tooling/start-prompt/`).
+
+When work changes a durable project assumption, architecture decision,
+research conclusion, experiment result, roadmap stage, or milestone, update
+the relevant Wiki page as part of the same task:
+
+1. read the current page first;
+2. decide whether it is an extension, a correction, or a supersession;
+3. preserve important provenance (dates, sources, evidence states);
+4. never silently promote a working hypothesis to an established fact;
+5. update the affected cross-links;
+6. update `Roadmap` when the current stage or milestone is affected.
+
+When historical repository documents (or Git history) conflict with current
+Wiki content, the Wiki represents the current canonical understanding — but
+historical evidence is never deleted or rewritten: provenance stays traceable
+through Git history and each Wiki page's source reference.
+
+Boundary-level decisions are the Wiki's `Decisions` section (ADR 0001–0012;
+several early ADRs are explicitly superseded — read each ADR's status line
+before relying on it). For host-language, TUI, Pi/member-host integration,
 Viva state storage, or Rust migration work, read the accepted target,
-direct-replacement policy and implementation status in
-`docs/decisions/0011-rust-host-and-tui.md`; for the resident runtime,
-detach/attach, terminal orchestration API and close/pause semantics, read
-`docs/decisions/0012-resident-runtime-and-terminal-orchestration.md`.
-The architecture and migration record is
-`docs/architecture/viva-transition.md`. Goal-drift incidents are recorded in
-`logs/goal-drift.md`.
+direct-replacement policy and implementation status in `ADR-0011`; for the
+resident runtime, detach/attach, terminal orchestration API and close/pause
+semantics, read `ADR-0012`. The architecture and migration record is
+`Transition-Record`. Goal-drift incidents are recorded in `Goal-Drift-Log`.
 
 ## Mandatory Alignment Check
 
@@ -59,7 +106,7 @@ Do not skip directly to a custom platform:
    prevents the product from working.
 
 Every custom component must name the existing capability that was checked and
-the gap it fills (pattern and the current table: `docs/architecture/viva-transition.md` §6).
+the gap it fills (pattern and the current table: Wiki `Transition-Record` §6).
 
 ## Retired Subsystem Rule
 

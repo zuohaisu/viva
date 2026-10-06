@@ -27,7 +27,7 @@ use crate::foundation::error::{OfficeError, OfficeResult};
 use crate::foundation::ids::utc_now;
 
 /// The known migration domains. Each domain owner (see
-/// `docs/implementation/g0-contracts.md`) sequences its own versions.
+/// Wiki page `G0-Interface-Contracts`) sequences its own versions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Domain(&'static str);
 
@@ -405,7 +405,7 @@ impl Store {
                         "maintenance v2 could not backfill conflicting proposal keys ({err}); \
                          no proposal was changed. Stop the office, preserve the database with \
                          SQLite backup, then inspect both proposals and resolve the key conflict \
-                         as described in docs/validation/f01-f04-acceptance.md. A private raw \
+                         as described in the Wiki (F01-F04-Acceptance). A private raw \
                          inventory is available via `viva data export --out <dir>`"
                     ))
                 } else {

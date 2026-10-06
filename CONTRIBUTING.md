@@ -1,18 +1,21 @@
 # Contributing to Viva
 
 Viva is Haisu's local-first personal AI collaboration system. Repository-wide rules live in
-[AGENTS.md](AGENTS.md), the product charter in [IDEA.md](IDEA.md), and the
-architecture/migration record in
-[docs/architecture/viva-transition.md](docs/architecture/viva-transition.md).
+[AGENTS.md](AGENTS.md); the product charter, architecture/migration record and
+all long-term project knowledge live in the
+[GitHub Wiki](https://github.com/zuohaisu/viva/wiki) — the canonical
+documentation source (see [Core-Thesis](https://github.com/zuohaisu/viva/wiki/Core-Thesis)
+and [Transition-Record](https://github.com/zuohaisu/viva/wiki/Transition-Record)).
 
 ## Before starting
 
 - Begin each work update with the required `[Goal check]` line from
   [AGENTS.md](AGENTS.md).
-- Read the decisions that bind your change: `docs/decisions/` — and check each
-  ADR's **Status** line first, because several early ones are explicitly
-  superseded (0001 partially, 0002/0003/0004 fully) and only the superseding
-  ADR (0006–0010) is current.
+- Read the decisions that bind your change: the Wiki's
+  [Decisions](https://github.com/zuohaisu/viva/wiki/Decisions) section — and
+  check each ADR's **Status** line first, because several early ones are
+  explicitly superseded (0001 partially, 0002/0003/0004 fully) and only the
+  superseding ADR (0006–0010) is current.
 - Treat a missing requirement, unmet dependency, or ambiguous decision as
   blocked; record evidence rather than guessing.
 
