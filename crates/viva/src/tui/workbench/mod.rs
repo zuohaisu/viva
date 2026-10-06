@@ -24,7 +24,6 @@
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
@@ -33,6 +32,7 @@ use std::process::Command;
 use crate::foundation::error::OfficeResult;
 use crate::terminal::TerminalSnapshot;
 use crate::tui::layout::{Direction, PaneContent, PaneNode, SplitAxis};
+use crate::tui::theme::Palette;
 
 /// Reference area for geometric pane-focus moves: adjacency decisions are
 /// proportional, so one fixed virtual size is stable for any real size.
@@ -42,6 +42,21 @@ const PANE_REF_AREA: ratatui::layout::Rect = ratatui::layout::Rect {
     width: 100,
     height: 40,
 };
+
+/// Sidebar width (herdr's default); the chrome hides it on narrow
+/// terminals instead of squeezing the pane grid to death.
+const SIDEBAR_WIDTH: u16 = 26;
+
+/// Minimum usable pane size (P3): a split that would leave any pane below
+/// this is refused instead of crushing a neighbor into a sliver.
+const MIN_PANE_WIDTH: u16 = 8;
+const MIN_PANE_HEIGHT: u16 = 3;
+
+/// Clip `text` to `max` characters (display width is approximated by char
+/// count; the sidebar rows are ASCII in practice).
+fn fit(text: &str, max: usize) -> String {
+    text.chars().take(max).collect()
+}
 
 // ---------------------------------------------------------------------------
 // Projections (read-only facts assembled by the store-backed source)
@@ -131,9 +146,10 @@ pub struct WorkbenchModel {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
-    Projects,
+    /// The `spaces` sidebar section: projects and their worktrees.
     Worktrees,
     Tasks,
+    /// The `agents` sidebar section: terminals and their agent states.
     Terminals,
 }
 
@@ -251,13 +267,21 @@ pub struct WorkbenchApp {
     /// second confirms. Any OTHER keypress disarms (stale arming must not
     /// turn a later `D` into an unintended deletion).
     cleanup_armed: Option<String>,
+    /// QA F4: scroll offset into the diff overlay.
+    diff_scroll: usize,
+    /// The pane area as last drawn: split refuses to create ANY pane below
+    /// the minimum usable size at this real terminal size (P3). Invariant:
+    /// a split before the first draw is only cap-checked — the product run
+    /// loop always draws before reading keys, so it never hits that gap;
+    /// tests may set the area directly.
+    last_pane_area: Option<Rect>,
 }
 
 impl WorkbenchApp {
     pub fn new() -> Self {
         Self {
             model: WorkbenchModel::default(),
-            focus: Focus::Projects,
+            focus: Focus::Worktrees,
             selected: 0,
             grid: PaneNode::leaf(PaneContent::Browser),
             pane_focus: PaneContent::Browser,
@@ -265,13 +289,15 @@ impl WorkbenchApp {
             snapshots: std::collections::HashMap::new(),
             terminal_mode: None,
             diff_view: None,
-            status_line: "Ctrl+arrows panes · | - split · x close · z zoom · f files · D cleanup · h handoff · g auto-pull · o open · w worktree · 1-4 lists · Enter terminal · q detach".into(),
+            status_line: "1 spaces · 2 agents · 3 tasks · Enter/o open · d diff · f files · D cleanup · h handoff · g auto-pull · | - split · x close · z zoom · Ctrl+arrows panes · q detach".into(),
             quit_requested: false,
             layout_dirty: false,
             file_panel: None,
             file_view: None,
             handoff_picker: None,
             cleanup_armed: None,
+            diff_scroll: 0,
+            last_pane_area: None,
         }
     }
 
@@ -297,6 +323,9 @@ impl WorkbenchApp {
     }
 
     pub fn set_diff_view(&mut self, diff: Option<String>) {
+        if diff.is_some() {
+            self.diff_scroll = 0;
+        }
         self.diff_view = diff;
     }
 
@@ -392,12 +421,22 @@ impl WorkbenchApp {
         self.pane_focus = leaves[(index + 1) % leaves.len()].clone();
     }
 
-    /// Point the focused pane at a terminal. From the browser: reuse the
-    /// first terminal pane, or split one off when none exists. From a
-    /// terminal pane: retarget it.
+    /// Point the focused pane at a terminal. From the browser: split a new
+    /// pane whenever capacity allows — an existing pane is never silently
+    /// consumed (QA F7); only at the pane cap does the first terminal pane
+    /// get reused, with an explicit status note and its snapshot dropped.
+    /// From a terminal pane: retarget it (the old terminal keeps running
+    /// server-side; its snapshot cache entry goes with the pane).
     pub fn attach_terminal(&mut self, terminal_id: String) {
+        // Attaching a terminal that already has a pane is just focusing it
+        // — never a duplicate pane.
+        let already_placed = PaneContent::Terminal(terminal_id.clone());
+        if self.grid.leaves().contains(&already_placed) {
+            self.pane_focus = already_placed;
+            return;
+        }
         self.layout_dirty = true;
-        let content = PaneContent::Terminal(terminal_id);
+        let content = PaneContent::Terminal(terminal_id.clone());
         match self.pane_focus.clone() {
             PaneContent::Browser => {
                 let existing = self
@@ -405,11 +444,22 @@ impl WorkbenchApp {
                     .leaves()
                     .into_iter()
                     .find(|c| matches!(c, PaneContent::Terminal(_)));
-                match existing {
-                    Some(first) => {
+                let at_cap = self.grid.leaves().len() >= crate::tui::layout::MAX_PANES;
+                match (existing, at_cap) {
+                    (Some(first), true) => {
+                        if let PaneContent::Terminal(old) = &first {
+                            self.snapshots.remove(old);
+                            self.set_status(format!(
+                                "pane limit reached — reused {old}'s pane for {terminal_id} \
+                                 ({old} keeps running server-side)"
+                            ));
+                        }
                         self.grid.replace(&first, content.clone());
                     }
-                    None => {
+                    _ => {
+                        // No terminal pane yet, or capacity to spare: the
+                        // browser leaf keeps its place and the new pane
+                        // splits off beside it.
                         self.grid.split(
                             &PaneContent::Browser,
                             SplitAxis::Horizontal,
@@ -420,6 +470,12 @@ impl WorkbenchApp {
                 self.pane_focus = content;
             }
             PaneContent::Terminal(old) => {
+                if old != terminal_id {
+                    self.snapshots.remove(&old);
+                    self.set_status(format!(
+                        "pane retargeted to {terminal_id} ({old} keeps running server-side)"
+                    ));
+                }
                 self.grid
                     .replace(&PaneContent::Terminal(old), content.clone());
                 self.pane_focus = content;
@@ -427,12 +483,39 @@ impl WorkbenchApp {
         }
     }
 
+    /// Whether the pane tree can take one more leaf (the run loop checks
+    /// BEFORE spawning a terminal, so no terminal is ever created that no
+    /// pane can hold — QA F6).
+    pub fn can_split(&self) -> bool {
+        self.grid.leaves().len() < crate::tui::layout::MAX_PANES
+    }
+
     /// Split the focused pane and put a new terminal in the new leaf.
-    /// Returns false (with a status message) at the pane cap.
+    /// Returns false (with a status message) at the pane cap, or when the
+    /// split would crush a pane below the minimum usable size at the last
+    /// drawn terminal size — the split is undone in that case (P3).
     pub fn split_pane(&mut self, axis: SplitAxis, terminal_id: String) -> bool {
         self.layout_dirty = true;
         let content = PaneContent::Terminal(terminal_id);
         if self.grid.split(&self.pane_focus, axis, content.clone()) {
+            if let Some(area) = self.last_pane_area {
+                // Every leaf must stay usable — not just the new one: the
+                // ratio split can hand the KEPT (focused) pane the smaller
+                // half on odd widths.
+                let too_small = self
+                    .grid
+                    .render_layout_chrome(area)
+                    .iter()
+                    .any(|(_, r)| r.width < MIN_PANE_WIDTH || r.height < MIN_PANE_HEIGHT);
+                if too_small {
+                    // Undo: the new leaf collapses back into its sibling.
+                    self.grid.close(&content);
+                    self.set_status(format!(
+                        "pane too small to split at this terminal size (min {MIN_PANE_WIDTH}×{MIN_PANE_HEIGHT})"
+                    ));
+                    return false;
+                }
+            }
             self.pane_focus = content;
             true
         } else {
@@ -499,7 +582,6 @@ impl WorkbenchApp {
 
     fn row_count(&self) -> usize {
         match self.focus {
-            Focus::Projects => self.model.projects.len(),
             Focus::Worktrees => self.model.worktrees.len(),
             Focus::Tasks => self.model.tasks.len(),
             Focus::Terminals => self.model.terminals.len(),
@@ -652,6 +734,40 @@ impl WorkbenchApp {
                 _ => KeyOutcome::Ignored,
             };
         }
+        // QA F4: the diff overlay is modal. It used to be unclosable (the
+        // setter only ever set it) and unscrollable (the truncation note
+        // sat below the fold) — Esc closes, ↑↓/PageUp/PageDown scroll.
+        if self.diff_view.is_some() {
+            return match key.code {
+                KeyCode::Esc => {
+                    self.diff_view = None;
+                    self.diff_scroll = 0;
+                    self.set_status("diff closed");
+                    KeyOutcome::Handled
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.diff_scroll = self.diff_scroll.saturating_sub(1);
+                    KeyOutcome::Handled
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.diff_scroll = self.diff_scroll.saturating_add(1);
+                    KeyOutcome::Handled
+                }
+                KeyCode::PageUp => {
+                    self.diff_scroll = self.diff_scroll.saturating_sub(20);
+                    KeyOutcome::Handled
+                }
+                KeyCode::PageDown => {
+                    self.diff_scroll = self.diff_scroll.saturating_add(20);
+                    KeyOutcome::Handled
+                }
+                KeyCode::Char('q') | KeyCode::Char('Q') => {
+                    self.quit_requested = true;
+                    KeyOutcome::QuitRequested
+                }
+                _ => KeyOutcome::Ignored,
+            };
+        }
         // Terminal mode owns the keyboard first: in a focused terminal,
         // even Ctrl-C belongs to the child (0x03), exactly as a real
         // terminal would deliver it. Esc releases the focus.
@@ -707,13 +823,14 @@ impl WorkbenchApp {
                 self.quit_requested = true;
                 KeyOutcome::QuitRequested
             }
+            // Sidebar sections (herdr order: spaces, agents, tasks).
             KeyCode::Char('1') => {
-                self.focus = Focus::Projects;
+                self.focus = Focus::Worktrees;
                 self.selected = 0;
                 KeyOutcome::Handled
             }
             KeyCode::Char('2') => {
-                self.focus = Focus::Worktrees;
+                self.focus = Focus::Terminals;
                 self.selected = 0;
                 KeyOutcome::Handled
             }
@@ -722,18 +839,12 @@ impl WorkbenchApp {
                 self.selected = 0;
                 KeyOutcome::Handled
             }
-            KeyCode::Char('4') => {
-                self.focus = Focus::Terminals;
-                self.selected = 0;
-                KeyOutcome::Handled
-            }
             KeyCode::Tab => {
                 if self.pane_focus == PaneContent::Browser {
                     self.focus = match self.focus {
-                        Focus::Projects => Focus::Worktrees,
-                        Focus::Worktrees => Focus::Tasks,
-                        Focus::Tasks => Focus::Terminals,
-                        Focus::Terminals => Focus::Projects,
+                        Focus::Worktrees => Focus::Terminals,
+                        Focus::Terminals => Focus::Tasks,
+                        Focus::Tasks => Focus::Worktrees,
                     };
                     self.selected = 0;
                 } else {
@@ -751,6 +862,11 @@ impl WorkbenchApp {
             }
             KeyCode::Enter if self.focus == Focus::Terminals => match self.selected_terminal() {
                 Some(id) => KeyOutcome::Action(WorkbenchAction::EnterTerminal(id)),
+                None => KeyOutcome::Ignored,
+            },
+            // Enter on a space row opens a shell at that worktree.
+            KeyCode::Enter if self.focus == Focus::Worktrees => match self.selected_worktree() {
+                Some(id) => KeyOutcome::Action(WorkbenchAction::OpenWorktreeShell(id)),
                 None => KeyOutcome::Ignored,
             },
             KeyCode::Char('s') if self.focus == Focus::Terminals => {
@@ -833,10 +949,8 @@ impl WorkbenchApp {
                 self.enter_terminal_mode(id);
                 KeyOutcome::Handled
             }
-            // `o` on a worktree row: open a shell at that worktree.
-            KeyCode::Char('o')
-                if self.focus == Focus::Worktrees && self.pane_focus == PaneContent::Browser =>
-            {
+            // `o` on a space row: open a shell at that worktree.
+            KeyCode::Char('o') if self.focus == Focus::Worktrees => {
                 match self.selected_worktree() {
                     Some(id) => KeyOutcome::Action(WorkbenchAction::OpenWorktreeShell(id)),
                     None => KeyOutcome::Ignored,
@@ -844,9 +958,7 @@ impl WorkbenchApp {
             }
             // `w` on a task row: create the task's worktree (server-side
             // V08 policy; removal stays a human-authorized action).
-            KeyCode::Char('w')
-                if self.focus == Focus::Tasks && self.pane_focus == PaneContent::Browser =>
-            {
+            KeyCode::Char('w') if self.focus == Focus::Tasks => {
                 match self.model.tasks.get(self.selected) {
                     Some(task) => KeyOutcome::Action(WorkbenchAction::CreateTaskWorktree(
                         task.task_id.clone(),
@@ -859,55 +971,67 @@ impl WorkbenchApp {
         }
     }
 
-    /// Draw one frame from the caches. In terminal mode the focused
-    /// terminal's real snapshot is the main area; otherwise the focused
-    /// pane's list is.
-    pub fn draw(&self, frame: &mut Frame) {
-        let chunks = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .split(frame.area());
+    /// Draw one frame from the caches, herdr-style: the sidebar (spaces /
+    /// agents / tasks) on the left, the pane grid on the right with merged
+    /// borders, one status/mode bar at the bottom. The browser leaf is a
+    /// facts card now — the lists live in the sidebar. Overlays (file
+    /// panel, handoff picker, diff) sit on top of everything.
+    pub fn draw(&mut self, frame: &mut Frame) {
+        let palette = crate::tui::theme::Palette::catppuccin_mocha();
+        let rows =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
+        let main = rows[0];
 
-        let header = Line::from(vec![
-            Span::styled(" viva workbench", ratatui::style::Style::new().bold()),
-            Span::raw("  "),
-            Span::styled(
-                match self.focus {
-                    Focus::Projects => "[projects]",
-                    Focus::Worktrees => "[worktrees]",
-                    Focus::Tasks => "[tasks]",
-                    Focus::Terminals => "[terminals]",
-                },
-                ratatui::style::Style::new().bold(),
-            ),
-            Span::raw(if self.zoomed { "  [zoom]" } else { "" }),
-            Span::raw(if self.model.auto_pull {
-                "  [auto-pull]"
-            } else {
-                ""
-            }),
-            Span::raw(if self.terminal_mode.is_some() {
-                "  [terminal focused]"
-            } else {
-                ""
-            }),
-        ]);
-        frame.render_widget(Paragraph::new(header), chunks[0]);
-
-        // The pane tree lays out the main area: the browser leaf renders
-        // the focused list, terminal leaves render server snapshots. Zoom
-        // draws only the focused pane, full-screen.
-        let layout = if self.zoomed {
-            vec![(self.pane_focus.clone(), chunks[1])]
+        // herdr hides the sidebar on narrow terminals; so do we.
+        let sidebar_width = if main.width >= 60 {
+            SIDEBAR_WIDTH.min(main.width.saturating_sub(20))
         } else {
-            self.grid.render_layout(chunks[1])
+            0
         };
-        for (content, rect) in &layout {
+        let columns =
+            Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(0)]).split(main);
+        let pane_area = columns[1];
+        self.last_pane_area = Some(pane_area);
+        if sidebar_width > 0 {
+            self.draw_sidebar(frame, columns[0], &palette);
+        }
+
+        // The chrome pass yields leaf rects that INCLUDE their border
+        // cells (shared divider cells between siblings). A single pane
+        // stays full-bleed, so zoom and one-pane views have no chrome.
+        let layout = if self.zoomed {
+            vec![(self.pane_focus.clone(), pane_area)]
+        } else {
+            self.grid.render_layout_chrome(pane_area)
+        };
+        let rects: Vec<Rect> = layout.iter().map(|(_, rect)| *rect).collect();
+        let focused_index = layout
+            .iter()
+            .position(|(content, _)| *content == self.pane_focus);
+        let titles: Vec<crate::tui::chrome::PaneTitle> = layout
+            .iter()
+            .enumerate()
+            .map(|(index, (content, _))| match content {
+                PaneContent::Browser => crate::tui::chrome::PaneTitle {
+                    pane: index,
+                    text: "viva".into(),
+                },
+                PaneContent::Terminal(id) => crate::tui::chrome::PaneTitle {
+                    pane: index,
+                    text: self.terminal_title(id),
+                },
+            })
+            .collect();
+        crate::tui::chrome::render_pane_borders(frame, &rects, focused_index, &palette, &titles);
+        for (index, (content, rect)) in layout.iter().enumerate() {
+            let content_area = if layout.len() >= 2 {
+                crate::tui::chrome::inner_rect(*rect)
+            } else {
+                rects[index]
+            };
             match content {
-                PaneContent::Browser => self.draw_browser(frame, *rect),
-                PaneContent::Terminal(id) => self.draw_terminal_pane(frame, *rect, id),
+                PaneContent::Browser => self.draw_overview(frame, content_area),
+                PaneContent::Terminal(id) => self.draw_terminal_pane(frame, content_area, id),
             }
         }
 
@@ -917,66 +1041,66 @@ impl WorkbenchApp {
         if self.handoff_picker.is_some() {
             self.draw_handoff_picker(frame);
         }
-        let attention = if self.model.attention.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "  |  needs attention: {}",
-                self.model
-                    .attention
-                    .iter()
-                    .map(|m| format!("{}: {}", m.kind, m.detail))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            )
-        };
-        let sync_note = self
-            .model
-            .sync_note
-            .as_deref()
-            .map(|note| format!("  |  {note}"))
-            .unwrap_or_default();
-        frame.render_widget(
-            Paragraph::new(
-                Line::from(format!("{}{}{}", self.status_line, attention, sync_note)).gray(),
-            ),
-            chunks[2],
-        );
-
+        self.draw_status_bar(frame, rows[1], &palette);
         if let Some(diff) = &self.diff_view {
             self.draw_diff(frame, frame.area(), diff);
         }
     }
 
-    fn draw_browser(&self, frame: &mut Frame, area: Rect) {
-        match self.focus {
-            Focus::Projects => self.draw_projects(frame, area),
-            Focus::Worktrees => self.draw_worktrees(frame, area),
-            Focus::Tasks => self.draw_tasks(frame, area),
-            Focus::Terminals => self.draw_terminals(frame, area),
-        }
-    }
-
-    /// One terminal leaf: the server snapshot, bottom-anchored so a
-    /// reattached client sees the server-kept history.
-    fn draw_terminal_pane(&self, frame: &mut Frame, area: Rect, id: &str) {
-        let statuses = self
+    /// The browser leaf after the sidebar took over the lists: a small
+    /// facts card. Counts of the real model plus key hints — nothing more.
+    fn draw_overview(&self, frame: &mut Frame, area: Rect) {
+        let palette = crate::tui::theme::Palette::catppuccin_mocha();
+        let live = self
             .model
             .terminals
             .iter()
-            .find(|t| t.terminal_id == id)
-            .map(|t| Self::format_agent_status(&t.agent_status))
-            .unwrap_or_default();
-        let status_suffix = if statuses.is_empty() {
-            String::new()
-        } else {
-            format!(" · {statuses}")
-        };
-        let title = if self.pane_focus == PaneContent::Terminal(id.to_string()) {
-            format!(" terminal {id} · pane focus{status_suffix} ")
-        } else {
-            format!(" terminal {id}{status_suffix} ")
-        };
+            .filter(|t| t.live == Some(true))
+            .count();
+        let facts = format!(
+            "{} projects · {} worktrees · {} terminals ({} live) · {} tasks",
+            self.model.projects.len(),
+            self.model.worktrees.len(),
+            self.model.terminals.len(),
+            live,
+            self.model.tasks.len()
+        );
+        let lines = vec![
+            Line::from(Span::styled(
+                " viva workbench",
+                ratatui::style::Style::new().bold().fg(palette.text),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                facts,
+                ratatui::style::Style::new().fg(palette.subtext0),
+            )),
+            Line::from(Span::styled(
+                "o/Enter opens a worktree shell · 1 spaces · 2 agents · 3 tasks",
+                ratatui::style::Style::new().fg(palette.overlay0),
+            )),
+            Line::from(Span::styled(
+                "| split · - split below · z zoom · q detach",
+                ratatui::style::Style::new().fg(palette.overlay0),
+            )),
+        ];
+        let height = 5.min(area.height);
+        let y = area.y + area.height.saturating_sub(height) / 2;
+        frame.render_widget(
+            Paragraph::new(lines),
+            Rect {
+                x: area.x.saturating_add(2),
+                y,
+                width: area.width.saturating_sub(4),
+                height,
+            },
+        );
+    }
+
+    /// One terminal leaf: the server snapshot, bottom-anchored so a
+    /// reattached client sees the server-kept history. Borders and the
+    /// title are chrome (see `render_pane_borders`); this draws content.
+    fn draw_terminal_pane(&self, frame: &mut Frame, area: Rect, id: &str) {
         let lines: Vec<Line> = match self.snapshots.get(id) {
             Some(view) => {
                 let mut lines: Vec<Line> = view
@@ -985,7 +1109,7 @@ impl WorkbenchApp {
                     .chain(view.visible.iter())
                     .map(|row| Line::from(row.clone()))
                     .collect();
-                let max_lines = area.height.saturating_sub(2) as usize;
+                let max_lines = area.height.saturating_sub(1) as usize;
                 if lines.len() > max_lines {
                     let skip = lines.len() - max_lines;
                     lines.drain(..skip);
@@ -1006,10 +1130,445 @@ impl WorkbenchApp {
             }
             None => vec![Line::from(" waiting for the first server snapshot… ")],
         };
-        frame.render_widget(
-            Paragraph::new(lines).block(Block::new().title(title).borders(Borders::ALL)),
-            area,
-        );
+        frame.render_widget(Paragraph::new(lines), area);
+    }
+
+    /// The pane title: id plus the source-labeled agent statuses.
+    fn terminal_title(&self, id: &str) -> String {
+        let statuses = self
+            .model
+            .terminals
+            .iter()
+            .find(|t| t.terminal_id == id)
+            .map(|t| Self::format_agent_status(&t.agent_status))
+            .unwrap_or_default();
+        if statuses.is_empty() {
+            format!("terminal {id}")
+        } else {
+            format!("terminal {id} · {statuses}")
+        }
+    }
+
+    /// The 1-row status/mode bar (herdr's mode bar). Facts come first —
+    /// mode chips, needs-attention markers, sync note — and the key hints
+    /// go last, truncated with an ellipsis. Honesty never loses its row to
+    /// decoration on a narrow terminal (QA F5). The client version sits
+    /// dim at the right edge: provenance without noise.
+    fn draw_status_bar(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        // The version badge reserves its columns at the right edge first
+        // (dim, unobtrusive provenance); the hints budget shrinks around
+        // it, so the two never overlap.
+        let version = format!(" v{}", env!("CARGO_PKG_VERSION"));
+        let version_width = version.chars().count() as u16;
+        let (bar_area, version_area) = if area.width > version_width {
+            (
+                Rect {
+                    width: area.width - version_width,
+                    ..area
+                },
+                Rect {
+                    x: area.x + area.width - version_width,
+                    width: version_width,
+                    ..area
+                },
+            )
+        } else {
+            (area, Rect::new(area.x, area.y, 0, area.height))
+        };
+        let mut spans: Vec<Span> = Vec::new();
+        if self.terminal_mode.is_some() {
+            spans.push(Self::chip(" TERMINAL ", palette.accent, palette));
+        }
+        if self.zoomed {
+            spans.push(Self::chip(" ZOOM ", palette.accent, palette));
+        }
+        if self.model.auto_pull {
+            spans.push(Self::chip(" AUTO-PULL ", palette.mauve, palette));
+        }
+        if self.cleanup_armed.is_some() {
+            spans.push(Self::chip(" CLEANUP ARMED ", palette.red, palette));
+        }
+        for marker in &self.model.attention {
+            spans.push(Span::styled(
+                format!("  ● needs attention: {}: {}", marker.kind, marker.detail),
+                ratatui::style::Style::new().fg(palette.red),
+            ));
+        }
+        if let Some(note) = &self.model.sync_note {
+            spans.push(Span::styled(
+                format!("  |  {note}"),
+                ratatui::style::Style::new().fg(palette.overlay0),
+            ));
+        }
+        // The hints are decoration: they get whatever columns remain, with
+        // an ellipsis when they do not fit.
+        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let budget = (bar_area.width as usize).saturating_sub(used);
+        if budget > 1 {
+            let body_budget = budget - 1; // one leading space
+            let truncated = self.status_line.chars().count() > body_budget;
+            let mut body = fit(&self.status_line, body_budget);
+            if truncated {
+                body = fit(&body, body_budget.saturating_sub(1));
+            }
+            spans.push(Span::styled(
+                format!(" {body}{}", if truncated { "…" } else { "" }),
+                ratatui::style::Style::new().fg(palette.overlay0),
+            ));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), bar_area);
+        if version_area.width > 0 {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    version,
+                    ratatui::style::Style::new().fg(palette.overlay0),
+                ))),
+                version_area,
+            );
+        }
+    }
+
+    fn chip(label: &str, bg: ratatui::style::Color, palette: &Palette) -> Span<'static> {
+        Span::styled(
+            label.to_string(),
+            ratatui::style::Style::new()
+                .fg(palette.chip_fg())
+                .bg(bg)
+                .bold(),
+        )
+    }
+
+    /// The herdr-style sidebar: `spaces` (projects → worktrees as a tree),
+    /// `agents` (terminals with status dots), `tasks`. The active
+    /// section's header is accented; the selected row carries the
+    /// selection background across its whole entity block. The viewport
+    /// follows the keyboard selection (QA F2) — with no mouse, a selected
+    /// row that scrolled off-screen would be unreachable. Facts only —
+    /// unknown stays unknown.
+    fn draw_sidebar(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        let width = area.width as usize;
+        // Each line carries the entity it belongs to (section + model
+        // index); headers and dividers carry None. The viewport window is
+        // computed over the SELECTED entity's whole block.
+        let mut lines: Vec<(Line<'static>, Option<(Focus, usize)>)> = Vec::new();
+
+        // -- spaces --
+        lines.push((
+            Self::section_header(" spaces", self.focus == Focus::Worktrees, palette),
+            None,
+        ));
+        for (name, indices) in self.sidebar_space_groups() {
+            lines.push((
+                Self::row(
+                    vec![
+                        Span::styled(
+                            fit(&name, width.saturating_sub(4)),
+                            ratatui::style::Style::new().bold().fg(palette.text),
+                        ),
+                        Span::styled(
+                            format!(" {}", indices.len()),
+                            ratatui::style::Style::new().fg(palette.overlay0),
+                        ),
+                    ],
+                    false,
+                    width,
+                    palette,
+                ),
+                None,
+            ));
+            let count = indices.len();
+            for (position, index) in indices.iter().enumerate() {
+                let worktree = &self.model.worktrees[*index];
+                let last = position + 1 == count;
+                let (prefix, continuation) = if last {
+                    ("└─ ", "   ")
+                } else {
+                    ("├─ ", "│  ")
+                };
+                let (dot, dot_color) = match worktree.dirty {
+                    Some(true) => ("●", palette.yellow),
+                    Some(false) => ("●", palette.green),
+                    None => ("·", palette.overlay0),
+                };
+                let selected = self.focus == Focus::Worktrees && self.selected == *index;
+                lines.push((
+                    Self::row(
+                        vec![
+                            Span::styled(
+                                prefix.to_string(),
+                                ratatui::style::Style::new().fg(palette.overlay0),
+                            ),
+                            Span::styled(
+                                dot.to_string(),
+                                ratatui::style::Style::new().fg(dot_color),
+                            ),
+                            Span::styled(
+                                format!(" {}", fit(&worktree.branch, width.saturating_sub(5))),
+                                ratatui::style::Style::new().fg(palette.mauve),
+                            ),
+                        ],
+                        selected,
+                        width,
+                        palette,
+                    ),
+                    Some((Focus::Worktrees, *index)),
+                ));
+                let mut detail = format!(
+                    "{continuation}{}",
+                    match worktree.dirty {
+                        Some(true) => "dirty",
+                        Some(false) => "clean",
+                        None => "unknown",
+                    }
+                );
+                if let Some(task) = &worktree.task_id {
+                    detail.push_str(&format!(" · task:{task}"));
+                }
+                if let Some(pr) = &worktree.pr_state {
+                    detail.push_str(&format!(" · pr:{pr}"));
+                }
+                if let (Some(ahead), Some(behind)) = (worktree.ahead, worktree.behind) {
+                    detail.push_str(&format!(" · ↑{ahead}↓{behind}"));
+                }
+                lines.push((
+                    Self::row(
+                        vec![Span::styled(
+                            fit(&detail, width.saturating_sub(1)),
+                            ratatui::style::Style::new().fg(palette.overlay0),
+                        )],
+                        selected,
+                        width,
+                        palette,
+                    ),
+                    Some((Focus::Worktrees, *index)),
+                ));
+            }
+        }
+
+        // -- agents --
+        lines.push((Self::section_divider(width, palette), None));
+        lines.push((
+            Self::section_header(" agents", self.focus == Focus::Terminals, palette),
+            None,
+        ));
+        for (index, terminal) in self.model.terminals.iter().enumerate() {
+            let selected = self.focus == Focus::Terminals && self.selected == index;
+            // The dot shows the best observation's state. Honesty (S4,
+            // ruling §5.3): only a controlled report may look authoritative
+            // — screen/process-tree dots stay muted.
+            let (dot, dot_color) = match terminal.agent_status.first() {
+                Some(record) => {
+                    let color = if record.source.is_authoritative() {
+                        crate::tui::theme::status_color(record.status, palette)
+                    } else {
+                        palette.overlay0
+                    };
+                    (crate::tui::theme::status_glyph(record.status), color)
+                }
+                None => ("·", palette.overlay0),
+            };
+            lines.push((
+                Self::row(
+                    vec![
+                        Span::styled(dot.to_string(), ratatui::style::Style::new().fg(dot_color)),
+                        Span::styled(
+                            format!(" {}", fit(&terminal.purpose, width.saturating_sub(3))),
+                            ratatui::style::Style::new().fg(palette.text),
+                        ),
+                    ],
+                    selected,
+                    width,
+                    palette,
+                ),
+                Some((Focus::Terminals, index)),
+            ));
+            let live_word = match terminal.live {
+                Some(true) => "live",
+                Some(false) => "exited",
+                None => "unknown",
+            };
+            let mut detail = format!("{} · {live_word}", terminal.owner_label);
+            let records = Self::format_agent_status(&terminal.agent_status);
+            if !records.is_empty() {
+                detail.push_str(&format!(" · {records}"));
+            }
+            lines.push((
+                Self::row(
+                    vec![Span::styled(
+                        fit(&detail, width.saturating_sub(1)),
+                        ratatui::style::Style::new().fg(palette.overlay0),
+                    )],
+                    selected,
+                    width,
+                    palette,
+                ),
+                Some((Focus::Terminals, index)),
+            ));
+        }
+
+        // -- tasks --
+        lines.push((Self::section_divider(width, palette), None));
+        lines.push((
+            Self::section_header(" tasks", self.focus == Focus::Tasks, palette),
+            None,
+        ));
+        for (index, task) in self.model.tasks.iter().enumerate() {
+            let selected = self.focus == Focus::Tasks && self.selected == index;
+            // Two rows per task (herdr's two-row workspaces): the colored
+            // status word, then the goal on its own line so it fits.
+            lines.push((
+                Self::row(
+                    vec![Span::styled(
+                        task.status.clone(),
+                        ratatui::style::Style::new()
+                            .fg(Self::task_status_color(&task.status, palette)),
+                    )],
+                    selected,
+                    width,
+                    palette,
+                ),
+                Some((Focus::Tasks, index)),
+            ));
+            lines.push((
+                Self::row(
+                    vec![Span::styled(
+                        format!(" {}", fit(&task.goal, width.saturating_sub(2))),
+                        ratatui::style::Style::new().fg(palette.text),
+                    )],
+                    selected,
+                    width,
+                    palette,
+                ),
+                Some((Focus::Tasks, index)),
+            ));
+        }
+
+        // Viewport window: keep the selected entity's whole block visible.
+        let viewport = area.height as usize;
+        let selected_key = Some((self.focus, self.selected));
+        let first = lines.iter().position(|(_, key)| *key == selected_key);
+        let mut offset = 0usize;
+        if let Some(first) = first {
+            let span = lines
+                .iter()
+                .filter(|(_, key)| *key == selected_key)
+                .count()
+                .max(1);
+            let end = first + span;
+            if end > offset + viewport {
+                offset = end - viewport;
+            }
+            if first < offset {
+                offset = first;
+            }
+        }
+        let visible: Vec<Line<'static>> = lines
+            .into_iter()
+            .skip(offset)
+            .take(viewport)
+            .map(|(line, _)| line)
+            .collect();
+        frame.render_widget(Paragraph::new(visible), area);
+        // herdr's sidebar separator: one dim vertical line on the right.
+        let buffer = frame.buffer_mut();
+        let x = area.x + area.width.saturating_sub(1);
+        for y in area.y..area.y + area.height {
+            if let Some(cell) = buffer.cell_mut(ratatui::layout::Position::new(x, y)) {
+                cell.set_char('│')
+                    .set_style(ratatui::style::Style::new().fg(palette.surface_dim));
+            }
+        }
+    }
+
+    /// Worktrees grouped under their project's name, as (name, indices
+    /// into `model.worktrees`), projects in model order, unmatched
+    /// worktrees last under "(no project)".
+    fn sidebar_space_groups(&self) -> Vec<(String, Vec<usize>)> {
+        let mut groups: Vec<(String, Vec<usize>)> = self
+            .model
+            .projects
+            .iter()
+            .map(|project| {
+                let rows: Vec<usize> = self
+                    .model
+                    .worktrees
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, w)| w.project_id == project.project_id)
+                    .map(|(index, _)| index)
+                    .collect();
+                (project.name.clone(), rows)
+            })
+            .collect();
+        let orphans: Vec<usize> = self
+            .model
+            .worktrees
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| {
+                !self
+                    .model
+                    .projects
+                    .iter()
+                    .any(|p| p.project_id == w.project_id)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if !orphans.is_empty() {
+            groups.push(("(no project)".into(), orphans));
+        }
+        groups
+    }
+
+    fn section_header(text: &str, active: bool, palette: &Palette) -> Line<'static> {
+        let style = if active {
+            ratatui::style::Style::new().fg(palette.accent).bold()
+        } else {
+            ratatui::style::Style::new().fg(palette.subtext0)
+        };
+        Line::from(Span::styled(format!("{text} "), style))
+    }
+
+    fn section_divider(width: usize, palette: &Palette) -> Line<'static> {
+        Line::from(Span::styled(
+            "─".repeat(width),
+            ratatui::style::Style::new().fg(palette.surface_dim),
+        ))
+    }
+
+    /// One sidebar row: pad with the selection background when selected so
+    /// the highlight fills the row.
+    fn row(
+        mut spans: Vec<Span<'static>>,
+        selected: bool,
+        width: usize,
+        palette: &Palette,
+    ) -> Line<'static> {
+        if selected {
+            for span in spans.iter_mut() {
+                span.style = span.style.bg(palette.selection_bg);
+            }
+            let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            let pad = width.saturating_sub(used);
+            if pad > 0 {
+                spans.push(Span::styled(
+                    " ".repeat(pad),
+                    ratatui::style::Style::new().bg(palette.selection_bg),
+                ));
+            }
+        }
+        Line::from(spans)
+    }
+
+    /// Task status is a free string from the registry; known words map to
+    /// semantic colors, everything else stays muted.
+    fn task_status_color(status: &str, palette: &Palette) -> ratatui::style::Color {
+        match status {
+            "done" | "completed" | "released" => palette.green,
+            "in_progress" | "active" | "working" => palette.yellow,
+            "blocked" | "failed" => palette.red,
+            _ => palette.overlay0,
+        }
     }
 
     /// One-line, source-labeled agent status: `(reported)` = the agent's
@@ -1140,156 +1699,39 @@ impl WorkbenchApp {
         );
     }
 
-    fn draw_projects(&self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self
-            .model
-            .projects
-            .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let marker = if self.selected == i { "▶ " } else { "  " };
-                ListItem::new(Line::from(format!("{marker}{}  {}", p.name, p.repo_path)))
-            })
-            .collect();
-        frame.render_widget(
-            List::new(items).block(Block::new().title(" projects ").borders(Borders::ALL)),
-            area,
-        );
-    }
-
-    fn draw_worktrees(&self, frame: &mut Frame, area: Rect) {
-        // Grouped by project (S2): a styled header per project, real rows
-        // selectable beneath. Headers are render-only; the selection index
-        // counts real rows only.
-        let mut items: Vec<ListItem> = Vec::new();
-        let mut current_project: Option<String> = None;
-        for (real_index, w) in self.model.worktrees.iter().enumerate() {
-            if current_project.as_ref() != Some(&w.project_id) {
-                current_project = Some(w.project_id.clone());
-                let name = self
-                    .model
-                    .projects
-                    .iter()
-                    .find(|p| p.project_id == w.project_id)
-                    .map(|p| p.name.clone())
-                    .unwrap_or_else(|| "no project".into());
-                items.push(ListItem::new(Line::from(Span::styled(
-                    format!("── {name}"),
-                    ratatui::style::Style::new().bold().gray(),
-                ))));
-            }
-            let focused = self.pane_focus == PaneContent::Browser && self.focus == Focus::Worktrees;
-            let marker = if focused && self.selected == real_index {
-                "▶ "
-            } else {
-                "  "
-            };
-            let dirty = match w.dirty {
-                Some(true) => "dirty",
-                Some(false) => "clean",
-                None => "unknown",
-            };
-            let pr = w
-                .pr_state
-                .as_deref()
-                .map(|state| format!(" · pr:{state}"))
-                .unwrap_or_default();
-            let distance = match (w.ahead, w.behind) {
-                (Some(a), Some(b)) => format!(" · ↑{a} ↓{b}"),
-                _ => String::new(),
-            };
-            items.push(ListItem::new(Line::from(format!(
-                "{marker}{} · {} · {} · task:{} · {}{}{}",
-                w.branch,
-                dirty,
-                w.path,
-                w.task_id.as_deref().unwrap_or("-"),
-                w.source,
-                pr,
-                distance
-            ))));
-        }
-        frame.render_widget(
-            List::new(items).block(
-                Block::new()
-                    .title(" worktrees — project · branch · state · path · task · source ")
-                    .borders(Borders::ALL),
-            ),
-            area,
-        );
-    }
-
-    fn draw_tasks(&self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self
-            .model
-            .tasks
-            .iter()
-            .enumerate()
-            .map(|(i, t)| {
-                let marker = if self.selected == i { "▶ " } else { "  " };
-                ListItem::new(Line::from(format!(
-                    "{marker}{} {} ({})",
-                    t.status, t.goal, t.task_id
-                )))
-            })
-            .collect();
-        frame.render_widget(
-            List::new(items).block(
-                Block::new()
-                    .title(" tasks — status · goal ")
-                    .borders(Borders::ALL),
-            ),
-            area,
-        );
-    }
-
-    fn draw_terminals(&self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self
-            .model
-            .terminals
-            .iter()
-            .enumerate()
-            .map(|(i, t)| {
-                let marker = if self.selected == i { "▶ " } else { "  " };
-                let live = match t.live {
-                    Some(true) => "live",
-                    Some(false) => "exited",
-                    None => "unknown",
-                };
-                let agents = Self::format_agent_status(&t.agent_status);
-                let agents = if agents.is_empty() {
-                    String::new()
-                } else {
-                    format!(" · {agents}")
-                };
-                ListItem::new(Line::from(format!(
-                    "{marker}{} · {} · {} · wt:{}{}",
-                    t.purpose,
-                    t.owner_label,
-                    live,
-                    t.worktree_id.as_deref().unwrap_or("-"),
-                    agents
-                )))
-            })
-            .collect();
-        frame.render_widget(
-            List::new(items).block(
-                Block::new()
-                    .title(" terminals — purpose · owner · state · worktree ")
-                    .borders(Borders::ALL),
-            ),
-            area,
-        );
-    }
-
     fn draw_diff(&self, frame: &mut Frame, area: Rect, diff: &str) {
         let inner = centered(area, 80, area.height.saturating_sub(4).max(5));
         let lines: Vec<Line> = diff.lines().map(Line::from).collect();
+        // Scrolled (QA F4): the bounded material may be truncated — the
+        // position/truncation note must be reachable, so the view scrolls
+        // instead of clipping.
+        let view_height = inner.height.saturating_sub(2) as usize;
+        let max_scroll = lines.len().saturating_sub(view_height);
+        let offset = self.diff_scroll.min(max_scroll);
+        let shown: Vec<Line> = lines
+            .iter()
+            .skip(offset)
+            .take(view_height.max(1))
+            .cloned()
+            .collect();
+        let shown_count = shown.len();
         frame.render_widget(Clear, inner);
         frame.render_widget(
-            Paragraph::new(lines).block(
+            Paragraph::new(shown).block(
                 Block::new()
-                    .title(" worktree diff (HEAD) ")
+                    .title(format!(
+                        " worktree diff (HEAD) — Esc close · ↑↓ scroll{} ",
+                        if lines.len() > view_height {
+                            format!(
+                                " · lines {}..{} / {}",
+                                offset + 1,
+                                offset + shown_count,
+                                lines.len()
+                            )
+                        } else {
+                            String::new()
+                        }
+                    ))
                     .borders(Borders::ALL),
             ),
             inner,
@@ -1330,7 +1772,9 @@ fn encode_char(modifiers: ratatui::crossterm::event::KeyModifiers, c: char) -> V
 }
 
 fn centered(area: Rect, percent_x: u16, height: u16) -> Rect {
-    let width = area.width * percent_x / 100;
+    // u32 math: 90% of 730+ columns overflows u16 in debug builds and
+    // wraps silently in release.
+    let width = ((area.width as u32) * (percent_x as u32) / 100) as u16;
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     Rect {
@@ -1955,6 +2399,16 @@ fn spawn_and_split(
     app: &mut WorkbenchApp,
     axis: SplitAxis,
 ) -> OfficeResult<()> {
+    // Capacity BEFORE spawning (QA F6): a terminal the grid cannot place
+    // would run orphaned server-side — visible in the agents list, with no
+    // pane and no way to close it from the grid.
+    if !app.can_split() {
+        app.set_status(format!(
+            "pane limit reached ({}) — close one first",
+            crate::tui::layout::MAX_PANES
+        ));
+        return Ok(());
+    }
     let worktree_id = app.focused_worktree_id();
     let cwd = worktree_id
         .as_ref()
@@ -1983,7 +2437,22 @@ fn spawn_and_split(
             crate::foundation::OfficeError::Validation("spawn returned no terminal id".into())
         })?
         .to_string();
-    app.split_pane(axis, terminal_id);
+    if !app.split_pane(axis, terminal_id.clone()) {
+        // The split was refused after the spawn (e.g. a pane would fall
+        // below the minimum size): roll the terminal back so nothing runs
+        // orphaned. The raw-mode client has no log sink — the status line
+        // is the record — so a FAILED rollback says so instead of being
+        // swallowed.
+        match client.call(crate::office::OfficeRequestKind::TerminalStop {
+            terminal_id: terminal_id.clone(),
+        }) {
+            Ok(_) => app.set_status(format!("split refused — terminal {terminal_id} stopped")),
+            Err(err) => app.set_status(format!(
+                "split refused — terminal {terminal_id} could NOT be stopped ({err}); \
+                 it keeps running server-side with no pane"
+            )),
+        }
+    }
     Ok(())
 }
 
@@ -1993,7 +2462,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    fn render(app: &WorkbenchApp, w: u16, h: u16) -> String {
+    fn render(app: &mut WorkbenchApp, w: u16, h: u16) -> String {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal.draw(|f| app.draw(f)).expect("draw");
@@ -2042,29 +2511,36 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_cycles_all_four_panes_and_renders_facts() {
+    fn sidebar_sections_switch_and_render_facts() {
         let mut app = WorkbenchApp::new();
         app.set_model(sample());
 
-        for (key, expected_focus) in [
-            (KeyCode::Char('2'), Focus::Worktrees),
-            (KeyCode::Char('3'), Focus::Tasks),
-            (KeyCode::Char('4'), Focus::Terminals),
-            (KeyCode::Tab, Focus::Projects),
-        ] {
-            assert_eq!(app.on_key(KeyEvent::from(key)), KeyOutcome::Handled);
-            assert_eq!(app.focus(), expected_focus);
-        }
-        app.on_key(KeyEvent::from(KeyCode::Char('2')));
-        let view = render(&app, 100, 20);
-        assert!(view.contains("agent/feat-x"));
+        // Spaces is the first section; the worktree is a tree child row
+        // with its real state beside it.
+        assert_eq!(app.focus(), Focus::Worktrees);
+        let view = render(&mut app, 100, 24);
+        assert!(view.contains("agent/feat-x"), "{view}");
         assert!(view.contains("dirty"), "real dirty state is a fact: {view}");
-        app.on_key(KeyEvent::from(KeyCode::Char('3')));
-        assert!(render(&app, 100, 20).contains("ship the workbench"));
-        app.on_key(KeyEvent::from(KeyCode::Char('4')));
-        let terminals = render(&app, 100, 20);
-        assert!(terminals.contains("live"));
-        assert!(terminals.contains("user_shell"));
+        assert!(view.contains("└─"), "tree glyphs group worktrees: {view}");
+
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('2'))),
+            KeyOutcome::Handled
+        );
+        assert_eq!(app.focus(), Focus::Terminals);
+        let agents = render(&mut app, 100, 24);
+        assert!(agents.contains("user_shell"));
+        assert!(agents.contains("live"));
+
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('3'))),
+            KeyOutcome::Handled
+        );
+        assert!(render(&mut app, 100, 24).contains("ship the workbench"));
+
+        // Tab cycles the sections and wraps back to spaces.
+        app.on_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.focus(), Focus::Worktrees);
     }
 
     #[test]
@@ -2072,7 +2548,7 @@ mod tests {
         let mut app = WorkbenchApp::new();
         app.set_model(sample());
         // Wide enough that the attention suffix is not clipped.
-        let view = render(&app, 200, 20);
+        let view = render(&mut app, 200, 20);
         assert!(
             view.contains("needs attention") && view.contains("execution_failed"),
             "markers are visible facts: {view}"
@@ -2083,7 +2559,7 @@ mod tests {
     fn terminal_mode_forwards_bytes_and_esc_releases() {
         let mut app = WorkbenchApp::new();
         app.set_model(sample());
-        app.on_key(KeyEvent::from(KeyCode::Char('4')));
+        app.on_key(KeyEvent::from(KeyCode::Char('2')));
         assert_eq!(
             app.on_key(KeyEvent::from(KeyCode::Enter)),
             KeyOutcome::Action(WorkbenchAction::EnterTerminal("term-1".into()))
@@ -2173,7 +2649,7 @@ mod tests {
         app.set_snapshot("t2", snapshot_with(&["beta-out"]));
         app.set_snapshot("t3", snapshot_with(&["gamma-out"]));
 
-        let view = render(&app, 160, 44);
+        let view = render(&mut app, 160, 44);
         assert!(view.contains("terminal t1"), "{view}");
         assert!(view.contains("terminal t2"));
         assert!(view.contains("terminal t3"));
@@ -2195,17 +2671,20 @@ mod tests {
         app.attach_terminal("t1".into());
         app.toggle_zoom();
         app.set_snapshot("t1", snapshot_with(&["solo-out"]));
-        let view = render(&app, 160, 44);
+        let view = render(&mut app, 160, 44);
         assert!(view.contains("solo-out"), "{view}");
-        assert!(view.contains("[zoom]"));
-        // The browser's list CONTENT is hidden (the header keeps the list
-        // label; the sample project row path must be gone).
+        assert!(view.contains("ZOOM"), "zoom shows as a mode chip: {view}");
+        // Zoom shows only the focused pane: the overview card is not part
+        // of the zoomed chrome.
         assert!(
-            !view.contains("/code/viva"),
-            "zoom hides the browser content: {view}"
+            !view.contains("opens a worktree shell"),
+            "zoom hides the overview card: {view}"
         );
         app.toggle_zoom();
-        assert!(render(&app, 160, 44).contains("/code/viva"));
+        let view = render(&mut app, 160, 44);
+        assert!(view.contains("solo-out"));
+        // The sidebar survives zoom, like herdr's.
+        assert!(view.contains("spaces") && view.contains("agents"));
     }
 
     #[test]
@@ -2227,10 +2706,316 @@ mod tests {
         model.terminals[0].live = None;
         let mut app = WorkbenchApp::new();
         app.set_model(model);
+        // Spaces section: unreadable tree shown as unknown.
+        assert!(render(&mut app, 100, 24).contains("unknown"));
+        // Agents section: unreadable wait state shown as unknown.
         app.on_key(KeyEvent::from(KeyCode::Char('2')));
-        assert!(render(&app, 100, 20).contains("unknown"));
-        app.on_key(KeyEvent::from(KeyCode::Char('4')));
-        assert!(render(&app, 100, 20).contains("unknown"));
+        assert!(render(&mut app, 100, 24).contains("unknown"));
+    }
+
+    #[test]
+    fn spaces_group_worktrees_under_their_project_with_tree_glyphs() {
+        let mut model = sample();
+        model.worktrees.push(WorktreeRow {
+            worktree_id: "wt2".into(),
+            project_id: "p1".into(),
+            path: "/wt/dev5".into(),
+            branch: "agent/feat-y".into(),
+            dirty: Some(false),
+            task_id: None,
+            source: "created".into(),
+            pr_state: Some("open".into()),
+            ahead: Some(1),
+            behind: Some(2),
+        });
+        let mut app = WorkbenchApp::new();
+        app.set_model(model);
+        let view = render(&mut app, 100, 24);
+        assert!(
+            view.contains("├─") && view.contains("└─"),
+            "tree glyphs nest children: {view}"
+        );
+        assert!(view.contains("agent/feat-y"));
+        assert!(view.contains("pr:open"), "PR state is a fact: {view}");
+        assert!(view.contains("↑1↓2"), "git distance is a fact: {view}");
+    }
+
+    #[test]
+    fn overview_card_shows_real_counts_only() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        let view = render(&mut app, 100, 24);
+        assert!(
+            view.contains("1 projects · 1 worktrees · 1 terminals (1 live) · 1 tasks"),
+            "{view}"
+        );
+    }
+
+    /// S4/§5.3 honesty, rendered: a screen-inferred status may appear as a
+    /// dot, but never in the state color — only a controlled report may
+    /// look authoritative.
+    #[test]
+    fn screen_inferred_status_dots_never_look_authoritative() {
+        use crate::agents::{AgentStatus, AgentStatusRecord, StatusSource};
+        let palette = Palette::catppuccin_mocha();
+        let record = |source: StatusSource| AgentStatusRecord {
+            terminal_id: "term-1".into(),
+            agent: "pi".into(),
+            status: AgentStatus::Working,
+            source,
+            detail: "test".into(),
+            updated_at: "2026-10-05T00:00:00Z".into(),
+        };
+
+        let mut model = sample();
+        model.terminals[0].agent_status = vec![record(StatusSource::ScreenInference)];
+        let mut app = WorkbenchApp::new();
+        app.set_model(model);
+        assert_eq!(
+            sidebar_dot(&mut app, 100, 24),
+            palette.overlay0,
+            "screen inference stays muted"
+        );
+
+        let mut model = sample();
+        model.terminals[0].agent_status = vec![record(StatusSource::ControlledReport)];
+        let mut app = WorkbenchApp::new();
+        app.set_model(model);
+        assert_eq!(
+            sidebar_dot(&mut app, 100, 24),
+            palette.yellow,
+            "a controlled report may carry the state color"
+        );
+    }
+
+    /// The first filled dot in the sidebar's leftmost column: the agents
+    /// section's status dot for the first terminal row.
+    fn sidebar_dot(app: &mut WorkbenchApp, w: u16, h: u16) -> ratatui::style::Color {
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|f| app.draw(f)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        for y in 0..h {
+            if let Some(cell) = buffer.cell(ratatui::layout::Position::new(0, y)) {
+                if cell.symbol() == "●" {
+                    return cell.fg;
+                }
+            }
+        }
+        panic!("no status dot found in the sidebar");
+    }
+
+    // ------------------------------------------------------------------
+    // QA-round regressions (branch agent/feat-herdr-style-workbench-ui)
+    // ------------------------------------------------------------------
+
+    /// F1: the snapshot facts footer (scrollback size, output bytes) must
+    /// stay visible when the output is BUSY — that is exactly when the
+    /// honest history reading matters.
+    #[test]
+    fn terminal_pane_footer_line_stays_visible_on_busy_output() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.attach_terminal("t1".into());
+        let busy: Vec<String> = (0..45).map(|i| format!("out-{i}")).collect();
+        let view = snapshot_with(&busy.iter().map(String::as_str).collect::<Vec<_>>());
+        app.set_snapshot(
+            "t1",
+            TerminalSnapshot {
+                total_output_bytes: 123_456,
+                ..view
+            },
+        );
+        let frame = render(&mut app, 160, 44);
+        assert!(
+            frame.contains("output bytes: 123456"),
+            "the facts footer must survive clipping on busy output: {frame}"
+        );
+        assert!(frame.contains("out-44"), "the newest output stays: {frame}");
+    }
+
+    /// F2: the sidebar viewport follows the keyboard selection — the
+    /// agents/tasks sections stay reachable on tall workspaces.
+    #[test]
+    fn sidebar_viewport_follows_the_selection() {
+        let mut model = sample();
+        for i in 0..12 {
+            model.worktrees.push(WorktreeRow {
+                worktree_id: format!("wt-{i}"),
+                project_id: "p1".into(),
+                path: format!("/wt/dev-{i}"),
+                branch: format!("agent/feat-{i}"),
+                dirty: Some(false),
+                task_id: None,
+                source: "created".into(),
+                pr_state: None,
+                ahead: None,
+                behind: None,
+            });
+        }
+        let mut app = WorkbenchApp::new();
+        app.set_model(model);
+        // Walk to the last worktree row (index 12): it must be on screen.
+        for _ in 0..12 {
+            app.on_key(KeyEvent::from(KeyCode::Char('j')));
+        }
+        let frame = render(&mut app, 100, 24);
+        assert!(
+            frame.contains("agent/feat-11"),
+            "the selected row must follow the viewport: {frame}"
+        );
+    }
+
+    /// F4: the diff overlay closes with Esc (it used to be unclosable)
+    /// and scrolls, so a bounded/truncated diff stays readable.
+    #[test]
+    fn diff_overlay_closes_with_esc_and_scrolls() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        let diff = (0..50)
+            .map(|i| format!("line-{i} +added"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.set_diff_view(Some(diff));
+        let frame = render(&mut app, 120, 24);
+        assert!(frame.contains("line-1 +added"), "{frame}");
+        assert!(
+            frame.contains("Esc close"),
+            "the close affordance is advertised: {frame}"
+        );
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Esc)),
+            KeyOutcome::Handled
+        );
+        assert!(
+            !render(&mut app, 120, 24).contains("+added"),
+            "the diff overlay closed"
+        );
+
+        // Scrolling moves the window and shows the range note.
+        app.set_diff_view(Some(
+            (0..50)
+                .map(|i| format!("line-{i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ));
+        app.on_key(KeyEvent::from(KeyCode::PageDown));
+        let frame = render(&mut app, 120, 24);
+        assert!(frame.contains("lines 21"), "scroll range shown: {frame}");
+    }
+
+    /// F5: needs-attention markers are facts — they stay visible on a
+    /// narrow terminal; the key hints are what get truncated.
+    #[test]
+    fn attention_markers_survive_narrow_terminals() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        let frame = render(&mut app, 100, 24);
+        assert!(
+            frame.contains("needs attention") && frame.contains("execution_failed"),
+            "{frame}"
+        );
+    }
+
+    /// F7: attaching from the browser never silently consumes an existing
+    /// pane; re-attaching a placed terminal just focuses it.
+    #[test]
+    fn attach_from_browser_splits_and_never_consumes_a_pane() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.attach_terminal("t1".into());
+        app.move_pane_focus(Direction::Left); // back to the browser leaf
+        app.attach_terminal("t2".into());
+        let leaves = app.terminal_leaves();
+        assert!(
+            leaves.contains(&"t1".to_string()) && leaves.contains(&"t2".to_string()),
+            "no pane may vanish: {leaves:?}"
+        );
+        // Re-attaching a placed terminal only moves focus.
+        app.attach_terminal("t1".into());
+        assert_eq!(app.pane_focus(), &PaneContent::Terminal("t1".into()));
+        assert_eq!(app.terminal_leaves().len(), 2);
+    }
+
+    /// F6: `can_split` gates before the pane cap, so the run loop can
+    /// refuse a spawn before creating an orphaned terminal.
+    #[test]
+    fn can_split_gates_before_the_pane_cap() {
+        let mut app = WorkbenchApp::new();
+        assert!(app.can_split());
+        for i in 0..8 {
+            assert!(app.split_pane(SplitAxis::Horizontal, format!("t{i}")));
+        }
+        assert_eq!(app.terminal_leaves().len(), 8, "browser + 8 terminals");
+        assert!(
+            !app.can_split(),
+            "at the cap no further split may be attempted"
+        );
+    }
+
+    /// P3: split refuses — with a status note — instead of crushing a
+    /// neighbor into an unusable sliver at small terminal sizes.
+    #[test]
+    fn split_refuses_panes_below_the_minimum_size() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        render(&mut app, 100, 24); // records the real pane area (74×23)
+        let mut placed = 0;
+        for i in 1..=8 {
+            if app.split_pane(SplitAxis::Horizontal, format!("t{i}")) {
+                placed += 1;
+            } else {
+                break;
+            }
+        }
+        assert!(placed < 8, "some split must be refused at 74 columns");
+        assert_eq!(
+            app.terminal_leaves().len(),
+            placed,
+            "a refused split never enters the tree"
+        );
+        let frame = render(&mut app, 100, 24);
+        assert!(
+            frame.contains("too small"),
+            "the refusal is explained: {frame}"
+        );
+    }
+
+    /// The min-size check covers EVERY leaf: the ratio split can hand the
+    /// kept (focused) pane the smaller half on odd widths.
+    #[test]
+    fn split_checks_the_kept_leaf_too() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        // 15 columns: a 50% split gives the KEPT pane 7 (< 8) and the new
+        // leaf 8+1 — the asymmetric (new-leaf-only) check let this through.
+        app.last_pane_area = Some(Rect::new(0, 0, 15, 23));
+        assert!(
+            !app.split_pane(SplitAxis::Horizontal, "t1".into()),
+            "a split that starves the kept pane must be refused"
+        );
+        assert_eq!(
+            app.terminal_leaves().len(),
+            0,
+            "the refused split never entered the tree"
+        );
+    }
+
+    /// The client version is shown dim at the status bar's right edge,
+    /// and the hints budget shrinks around it (the two never overlap).
+    #[test]
+    fn version_is_shown_dim_at_the_status_bar_edge() {
+        let mut app = WorkbenchApp::new();
+        let expected = concat!("v", env!("CARGO_PKG_VERSION"));
+        let frame = render(&mut app, 100, 24);
+        assert!(frame.contains(expected), "{frame}");
+        // Narrow terminal: the hints yield, the version badge stays.
+        let frame = render(&mut app, 40, 24);
+        assert!(frame.contains(expected), "{frame}");
+        assert!(
+            frame.contains("…"),
+            "hints truncate before the badge: {frame}"
+        );
     }
 }
 
@@ -2272,7 +3057,7 @@ mod v15_tui_fix_tests {
     fn stale_cleanup_arming_disarms_on_any_other_key() {
         let mut app = WorkbenchApp::new();
         app.set_model(sample());
-        app.on_key(KeyEvent::from(KeyCode::Char('2')));
+        app.on_key(KeyEvent::from(KeyCode::Char('1'))); // spaces (worktrees)
         // Arm on the selected worktree row.
         app.on_key(KeyEvent::from(KeyCode::Char('D')));
         assert!(app.cleanup_armed.is_some(), "first D arms");
@@ -2287,13 +3072,13 @@ mod v15_tui_fix_tests {
     fn auto_pull_toggle_requires_the_worktrees_focus() {
         let mut app = WorkbenchApp::new();
         app.set_model(sample());
-        app.on_key(KeyEvent::from(KeyCode::Char('1'))); // projects focus
+        app.on_key(KeyEvent::from(KeyCode::Char('2'))); // agents focus
         assert_eq!(
             app.on_key(KeyEvent::from(KeyCode::Char('g'))),
             KeyOutcome::Ignored,
             "g outside worktrees focus is ignored"
         );
-        app.on_key(KeyEvent::from(KeyCode::Char('2'))); // worktrees focus
+        app.on_key(KeyEvent::from(KeyCode::Char('1'))); // spaces (worktrees) focus
         assert_eq!(
             app.on_key(KeyEvent::from(KeyCode::Char('g'))),
             KeyOutcome::Action(WorkbenchAction::ToggleAutoPull)
@@ -2304,7 +3089,7 @@ mod v15_tui_fix_tests {
     /// features are discoverable (QA round-2 F12).
     #[test]
     fn status_line_advertises_v15_keys() {
-        let app = WorkbenchApp::new();
+        let mut app = WorkbenchApp::new();
         let backend = TestBackend::new(200, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         terminal.draw(|f| app.draw(f)).expect("draw");

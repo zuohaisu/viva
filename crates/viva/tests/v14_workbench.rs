@@ -107,7 +107,7 @@ fn bench() -> Bench {
     }
 }
 
-fn render(app: &WorkbenchApp, w: u16, h: u16) -> String {
+fn render(app: &mut WorkbenchApp, w: u16, h: u16) -> String {
     let backend = TestBackend::new(w, h);
     let mut terminal = Terminal::new(backend).expect("terminal");
     terminal.draw(|f| app.draw(f)).expect("draw");
@@ -241,17 +241,18 @@ fn workbench_spans_projects_tasks_worktrees_with_real_git_facts() {
     assert_eq!(created_row.dirty, Some(false), "clean is a real git fact");
     assert_eq!(created_row.source, "created");
 
-    // Rendering shows the span and the honest state labels.
+    // Rendering shows the span in the sidebar (provenance itself is
+    // asserted on the model above — the 26-column sidebar row carries the
+    // branch and the honest dirty state).
     let mut app = WorkbenchApp::new();
     app.set_model(model.clone());
     app.on_key(ratatui::crossterm::event::KeyEvent::from(
-        ratatui::crossterm::event::KeyCode::Char('2'),
+        ratatui::crossterm::event::KeyCode::Char('1'),
     ));
-    let view = render(&app, 240, 24);
+    let view = render(&mut app, 240, 24);
     assert!(view.contains("agent/ship-workbench"));
     assert!(view.contains("clean"));
-    assert!(view.contains("created"));
-    assert!(view.contains("adopted"));
+    assert!(view.contains("└─"), "tree glyphs group worktrees");
 }
 
 #[test]
@@ -292,7 +293,7 @@ fn dirty_state_and_diff_are_real_facts() {
     let mut app = WorkbenchApp::new();
     app.set_model(model);
     app.set_diff_view(Some(diff));
-    let view = render(&app, 120, 24);
+    let view = render(&mut app, 120, 24);
     assert!(view.contains("changed line"));
 }
 
