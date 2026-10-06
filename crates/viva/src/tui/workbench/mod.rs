@@ -47,6 +47,15 @@ const PANE_REF_AREA: ratatui::layout::Rect = ratatui::layout::Rect {
 /// terminals instead of squeezing the pane grid to death.
 const SIDEBAR_WIDTH: u16 = 26;
 
+/// Sidebar drag bounds (herdr's validated defaults): the edge drag clamps
+/// into this band, and double-click resets to [`SIDEBAR_WIDTH`].
+const SIDEBAR_MIN_WIDTH: u16 = 18;
+const SIDEBAR_MAX_WIDTH: u16 = 36;
+
+/// Two clicks on the same divider cell within this window are a
+/// double-click (reset to the default split/width).
+const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Minimum usable pane size (P3): a split that would leave any pane below
 /// this is refused instead of crushing a neighbor into a sliver.
 const MIN_PANE_WIDTH: u16 = 8;
@@ -200,6 +209,29 @@ pub enum WorkbenchAction {
     ToggleAutoPull,
 }
 
+/// An in-progress mouse drag (herdr-parity interaction). A pane-split drag
+/// mutates the tree's ratio directly — the tree is client-side, so no
+/// server round-trip is needed; the existing `layout_dirty` → persistence
+/// flow saves the result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DragState {
+    None,
+    /// Dragging one split boundary. `grab_offset` glues the grabbed point
+    /// to the pointer (divider position at grab minus pointer coordinate
+    /// at grab), so the line never jumps on grab. `leaves` snapshots the
+    /// topology: a split/close under a live drag invalidates the path and
+    /// cancels the drag instead of resizing the wrong node.
+    PaneSplit {
+        path: Vec<bool>,
+        axis: SplitAxis,
+        area: Rect,
+        grab_offset: i32,
+        leaves: Vec<PaneContent>,
+    },
+    /// Dragging the sidebar's right edge to resize it.
+    Sidebar,
+}
+
 // ---------------------------------------------------------------------------
 // V15 workbench UI blocks (issues V15-1/V15-3): file panel, handoff
 // picker, two-step cleanup. Inserted into tui/workbench/mod.rs.
@@ -275,6 +307,18 @@ pub struct WorkbenchApp {
     /// loop always draws before reading keys, so it never hits that gap;
     /// tests may set the area directly.
     last_pane_area: Option<Rect>,
+    /// The sidebar's right edge as last drawn (the pane area's first
+    /// column); None while the sidebar is hidden (narrow terminal). The
+    /// sidebar drag band sits on this column and the one before it.
+    last_sidebar_edge: Option<u16>,
+    /// The user-chosen sidebar width; the draw applies the
+    /// narrow-terminal clamp on top of it.
+    sidebar_width: u16,
+    /// Mouse drag state; see [`DragState`].
+    drag: DragState,
+    /// The last divider click for double-click detection: (when, column,
+    /// row). Cleared by any click that is not on a divider.
+    last_divider_click: Option<(std::time::Instant, u16, u16)>,
 }
 
 impl WorkbenchApp {
@@ -298,6 +342,10 @@ impl WorkbenchApp {
             cleanup_armed: None,
             diff_scroll: 0,
             last_pane_area: None,
+            last_sidebar_edge: None,
+            sidebar_width: SIDEBAR_WIDTH,
+            drag: DragState::None,
+            last_divider_click: None,
         }
     }
 
@@ -366,9 +414,16 @@ impl WorkbenchApp {
         self.layout_dirty = false;
     }
 
-    /// The persisted layout payload: the pane tree plus the focused pane.
+    /// The persisted layout payload: the pane tree plus the focused pane
+    /// and the sidebar width (restored with a default when absent, so
+    /// older saved layouts keep loading).
     pub fn serialize_layout(&self) -> String {
-        serde_json::json!({ "grid": self.grid, "focus": self.pane_focus }).to_string()
+        serde_json::json!({
+            "grid": self.grid,
+            "focus": self.pane_focus,
+            "sidebar": self.sidebar_width,
+        })
+        .to_string()
     }
 
     /// Rebuild the pane tree from a saved layout (QA F5): terminal leaves
@@ -392,6 +447,11 @@ impl WorkbenchApp {
             .and_then(|focus| serde_json::from_value::<PaneContent>(focus.clone()).ok())
             .filter(|focus| leaves.contains(focus))
             .unwrap_or(PaneContent::Browser);
+        if let Some(width) = value.get("sidebar").and_then(|w| w.as_u64()) {
+            self.sidebar_width = u16::try_from(width)
+                .unwrap_or(SIDEBAR_WIDTH)
+                .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+        }
         self.layout_dirty = false;
     }
 
@@ -971,6 +1031,146 @@ impl WorkbenchApp {
         }
     }
 
+    /// Handle one mouse event (herdr-parity interaction). Left button
+    /// drags a pane divider, drags the sidebar edge, clicks a pane into
+    /// focus, and double-clicks a divider to reset. Scroll wheels and
+    /// other buttons are not wired (later interaction slices).
+    pub fn on_mouse(&mut self, mouse: ratatui::crossterm::event::MouseEvent) {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => self.on_left_down(mouse.column, mouse.row),
+            MouseEventKind::Drag(MouseButton::Left) => self.on_left_drag(mouse.column, mouse.row),
+            MouseEventKind::Up(MouseButton::Left) => self.drag = DragState::None,
+            _ => {}
+        }
+    }
+
+    fn on_left_down(&mut self, column: u16, row: u16) {
+        // Overlays are modal: clicks must not fall through to the grid.
+        if self.file_panel.is_some() || self.handoff_picker.is_some() || self.diff_view.is_some() {
+            return;
+        }
+        // Sidebar edge first: the band is the sidebar's last column and
+        // the pane area's first column (the pane border the user sees).
+        if let Some(edge) = self.last_sidebar_edge {
+            if column.saturating_add(1) == edge || column == edge {
+                let now = std::time::Instant::now();
+                let double_click = self.last_divider_click.take().is_some_and(|(at, x, y)| {
+                    now.duration_since(at) <= DOUBLE_CLICK_WINDOW && x == column && y == row
+                });
+                if double_click {
+                    self.sidebar_width = SIDEBAR_WIDTH;
+                    self.layout_dirty = true;
+                    self.set_status("sidebar width reset");
+                    return;
+                }
+                self.last_divider_click = Some((now, column, row));
+                self.drag = DragState::Sidebar;
+                return;
+            }
+        }
+        let Some(pane_area) = self.last_pane_area else {
+            return;
+        };
+        if !contains_point(pane_area, column, row) {
+            return;
+        }
+        // Divider grabs come before pane clicks: the grab band overlaps
+        // the panes' border cells on purpose.
+        if !self.zoomed {
+            let hit = self
+                .grid
+                .splits(pane_area)
+                .into_iter()
+                .find(|hit| contains_point(hit.hit_rect, column, row));
+            if let Some(hit) = hit {
+                let now = std::time::Instant::now();
+                let double_click = self.last_divider_click.take().is_some_and(|(at, x, y)| {
+                    now.duration_since(at) <= DOUBLE_CLICK_WINDOW && x == column && y == row
+                });
+                if double_click {
+                    if self.grid.set_ratio_at_path(&hit.path, 50) {
+                        self.layout_dirty = true;
+                        self.set_status("split reset to 50/50");
+                    }
+                    return;
+                }
+                self.last_divider_click = Some((now, column, row));
+                let pointer = match hit.axis {
+                    SplitAxis::Horizontal => i32::from(column),
+                    SplitAxis::Vertical => i32::from(row),
+                };
+                self.drag = DragState::PaneSplit {
+                    path: hit.path,
+                    axis: hit.axis,
+                    area: hit.area,
+                    grab_offset: i32::from(hit.pos) - pointer,
+                    leaves: self.grid.leaves(),
+                };
+                return;
+            }
+        }
+        // Click a pane to focus it (herdr behavior). Switching panes while
+        // a terminal is in keyboard-forwarding mode releases the mode:
+        // typed keys must never silently keep flowing to the previously
+        // focused terminal. A click that is not on a divider also breaks
+        // any double-click sequence.
+        self.last_divider_click = None;
+        let hit_leaf = self
+            .grid
+            .render_layout_chrome(pane_area)
+            .into_iter()
+            .find(|(_, rect)| contains_point(*rect, column, row))
+            .map(|(content, _)| content);
+        if let Some(content) = hit_leaf {
+            if self.pane_focus != content {
+                self.pane_focus = content;
+                if self.terminal_mode.is_some() {
+                    self.leave_terminal_mode();
+                }
+            }
+        }
+    }
+
+    fn on_left_drag(&mut self, column: u16, row: u16) {
+        match self.drag.clone() {
+            DragState::None => {}
+            DragState::Sidebar => {
+                let width = column.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+                if self.sidebar_width != width {
+                    self.sidebar_width = width;
+                    self.layout_dirty = true;
+                }
+            }
+            DragState::PaneSplit {
+                path,
+                axis,
+                area,
+                grab_offset,
+                leaves,
+            } => {
+                // The topology must still be the one the grab happened on:
+                // a split/close under a live drag leaves the path pointing
+                // at a different node, which must never silently resize.
+                if self.grid.leaves() != leaves {
+                    self.drag = DragState::None;
+                    return;
+                }
+                let pointer = match axis {
+                    SplitAxis::Horizontal => i32::from(column),
+                    SplitAxis::Vertical => i32::from(row),
+                };
+                if let Some(ratio) =
+                    crate::tui::layout::ratio_for_divider(axis, pointer + grab_offset, area)
+                {
+                    if self.grid.set_ratio_at_path(&path, ratio) {
+                        self.layout_dirty = true;
+                    }
+                }
+            }
+        }
+    }
+
     /// Draw one frame from the caches, herdr-style: the sidebar (spaces /
     /// agents / tasks) on the left, the pane grid on the right with merged
     /// borders, one status/mode bar at the bottom. The browser leaf is a
@@ -982,9 +1182,11 @@ impl WorkbenchApp {
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
         let main = rows[0];
 
-        // herdr hides the sidebar on narrow terminals; so do we.
+        // herdr hides the sidebar on narrow terminals; so do we. The
+        // user-chosen width applies, clamped so the pane grid keeps a
+        // usable minimum.
         let sidebar_width = if main.width >= 60 {
-            SIDEBAR_WIDTH.min(main.width.saturating_sub(20))
+            self.sidebar_width.min(main.width.saturating_sub(20))
         } else {
             0
         };
@@ -992,6 +1194,11 @@ impl WorkbenchApp {
             Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(0)]).split(main);
         let pane_area = columns[1];
         self.last_pane_area = Some(pane_area);
+        self.last_sidebar_edge = if sidebar_width > 0 {
+            Some(sidebar_width)
+        } else {
+            None
+        };
         if sidebar_width > 0 {
             self.draw_sidebar(frame, columns[0], &palette);
         }
@@ -1032,6 +1239,45 @@ impl WorkbenchApp {
             match content {
                 PaneContent::Browser => self.draw_overview(frame, content_area),
                 PaneContent::Terminal(id) => self.draw_terminal_pane(frame, content_area, id),
+            }
+        }
+
+        // A live divider drag lights up the dragged line (herdr feedback):
+        // restyle the shared divider cells over the drawn chrome. Overlays
+        // still render on top.
+        let drag_path = match &self.drag {
+            DragState::PaneSplit { path, .. } if !self.zoomed => Some(path.clone()),
+            _ => None,
+        };
+        if let Some(path) = drag_path {
+            let hit = self
+                .grid
+                .splits(pane_area)
+                .into_iter()
+                .find(|hit| hit.path == path);
+            if let Some(hit) = hit {
+                let style = ratatui::style::Style::new().fg(palette.mauve).bold();
+                let buffer = frame.buffer_mut();
+                match hit.axis {
+                    SplitAxis::Horizontal => {
+                        for y in hit.area.y..hit.area.y + hit.area.height {
+                            if let Some(cell) =
+                                buffer.cell_mut(ratatui::layout::Position::new(hit.pos, y))
+                            {
+                                cell.set_style(style);
+                            }
+                        }
+                    }
+                    SplitAxis::Vertical => {
+                        for x in hit.area.x..hit.area.x + hit.area.width {
+                            if let Some(cell) =
+                                buffer.cell_mut(ratatui::layout::Position::new(x, hit.pos))
+                            {
+                                cell.set_style(style);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -1785,6 +2031,15 @@ fn centered(area: Rect, percent_x: u16, height: u16) -> Rect {
     }
 }
 
+/// Whether the cell (`x`, `y`) lies inside `rect` (zero-size rects contain
+/// nothing).
+fn contains_point(rect: Rect, x: u16, y: u16) -> bool {
+    x >= rect.x
+        && y >= rect.y
+        && x < rect.x.saturating_add(rect.width)
+        && y < rect.y.saturating_add(rect.height)
+}
+
 // ---------------------------------------------------------------------------
 // Store-backed source: the composition layer that assembles real facts and
 // executes actions against the owning registries
@@ -2150,34 +2405,38 @@ fn run_client_inner(client: &mut crate::office::OfficeClient) -> OfficeResult<()
         {
             continue;
         }
-        let Event::Key(key) = event::read().map_err(|e| {
+        let event = event::read().map_err(|e| {
             crate::foundation::OfficeError::Io(std::io::Error::other(e.to_string()))
-        })?
-        else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        match app.on_key(key) {
-            // Detach, not shutdown: the resident server keeps running.
-            KeyOutcome::QuitRequested => break,
-            KeyOutcome::Action(action) => {
-                if let Err(err) = apply_client_action(client, &mut app, action) {
-                    app.set_status(format!("action failed: {err}"));
-                }
-            }
-            KeyOutcome::Forward(bytes) => {
-                if let Some(id) = app.terminal_mode().map(str::to_string) {
-                    if let Err(err) = client.call(crate::office::OfficeRequestKind::TerminalInput {
-                        terminal_id: id,
-                        bytes_hex: crate::office::hex_encode(&bytes),
-                    }) {
-                        app.set_status(format!("input failed: {err}"));
+        })?;
+        match event {
+            // Key handling is the existing flow; mouse events feed the
+            // drag/click layer (herdr parity). Everything else is dropped.
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                match app.on_key(key) {
+                    // Detach, not shutdown: the resident server keeps running.
+                    KeyOutcome::QuitRequested => break,
+                    KeyOutcome::Action(action) => {
+                        if let Err(err) = apply_client_action(client, &mut app, action) {
+                            app.set_status(format!("action failed: {err}"));
+                        }
                     }
+                    KeyOutcome::Forward(bytes) => {
+                        if let Some(id) = app.terminal_mode().map(str::to_string) {
+                            if let Err(err) =
+                                client.call(crate::office::OfficeRequestKind::TerminalInput {
+                                    terminal_id: id,
+                                    bytes_hex: crate::office::hex_encode(&bytes),
+                                })
+                            {
+                                app.set_status(format!("input failed: {err}"));
+                            }
+                        }
+                    }
+                    KeyOutcome::Handled | KeyOutcome::Ignored => {}
                 }
             }
-            KeyOutcome::Handled | KeyOutcome::Ignored => {}
+            Event::Mouse(mouse) => app.on_mouse(mouse),
+            _ => {}
         }
         // Persist pane-tree changes so the next attach restores them.
         if app.layout_dirty() {
@@ -3098,5 +3357,218 @@ mod v15_tui_fix_tests {
         assert!(view.contains("D cleanup"), "{view}");
         assert!(view.contains("h handoff"), "{view}");
         assert!(view.contains("g auto-pull"), "{view}");
+    }
+
+    // -- mouse: divider drags, pane clicks, sidebar resize (herdr parity) --
+
+    fn mouse(
+        kind: ratatui::crossterm::event::MouseEventKind,
+        x: u16,
+        y: u16,
+    ) -> ratatui::crossterm::event::MouseEvent {
+        ratatui::crossterm::event::MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: ratatui::crossterm::event::KeyModifiers::empty(),
+        }
+    }
+
+    fn mouse_down(x: u16, y: u16) -> ratatui::crossterm::event::MouseEvent {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        mouse(MouseEventKind::Down(MouseButton::Left), x, y)
+    }
+
+    fn mouse_drag(x: u16, y: u16) -> ratatui::crossterm::event::MouseEvent {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        mouse(MouseEventKind::Drag(MouseButton::Left), x, y)
+    }
+
+    fn mouse_up(x: u16, y: u16) -> ratatui::crossterm::event::MouseEvent {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        mouse(MouseEventKind::Up(MouseButton::Left), x, y)
+    }
+
+    /// Browser | t1 at 50/50 over a 100x40 pane area: the root divider is
+    /// the shared cell at column 49, band 48..=50.
+    fn app_with_two_panes() -> WorkbenchApp {
+        let mut app = WorkbenchApp::new();
+        app.attach_terminal("t1".into());
+        app.last_pane_area = Some(Rect::new(0, 0, 100, 40));
+        app.last_sidebar_edge = None;
+        app
+    }
+
+    #[test]
+    fn divider_drag_resizes_the_split_and_persists_when_released() {
+        let mut app = app_with_two_panes();
+        app.clear_layout_dirty();
+        app.on_mouse(mouse_down(49, 10));
+        assert!(
+            matches!(app.drag, DragState::PaneSplit { .. }),
+            "a grab on the band starts a pane-split drag"
+        );
+        app.on_mouse(mouse_drag(69, 10));
+        assert!(app.layout_dirty(), "a resize must be persisted");
+        assert!(
+            matches!(app.grid, PaneNode::Split { ratio: 70, .. }),
+            "drag to column 69 = first side 70 cells = ratio 70"
+        );
+        app.on_mouse(mouse_up(69, 10));
+        assert!(matches!(app.drag, DragState::None), "release ends the drag");
+        assert!(matches!(app.grid, PaneNode::Split { ratio: 70, .. }));
+    }
+
+    #[test]
+    fn grab_offset_keeps_the_divider_glued_to_the_pointer() {
+        // Grab one cell left of the divider (inside the tolerance band):
+        // the grabbed point must stay under the pointer, so dragging to 58
+        // puts the divider at 59, i.e. ratio 60 — not 59.
+        let mut app = app_with_two_panes();
+        app.on_mouse(mouse_down(48, 10));
+        app.on_mouse(mouse_drag(58, 10));
+        assert!(matches!(app.grid, PaneNode::Split { ratio: 60, .. }));
+    }
+
+    #[test]
+    fn drag_clamps_into_the_never_zero_band() {
+        let mut app = app_with_two_panes();
+        app.on_mouse(mouse_down(49, 10));
+        app.on_mouse(mouse_drag(0, 10));
+        assert!(matches!(app.grid, PaneNode::Split { ratio: 10, .. }));
+        app.on_mouse(mouse_drag(99, 10));
+        assert!(matches!(app.grid, PaneNode::Split { ratio: 90, .. }));
+    }
+
+    #[test]
+    fn topology_change_under_a_drag_cancels_it() {
+        let mut app = app_with_two_panes();
+        app.on_mouse(mouse_down(49, 10));
+        // The tree collapses under the drag (e.g. the server pruned the
+        // terminal): the path now points elsewhere — cancel, never resize.
+        app.grid = PaneNode::leaf(PaneContent::Browser);
+        app.on_mouse(mouse_drag(69, 10));
+        assert!(matches!(app.drag, DragState::None));
+        assert!(matches!(app.grid, PaneNode::Leaf(_)));
+    }
+
+    #[test]
+    fn clicking_a_pane_focuses_it_and_releases_terminal_mode() {
+        let mut app = app_with_two_panes();
+        // Focus starts on t1 after the attach; engage keyboard forwarding.
+        assert_eq!(app.pane_focus(), &PaneContent::Terminal("t1".into()));
+        app.enter_terminal_mode("t1");
+        // Clicking the same pane keeps the mode.
+        app.on_mouse(mouse_down(75, 10));
+        app.on_mouse(mouse_up(75, 10));
+        assert_eq!(app.terminal_mode(), Some("t1"));
+        // Clicking the browser focuses it and releases the mode.
+        app.on_mouse(mouse_down(10, 10));
+        app.on_mouse(mouse_up(10, 10));
+        assert_eq!(app.pane_focus(), &PaneContent::Browser);
+        assert_eq!(app.terminal_mode(), None, "keys must not keep flowing");
+    }
+
+    #[test]
+    fn double_click_resets_split_and_sidebar() {
+        let mut app = app_with_two_panes();
+        assert!(app.grid.set_ratio_at_path(&[], 70));
+        app.clear_layout_dirty();
+        // First click happened a moment ago at the same cell: this is the
+        // second click of a double-click.
+        app.last_divider_click = Some((std::time::Instant::now(), 69, 10));
+        app.on_mouse(mouse_down(69, 10));
+        assert!(matches!(app.grid, PaneNode::Split { ratio: 50, .. }));
+        assert!(app.layout_dirty(), "the reset must be persisted too");
+
+        let mut app = WorkbenchApp::new();
+        app.sidebar_width = 34;
+        app.last_sidebar_edge = Some(26);
+        app.clear_layout_dirty();
+        app.last_divider_click = Some((std::time::Instant::now(), 26, 5));
+        app.on_mouse(mouse_down(26, 5));
+        assert_eq!(app.sidebar_width, SIDEBAR_WIDTH, "sidebar resets to 26");
+        assert!(app.layout_dirty());
+    }
+
+    #[test]
+    fn sidebar_edge_drag_resizes_within_bounds_and_persists() {
+        let mut app = WorkbenchApp::new();
+        app.last_sidebar_edge = Some(26);
+        app.clear_layout_dirty();
+        app.on_mouse(mouse_down(26, 5));
+        assert!(matches!(app.drag, DragState::Sidebar));
+        app.on_mouse(mouse_drag(10, 5));
+        assert_eq!(app.sidebar_width, SIDEBAR_MIN_WIDTH, "clamped at 18");
+        app.on_mouse(mouse_drag(99, 5));
+        assert_eq!(app.sidebar_width, SIDEBAR_MAX_WIDTH, "clamped at 36");
+        app.on_mouse(mouse_drag(22, 5));
+        assert_eq!(app.sidebar_width, 22);
+        assert!(app.layout_dirty(), "resizes persist");
+        app.on_mouse(mouse_up(22, 5));
+        assert!(matches!(app.drag, DragState::None));
+    }
+
+    #[test]
+    fn overlays_swallow_mouse_clicks() {
+        let mut app = app_with_two_panes();
+        app.file_panel = Some(FilePanel {
+            worktree_id: "wt1".into(),
+            rows: vec![],
+            truncated: false,
+            total: 0,
+            selected: 0,
+            viewing: None,
+            full_path: None,
+            scroll: 0,
+        });
+        app.clear_layout_dirty();
+        app.on_mouse(mouse_down(49, 10));
+        app.on_mouse(mouse_drag(69, 10));
+        assert!(matches!(app.drag, DragState::None));
+        assert!(
+            matches!(app.grid, PaneNode::Split { ratio: 50, .. }),
+            "no resize through the overlay"
+        );
+        assert!(!app.layout_dirty());
+    }
+
+    #[test]
+    fn the_dragged_divider_lights_up_in_the_drawn_chrome() {
+        let mut app = app_with_two_panes();
+        let backend = TestBackend::new(160, 44);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        // First draw fixes the real geometry: 160 cols → sidebar 26, pane
+        // area 134 wide, root divider at 26 + 67 - 1 = 92.
+        terminal.draw(|f| app.draw(f)).expect("draw");
+        app.on_mouse(mouse_down(92, 10));
+        terminal.draw(|f| app.draw(f)).expect("draw");
+        let cell = terminal
+            .backend()
+            .buffer()
+            .cell(ratatui::layout::Position::new(92, 10))
+            .expect("cell");
+        assert_eq!(cell.symbol(), "│", "the divider stays a line: {cell:?}");
+        assert_eq!(
+            cell.style().fg,
+            Some(ratatui::style::Color::Rgb(203, 166, 247)),
+            "dragged divider highlights in mauve: {cell:?}"
+        );
+        app.on_mouse(mouse_up(92, 10));
+    }
+
+    #[test]
+    fn sidebar_width_round_trips_through_the_layout_payload() {
+        let mut app = WorkbenchApp::new();
+        app.sidebar_width = 31;
+        let json = app.serialize_layout();
+        let mut other = WorkbenchApp::new();
+        other.restore_layout(&json, &std::collections::HashSet::new());
+        assert_eq!(other.sidebar_width, 31);
+        // A payload from before the sidebar field: the default survives.
+        let legacy = serde_json::json!({ "grid": PaneNode::leaf(PaneContent::Browser), "focus": PaneContent::Browser }).to_string();
+        let mut other = WorkbenchApp::new();
+        other.restore_layout(&legacy, &std::collections::HashSet::new());
+        assert_eq!(other.sidebar_width, SIDEBAR_WIDTH);
     }
 }
