@@ -29,7 +29,7 @@
 
 use std::io::Read as _;
 use std::io::Write as _;
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -300,12 +300,12 @@ impl TerminalHandle {
     ) -> OfficeResult<Self> {
         spec.validate()?;
         let (master, slave_fd) = OwnedMaster::open(spec)?;
-        let child = spawn_child(spec, slave_fd)?;
+        // SAFETY: open returned a fresh slave fd owned by this caller.
+        // Keep it owned even when spawn_child fails partway through setup.
+        let slave = unsafe { std::fs::File::from_raw_fd(slave_fd) };
+        let child = spawn_child(spec, slave.as_raw_fd())?;
         // The parent's slave reference is done: the child owns its dups.
-        #[cfg(unix)]
-        unsafe {
-            libc::close(slave_fd);
-        }
+        drop(slave);
         let pid = child.id();
         let writer_fd = master.dup()?;
         let reader_fd = master.dup()?;

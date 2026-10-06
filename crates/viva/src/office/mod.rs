@@ -5064,7 +5064,14 @@ mod qa_round2_tests {
                     break;
                 }
             }
-            assert!(seen, "the recovery prompt must reach the terminal");
+            assert!(
+                seen,
+                "the recovery prompt must reach the terminal; plans={:?}; terminal={:?}",
+                client.call(OfficeRequestKind::RecoveryList),
+                client.call(OfficeRequestKind::TerminalSnapshot {
+                    terminal_id: terminal_id.clone(),
+                }),
+            );
         }
 
         // Audit + plan state.
