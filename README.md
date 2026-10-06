@@ -196,6 +196,29 @@ channel; nothing self-declares. Every persisted artifact is private
 (0o600/0o700) and secret-redacted before it is written. Viva never reads,
 writes or migrates the historical `~/.ticket-autopilot/` state.
 
+## Acknowledgements
+
+Viva is an original implementation, and its design deliberately references
+two proven tools:
+
+- **[herdr](https://github.com/herdrdev/herdr)** (Apache-2.0) — the mature
+  terminal-multiplexer reference behind Viva's resident runtime and workbench
+  chrome: a resident server that holds all terminal sessions with
+  detach/attach, a workspace/tab/pane layout, mouse-first pane interaction,
+  and sidebar-based agent awareness. Viva implements these ideas natively
+  ("route A"): no herdr source code is copied or redistributed. The alignment
+  analysis and decision records live in the Wiki
+  ([Research-Herdr-Runtime-Parity](https://github.com/zuohaisu/viva/wiki/Research-Herdr-Runtime-Parity)
+  and [ADR-0012](https://github.com/zuohaisu/viva/wiki/ADR-0012)).
+- **[Orca](https://github.com/stablyai/orca)** (MIT) — the day-to-day
+  workbench experience reference for running several agents in parallel
+  across git worktrees. Also a design reference only; no source code is
+  reused.
+
+Both projects are credited as design references. If any code or substantive
+material from either project is ever reused, the respective license and
+copyright notices will be preserved in full, as those licenses require.
+
 ## License
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
