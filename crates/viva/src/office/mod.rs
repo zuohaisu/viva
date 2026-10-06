@@ -193,6 +193,7 @@ pub struct OfficeShared {
     /// Agent status board (S4): controlled reports (authoritative) and
     /// screen/process observations (auxiliary), kept per source.
     pub agent_board: crate::agents::AgentStatusBoard,
+    agent_processes: Mutex<std::collections::HashMap<String, crate::agents::ProcessAgent>>,
     /// Paused (S6): no NEW dispatch, no maintenance cycles; running
     /// executions are untouched. Owner-controlled, explicitly.
     pub paused: AtomicBool,
@@ -293,6 +294,7 @@ impl OfficeHost {
             transferred: AtomicBool::new(false),
             handoff_listener: Mutex::new(None),
             agent_board: crate::agents::AgentStatusBoard::new(),
+            agent_processes: Mutex::new(std::collections::HashMap::new()),
             paused: AtomicBool::new(persisted_pause),
             pr_cache: Mutex::new(std::collections::HashMap::new()),
             last_sync: Mutex::new(None),
@@ -1199,22 +1201,56 @@ fn workbench_view(shared: Arc<OfficeShared>) -> OfficeResult<serde_json::Value> 
     let store = shared.store.lock().expect("office store");
     let mut model = crate::tui::workbench::assemble_view(&store, &shared.terminals)?;
 
-    // S4 sweep: for every live terminal, refresh the AUXILIARY screen
-    // observation (display-only) and project all sources onto the rows.
+    // Process identification is independent of screen text and refreshed for
+    // shell → agent → shell. A single ps snapshot serves all terminals.
+    let process_table = crate::agents::ProcessTable::capture().ok();
+    let mut incarnations = shared.agent_processes.lock().expect("agent incarnations");
     for row in &mut model.terminals {
-        if let Ok(Some(handle)) = shared.terminals.handle(
-            &crate::foundation::ids::TerminalId::from_str(&row.terminal_id).expect("row id"),
-        ) {
-            if handle.try_wait().ok().flatten().is_none() {
-                if let Ok(snapshot) = handle.snapshot() {
+        let handle = shared
+            .terminals
+            .handle(&TerminalId::from_str(&row.terminal_id)?)
+            .ok()
+            .flatten();
+        if row.live == Some(true) {
+            if let Some(table) = &process_table {
+                let current = table.identify(handle.as_ref().and_then(|h| h.pid()));
+                let previous = incarnations.get(&row.terminal_id).cloned();
+                if previous.is_some() && previous != current {
+                    shared.agent_board.clear(&row.terminal_id);
+                }
+                shared
+                    .agent_board
+                    .clear_source(&row.terminal_id, crate::agents::StatusSource::ProcessTree);
+                shared.agent_board.clear_source(
+                    &row.terminal_id,
+                    crate::agents::StatusSource::ScreenInference,
+                );
+                if let Some(found) = current {
+                    shared
+                        .agent_board
+                        .observe(crate::agents::AgentStatusRecord {
+                            terminal_id: row.terminal_id.clone(),
+                            agent: found.agent.clone(),
+                            status: crate::agents::AgentStatus::Unknown,
+                            source: crate::agents::StatusSource::ProcessTree,
+                            detail: format!("process {} started {}", found.pid, found.started),
+                            updated_at: utc_now(),
+                        });
+                    incarnations.insert(row.terminal_id.clone(), found);
+                } else {
+                    incarnations.remove(&row.terminal_id);
+                }
+            }
+            let records = shared.agent_board.project(&row.terminal_id);
+            if let (Some(agent), Some(h)) = (
+                records
+                    .first()
+                    .map(|r| r.agent.clone())
+                    .or_else(|| (row.owner_label == "agent_cli").then(|| "unknown".into())),
+                handle,
+            ) {
+                if let Ok(snapshot) = h.snapshot() {
                     if let Some(status) = crate::agents::infer_from_screen(&snapshot) {
-                        let agent = shared
-                            .agent_board
-                            .project(&row.terminal_id)
-                            .into_iter()
-                            .find(|r| r.source == crate::agents::StatusSource::ProcessTree)
-                            .map(|r| r.agent)
-                            .unwrap_or_else(|| "unknown".into());
                         shared
                             .agent_board
                             .observe(crate::agents::AgentStatusRecord {
@@ -1227,10 +1263,55 @@ fn workbench_view(shared: Arc<OfficeShared>) -> OfficeResult<serde_json::Value> 
                             });
                     }
                 }
-            };
-        };
+            }
+        }
         row.agent_status = shared.agent_board.project(&row.terminal_id);
+        if !row.agent_status.is_empty() {
+            let stale = row.agent_status.iter().any(|r| {
+                r.source == crate::agents::StatusSource::ControlledReport
+                    && crate::agents::report_stale(r)
+            });
+            let worktree = row
+                .worktree_id
+                .as_ref()
+                .and_then(|id| model.worktrees.iter().find(|w| &w.worktree_id == id));
+            let in_workspace = model.workspace_id.is_none() || worktree.is_some();
+            let location = worktree
+                .map(|w| {
+                    let project = model
+                        .projects
+                        .iter()
+                        .find(|p| p.project_id == w.project_id)
+                        .map(|p| p.name.as_str())
+                        .unwrap_or("project");
+                    format!("{project} / {}", w.branch)
+                })
+                .unwrap_or_else(|| {
+                    row.worktree_id
+                        .clone()
+                        .unwrap_or_else(|| "floating / directory".into())
+                });
+            model.agents.push(crate::agents::AgentSessionRow {
+                terminal_id: row.terminal_id.clone(),
+                tool: row.agent_status[0].agent.clone(),
+                name: row.purpose.clone(),
+                worktree_id: row.worktree_id.clone(),
+                location,
+                live: row.live,
+                records: row.agent_status.clone(),
+                stale,
+                in_workspace,
+            });
+        }
     }
+    drop(incarnations);
+    model.agents.sort_by_key(|a| {
+        (
+            !a.needs_attention(),
+            a.location.clone(),
+            a.terminal_id.clone(),
+        )
+    });
 
     // V15-4 switch + note surface on the model. The note falls back to
     // the persisted one after a restart (QA F17).

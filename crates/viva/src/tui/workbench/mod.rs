@@ -140,6 +140,8 @@ pub struct AttentionMarker {
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorkbenchModel {
     #[serde(default)]
+    pub agents: Vec<crate::agents::AgentSessionRow>,
+    #[serde(default)]
     pub workspaces: Vec<crate::workspaces::navigation::WorkspaceRow>,
     #[serde(default)]
     pub workspace_id: Option<String>,
@@ -348,6 +350,9 @@ pub struct WorkbenchApp {
     tab_prompt: Option<String>,
     tab_hits: Vec<(String, Rect)>,
     terminal_picker: Option<usize>,
+    global_attention: bool,
+    sidebar_hits: Vec<(Focus, usize, Rect)>,
+    mouse_action: Option<WorkbenchAction>,
 }
 
 impl WorkbenchApp {
@@ -380,6 +385,9 @@ impl WorkbenchApp {
             tab_prompt:None,
             tab_hits:vec![],
             terminal_picker:None,
+            global_attention:false,
+            sidebar_hits:vec![],
+            mouse_action:None,
         }
     }
 
@@ -886,7 +894,7 @@ impl WorkbenchApp {
         match self.focus {
             Focus::Worktrees => self.model.worktrees.len(),
             Focus::Tasks => self.model.tasks.len(),
-            Focus::Terminals => self.model.terminals.len(),
+            Focus::Terminals => self.agent_rows().len(),
         }
     }
 
@@ -899,11 +907,26 @@ impl WorkbenchApp {
         };
     }
 
-    fn selected_terminal(&self) -> Option<String> {
+    fn agent_rows(&self) -> Vec<&crate::agents::AgentSessionRow> {
         self.model
-            .terminals
+            .agents
+            .iter()
+            .filter(|a| {
+                if self.global_attention {
+                    a.needs_attention()
+                } else {
+                    a.in_workspace
+                }
+            })
+            .collect()
+    }
+    fn selected_terminal(&self) -> Option<String> {
+        self.agent_rows()
             .get(self.selected)
-            .map(|t| t.terminal_id.clone())
+            .map(|a| a.terminal_id.clone())
+    }
+    pub fn take_mouse_action(&mut self) -> Option<WorkbenchAction> {
+        self.mouse_action.take()
     }
 
     fn selected_worktree(&self) -> Option<String> {
@@ -1339,6 +1362,12 @@ impl WorkbenchApp {
                     None => KeyOutcome::Ignored,
                 }
             }
+            KeyCode::Char('!') => {
+                self.global_attention = !self.global_attention;
+                self.focus = Focus::Terminals;
+                self.selected = 0;
+                KeyOutcome::Handled
+            }
             KeyCode::Char('t') => {
                 self.terminal_picker = Some(0);
                 KeyOutcome::Handled
@@ -1455,6 +1484,24 @@ impl WorkbenchApp {
         {
             let id = id.clone();
             self.switch_tab(&id);
+            return;
+        }
+        if let Some((focus, index, _)) = self
+            .sidebar_hits
+            .iter()
+            .find(|(_, _, r)| contains_point(*r, column, row))
+            .cloned()
+        {
+            self.leave_terminal_mode();
+            self.focus = focus;
+            self.selected = index;
+            self.mouse_action = match focus {
+                Focus::Worktrees => self
+                    .selected_worktree()
+                    .map(WorkbenchAction::SelectWorktree),
+                Focus::Terminals => self.selected_terminal().map(WorkbenchAction::EnterTerminal),
+                Focus::Tasks => None,
+            };
             return;
         }
         // Sidebar edge first: the band is the sidebar's last column and
@@ -1996,7 +2043,7 @@ impl WorkbenchApp {
     /// follows the keyboard selection (QA F2) — with no mouse, a selected
     /// row that scrolled off-screen would be unreachable. Facts only —
     /// unknown stays unknown.
-    fn draw_sidebar(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+    fn draw_sidebar(&mut self, frame: &mut Frame, area: Rect, palette: &Palette) {
         let width = area.width as usize;
         // Each line carries the entity it belongs to (section + model
         // index); headers and dividers carry None. The viewport window is
@@ -2096,18 +2143,27 @@ impl WorkbenchApp {
             }
         }
 
+        let agent_start = lines.len();
         // -- agents --
         lines.push((Self::section_divider(width, palette), None));
         lines.push((
-            Self::section_header(" agents", self.focus == Focus::Terminals, palette),
+            Self::section_header(
+                if self.global_attention {
+                    " agents · global attention (! returns)"
+                } else {
+                    " agents · workspace (! global)"
+                },
+                self.focus == Focus::Terminals,
+                palette,
+            ),
             None,
         ));
-        for (index, terminal) in self.model.terminals.iter().enumerate() {
+        for (index, terminal) in self.agent_rows().into_iter().enumerate() {
             let selected = self.focus == Focus::Terminals && self.selected == index;
             // The dot shows the best observation's state. Honesty (S4,
             // ruling §5.3): only a controlled report may look authoritative
             // — screen/process-tree dots stay muted.
-            let (dot, dot_color) = match terminal.agent_status.first() {
+            let (dot, dot_color) = match terminal.records.first() {
                 Some(record) => {
                     let color = if record.source.is_authoritative() {
                         crate::tui::theme::status_color(record.status, palette)
@@ -2123,7 +2179,7 @@ impl WorkbenchApp {
                     vec![
                         Span::styled(dot.to_string(), ratatui::style::Style::new().fg(dot_color)),
                         Span::styled(
-                            format!(" {}", fit(&terminal.purpose, width.saturating_sub(3))),
+                            format!(" {}", fit(&terminal.name, width.saturating_sub(3))),
                             ratatui::style::Style::new().fg(palette.text),
                         ),
                     ],
@@ -2138,8 +2194,16 @@ impl WorkbenchApp {
                 Some(false) => "exited",
                 None => "unknown",
             };
-            let mut detail = format!("{} · {live_word}", terminal.owner_label);
-            let records = Self::format_agent_status(&terminal.agent_status);
+            let mut detail = format!(
+                "{} · {live_word}{}",
+                terminal.location,
+                if terminal.stale {
+                    " · stale report"
+                } else {
+                    ""
+                }
+            );
+            let records = Self::format_agent_status(&terminal.records);
             if !records.is_empty() {
                 detail.push_str(&format!(" · {records}"));
             }
@@ -2157,6 +2221,7 @@ impl WorkbenchApp {
             ));
         }
 
+        let task_start = lines.len();
         // -- tasks --
         lines.push((Self::section_divider(width, palette), None));
         lines.push((
@@ -2194,32 +2259,42 @@ impl WorkbenchApp {
             ));
         }
 
-        // Viewport window: keep the selected entity's whole block visible.
-        let viewport = area.height as usize;
-        let selected_key = Some((self.focus, self.selected));
-        let first = lines.iter().position(|(_, key)| *key == selected_key);
-        let mut offset = 0usize;
-        if let Some(first) = first {
-            let span = lines
+        // Two stable regions; Tasks are an explicit alternate lower view.
+        let regions =
+            Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
+        self.sidebar_hits.clear();
+        for (range, rect) in [
+            (0..agent_start, regions[0]),
+            (
+                if self.focus == Focus::Tasks {
+                    task_start..lines.len()
+                } else {
+                    agent_start..task_start
+                },
+                regions[1],
+            ),
+        ] {
+            let section = &lines[range];
+            let height = rect.height as usize;
+            let selected_key = Some((self.focus, self.selected));
+            let last = section
                 .iter()
-                .filter(|(_, key)| *key == selected_key)
-                .count()
-                .max(1);
-            let end = first + span;
-            if end > offset + viewport {
-                offset = end - viewport;
+                .rposition(|(_, key)| *key == selected_key)
+                .unwrap_or(0);
+            let offset = (last + 1).saturating_sub(height);
+            let mut visible = Vec::new();
+            for (y, (line, key)) in section.iter().skip(offset).take(height).enumerate() {
+                visible.push(line.clone());
+                if let Some((focus, index)) = key {
+                    self.sidebar_hits.push((
+                        *focus,
+                        *index,
+                        Rect::new(rect.x, rect.y + y as u16, rect.width.saturating_sub(1), 1),
+                    ));
+                }
             }
-            if first < offset {
-                offset = first;
-            }
+            frame.render_widget(Paragraph::new(visible), rect);
         }
-        let visible: Vec<Line<'static>> = lines
-            .into_iter()
-            .skip(offset)
-            .take(viewport)
-            .map(|(line, _)| line)
-            .collect();
-        frame.render_widget(Paragraph::new(visible), area);
         // herdr's sidebar separator: one dim vertical line on the right.
         let buffer = frame.buffer_mut();
         let x = area.x + area.width.saturating_sub(1);
@@ -2762,6 +2837,7 @@ impl<'a> WorkbenchStore<'a> {
             workspace_id.is_none() || projects.iter().any(|p| p.project_id == w.project_id)
         });
         Ok(WorkbenchModel {
+            agents: vec![],
             workspaces,
             workspace_id,
             workspace_diagnostics,
@@ -3024,7 +3100,14 @@ fn run_client_inner(client: &mut crate::office::OfficeClient) -> OfficeResult<()
                     KeyOutcome::Handled | KeyOutcome::Ignored => {}
                 }
             }
-            Event::Mouse(mouse) => app.on_mouse(mouse),
+            Event::Mouse(mouse) => {
+                app.on_mouse(mouse);
+                if let Some(action) = app.take_mouse_action() {
+                    if let Err(err) = apply_client_action(client, &mut app, action) {
+                        app.set_status(format!("navigation failed: {err}"));
+                    }
+                }
+            }
             _ => {}
         }
         // Persist pane-tree changes so the next attach restores them.
@@ -3404,6 +3487,7 @@ mod tests {
             }],
             auto_pull: false,
             sync_note: None,
+            agents: vec![],
             workspaces: vec![],
             workspace_id: None,
             workspace_diagnostics: vec![],
@@ -3429,8 +3513,11 @@ mod tests {
         );
         assert_eq!(app.focus(), Focus::Terminals);
         let agents = render(&mut app, 100, 24);
-        assert!(agents.contains("user_shell"));
-        assert!(agents.contains("live"));
+        assert!(
+            !agents.contains("user_shell"),
+            "ordinary shell is not an agent row"
+        );
+        assert!(app.agent_rows().is_empty());
 
         assert_eq!(
             app.on_key(KeyEvent::from(KeyCode::Char('3'))),
@@ -3460,6 +3547,7 @@ mod tests {
         let mut app = WorkbenchApp::new();
         app.set_model(sample());
         app.on_key(KeyEvent::from(KeyCode::Char('2')));
+        app.on_key(KeyEvent::from(KeyCode::Char('t')));
         assert_eq!(
             app.on_key(KeyEvent::from(KeyCode::Enter)),
             KeyOutcome::Action(WorkbenchAction::EnterTerminal("term-1".into()))
@@ -3672,6 +3760,17 @@ mod tests {
 
         let mut model = sample();
         model.terminals[0].agent_status = vec![record(StatusSource::ScreenInference)];
+        model.agents = vec![crate::agents::AgentSessionRow {
+            terminal_id: "term-1".into(),
+            tool: "pi".into(),
+            name: "Pi".into(),
+            worktree_id: Some("wt1".into()),
+            location: "viva / agent/feat-x".into(),
+            live: Some(true),
+            records: vec![record(StatusSource::ScreenInference)],
+            stale: false,
+            in_workspace: true,
+        }];
         let mut app = WorkbenchApp::new();
         app.set_model(model);
         assert_eq!(
@@ -3682,6 +3781,17 @@ mod tests {
 
         let mut model = sample();
         model.terminals[0].agent_status = vec![record(StatusSource::ControlledReport)];
+        model.agents = vec![crate::agents::AgentSessionRow {
+            terminal_id: "term-1".into(),
+            tool: "pi".into(),
+            name: "Pi".into(),
+            worktree_id: Some("wt1".into()),
+            location: "viva / agent/feat-x".into(),
+            live: Some(true),
+            records: vec![record(StatusSource::ControlledReport)],
+            stale: false,
+            in_workspace: true,
+        }];
         let mut app = WorkbenchApp::new();
         app.set_model(model);
         assert_eq!(
@@ -3951,6 +4061,7 @@ mod v15_tui_fix_tests {
             attention: vec![],
             auto_pull: false,
             sync_note: None,
+            agents: vec![],
             workspaces: vec![],
             workspace_id: None,
             workspace_diagnostics: vec![],
