@@ -16,46 +16,22 @@
 //! Every unsafe block here is a single libc call with its contract stated.
 
 use std::io;
-use std::os::fd::{FromRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 use crate::foundation::error::{OfficeError, OfficeResult};
 use crate::terminal::TerminalSpec;
 
-/// Duplicate an fd close-on-exec. The copies live inside one process as
-/// reader/writer handles or become the child's stdio.
+/// Duplicate close-on-exec atomically: a concurrent spawn must never
+/// inherit another session's PTY. Keep copies above stdio so Command
+/// always dup2s them onto 0/1/2, clearing CLOEXEC on the child's stdio even
+/// when the parent's standard descriptors were initially closed.
 fn dup_cloexec(fd: RawFd) -> io::Result<RawFd> {
-    // SAFETY: dup on our own open fd; the flag update only touches the dup.
+    // SAFETY: F_DUPFD_CLOEXEC duplicates our open fd with a minimum of 3.
     #[cfg(unix)]
     unsafe {
-        let dup = libc::dup(fd);
-        if dup < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let flags = libc::fcntl(dup, libc::F_GETFD);
-        if flags >= 0 {
-            let _ = libc::fcntl(dup, libc::F_SETFD, flags | libc::FD_CLOEXEC);
-        }
-        Ok(dup)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = fd;
-        Err(io::Error::other("PTY requires unix"))
-    }
-}
-
-/// Duplicate an fd WITHOUT close-on-exec, for the child's stdio: when the
-/// duplicated fd happens to land on 0/1/2, std skips the dup2 (already the
-/// target) and a CLOEXEC flag would close the child's stdio at exec — the
-/// child would see an instantly-EOF stdin and die. The parent's copies are
-/// closed right after spawn, so the flag is only needed there.
-fn dup_no_cloexec(fd: RawFd) -> io::Result<RawFd> {
-    // SAFETY: dup on our own open fd.
-    #[cfg(unix)]
-    unsafe {
-        let dup = libc::dup(fd);
+        let dup = libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3);
         if dup < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -211,39 +187,17 @@ impl Drop for OwnedMaster {
 /// whose non-blocking `try_wait` keeps the V05 reap discipline intact.
 pub fn spawn_child(spec: &TerminalSpec, slave_fd: RawFd) -> OfficeResult<std::process::Child> {
     spec.validate()?;
-    // Dedicated dups for each stdio stream plus one the pre_exec closure
-    // uses for TIOCSCTTY. All CLOEXEC: after exec only the child's real
-    // stdio remains.
-    #[cfg(unix)]
-    let (stdin_fd, stdout_fd, stderr_fd, tty_fd) = {
-        // The three stdio dups must NOT carry CLOEXEC (see dup_no_cloexec);
-        // the TTY reference fd does (it is used in pre_exec, then gone).
-        let s = dup_no_cloexec(slave_fd).map_err(OfficeError::Io)?;
-        match (|| -> io::Result<(RawFd, RawFd, RawFd)> {
-            Ok((
-                dup_no_cloexec(slave_fd)?,
-                dup_no_cloexec(slave_fd)?,
-                dup_cloexec(slave_fd)?,
-            ))
-        })() {
-            Ok(tuple) => (s, tuple.0, tuple.1, tuple.2),
-            Err(err) => {
-                unsafe { libc::close(s) };
-                return Err(OfficeError::Io(err));
-            }
-        }
-    };
-    #[cfg(not(unix))]
-    let (stdin_fd, stdout_fd, stderr_fd, tty_fd) = (-1, -1, -1, -1);
-
-    // SAFETY: from_raw_fd of fresh dups above; each Stdio consumes exactly
-    // one and closes it in the parent after spawn.
+    // Own every dup immediately, including on partial setup/spawn errors.
+    // The tty reference must stay open in the PARENT until spawn returns:
+    // pre_exec runs in the child after fork, not when the closure is set.
     #[cfg(unix)]
     unsafe {
         use std::os::unix::process::CommandExt as _;
-        let stdin_file = std::fs::File::from_raw_fd(stdin_fd);
-        let stdout_file = std::fs::File::from_raw_fd(stdout_fd);
-        let stderr_file = std::fs::File::from_raw_fd(stderr_fd);
+        // SAFETY: each File consumes exactly one fresh CLOEXEC dup.
+        let stdin_file = std::fs::File::from_raw_fd(dup_cloexec(slave_fd)?);
+        let stdout_file = std::fs::File::from_raw_fd(dup_cloexec(slave_fd)?);
+        let stderr_file = std::fs::File::from_raw_fd(dup_cloexec(slave_fd)?);
+        let tty_file = std::fs::File::from_raw_fd(dup_cloexec(slave_fd)?);
         let mut command = Command::new(&spec.argv[0]);
         command
             .args(&spec.argv[1..])
@@ -256,7 +210,7 @@ pub fn spawn_child(spec: &TerminalSpec, slave_fd: RawFd) -> OfficeResult<std::pr
             .stdin(Stdio::from(stdin_file))
             .stdout(Stdio::from(stdout_file))
             .stderr(Stdio::from(stderr_file));
-        let tty_for_tty = tty_fd;
+        let tty_for_tty = tty_file.as_raw_fd();
         command.pre_exec(move || {
             // Between fork and exec: the child becomes a session leader —
             // setsid alone gives it pgid == pid (the V05 group discipline).
@@ -265,20 +219,42 @@ pub fn spawn_child(spec: &TerminalSpec, slave_fd: RawFd) -> OfficeResult<std::pr
             if libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
             }
-            let _ = libc::ioctl(
+            if libc::ioctl(
                 tty_for_tty,
                 libc::TIOCSCTTY as libc::c_ulong,
                 0 as libc::c_int,
-            );
+            ) == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
             Ok(())
         });
-        // The pre_exec reference fd is CLOEXEC: it closes at exec inside
-        // the child; close the parent's reference here.
-        let _ = libc::close(tty_fd);
-        command
+        let child = command
             .spawn()
-            .map_err(|e| OfficeError::Validation(format!("failed to spawn terminal: {e}")))
+            .map_err(|e| OfficeError::Validation(format!("failed to spawn terminal: {e}")));
+        // In the child CLOEXEC closes the reference at exec; in the parent
+        // the guard is dropped only AFTER pre_exec has finished.
+        drop(tty_file);
+        child
     }
     #[cfg(not(unix))]
     Err(OfficeError::Validation("PTY requires unix".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_rejects_a_non_tty_instead_of_ignoring_tiocsctty_failure() {
+        let not_a_tty = std::fs::File::open("/dev/null").expect("open");
+        let spec = TerminalSpec::new(vec!["/bin/true".into()], std::env::temp_dir()).expect("spec");
+        match spawn_child(&spec, not_a_tty.as_raw_fd()) {
+            Err(err) => assert!(err.to_string().contains("failed to spawn terminal")),
+            Ok(mut child) => {
+                let _ = child.wait();
+                panic!("spawn must report failure to acquire the controlling terminal");
+            }
+        }
+    }
 }

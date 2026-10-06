@@ -43,6 +43,95 @@ fn wait_for<F: Fn() -> bool>(timeout: Duration, predicate: F) -> bool {
     predicate()
 }
 
+/// Stdio being tty-shaped is not enough: the child must actually own a
+/// controlling terminal. Use cat, since a shell may repair a missing tty.
+#[test]
+fn child_has_a_controlling_terminal() {
+    let reg = registry();
+    let (_id, child) = reg
+        .spawn(
+            spec(&["/bin/cat"]),
+            TerminalOwner::TestRun,
+            None,
+            "controlling terminal",
+            None,
+            None,
+        )
+        .expect("spawn");
+    let ps = std::process::Command::new("ps")
+        .args(["-p", &child.pid().expect("pid").to_string(), "-o", "tty="])
+        .output()
+        .expect("ps");
+    child.stop(StopPolicy::default()).expect("stop");
+    assert!(ps.status.success());
+    let tty = String::from_utf8(ps.stdout).expect("tty name");
+    assert!(
+        !tty.trim().is_empty() && !tty.trim().chars().all(|c| c == '?'),
+        "child has no controlling terminal: {tty:?}"
+    );
+}
+
+/// Concurrent fork/exec must not inherit or acquire a neighbor's PTY.
+#[test]
+fn concurrent_spawns_keep_controlling_terminals_isolated() {
+    const SESSIONS: usize = 8;
+    let barrier = Arc::new(std::sync::Barrier::new(SESSIONS));
+    let workers: Vec<_> = (0..SESSIONS)
+        .map(|index| {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let reg = registry();
+                barrier.wait();
+                let (_id, child) = reg
+                    .spawn(
+                        spec(&["/bin/cat"]),
+                        TerminalOwner::TestRun,
+                        None,
+                        "concurrent cat",
+                        None,
+                        None,
+                    )
+                    .expect("spawn");
+                let marker = format!("session-{index}-alive");
+                child
+                    .input(format!("{marker}\n").as_bytes())
+                    .expect("input");
+                let echoed = wait_for(Duration::from_secs(5), || {
+                    child
+                        .snapshot()
+                        .expect("snapshot")
+                        .visible
+                        .iter()
+                        .any(|line| line.contains(&marker))
+                });
+                let ps = std::process::Command::new("ps")
+                    .args(["-p", &child.pid().expect("pid").to_string(), "-o", "tty="])
+                    .output()
+                    .expect("ps");
+                (child, ps, echoed)
+            })
+        })
+        .collect();
+    // Keep every handle alive until all workers have sampled their tty.
+    let children: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("worker"))
+        .collect();
+    let mut ttys = std::collections::HashSet::new();
+    for (child, ps, echoed) in children {
+        child.resize(60, 12).expect("resize");
+        let exit = child.stop(StopPolicy::default()).expect("stop");
+        assert!(echoed, "session lost its output");
+        assert!(ps.status.success());
+        assert_eq!(exit.via, ExitVia::GracefulStop);
+        let tty = String::from_utf8(ps.stdout).expect("tty name");
+        let tty = tty.trim().to_string();
+        assert!(!tty.is_empty() && !tty.chars().all(|c| c == '?'), "{tty:?}");
+        ttys.insert(tty);
+    }
+    assert_eq!(ttys.len(), SESSIONS, "every child owns a distinct tty");
+}
+
 /// Acceptance: "真实交互程序可输入、中文/Unicode、粘贴、resize" and the
 /// no-fake-transcript rule: ANSI bytes are parsed into the grid (the styled
 /// text is visible, the escape bytes are gone), never dropped or lied about.
