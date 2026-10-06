@@ -2,9 +2,13 @@
 //!
 //! Reuses GitHub Releases + the shipped SHA-256 files, system curl (TLS),
 //! npm's package manager, and tar/flate2/tempfile for bounded staging and
-//! atomic replacement. Never opens VIVA_HOME, starts/stops a server, or
-//! modifies member/task/history data. Checksums detect corruption; they
-//! are not an independent release signature.
+//! atomic replacement. Never opens VIVA_HOME data or modifies
+//! member/task/history records. After a successful install a RUNNING
+//! resident server is restarted through the S3 live handoff — the freshly
+//! installed entry point takes over and its terminals survive — unless
+//! `--no-restart` is given; nothing is spawned when no server runs.
+//! Checksums detect corruption; they are not an independent release
+//! signature.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -26,13 +30,14 @@ const MAX_METADATA: u64 = 2 * 1024 * 1024;
 const MAX_ARCHIVE: u64 = 100 * 1024 * 1024;
 const MAX_UNPACKED: u64 = 512 * 1024 * 1024;
 const MAX_CHECKSUM: u64 = 4096;
-const USAGE: &str = "USAGE: viva update [--check]\n\
+const USAGE: &str = "USAGE: viva update [--check] [--no-restart]\n\
     Upgrade to the latest stable version in the installation's channel.\n\
     --check only checks; it does not replace files or install packages.\n\
+    --no-restart skips restarting a running resident server after installing.\n\
     Native macOS: verified GitHub Release binary, atomically replaced.\n\
     Global npm: npm installs @zuohaisu/viva@latest at the same prefix.\n\
-    Running servers/agents and VIVA_HOME are untouched. After upgrading,\n\
-    use `viva server-restart` explicitly to upgrade a running server.";
+    After installing, a running resident server is restarted through the\n\
+    live handover (its terminals survive). VIVA_HOME data is untouched.";
 
 fn invalid(message: impl Into<String>) -> OfficeError {
     OfficeError::Validation(message.into())
@@ -40,15 +45,16 @@ fn invalid(message: impl Into<String>) -> OfficeError {
 
 #[derive(Debug, PartialEq)]
 enum Mode {
-    Install,
+    Install { restart: bool },
     Check,
     Help,
 }
 
 fn parse_args(args: &[String]) -> OfficeResult<Mode> {
     match args {
-        [] => Ok(Mode::Install),
+        [] => Ok(Mode::Install { restart: true }),
         [arg] if arg == "--check" => Ok(Mode::Check),
+        [arg] if arg == "--no-restart" => Ok(Mode::Install { restart: false }),
         [arg] if matches!(arg.as_str(), "--help" | "-h") => Ok(Mode::Help),
         _ => Err(invalid(USAGE)),
     }
@@ -64,7 +70,7 @@ pub fn run(args: &[String]) -> OfficeResult<()> {
     // A maintenance operation on the installed host is not a task grant
     // action. Reject known member contexts rather than treating their
     // request as the owner's. Like other CLI gates, this is NOT an OS sandbox.
-    if mode == Mode::Install
+    if matches!(mode, Mode::Install { .. })
         && ["VIVA_OFFICE_MEMBER_ID", "VIVA_OFFICE_GRANT_ID"]
             .iter()
             .any(|key| std::env::var_os(key).is_some())
@@ -75,9 +81,15 @@ pub fn run(args: &[String]) -> OfficeResult<()> {
     }
     let current = version(env!("CARGO_PKG_VERSION"))?;
     let target = fs::canonicalize(std::env::current_exe()?)?;
-    if let Some(root) = std::env::var_os("VIVA_NPM_PACKAGE_ROOT") {
+    let installed: Option<PathBuf> = if let Some(root) = std::env::var_os("VIVA_NPM_PACKAGE_ROOT") {
         let prefix = npm_prefix(&target, Path::new(&root))?;
-        update_npm(&current, prefix.as_deref(), mode == Mode::Check, "npm")?;
+        if update_npm(&current, prefix.as_deref(), mode == Mode::Check, "npm")? {
+            Some(npm_wrapper_entry(
+                prefix.as_deref().expect("global prefix checked"),
+            ))
+        } else {
+            None
+        }
     } else {
         // Never replace a package manager's binary behind its back, even
         // when someone invoked the platform executable without its wrapper.
@@ -90,12 +102,25 @@ pub fn run(args: &[String]) -> OfficeResult<()> {
             ));
         }
         let platform = platform(std::env::consts::OS, std::env::consts::ARCH)?;
-        if mode == Mode::Install && is_build_output(&target) {
+        if matches!(mode, Mode::Install { .. }) && is_build_output(&target) {
             return Err(invalid(
                 "refusing to overwrite a Cargo build output; rebuild from source or install Viva before updating",
             ));
         }
-        update_native(&current, &target, platform, mode == Mode::Check, &Curl)?;
+        if update_native(&current, &target, platform, mode == Mode::Check, &Curl)? {
+            Some(target)
+        } else {
+            None
+        }
+    };
+    match (installed, &mode) {
+        // The freshly installed entry takes over the running server: the
+        // handover IS the upgrade (S3). Nothing to spawn when none runs.
+        (Some(entry), Mode::Install { restart: true }) => {
+            restart_running_server(&crate::foundation::paths::viva_home(None), &entry)
+        }
+        (Some(_), Mode::Install { restart: false }) => print_restart_skipped(),
+        _ => {}
     }
     Ok(())
 }
@@ -300,7 +325,6 @@ fn update_native(
         eprintln!("viva: binary replaced, but syncing its directory failed: {err}");
     }
     println!("Updated Viva {current} → {latest} at {}.", target.display());
-    print_runtime_notice();
     Ok(true)
 }
 
@@ -496,10 +520,8 @@ fn update_npm(
         .arg(format!("{NPM_PACKAGE}@{latest}"))
         .args(["--no-audit", "--no-fund", "--ignore-scripts"]);
     capture(&mut install, Duration::from_secs(300))?;
-    let wrapper = prefix
-        .unwrap()
-        .join("lib/node_modules/@zuohaisu/viva/bin/viva.js");
-    let mut probe = Command::new(wrapper);
+    let wrapper = npm_wrapper_entry(prefix.unwrap());
+    let mut probe = Command::new(&wrapper);
     probe.arg("--version");
     if capture(&mut probe, Duration::from_secs(10))?.trim() != format!("viva {latest}") {
         return Err(invalid(
@@ -510,13 +532,52 @@ fn update_npm(
         "npm installed Viva {latest} at {}.",
         prefix.unwrap().display()
     );
-    print_runtime_notice();
     Ok(true)
 }
 
-fn print_runtime_notice() {
+/// The verified global-install entry point: the wrapper npm put on PATH,
+/// which resolves and execs the platform binary of its own channel.
+fn npm_wrapper_entry(prefix: &Path) -> PathBuf {
+    prefix.join("lib/node_modules/@zuohaisu/viva/bin/viva.js")
+}
+
+/// Post-install activation (default): hand a RUNNING resident server to the
+/// freshly installed entry point through the S3 live handoff — the handover
+/// IS the upgrade, and its terminals survive. No server, or a socket with no
+/// healthy host, is left alone with an honest note; a failed handover keeps
+/// the old generation serving and says so instead of failing the install,
+/// which already succeeded.
+fn restart_running_server(home: &Path, entry: &Path) {
+    let socket = home.join(crate::office::OFFICE_SOCKET_NAME);
+    if !socket.exists() {
+        println!("No running resident server; the next `viva` start will use the new version.");
+        return;
+    }
+    // Only a healthy host can hand over. A socket nobody answers is left
+    // for the next start to claim (`OfficeHost::open` records that).
+    if crate::office::OfficeClient::connect(home).is_err() {
+        eprintln!(
+            "viva: socket {} answered no healthy host; nothing to restart — \
+             the next `viva` start will claim it if it is stale",
+            socket.display()
+        );
+        return;
+    }
+    match crate::office::restart_server_with(home, entry) {
+        Ok(new_pid) => println!(
+            "Resident server restarted on the new version (pid {new_pid}); \
+             its terminals carried over — reconnect the TUI."
+        ),
+        Err(err) => eprintln!(
+            "viva: update installed, but the server restart failed: {err}\n\
+             The old server keeps serving; run `viva server-restart` when ready."
+        ),
+    }
+}
+
+fn print_restart_skipped() {
     println!(
-        "Running servers/agents were not restarted. Use `viva server-restart` explicitly to upgrade the server; reconnect the TUI afterwards."
+        "Server restart skipped (--no-restart). A running server keeps the old version until `viva server-restart`; reconnect the TUI afterwards."
     );
 }
 

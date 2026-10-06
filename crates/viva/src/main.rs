@@ -453,9 +453,11 @@ USAGE:
     viva doctor
         Report state root, database, schema versions and table counts.
 
-    viva update [--check]
+    viva update [--check] [--no-restart]
         Upgrade to the latest stable version (GitHub Release or global npm).
-        --check only checks. Does not modify VIVA_HOME or restart servers.
+        --check only checks. After installing, a running resident server is
+        restarted through the live handover (--no-restart skips); VIVA_HOME
+        data is untouched.
 
     viva event add <domain> <kind> <subject-type> <subject-id> [payload-json]
         Append one office event (origin: cli).

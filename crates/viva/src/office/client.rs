@@ -160,14 +160,20 @@ impl OfficeClient {
 /// `server.log` in the 0700 home. Returns once the spawn is handed to the
 /// OS — readiness is the caller's polling job.
 fn spawn_detached_server(home: &Path, extra_args: &[&str]) -> OfficeResult<()> {
-    let exe = std::env::current_exe()?;
+    spawn_detached_server_from(home, &std::env::current_exe()?, extra_args)
+}
+
+/// [`spawn_detached_server`] with an explicit entry point. The update flow
+/// passes the freshly installed wrapper/binary: the updating process itself
+/// is the OLD generation, and its on-disk executable has just been replaced.
+fn spawn_detached_server_from(home: &Path, entry: &Path, extra_args: &[&str]) -> OfficeResult<()> {
     let log_path = home.join("server.log");
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&log_path)?;
     let err_log = log.try_clone()?;
-    let mut command = Command::new(exe);
+    let mut command = Command::new(entry);
     command
         .arg("server")
         .args(extra_args)
@@ -192,6 +198,14 @@ fn spawn_detached_server(home: &Path, extra_args: &[&str]) -> OfficeResult<()> {
 /// the handoff, spawn the resumed server detached, and wait until a new
 /// host answers on the control socket. Returns the new host's pid.
 pub fn restart_server(home: &Path) -> OfficeResult<u32> {
+    restart_server_with(home, &std::env::current_exe()?)
+}
+
+/// [`restart_server`] with an explicit server entry point for the resumed
+/// host. The update flow passes the entry it just installed and verified —
+/// the handover then IS the upgrade: the old generation hands its live
+/// terminals to the new version.
+pub fn restart_server_with(home: &Path, server_entry: &Path) -> OfficeResult<u32> {
     crate::foundation::paths::ensure_private_dir(home)?;
     // The OLD server must be running; a restart never spawns anything.
     // Record its identity: during the handoff window the old host keeps
@@ -212,7 +226,7 @@ pub fn restart_server(home: &Path) -> OfficeResult<u32> {
     let _ = handoff_socket; // the resumed server finds it under the home
     drop(client);
 
-    spawn_detached_server(home, &["--resume"])?;
+    spawn_detached_server_from(home, server_entry, &["--resume"])?;
 
     // Wait until whoever answers is NOT the old host (QA F1 round 2): the
     // old host answers pings during the transfer window; the moment the

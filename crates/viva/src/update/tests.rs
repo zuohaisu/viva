@@ -137,12 +137,18 @@ impl Fixture {
 
 #[test]
 fn strict_arguments_and_semver_precedence() {
-    assert_eq!(parse_args(&[]).unwrap(), Mode::Install);
+    assert_eq!(parse_args(&[]).unwrap(), Mode::Install { restart: true });
+    assert_eq!(
+        parse_args(&["--no-restart".into()]).unwrap(),
+        Mode::Install { restart: false }
+    );
     assert_eq!(parse_args(&["--check".into()]).unwrap(), Mode::Check);
     assert_eq!(parse_args(&["--help".into()]).unwrap(), Mode::Help);
     for args in [
         vec!["--force".into()],
         vec!["--check".into(), "--check".into()],
+        vec!["--check".into(), "--no-restart".into()],
+        vec!["--no-restart".into(), "--no-restart".into()],
     ] {
         assert!(parse_args(&args).is_err());
     }
