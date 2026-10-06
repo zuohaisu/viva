@@ -136,6 +136,12 @@ pub struct AttentionMarker {
 /// from the real registries, the client renders it.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorkbenchModel {
+    #[serde(default)]
+    pub workspaces: Vec<crate::workspaces::navigation::WorkspaceRow>,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub workspace_diagnostics: Vec<String>,
     pub projects: Vec<ProjectRow>,
     pub worktrees: Vec<WorktreeRow>,
     pub tasks: Vec<TaskRow>,
@@ -207,6 +213,11 @@ pub enum WorkbenchAction {
     HandoffTo { worktree_id: String, agent: String },
     /// V15-4: toggle the auto_pull switch.
     ToggleAutoPull,
+    Workspace {
+        action: String,
+        value: Option<String>,
+        project_id: Option<String>,
+    },
 }
 
 /// An in-progress mouse drag (herdr-parity interaction). A pane-split drag
@@ -319,6 +330,7 @@ pub struct WorkbenchApp {
     /// The last divider click for double-click detection: (when, column,
     /// row). Cleared by any click that is not on a divider.
     last_divider_click: Option<(std::time::Instant, u16, u16)>,
+    workspace_prompt: Option<(String, String)>,
 }
 
 impl WorkbenchApp {
@@ -346,6 +358,7 @@ impl WorkbenchApp {
             sidebar_width: SIDEBAR_WIDTH,
             drag: DragState::None,
             last_divider_click: None,
+            workspace_prompt: None,
         }
     }
 
@@ -362,6 +375,9 @@ impl WorkbenchApp {
     }
 
     pub fn set_model(&mut self, model: WorkbenchModel) {
+        if !model.workspace_diagnostics.is_empty() {
+            self.set_status(model.workspace_diagnostics.join(" · "));
+        }
         self.model = model;
         self.clamp_selection();
     }
@@ -674,6 +690,27 @@ impl WorkbenchApp {
     /// Handle one key event.
     pub fn on_key(&mut self, key: KeyEvent) -> KeyOutcome {
         use ratatui::crossterm::event::KeyModifiers;
+        if let Some((action, text)) = &mut self.workspace_prompt {
+            match key.code {
+                KeyCode::Esc => self.workspace_prompt = None,
+                KeyCode::Backspace => {
+                    text.pop();
+                }
+                KeyCode::Char(c) => text.push(c),
+                KeyCode::Enter => {
+                    let action = action.clone();
+                    let value = Some(text.clone());
+                    self.workspace_prompt = None;
+                    return KeyOutcome::Action(WorkbenchAction::Workspace {
+                        action,
+                        value,
+                        project_id: None,
+                    });
+                }
+                _ => {}
+            }
+            return KeyOutcome::Handled;
+        }
         // QA F8: stale cleanup arming must never survive an unrelated
         // keypress — only the confirming second `D` keeps it.
         if self.cleanup_armed.is_some()
@@ -1026,6 +1063,48 @@ impl WorkbenchApp {
                     None => KeyOutcome::Ignored,
                 }
             }
+            KeyCode::Char('W' | 'N' | 'A' | 'S') => {
+                let action = match key.code {
+                    KeyCode::Char('W') => "open",
+                    KeyCode::Char('N') => "new",
+                    KeyCode::Char('A') => "add",
+                    _ => "save",
+                };
+                self.workspace_prompt = Some((action.into(), String::new()));
+                KeyOutcome::Handled
+            }
+            KeyCode::Char('[' | ']') => {
+                let ws = &self.model.workspaces;
+                if ws.is_empty() {
+                    return KeyOutcome::Ignored;
+                }
+                let i = ws
+                    .iter()
+                    .position(|w| Some(&w.workspace_id) == self.model.workspace_id.as_ref())
+                    .unwrap_or(0);
+                let next = if key.code == KeyCode::Char(']') {
+                    (i + 1) % ws.len()
+                } else {
+                    (i + ws.len() - 1) % ws.len()
+                };
+                KeyOutcome::Action(WorkbenchAction::Workspace {
+                    action: "select".into(),
+                    value: Some(ws[next].workspace_id.clone()),
+                    project_id: None,
+                })
+            }
+            KeyCode::Char('R') if self.focus == Focus::Worktrees => {
+                let project_id = self
+                    .model
+                    .worktrees
+                    .get(self.selected)
+                    .map(|w| w.project_id.clone());
+                KeyOutcome::Action(WorkbenchAction::Workspace {
+                    action: "remove".into(),
+                    value: None,
+                    project_id,
+                })
+            }
             KeyCode::Char('r') => KeyOutcome::Action(WorkbenchAction::Refresh),
             _ => KeyOutcome::Ignored,
         }
@@ -1178,9 +1257,21 @@ impl WorkbenchApp {
     /// panel, handoff picker, diff) sit on top of everything.
     pub fn draw(&mut self, frame: &mut Frame) {
         let palette = crate::tui::theme::Palette::catppuccin_mocha();
-        let rows =
-            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
-        let main = rows[0];
+        let rows = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(frame.area());
+        let name = self
+            .model
+            .workspaces
+            .iter()
+            .find(|w| Some(&w.workspace_id) == self.model.workspace_id.as_ref())
+            .map(|w| w.name.as_str())
+            .unwrap_or("All projects");
+        frame.render_widget(Paragraph::new(format!(" Workspace: {name} · [ ] switch/recent · W open · N new · A add · R remove · S save as")),rows[0]);
+        let main = rows[1];
 
         // herdr hides the sidebar on narrow terminals; so do we. The
         // user-chosen width applies, clamped so the pane grid keeps a
@@ -1287,7 +1378,18 @@ impl WorkbenchApp {
         if self.handoff_picker.is_some() {
             self.draw_handoff_picker(frame);
         }
-        self.draw_status_bar(frame, rows[1], &palette);
+        self.draw_status_bar(frame, rows[2], &palette);
+        if let Some((action, text)) = &self.workspace_prompt {
+            let area = centered(frame.area(), 80, 3);
+            frame.render_widget(Clear, area);
+            frame.render_widget(
+                Paragraph::new(text.as_str()).block(
+                    Block::bordered()
+                        .title(format!(" Workspace {action} · Enter confirm / Esc cancel ")),
+                ),
+                area,
+            );
+        }
         if let Some(diff) = &self.diff_view {
             self.draw_diff(frame, frame.area(), diff);
         }
@@ -2175,7 +2277,87 @@ impl<'a> WorkbenchStore<'a> {
             });
         }
 
+        let nav = crate::workspaces::navigation::Navigation { store: self.store };
+        let workspaces = nav.list()?;
+        let workspace_id = nav.selected()?;
+        let folders = workspace_id
+            .as_deref()
+            .map(|id| nav.folders(id))
+            .transpose()?
+            .unwrap_or_default();
+        let workspace_diagnostics = folders
+            .iter()
+            .filter_map(|f| f.diagnostic.as_ref().map(|d| format!("{}: {d}", f.name)))
+            .collect();
+        let projects = projects
+            .into_iter()
+            .filter(|p| {
+                workspace_id.is_none()
+                    || folders
+                        .iter()
+                        .any(|f| f.project_id.as_deref() == Some(&p.project_id))
+            })
+            .map(|mut p| {
+                if let Some(f) = folders
+                    .iter()
+                    .find(|f| f.project_id.as_deref() == Some(&p.project_id))
+                {
+                    p.name = f.name.clone();
+                }
+                p
+            })
+            .collect::<Vec<_>>();
+        let mut st = self
+            .store
+            .connection()
+            .prepare("SELECT worktree_id,project_id,path,branch FROM navigation_checkouts")?;
+        for row in st.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })? {
+            let (id, project_id, path, branch) = row?;
+            if !worktrees.iter().any(|w| w.path == path) {
+                worktrees.push(WorktreeRow {
+                    worktree_id: id,
+                    project_id,
+                    path: path.clone(),
+                    branch,
+                    dirty: self.dirty_state(std::path::Path::new(&path)),
+                    task_id: None,
+                    source: "discovered (read-only)".into(),
+                    pr_state: None,
+                    ahead: None,
+                    behind: None,
+                });
+            }
+        }
+        for p in &projects {
+            if folders.iter().any(|f| f.project_id.as_deref() == Some(&p.project_id) && f.diagnostic.as_deref() == Some("non-Git directory: shell only")) && !worktrees.iter().any(|w| w.project_id == p.project_id) {
+                worktrees.push(WorktreeRow {
+                    worktree_id: format!("directory:{}", p.project_id),
+                    project_id: p.project_id.clone(),
+                    path: p.repo_path.clone(),
+                    branch: "(directory — not Git)".into(),
+                    dirty: None,
+                    task_id: None,
+                    source: "directory".into(),
+                    pr_state: None,
+                    ahead: None,
+                    behind: None,
+                });
+            }
+        }
+        worktrees.retain(|w| {
+            workspace_id.is_none() || projects.iter().any(|p| p.project_id == w.project_id)
+        });
         Ok(WorkbenchModel {
+            workspaces,
+            workspace_id,
+            workspace_diagnostics,
             projects,
             worktrees,
             tasks,
@@ -2461,6 +2643,19 @@ fn apply_client_action(
     action: WorkbenchAction,
 ) -> OfficeResult<()> {
     match action {
+        WorkbenchAction::Workspace {
+            action,
+            value,
+            project_id,
+        } => {
+            let v = client.call(crate::office::OfficeRequestKind::Workspace {
+                action,
+                value,
+                project_id,
+            })?;
+            app.set_status(format!("workspace selected: {}", v["workspace_id"]));
+            Ok(())
+        }
         WorkbenchAction::EnterTerminal(id) => {
             app.attach_terminal(id.clone());
             app.enter_terminal_mode(id);
@@ -2766,6 +2961,9 @@ mod tests {
             }],
             auto_pull: false,
             sync_note: None,
+            workspaces: vec![],
+            workspace_id: None,
+            workspace_diagnostics: vec![],
         }
     }
 
@@ -3307,6 +3505,9 @@ mod v15_tui_fix_tests {
             attention: vec![],
             auto_pull: false,
             sync_note: None,
+            workspaces: vec![],
+            workspace_id: None,
+            workspace_diagnostics: vec![],
         }
     }
 

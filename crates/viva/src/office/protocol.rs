@@ -114,6 +114,14 @@ pub enum OfficeRequestKind {
     /// The workbench projection: projects, worktrees (+real dirty state),
     /// tasks, terminals (+live state) and needs-attention markers.
     WorkbenchView,
+    /// Owner-only local composition changes. No grants or execution changes.
+    Workspace {
+        action: String,
+        #[serde(default)]
+        value: Option<String>,
+        #[serde(default)]
+        project_id: Option<String>,
+    },
     /// The real bounded diff of one worktree against HEAD.
     WorkbenchDiff {
         worktree_id: String,

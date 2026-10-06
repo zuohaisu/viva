@@ -4,6 +4,8 @@
 //! tasks reference workspaces by id; switching a workspace never rewrites
 //! history (V03 attributes executions at creation time).
 
+pub mod navigation;
+
 use std::str::FromStr as _;
 
 use rusqlite::OptionalExtension;
@@ -49,12 +51,19 @@ CREATE TABLE project_references (
 /// Register the `workspaces_projects` domain migrations (this domain also
 /// serves the project tables — see `crate::projects`).
 pub fn register_migrations(registry: MigrationRegistry) -> MigrationRegistry {
-    registry.register(
-        DOMAIN_WORKSPACES_PROJECTS,
-        1,
-        "workspaces and projects v1",
-        WORKSPACES_PROJECTS_V1_SQL,
-    )
+    registry
+        .register(
+            DOMAIN_WORKSPACES_PROJECTS,
+            1,
+            "workspaces and projects v1",
+            WORKSPACES_PROJECTS_V1_SQL,
+        )
+        .register(
+            DOMAIN_WORKSPACES_PROJECTS,
+            2,
+            "workspace compositions and discovered checkouts",
+            navigation::V2_SQL,
+        )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

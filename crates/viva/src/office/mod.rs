@@ -142,6 +142,12 @@ pub fn office_migrations() -> &'static crate::foundation::store::FrozenMigration
                 "workspaces and projects v1",
                 crate::workspaces::WORKSPACES_PROJECTS_V1_SQL,
             );
+        let registry = registry.register(
+            crate::foundation::store::DOMAIN_WORKSPACES_PROJECTS,
+            2,
+            "workspace compositions and discovered checkouts",
+            crate::workspaces::navigation::V2_SQL,
+        );
         let registry = crate::tasks::register_migrations(registry);
         let registry = crate::authority::register_migrations(registry);
         let registry = crate::git::worktrees::register_migrations(registry);
@@ -783,6 +789,60 @@ fn handle_request(
             cols,
             rows,
         } => terminal_resize(&shared, terminal_id, *cols, *rows),
+        OfficeRequestKind::Workspace {
+            action,
+            value,
+            project_id,
+        } => {
+            let store = shared.store.lock().expect("office store");
+            let nav = crate::workspaces::navigation::Navigation { store: &store };
+            let required = || {
+                value
+                    .as_deref()
+                    .ok_or_else(|| OfficeError::Validation("workspace action needs value".into()))
+            };
+            let id = match action.as_str() {
+                "open" => Some(nav.open(Path::new(required()?))?),
+                "new" => Some(nav.create(required()?)?),
+                "select" => {
+                    nav.select(required()?)?;
+                    nav.selected()?
+                }
+                "add" => {
+                    let id = nav.selected()?.ok_or_else(|| {
+                        OfficeError::Validation("select a workspace first".into())
+                    })?;
+                    nav.add(&id, serde_json::json!({"path":required()?}), Path::new("/"))?;
+                    Some(id)
+                }
+                "remove" => {
+                    let id = nav.selected()?.ok_or_else(|| {
+                        OfficeError::Validation("select a workspace first".into())
+                    })?;
+                    nav.remove(
+                        &id,
+                        project_id.as_deref().ok_or_else(|| {
+                            OfficeError::Validation("remove needs project_id".into())
+                        })?,
+                    )?;
+                    Some(id)
+                }
+                "save" => {
+                    let id = nav.selected()?.ok_or_else(|| {
+                        OfficeError::Validation("select a workspace first".into())
+                    })?;
+                    nav.save_as(&id, Path::new(required()?))?;
+                    Some(id)
+                }
+                "list" => nav.selected()?,
+                _ => {
+                    return Err(OfficeError::Validation(
+                        "workspace action: open | new | select | add | remove | save | list".into(),
+                    ));
+                }
+            };
+            Ok(serde_json::json!({"workspace_id":id,"workspaces":nav.list()?}))
+        }
         OfficeRequestKind::WorkbenchView => workbench_view(Arc::clone(&shared)),
         OfficeRequestKind::WorkbenchDiff { worktree_id } => workbench_diff(&shared, worktree_id),
         OfficeRequestKind::WorkbenchLayout { layout_json } => {
@@ -890,6 +950,9 @@ fn is_member_gated_kind(kind: &OfficeRequestKind) -> bool {
     matches!(
         kind,
         OfficeRequestKind::Dispatch { .. }
+            | OfficeRequestKind::Workspace { .. }
+            | OfficeRequestKind::WorkbenchLayout { .. }
+            | OfficeRequestKind::TerminalOpenInWorktree { .. }
             | OfficeRequestKind::TerminalCreate { .. }
             | OfficeRequestKind::TerminalInput { .. }
             | OfficeRequestKind::TerminalResize { .. }
@@ -986,6 +1049,8 @@ fn authorize_socket_request(shared: &OfficeShared, request: &OfficeRequest) -> O
         if matches!(
             request.kind,
             OfficeRequestKind::Shutdown { .. }
+                | OfficeRequestKind::Workspace { .. }
+                | OfficeRequestKind::WorkbenchLayout { .. }
                 | OfficeRequestKind::Pause
                 | OfficeRequestKind::Resume
                 | OfficeRequestKind::SetAutoPull { .. }
@@ -1316,33 +1381,54 @@ fn terminal_open_in_worktree(
     shared: &OfficeShared,
     worktree_id: &str,
 ) -> OfficeResult<serde_json::Value> {
+    if let Some(pid) = worktree_id.strip_prefix("directory:") {
+        let store = shared.store.lock().expect("office store");
+        let project = crate::projects::ProjectRegistry::new(&store)
+            .require(&crate::foundation::ids::ProjectId::from_str(pid)?)?;
+        let spec = crate::terminal::TerminalSpec::new(
+            vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())],
+            project.repo_path,
+        )?;
+        let (id, handle) = shared.terminals.spawn(
+            spec,
+            TerminalOwner::UserShell,
+            None,
+            "directory shell",
+            None,
+            Some(&store),
+        )?;
+        return Ok(serde_json::json!({"terminal_id":id.to_string(),"pid":handle.pid()}));
+    }
     let worktree_id = WorktreeId::from_str(worktree_id)?;
     let store = shared.store.lock().expect("office store");
     let service = crate::git::worktrees::WorktreeService::new(
         &store,
         crate::git::worktrees::ProtectedRefs::new(vec![]),
     );
-    let record = service
-        .record(&worktree_id)?
-        .ok_or_else(|| OfficeError::NotFound {
-            entity: "worktree",
-            id: worktree_id.to_string(),
-        })?;
+    let (path, branch) = match service.record(&worktree_id)? {
+        Some(r) => (r.worktree_path, r.branch),
+        None => crate::workspaces::navigation::Navigation { store: &store }
+            .checkout(worktree_id.as_str())?
+            .ok_or_else(|| OfficeError::NotFound {
+                entity: "worktree",
+                id: worktree_id.to_string(),
+            })?,
+    };
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let spec = crate::terminal::TerminalSpec::new(vec![shell], record.worktree_path.clone())?;
+    let spec = crate::terminal::TerminalSpec::new(vec![shell], path.clone())?;
     let (terminal_id, handle) = shared.terminals.spawn(
         spec,
         TerminalOwner::UserShell,
         Some(worktree_id),
-        format!("shell · {}", record.branch),
+        format!("shell · {}", branch),
         None,
         Some(&store),
     )?;
     Ok(serde_json::json!({
         "terminal_id": terminal_id.to_string(),
         "pid": handle.pid(),
-        "cwd": record.worktree_path.display().to_string(),
-        "branch": record.branch,
+        "cwd": path.display().to_string(),
+        "branch": branch,
     }))
 }
 
