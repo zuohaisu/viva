@@ -269,8 +269,11 @@ pub struct WorkbenchApp {
     cleanup_armed: Option<String>,
     /// QA F4: scroll offset into the diff overlay.
     diff_scroll: usize,
-    /// The pane area as last drawn (P3): split refuses to create panes
-    /// smaller than the minimum usable size at this real terminal size.
+    /// The pane area as last drawn: split refuses to create ANY pane below
+    /// the minimum usable size at this real terminal size (P3). Invariant:
+    /// a split before the first draw is only cap-checked — the product run
+    /// loop always draws before reading keys, so it never hits that gap;
+    /// tests may set the area directly.
     last_pane_area: Option<Rect>,
 }
 
@@ -496,9 +499,14 @@ impl WorkbenchApp {
         let content = PaneContent::Terminal(terminal_id);
         if self.grid.split(&self.pane_focus, axis, content.clone()) {
             if let Some(area) = self.last_pane_area {
-                let too_small = self.grid.render_layout_chrome(area).iter().any(|(c, r)| {
-                    *c == content && (r.width < MIN_PANE_WIDTH || r.height < MIN_PANE_HEIGHT)
-                });
+                // Every leaf must stay usable — not just the new one: the
+                // ratio split can hand the KEPT (focused) pane the smaller
+                // half on odd widths.
+                let too_small = self
+                    .grid
+                    .render_layout_chrome(area)
+                    .iter()
+                    .any(|(_, r)| r.width < MIN_PANE_WIDTH || r.height < MIN_PANE_HEIGHT);
                 if too_small {
                     // Undo: the new leaf collapses back into its sibling.
                     self.grid.close(&content);
@@ -2432,11 +2440,18 @@ fn spawn_and_split(
     if !app.split_pane(axis, terminal_id.clone()) {
         // The split was refused after the spawn (e.g. a pane would fall
         // below the minimum size): roll the terminal back so nothing runs
-        // orphaned.
-        let _ = client.call(crate::office::OfficeRequestKind::TerminalStop {
+        // orphaned. The raw-mode client has no log sink — the status line
+        // is the record — so a FAILED rollback says so instead of being
+        // swallowed.
+        match client.call(crate::office::OfficeRequestKind::TerminalStop {
             terminal_id: terminal_id.clone(),
-        });
-        app.set_status(format!("split refused — terminal {terminal_id} stopped"));
+        }) {
+            Ok(_) => app.set_status(format!("split refused — terminal {terminal_id} stopped")),
+            Err(err) => app.set_status(format!(
+                "split refused — terminal {terminal_id} could NOT be stopped ({err}); \
+                 it keeps running server-side with no pane"
+            )),
+        }
     }
     Ok(())
 }
@@ -2963,6 +2978,26 @@ mod tests {
         assert!(
             frame.contains("too small"),
             "the refusal is explained: {frame}"
+        );
+    }
+
+    /// The min-size check covers EVERY leaf: the ratio split can hand the
+    /// kept (focused) pane the smaller half on odd widths.
+    #[test]
+    fn split_checks_the_kept_leaf_too() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        // 15 columns: a 50% split gives the KEPT pane 7 (< 8) and the new
+        // leaf 8+1 — the asymmetric (new-leaf-only) check let this through.
+        app.last_pane_area = Some(Rect::new(0, 0, 15, 23));
+        assert!(
+            !app.split_pane(SplitAxis::Horizontal, "t1".into()),
+            "a split that starves the kept pane must be refused"
+        );
+        assert_eq!(
+            app.terminal_leaves().len(),
+            0,
+            "the refused split never entered the tree"
         );
     }
 
