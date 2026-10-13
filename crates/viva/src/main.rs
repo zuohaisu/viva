@@ -48,12 +48,18 @@ fn run(args: &[String]) -> OfficeResult<()> {
         ) => cmd_office(args),
         Some("workspace") => cmd_workspace(args.get(1..).unwrap_or(&[])),
         Some("open") => {
-            cmd_workspace(&[
-                "open".into(),
-                args.get(1)
-                    .cloned()
-                    .ok_or_else(|| OfficeError::Validation("open needs a path".into()))?,
-            ])?;
+            // `viva open <path>` = open the workspace, then the workbench.
+            // The tty gate comes first so a failing call never leaves a
+            // resident server (or a half-opened workspace) behind.
+            require_interactive_terminal()?;
+            let path = args
+                .get(1)
+                .ok_or_else(|| OfficeError::Validation("open needs a path".into()))?;
+            let reply = workspace_call(&["open".into(), path.clone()])?;
+            eprintln!(
+                "{}",
+                reply["message"].as_str().unwrap_or("workspace opened")
+            );
             cmd_workbench()
         }
         Some("terminal") => cmd_terminal(args.get(1..).unwrap_or(&[])),
@@ -81,15 +87,10 @@ fn run(args: &[String]) -> OfficeResult<()> {
     }
 }
 
-/// `viva workbench` — the interactive parallel-development workbench, run
-/// as a CLIENT of the resident office server. If no healthy server answers,
-/// one is spawned detached first (its own process group, log in
-/// `server.log`). `q` detaches the client; the server keeps every terminal
-/// running until an explicit `viva shutdown` (ADR 0012, issue #43).
-fn cmd_workbench() -> OfficeResult<()> {
-    // Honest gate BEFORE any server is started: a workbench without a real
-    // terminal cannot work, and auto-starting a resident server for a call
-    // that must fail would leak a runtime.
+/// Honest gate BEFORE any server is started: a workbench without a real
+/// terminal cannot work, and auto-starting a resident server for a call
+/// that must fail would leak a runtime.
+fn require_interactive_terminal() -> OfficeResult<()> {
     #[cfg(unix)]
     let stdin_is_tty = unsafe { libc::isatty(0) == 1 };
     #[cfg(not(unix))]
@@ -102,6 +103,16 @@ fn cmd_workbench() -> OfficeResult<()> {
                 .into(),
         ));
     }
+    Ok(())
+}
+
+/// `viva workbench` — the interactive parallel-development workbench, run
+/// as a CLIENT of the resident office server. If no healthy server answers,
+/// one is spawned detached first (its own process group, log in
+/// `server.log`). `q` detaches the client; the server keeps every terminal
+/// running until an explicit `viva shutdown` (ADR 0012, issue #43).
+fn cmd_workbench() -> OfficeResult<()> {
+    require_interactive_terminal()?;
     let home = viva::foundation::paths::viva_home(None);
     let client = viva::office::OfficeClient::ensure_server(&home)?;
     eprintln!(
@@ -462,6 +473,18 @@ USAGE:
 
     viva doctor
         Report state root, database, schema versions and table counts.
+
+    viva open <path>
+        Open a repo, a folder or a VS Code `.code-workspace` file as the
+        current workspace, then attach the workbench. The same path always
+        maps to the same workspace; the file itself is never modified.
+
+    viva workspace [list | open <path> | new <name> | select <id|all> |
+                    add <dir> | remove <project-id|path> | save <file> |
+                    refresh]
+        Compose workspaces without the TUI (owner only). `save` writes a
+        `.code-workspace` file that VS Code opens; only its `folders` list
+        changes. Removing a folder never deletes files or stops processes.
 
     viva update [--check] [--no-restart]
         Upgrade to the latest stable version (GitHub Release or global npm).
@@ -2118,7 +2141,8 @@ fn write_private_export_json(
     Ok(())
 }
 
-fn cmd_workspace(args: &[String]) -> OfficeResult<()> {
+/// One owner-only workspace request over the real channel.
+fn workspace_call(args: &[String]) -> OfficeResult<serde_json::Value> {
     let home = viva_home(None);
     let mut client = viva::office::OfficeClient::ensure_server(&home)?;
     let action = args
@@ -2129,10 +2153,11 @@ fn cmd_workspace(args: &[String]) -> OfficeResult<()> {
     let mut value = args.get(1).cloned();
     if matches!(action.as_str(), "open" | "add" | "save") {
         if let Some(v) = &value {
-            let p = std::path::Path::new(v);
-            if !p.is_absolute() {
-                value = Some(std::env::current_dir()?.join(p).display().to_string());
-            }
+            value = Some(
+                viva::workspaces::navigation::absolutize(v, &std::env::current_dir()?)
+                    .display()
+                    .to_string(),
+            );
         }
     }
     let project_id = if action == "remove" {
@@ -2140,15 +2165,16 @@ fn cmd_workspace(args: &[String]) -> OfficeResult<()> {
     } else {
         None
     };
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&client.call(viva::office::OfficeRequestKind::Workspace {
-            action,
-            value,
-            project_id
-        })?)
-        .unwrap()
-    );
+    client.call(viva::office::OfficeRequestKind::Workspace {
+        action,
+        value,
+        project_id,
+    })
+}
+
+/// `viva workspace [list|open|new|select|add|remove|save|refresh] [value]`.
+fn cmd_workspace(args: &[String]) -> OfficeResult<()> {
+    println!("{}", serde_json::to_string_pretty(&workspace_call(args)?)?);
     Ok(())
 }
 

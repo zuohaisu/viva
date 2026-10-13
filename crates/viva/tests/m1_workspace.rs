@@ -25,8 +25,9 @@ fn workspace_roundtrip_retains_unavailable_folders_and_other_fields() {
     assert!(rows.iter().all(|r| r.diagnostic.is_some()));
     let save = dir.path().join("saved.code-workspace");
     nav.save_as(&id, &save).unwrap();
-    let v: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(save).unwrap()).unwrap();
+    // The copy keeps the source's comments (S1, #74), so it is JSONC like any
+    // `.code-workspace` file VS Code writes; every assertion below is unchanged.
+    let v = parse_jsonc(&std::fs::read_to_string(save).unwrap()).unwrap();
     assert_eq!(v["settings"]["url"], "https://example.com");
     assert_eq!(v["folders"][0]["name"], "Absent");
     assert_eq!(std::fs::read_to_string(input).unwrap(), original);

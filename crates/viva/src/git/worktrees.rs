@@ -180,6 +180,25 @@ impl<'a> WorktreeService<'a> {
     /// Git-native discovery of every worktree of `repo_root`, annotated
     /// with dirty state and office occupancy. Read-only.
     pub fn discover(&self, repo_root: &Path) -> OfficeResult<Vec<DiscoveredWorktree>> {
+        let mut found = self.list_registered(repo_root)?;
+        // Annotate: tree state (missing for prunable/deleted dirs is fine).
+        for entry in &mut found {
+            if !entry.bare {
+                entry.tree = tree_state(&self.runner, &entry.path);
+            }
+            if let Some(branch) = entry.branch.clone() {
+                let claim = self.office_claim(repo_root, &branch)?;
+                entry.occupied_by_task = claim.as_ref().map(|(task, _)| task.clone());
+                entry.office_source = claim.map(|(_, source)| source);
+            }
+        }
+        Ok(found)
+    }
+
+    /// The worktrees git itself lists for `repo_root` (`git worktree list
+    /// --porcelain`), without tree-state or office annotations. One cheap
+    /// process; navigation re-scans with this on every workspace switch.
+    pub fn list_registered(&self, repo_root: &Path) -> OfficeResult<Vec<DiscoveredWorktree>> {
         let out = self
             .runner
             .git_ok(repo_root, &["worktree", "list", "--porcelain"])?;
@@ -235,18 +254,6 @@ impl<'a> WorktreeService<'a> {
         }
         if let Some(prev) = current.take() {
             found.push(prev);
-        }
-
-        // Annotate: tree state (missing for prunable/deleted dirs is fine).
-        for entry in &mut found {
-            if !entry.bare {
-                entry.tree = tree_state(&self.runner, &entry.path);
-            }
-            if let Some(branch) = entry.branch.clone() {
-                let claim = self.office_claim(repo_root, &branch)?;
-                entry.occupied_by_task = claim.as_ref().map(|(task, _)| task.clone());
-                entry.office_source = claim.map(|(_, source)| source);
-            }
         }
         Ok(found)
     }

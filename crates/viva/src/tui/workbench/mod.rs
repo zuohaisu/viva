@@ -296,6 +296,32 @@ pub struct HandoffPicker {
     pub selected: usize,
 }
 
+/// The one-line input of the workspace actions (`W` open, `N` new, `A` add,
+/// `S` save as). For `open`, the most recent workspaces are listed under
+/// the input; ↑/↓ pick one and Enter on an empty input switches to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspacePrompt {
+    action: &'static str,
+    text: String,
+    pick: Option<usize>,
+}
+
+impl WorkspacePrompt {
+    fn title(&self) -> &'static str {
+        match self.action {
+            "open" => {
+                " Open workspace: a repo, a folder or a .code-workspace file · ↑↓ recent · Enter · Esc "
+            }
+            "new" => " New workspace name · Enter · Esc ",
+            "add" => " Add project: path of a repo or folder · Enter · Esc ",
+            _ => " Save As: path of the .code-workspace file · Enter · Esc ",
+        }
+    }
+}
+
+/// How many recent workspaces the open prompt lists.
+const RECENT_LIMIT: usize = 8;
+
 /// The workbench application state. Pure view state + explicit caches;
 /// drive it with [`WorkbenchApp::on_key`], the setters, and [`Self::draw`].
 pub struct WorkbenchApp {
@@ -355,7 +381,9 @@ pub struct WorkbenchApp {
     /// The last divider click for double-click detection: (when, column,
     /// row). Cleared by any click that is not on a divider.
     last_divider_click: Option<(std::time::Instant, u16, u16)>,
-    workspace_prompt: Option<(String, String)>,
+    workspace_prompt: Option<WorkspacePrompt>,
+    /// Click targets of the top workspace switcher (`None` = All projects).
+    workspace_hits: Vec<(Option<String>, Rect)>,
     scenes: SceneBook,
     tab_prompt: Option<String>,
     tab_hits: Vec<(String, Rect)>,
@@ -394,6 +422,7 @@ impl WorkbenchApp {
             drag_moved: false,
             last_divider_click: None,
             workspace_prompt: None,
+            workspace_hits: vec![],
             scenes:SceneBook::default(),
             tab_prompt:None,
             tab_hits:vec![],
@@ -476,7 +505,97 @@ impl WorkbenchApp {
         let value = old.saturating_add_signed(delta).min(retained);
         self.scroll_offsets.insert(id, value);
     }
+    /// `None` (All projects) followed by every workspace in creation order.
+    fn switcher_order(&self) -> Vec<Option<String>> {
+        std::iter::once(None)
+            .chain(
+                self.model
+                    .workspaces
+                    .iter()
+                    .map(|w| Some(w.workspace_id.clone())),
+            )
+            .collect()
+    }
+
+    fn select_workspace(id: Option<String>) -> WorkbenchAction {
+        WorkbenchAction::Workspace {
+            action: "select".into(),
+            value: Some(id.unwrap_or_else(|| "all".into())),
+            project_id: None,
+        }
+    }
+
+    /// Most recently opened workspaces, newest first.
+    fn recent_workspaces(&self) -> Vec<&crate::workspaces::navigation::WorkspaceRow> {
+        // Reversed first: the sort is stable, so equal timestamps keep the
+        // newest-created first, exactly like the store's own ordering.
+        let mut recent: Vec<_> = self.model.workspaces.iter().rev().collect();
+        recent.sort_by(|a, b| b.opened_at.cmp(&a.opened_at));
+        recent.truncate(RECENT_LIMIT);
+        recent
+    }
+
+    fn on_workspace_prompt_key(&mut self, key: KeyEvent) -> KeyOutcome {
+        use ratatui::crossterm::event::KeyModifiers;
+        let recent_len = self.recent_workspaces().len();
+        let Some(prompt) = self.workspace_prompt.as_mut() else {
+            return KeyOutcome::Ignored;
+        };
+        match key.code {
+            KeyCode::Esc => self.workspace_prompt = None,
+            KeyCode::Backspace => {
+                prompt.text.pop();
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                prompt.text.clear();
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                prompt.text.push(c);
+                prompt.pick = None;
+            }
+            KeyCode::Down if prompt.action == "open" && recent_len > 0 => {
+                prompt.pick = Some(prompt.pick.map_or(0, |i| (i + 1).min(recent_len - 1)));
+            }
+            KeyCode::Up if prompt.action == "open" => {
+                prompt.pick = prompt.pick.and_then(|i| i.checked_sub(1));
+            }
+            KeyCode::Enter => {
+                let (action, text, pick) =
+                    (prompt.action, prompt.text.trim().to_string(), prompt.pick);
+                if let (true, true, Some(i)) = (action == "open", text.is_empty(), pick) {
+                    let id = self
+                        .recent_workspaces()
+                        .get(i)
+                        .map(|w| w.workspace_id.clone());
+                    self.workspace_prompt = None;
+                    return match id {
+                        Some(id) => KeyOutcome::Action(Self::select_workspace(Some(id))),
+                        None => KeyOutcome::Handled,
+                    };
+                }
+                if text.is_empty() {
+                    self.set_status("type a value first (Esc cancels)");
+                    return KeyOutcome::Handled;
+                }
+                self.workspace_prompt = None;
+                return KeyOutcome::Action(WorkbenchAction::Workspace {
+                    action: action.into(),
+                    value: Some(text),
+                    project_id: None,
+                });
+            }
+            _ => {}
+        }
+        KeyOutcome::Handled
+    }
+
     pub fn on_paste(&mut self, text: &str) -> KeyOutcome {
+        if let Some(prompt) = self.workspace_prompt.as_mut() {
+            // A pasted path lands in the prompt, newlines dropped.
+            prompt.text.extend(text.chars().filter(|c| !c.is_control()));
+            prompt.pick = None;
+            return KeyOutcome::Handled;
+        }
         if self.terminal_mode.is_none() {
             return KeyOutcome::Ignored;
         }
@@ -1104,26 +1223,8 @@ impl WorkbenchApp {
             }
             return KeyOutcome::Handled;
         }
-        if let Some((action, text)) = &mut self.workspace_prompt {
-            match key.code {
-                KeyCode::Esc => self.workspace_prompt = None,
-                KeyCode::Backspace => {
-                    text.pop();
-                }
-                KeyCode::Char(c) => text.push(c),
-                KeyCode::Enter => {
-                    let action = action.clone();
-                    let value = Some(text.clone());
-                    self.workspace_prompt = None;
-                    return KeyOutcome::Action(WorkbenchAction::Workspace {
-                        action,
-                        value,
-                        project_id: None,
-                    });
-                }
-                _ => {}
-            }
-            return KeyOutcome::Handled;
+        if self.workspace_prompt.is_some() {
+            return self.on_workspace_prompt_key(key);
         }
         // QA F8: stale cleanup arming must never survive an unrelated
         // keypress — only the confirming second `D` keeps it.
@@ -1523,47 +1624,71 @@ impl WorkbenchApp {
                 }
                 KeyOutcome::Handled
             }
-            KeyCode::Char('W' | 'N' | 'A' | 'S') => {
-                let action = match key.code {
-                    KeyCode::Char('W') => "open",
-                    KeyCode::Char('N') => "new",
-                    KeyCode::Char('A') => "add",
+            KeyCode::Char(c @ ('W' | 'N' | 'A' | 'S')) => {
+                if c == 'A' && self.model.workspace_id.is_none() {
+                    self.set_status("open or create a workspace first (W / N), then add projects");
+                    return KeyOutcome::Handled;
+                }
+                if c == 'S' && self.model.workspace_id.is_none() {
+                    self.set_status(
+                        "select a workspace to save (All projects is not a composition)",
+                    );
+                    return KeyOutcome::Handled;
+                }
+                let action = match c {
+                    'W' => "open",
+                    'N' => "new",
+                    'A' => "add",
                     _ => "save",
                 };
-                self.workspace_prompt = Some((action.into(), String::new()));
+                self.workspace_prompt = Some(WorkspacePrompt {
+                    action,
+                    text: String::new(),
+                    pick: None,
+                });
                 KeyOutcome::Handled
             }
-            KeyCode::Char('[' | ']') => {
-                let ws = &self.model.workspaces;
-                if ws.is_empty() {
+            KeyCode::Char(c @ ('[' | ']')) => {
+                // Stable order (creation), with "All projects" in front:
+                // switching never reorders the switcher.
+                let order = self.switcher_order();
+                if order.len() < 2 {
                     return KeyOutcome::Ignored;
                 }
-                let i = ws
+                let i = order
                     .iter()
-                    .position(|w| Some(&w.workspace_id) == self.model.workspace_id.as_ref())
+                    .position(|w| *w == self.model.workspace_id)
                     .unwrap_or(0);
-                let next = if key.code == KeyCode::Char(']') {
-                    (i + 1) % ws.len()
+                let next = if c == ']' {
+                    (i + 1) % order.len()
                 } else {
-                    (i + ws.len() - 1) % ws.len()
+                    (i + order.len() - 1) % order.len()
                 };
-                KeyOutcome::Action(WorkbenchAction::Workspace {
-                    action: "select".into(),
-                    value: Some(ws[next].workspace_id.clone()),
-                    project_id: None,
-                })
+                KeyOutcome::Action(Self::select_workspace(order[next].clone()))
             }
-            KeyCode::Char('R') if self.focus == Focus::Worktrees => {
-                let project_id = self
-                    .model
-                    .worktrees
-                    .get(self.selected)
-                    .map(|w| w.project_id.clone());
-                KeyOutcome::Action(WorkbenchAction::Workspace {
-                    action: "remove".into(),
-                    value: None,
-                    project_id,
-                })
+            KeyCode::Char('R') => {
+                if self.model.workspace_id.is_none() {
+                    self.set_status(
+                        "All projects is not a composition; select a workspace to remove from",
+                    );
+                    return KeyOutcome::Handled;
+                }
+                let project = (self.focus == Focus::Worktrees)
+                    .then(|| self.model.worktrees.get(self.selected))
+                    .flatten()
+                    .map(|w| w.project_id.clone())
+                    .filter(|p| !p.is_empty());
+                match project {
+                    Some(project_id) => KeyOutcome::Action(WorkbenchAction::Workspace {
+                        action: "remove".into(),
+                        value: None,
+                        project_id: Some(project_id),
+                    }),
+                    None => {
+                        self.set_status("select a project's row in the spaces list, then R");
+                        KeyOutcome::Handled
+                    }
+                }
             }
             KeyCode::Char('r') => KeyOutcome::Action(WorkbenchAction::Refresh),
             _ => KeyOutcome::Ignored,
@@ -1600,6 +1725,15 @@ impl WorkbenchApp {
             || self.handoff_picker.is_some()
             || self.diff_view.is_some()
         {
+            return;
+        }
+        if let Some((id, _)) = self
+            .workspace_hits
+            .iter()
+            .find(|(_, r)| contains_point(*r, column, row))
+            .cloned()
+        {
+            self.mouse_action = Some(Self::select_workspace(id));
             return;
         }
         if let Some((id, _)) = self
@@ -1769,14 +1903,7 @@ impl WorkbenchApp {
             Constraint::Length(1),
         ])
         .split(frame.area());
-        let name = self
-            .model
-            .workspaces
-            .iter()
-            .find(|w| Some(&w.workspace_id) == self.model.workspace_id.as_ref())
-            .map(|w| w.name.as_str())
-            .unwrap_or("All projects");
-        frame.render_widget(Paragraph::new(format!(" Workspace: {name} · [ ] switch/recent · W open · N new · A add · R remove · S save as")),rows[0]);
+        self.draw_workspace_bar(frame, rows[0], &palette);
         let main = rows[1];
 
         // herdr hides the sidebar on narrow terminals; so do we. The
@@ -1952,14 +2079,38 @@ impl WorkbenchApp {
                 area,
             );
         }
-        if let Some((action, text)) = &self.workspace_prompt {
-            let area = centered(frame.area(), 80, 3);
+        if let Some(prompt) = &self.workspace_prompt {
+            let recent = self.recent_workspaces();
+            let listed = if prompt.action == "open" {
+                recent.len()
+            } else {
+                0
+            };
+            let area = centered(frame.area(), 80, 3 + listed as u16 + u16::from(listed > 0));
             frame.render_widget(Clear, area);
+            let mut lines = vec![Line::from(format!("{}▏", prompt.text))];
+            if listed > 0 {
+                lines.push(Line::from(Span::styled(
+                    "recent",
+                    ratatui::style::Style::new().fg(palette.subtext0),
+                )));
+                for (i, w) in recent.iter().enumerate() {
+                    let marker = if prompt.pick == Some(i) { "›" } else { " " };
+                    let current = if Some(&w.workspace_id) == self.model.workspace_id.as_ref() {
+                        " (current)"
+                    } else {
+                        ""
+                    };
+                    let place = w.source_path.as_deref().unwrap_or("not saved to a file");
+                    let mut line = Line::from(format!("{marker} {}{current} — {place}", w.name));
+                    if prompt.pick == Some(i) {
+                        line = line.style(ratatui::style::Style::new().reversed());
+                    }
+                    lines.push(line);
+                }
+            }
             frame.render_widget(
-                Paragraph::new(text.as_str()).block(
-                    Block::bordered()
-                        .title(format!(" Workspace {action} · Enter confirm / Esc cancel ")),
-                ),
+                Paragraph::new(lines).block(Block::bordered().title(prompt.title())),
                 area,
             );
         }
@@ -2097,6 +2248,71 @@ impl WorkbenchApp {
     /// go last, truncated with an ellipsis. Honesty never loses its row to
     /// decoration on a narrow terminal (QA F5). The client version sits
     /// dim at the right edge: provenance without noise.
+    /// The top switcher: "All projects" plus every workspace as a clickable
+    /// tab in a stable order, the current one highlighted, then key hints.
+    fn draw_workspace_bar(&mut self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        self.workspace_hits.clear();
+        let order = self.switcher_order();
+        let label_of = |id: &Option<String>| -> String {
+            match id {
+                None => " All projects ".to_string(),
+                Some(id) => self
+                    .model
+                    .workspaces
+                    .iter()
+                    .find(|w| &w.workspace_id == id)
+                    .map_or_else(|| " ? ".to_string(), |w| format!(" {} ", w.name)),
+            }
+        };
+        let labels: Vec<(Option<String>, String)> =
+            order.iter().map(|id| (id.clone(), label_of(id))).collect();
+        let width = |s: &str| s.chars().count() as u16;
+        let active = labels
+            .iter()
+            .position(|(id, _)| *id == self.model.workspace_id)
+            .unwrap_or(0);
+        // Scroll the strip just far enough that the current tab is visible.
+        let budget = area.width.saturating_sub(2);
+        let mut first = 0;
+        while first < active
+            && labels[first..=active]
+                .iter()
+                .map(|(_, l)| width(l) + 1)
+                .sum::<u16>()
+                > budget
+        {
+            first += 1;
+        }
+        let mut x = area.x;
+        for (i, (id, label)) in labels.iter().enumerate().skip(first) {
+            let w = width(label).min(area.right().saturating_sub(x));
+            if w == 0 {
+                break;
+            }
+            let rect = Rect::new(x, area.y, w, 1);
+            let style = if i == active {
+                ratatui::style::Style::new().bold().reversed()
+            } else {
+                ratatui::style::Style::new().fg(palette.subtext0)
+            };
+            frame.render_widget(Paragraph::new(Span::styled(label.clone(), style)), rect);
+            self.workspace_hits.push((id.clone(), rect));
+            x += w + 1;
+        }
+        let hint = " [ ] switch · W open · N new · A add · R remove · S save as · r rescan";
+        let room = area.right().saturating_sub(x);
+        if room > 12 {
+            let shown: String = hint.chars().take(room as usize).collect();
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    shown,
+                    ratatui::style::Style::new().fg(palette.subtext0),
+                )),
+                Rect::new(x, area.y, room, 1),
+            );
+        }
+    }
+
     fn draw_status_bar(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
         // The version badge reserves its columns at the right edge first
         // (dim, unobtrusive provenance); the hints budget shrinks around
@@ -2824,16 +3040,31 @@ impl<'a> WorkbenchStore<'a> {
         // Worktree records + real dirty state per record.
         let worktree_service =
             crate::git::worktrees::WorktreeService::new(self.store, self.protected.clone());
+        // A task worktree belongs to its task's project; a task without a
+        // project still hangs under the repo the worktree was cut from, so
+        // it never falls out of the tree.
+        let project_of_repo: std::collections::HashMap<std::path::PathBuf, String> = projects
+            .iter()
+            .map(|p| {
+                let path = std::path::PathBuf::from(&p.repo_path);
+                (
+                    std::fs::canonicalize(&path).unwrap_or(path),
+                    p.project_id.clone(),
+                )
+            })
+            .collect();
         let mut worktrees = worktree_service
             .all_records()?
             .into_iter()
             .filter(|r| r.released_at.is_none())
             .map(|r| {
                 let dirty = self.dirty_state(&r.worktree_path);
+                let repo = std::fs::canonicalize(&r.repo_root).unwrap_or(r.repo_root.clone());
                 WorktreeRow {
                     worktree_id: r.worktree_id.to_string(),
                     project_id: project_of_task
                         .get(&r.task_id.to_string())
+                        .or_else(|| project_of_repo.get(&repo))
                         .cloned()
                         .unwrap_or_default(),
                     path: r.worktree_path.to_string_lossy().into_owned(),
@@ -2902,34 +3133,33 @@ impl<'a> WorkbenchStore<'a> {
 
         let nav = crate::workspaces::navigation::Navigation { store: self.store };
         let workspaces = nav.list()?;
-        let workspace_id = nav.selected()?;
-        let folders = workspace_id
-            .as_deref()
-            .map(|id| nav.folders(id))
-            .transpose()?
+        let selection = nav.selection()?;
+        let workspace_id = selection.as_ref().map(|s| s.workspace_id.clone());
+        let folders = selection
+            .as_ref()
+            .map(|s| s.folders.clone())
             .unwrap_or_default();
-        let workspace_diagnostics = folders
-            .iter()
-            .filter_map(|f| f.diagnostic.as_ref().map(|d| format!("{}: {d}", f.name)))
-            .collect();
-        let projects = projects
-            .into_iter()
-            .filter(|p| {
-                workspace_id.is_none()
-                    || folders
-                        .iter()
-                        .any(|f| f.project_id.as_deref() == Some(&p.project_id))
-            })
-            .map(|mut p| {
-                if let Some(f) = folders
-                    .iter()
-                    .find(|f| f.project_id.as_deref() == Some(&p.project_id))
-                {
-                    p.name = f.name.clone();
-                }
-                p
-            })
-            .collect::<Vec<_>>();
+        let workspace_diagnostics = selection
+            .as_ref()
+            .map(crate::workspaces::navigation::WorkspaceSelection::diagnostics)
+            .unwrap_or_default();
+        // The selected composition decides which projects show, in its own
+        // order and under its own display names.
+        let projects = match &selection {
+            None => projects,
+            Some(sel) => sel
+                .project_ids()
+                .into_iter()
+                .filter_map(|id| projects.iter().find(|p| p.project_id == id))
+                .map(|p| ProjectRow {
+                    name: sel
+                        .project_name(&p.project_id)
+                        .unwrap_or(&p.name)
+                        .to_string(),
+                    ..p.clone()
+                })
+                .collect(),
+        };
         let mut st = self
             .store
             .connection()
@@ -2961,7 +3191,7 @@ impl<'a> WorkbenchStore<'a> {
         for p in &projects {
             if folders.iter().any(|f| {
                 f.project_id.as_deref() == Some(&p.project_id)
-                    && f.diagnostic.as_deref() == Some("non-Git directory: shell only")
+                    && f.diagnostic.as_deref() == Some(crate::workspaces::navigation::DIAG_NOT_GIT)
             }) && !worktrees.iter().any(|w| w.project_id == p.project_id)
             {
                 worktrees.push(WorktreeRow {
@@ -2979,7 +3209,9 @@ impl<'a> WorkbenchStore<'a> {
             }
         }
         worktrees.retain(|w| {
-            workspace_id.is_none() || projects.iter().any(|p| p.project_id == w.project_id)
+            selection
+                .as_ref()
+                .is_none_or(|sel| sel.contains_project(&w.project_id))
         });
         Ok(WorkbenchModel {
             agents: vec![],
@@ -3294,6 +3526,16 @@ fn run_client_inner(client: &mut crate::office::OfficeClient) -> OfficeResult<()
     Ok(())
 }
 
+/// One status line for a workspace reply: what happened, plus how many
+/// folders are unavailable (the diagnostics themselves follow in the view).
+fn workspace_feedback(reply: &serde_json::Value) -> String {
+    let message = reply["message"].as_str().unwrap_or("workspace updated");
+    match reply["diagnostics"].as_array().map_or(0, Vec::len) {
+        0 => message.to_string(),
+        n => format!("{message} · {n} folder(s) need attention"),
+    }
+}
+
 /// Execute one workbench action against the resident server.
 fn apply_client_action(
     client: &mut crate::office::OfficeClient,
@@ -3308,10 +3550,11 @@ fn apply_client_action(
         } => {
             if matches!(action.as_str(), "open" | "add" | "save") {
                 if let Some(v) = &value {
-                    let path = std::path::Path::new(v);
-                    if !path.is_absolute() {
-                        value = Some(std::env::current_dir()?.join(path).display().to_string());
-                    }
+                    value = Some(
+                        crate::workspaces::navigation::absolutize(v, &std::env::current_dir()?)
+                            .display()
+                            .to_string(),
+                    );
                 }
             }
             let v = client.call(crate::office::OfficeRequestKind::Workspace {
@@ -3319,7 +3562,7 @@ fn apply_client_action(
                 value,
                 project_id,
             })?;
-            app.set_status(format!("workspace selected: {}", v["workspace_id"]));
+            app.set_status(workspace_feedback(&v));
             Ok(())
         }
         WorkbenchAction::SelectWorktree(id) => {
@@ -3361,7 +3604,20 @@ fn apply_client_action(
             app.set_diff_view(Some(diff));
             Ok(())
         }
-        WorkbenchAction::Refresh => Ok(()), // the loop refreshes every cycle
+        WorkbenchAction::Refresh => {
+            // The view refreshes every cycle; with a workspace selected,
+            // `r` also re-reads its repos so worktrees created or removed
+            // outside Viva show up.
+            if app.model().workspace_id.is_some() {
+                let v = client.call(crate::office::OfficeRequestKind::Workspace {
+                    action: "refresh".into(),
+                    value: None,
+                    project_id: None,
+                })?;
+                app.set_status(workspace_feedback(&v));
+            }
+            Ok(())
+        }
         WorkbenchAction::SplitRight => spawn_and_split(client, app, SplitAxis::Horizontal),
         WorkbenchAction::SplitBelow => spawn_and_split(client, app, SplitAxis::Vertical),
         WorkbenchAction::OpenWorktreeShell(worktree_id) => {

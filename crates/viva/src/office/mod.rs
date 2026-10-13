@@ -810,54 +810,14 @@ fn handle_request(
             value,
             project_id,
         } => {
+            // Owner-only (see `authorize_socket_request`): composition is
+            // navigation state and never carries grants or executions.
             let store = shared.store.lock().expect("office store");
-            let nav = crate::workspaces::navigation::Navigation { store: &store };
-            let required = || {
-                value
-                    .as_deref()
-                    .ok_or_else(|| OfficeError::Validation("workspace action needs value".into()))
-            };
-            let id = match action.as_str() {
-                "open" => Some(nav.open(Path::new(required()?))?),
-                "new" => Some(nav.create(required()?)?),
-                "select" => {
-                    nav.select(required()?)?;
-                    nav.selected()?
-                }
-                "add" => {
-                    let id = nav.selected()?.ok_or_else(|| {
-                        OfficeError::Validation("select a workspace first".into())
-                    })?;
-                    nav.add(&id, serde_json::json!({"path":required()?}), Path::new("/"))?;
-                    Some(id)
-                }
-                "remove" => {
-                    let id = nav.selected()?.ok_or_else(|| {
-                        OfficeError::Validation("select a workspace first".into())
-                    })?;
-                    nav.remove(
-                        &id,
-                        project_id.as_deref().ok_or_else(|| {
-                            OfficeError::Validation("remove needs project_id".into())
-                        })?,
-                    )?;
-                    Some(id)
-                }
-                "save" => {
-                    let id = nav.selected()?.ok_or_else(|| {
-                        OfficeError::Validation("select a workspace first".into())
-                    })?;
-                    nav.save_as(&id, Path::new(required()?))?;
-                    Some(id)
-                }
-                "list" => nav.selected()?,
-                _ => {
-                    return Err(OfficeError::Validation(
-                        "workspace action: open | new | select | add | remove | save | list".into(),
-                    ));
-                }
-            };
-            Ok(serde_json::json!({"workspace_id":id,"workspaces":nav.list()?}))
+            crate::workspaces::navigation::Navigation { store: &store }.apply(
+                action,
+                value.as_deref(),
+                project_id.as_deref(),
+            )
         }
         OfficeRequestKind::WorkbenchView => workbench_view(Arc::clone(&shared)),
         OfficeRequestKind::WorkbenchDiff { worktree_id } => workbench_diff(&shared, worktree_id),
