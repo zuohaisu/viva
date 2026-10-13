@@ -51,7 +51,9 @@ that file, import from the SDK and re-run typecheck.
 ## Real-Pi integration status (pending, not PASS)
 
 The extension package typechecks and its envelope logic is tested against a
-fake `viva` binary (see `npm test`). **Real Pi end-to-end interaction
+fake `viva` binary (see `npm test`), and the commands it emits are checked
+against the real `viva` binary by `test/viva-office.contract.test.ts`.
+**Real Pi end-to-end interaction
 (model conversations, tool calls inside live Pi) is pending**: it needs a
 Pi installation and model credentials, and is recorded by V12 when those
 exist. Nothing here claims that integration has been exercised.
@@ -63,3 +65,7 @@ npm install        # dev deps: typescript, @types/node
 npm run typecheck  # tsc --noEmit (strict)
 npm test           # node --experimental-strip-types --test
 ```
+
+`npm test` needs the real `viva` binary: run `cargo build -p viva` first (the
+contract test uses `target/debug/viva`, or the path in `VIVA_BIN`). It fails,
+rather than skips, when the binary is missing.

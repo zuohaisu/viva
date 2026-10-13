@@ -71,8 +71,19 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+      # The extension's contract test (issue #86) runs its tools against the
+      # REAL viva binary, so this job needs the Rust toolchain too.
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+      - name: Build the real viva binary
+        run: cargo build -p viva
       - name: Typecheck + test the Pi extension (strict tsc + node:test)
         working-directory: extensions/pi
+        env:
+          # The contract test runs the extension against this real binary.
+          VIVA_BIN: ${{ github.workspace }}/target/debug/viva
         run: |
           npm ci
           npm run typecheck
