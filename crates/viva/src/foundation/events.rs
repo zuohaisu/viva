@@ -1,6 +1,6 @@
-//! The append-only office event log.
+//! The append-only event log.
 //!
-//! G0 semantics: office events are audit facts. Rows are never updated or
+//! G0 semantics: events are audit facts. Rows are never updated or
 //! deleted (enforced by trigger), payloads are bounded, and the log is the
 //! raw-history substrate that experiences and memories must cite — writing an
 //! event never claims a memory was formed.
@@ -19,7 +19,7 @@ use crate::foundation::store::{Domain, Store};
 /// enforced on the cast BLOB, i.e. bytes, not characters).
 pub const MAX_EVENT_PAYLOAD_BYTES: usize = 65_536;
 
-/// A new office event to record.
+/// A new event to record.
 #[derive(Debug, Clone)]
 pub struct NewEvent {
     pub domain: Domain,

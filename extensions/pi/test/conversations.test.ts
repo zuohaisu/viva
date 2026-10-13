@@ -1,7 +1,7 @@
 /**
  * Tests for the conversations sub-extension (V10): native-first fork
- * ordering, honest refusal without a fork API, office-only rename, and
- * capability-declared handoff. The office side is a fake `viva` binary.
+ * ordering, honest refusal without a fork API, Viva-only rename, and
+ * capability-declared handoff. The Viva side is a fake `viva` binary.
  */
 
 import { test } from "node:test";
@@ -83,7 +83,7 @@ test("tryNativeFork feature-detects the documented entries and refuses honestly"
   assert.equal(await tryNativeFork(undefined), null);
 });
 
-test("fork records in the office only after the native fork succeeds", async () => {
+test("fork records in Viva only after the native fork succeeds", async () => {
   await withEnv(BASE_ENV, async () => {
     // The fake viva records what it was asked, then answers with JSON.
     const viva = fakeViva(
@@ -103,7 +103,7 @@ test("fork records in the office only after the native fork succeeds", async () 
 test("fork without a native entry point refuses and records nothing", async () => {
   await withEnv(BASE_ENV, async () => {
     // The fake viva appends every invocation to a call log. The refusal
-    // must mean the office CLI was NEVER called: `calls=0` inside a shell
+    // must mean the viva CLI was NEVER called: `calls=0` inside a shell
     // script can't be observed from JS, but the log file can.
     const callLog = join(tmpdir(), `viva-conv-calls-${process.pid}-${Date.now()}.log`);
     const viva = fakeViva(`#!/bin/sh\necho "$@" >> ${callLog}\necho "{}"\n`);
@@ -119,12 +119,12 @@ test("fork without a native entry point refuses and records nothing", async () =
     assert.equal(
       existsSync(callLog),
       false,
-      "the office CLI must never be invoked when the native fork is refused",
+      "the viva CLI must never be invoked when the native fork is refused",
     );
   });
 });
 
-test("rename is office-owned and handoff declares its capability", async () => {
+test("rename is Viva-owned and handoff declares its capability", async () => {
   await withEnv(BASE_ENV, async () => {
     const viva = fakeViva('#!/bin/sh\necho \'{"ok": true, "argv": "\'"\'"$*"\'"\'"}\'\n');
     const registered = fakePiWith(harnessWith(viva));
@@ -144,7 +144,7 @@ test("rename is office-owned and handoff declares its capability", async () => {
   });
 });
 
-test("the sub-extension stays inert without office context", () => {
+test("the sub-extension stays inert without Viva context", () => {
   withEnv({ VIVA_OFFICE_MEMBER_NAME: "Samuel" }, () => {
     let tools = 0;
     vivaConversations({

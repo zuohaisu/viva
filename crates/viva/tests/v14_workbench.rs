@@ -1,6 +1,6 @@
 //! V14 acceptance tests (issue #27): the parallel-development workbench over
 //! real git repositories, real PTY terminals and real store records — one
-//! office spanning projects/tasks/worktrees, keyboard-switchable panes,
+//! Viva spanning projects/tasks/worktrees, keyboard-switchable panes,
 //! per-terminal input isolation, real diffs, and a quit protocol that stops
 //! owned processes while preserving worktree contents.
 
@@ -119,14 +119,14 @@ fn user_shell_harness(cwd: &Path) -> HarnessSpec {
 }
 
 // ---------------------------------------------------------------------------
-// The one-office-many-projects span, with real git facts
+// The one-Viva-many-projects span, with real git facts
 // ---------------------------------------------------------------------------
 
 #[test]
 fn the_workbench_entry_exists_and_fails_honestly_without_a_tty() {
     // D5/D6: `viva workbench` is a real product entry. Without an
     // interactive terminal it refuses loudly (it never half-runs against a
-    // pipe); with one, quit goes through the office shutdown protocol
+    // pipe); with one, quit goes through the shutdown protocol
     // (stop owned terminals → join watchers → persist handoff), which the
     // v07 graceful-shutdown test pins at the protocol level.
     let out = Command::new(env!("CARGO_BIN_EXE_viva"))
@@ -174,7 +174,7 @@ fn workbench_spans_projects_tasks_worktrees_with_real_git_facts() {
     let repo_a = repo_with_origin(b._dir.path(), "alpha");
     let repo_b = repo_with_origin(b._dir.path(), "beta");
 
-    // Two projects, one office.
+    // Two projects, one Viva.
     let projects = viva::projects::ProjectRegistry::new(&b.store);
     let project_a = projects
         .register(None, "alpha", &repo_a)
@@ -231,7 +231,7 @@ fn workbench_spans_projects_tasks_worktrees_with_real_git_facts() {
 
     // The model spans both projects and both worktrees.
     let model = b.workbench().refresh().expect("model");
-    assert_eq!(model.projects.len(), 2, "alpha + beta in one office");
+    assert_eq!(model.projects.len(), 2, "alpha + beta in one Viva");
     assert_eq!(model.worktrees.len(), 2, "created + adopted");
     let created_row = model
         .worktrees
@@ -413,7 +413,7 @@ fn quit_protocol_stops_owned_processes_and_preserves_the_work() {
     });
 
     // Nothing was deleted: the worktree, the uncommitted file and the
-    // office record all survive.
+    // Viva record all survive.
     assert!(record.worktree_path.join("notes.txt").exists());
     assert!(record.worktree_path.join("README.md").exists());
     let model = b.workbench().refresh().expect("model");

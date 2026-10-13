@@ -79,7 +79,7 @@ CREATE TABLE knowledge_usage (
 );
 
 -- Skill registrations. `entry_path` points at SKILL.md — the content
--- authority on disk; enablement is office state only.
+-- authority on disk; enablement is Viva state only.
 CREATE TABLE skills (
     skill_id      TEXT PRIMARY KEY,
     item_id       TEXT NOT NULL REFERENCES knowledge_items(item_id),
@@ -565,7 +565,7 @@ impl<'a> KnowledgeRegistry<'a> {
                AND (scope = 'team'
                     OR (scope = 'personal' AND owner_member_id = ?1)
                     OR (scope = 'project' AND project_id IS NOT NULL AND project_id = ?2)
-                    -- A disabled skill is retired from selection: office
+                    -- A disabled skill is retired from selection: Viva
                     -- state actually gates context injection. A skill-scope
                     -- entry with no skills row (recorded directly) has no
                     -- disable mechanism and stays selectable.
@@ -636,7 +636,7 @@ impl<'a> KnowledgeRegistry<'a> {
 
     fn read_body_for(&self, item: KnowledgeItem) -> Result<SelectedKnowledge> {
         // External references that were never verified stay unavailable —
-        // the office says so instead of inventing content.
+        // Viva says so instead of inventing content.
         if item.external_state == ExternalState::Unavailable {
             return Ok(SelectedKnowledge {
                 item_id: item.item_id,
@@ -804,7 +804,7 @@ impl<'a> KnowledgeRegistry<'a> {
         Ok(registration)
     }
 
-    /// Disable (or re-enable) a skill. Office state only — the SKILL.md
+    /// Disable (or re-enable) a skill. Viva state only — the SKILL.md
     /// file on disk is untouched.
     pub fn set_skill_enabled(&self, skill_id: &str, enabled: bool) -> Result<()> {
         let n = self.store.connection().execute(

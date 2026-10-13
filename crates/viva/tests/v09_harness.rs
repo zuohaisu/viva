@@ -1,5 +1,5 @@
 //! V09 acceptance tests (issue #18): the Pi harness launch combination and
-//! the extension-facing office endpoints. The TS extension package has its
+//! the extension-facing endpoints. The TS extension package has its
 //! own independent typecheck/test suite under `extensions/pi/`; these tests
 //! cover the Rust side of the contract (launch context, honest
 //! availability, handoff facts that never complete a task).
@@ -112,7 +112,7 @@ fn pi_launch_combination_injects_identity_and_task_context() {
     std::fs::create_dir_all(&repo).expect("repo dir");
     let seed = seed(&home, "prepare the release");
 
-    // The launch context is built from real office records.
+    // The launch context is built from real Viva records.
     let store = viva::foundation::store::Store::open(
         &viva::foundation::paths::database_path(&home),
         server::migrations(),
@@ -159,7 +159,7 @@ fn pi_launch_combination_injects_identity_and_task_context() {
     );
 
     // A plain-chat launch carries identity but no task and no grant:
-    // chat never inherits office authority.
+    // chat never inherits Viva authority.
     let chat = harness
         .launch(&member, None, None, &repo, None)
         .expect("chat launch");

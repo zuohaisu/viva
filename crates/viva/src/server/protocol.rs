@@ -1,17 +1,17 @@
-//! The office control-channel wire protocol (V07, issue #16).
+//! The control-channel wire protocol (V07, issue #16).
 //!
 //! A private, local-only JSON-lines protocol over the per-`VIVA_HOME` Unix
 //! domain socket. It carries the same discipline as the foundation control
 //! envelope: a protocol version, a request id, a bounded payload, and
-//! machine-readable rejections. What it adds is the office-level request
+//! machine-readable rejections. What it adds is the request
 //! vocabulary: status queries (read-only, also answerable offline from the
 //! store), dispatch of a task execution under a named grant, terminal
 //! observation and control, task results, and the host shutdown request.
 //!
 //! This is deliberately NOT a general RPC surface and not a network server:
-//! the socket lives inside the 0700 `VIVA_HOME` and only the office host
+//! the socket lives inside the 0700 `VIVA_HOME` and only the server
 //! listens on it. No daemon is ever started by a client that finds the
-//! socket absent — mutation without an active office is a clean rejection.
+//! socket absent — mutation without an active server is a clean rejection.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -52,14 +52,14 @@ pub struct Request {
     pub member: Option<String>,
 }
 
-/// The office-level request vocabulary. Read-only kinds are answerable from
+/// The request vocabulary. Read-only kinds are answerable from
 /// the store alone; every other kind needs the live host.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RequestKind {
     /// Liveness probe; no side effects.
     Ping,
-    /// Office snapshot: host identity, terminal list, execution counts.
+    /// Snapshot: host identity, terminal list, execution counts.
     Status,
     /// Dispatch one task execution under a grant. Idempotent by
     /// `request_key`: a retry never spawns a second execution.
@@ -133,7 +133,7 @@ pub enum RequestKind {
     },
     /// The workbench pane-layout preference (issue #43 AC2, QA F5):
     /// `Some` saves the serialized layout, `None` returns the saved JSON
-    /// (null when none was saved). A UI preference, not an office fact.
+    /// (null when none was saved). A UI preference, not a Viva fact.
     WorkbenchLayout {
         #[serde(default)]
         layout_json: Option<String>,
@@ -177,7 +177,7 @@ pub enum RequestKind {
         #[serde(default)]
         detail: String,
         /// V15-5: RFC3339; REQUIRED when status is `rate_limited` — the
-        /// office never schedules a recovery for an unknown time.
+        /// Viva never schedules a recovery for an unknown time.
         #[serde(default)]
         reset_at: Option<String>,
     },
@@ -214,7 +214,7 @@ pub enum RequestKind {
         #[serde(default = "default_wait_timeout")]
         timeout_secs: u64,
     },
-    /// The office event stream since a sequence number (S5): the durable,
+    /// The event stream since a sequence number (S5): the durable,
     /// reconnectable feed. A client that disconnects re-subscribes with its
     /// last seen seq and misses nothing.
     EventsFeed {

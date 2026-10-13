@@ -3,8 +3,8 @@
  * Run with: npm test
  *
  * The audit tool is exercised against a fake `viva` binary: the real
- * chain (tool -> office CLI -> payload) runs for real, without needing a
- * live office or any computer tool.
+ * chain (tool -> viva CLI -> payload) runs for real, without needing a
+ * live server or any computer tool.
  */
 
 import { test } from "node:test";
@@ -71,15 +71,15 @@ function fakePi() {
   return { registered, pi };
 }
 
-test("the office entry registers the read-only computer audit tool", () => {
+test("the main entry registers the read-only computer audit tool", () => {
   withEnv(BASE_ENV, () => {
     const env = officeEnv(process.env);
-    assert.ok(env, "office context must parse");
+    assert.ok(env, "Viva context must parse");
     const { registered, pi } = fakePi();
     vivaOffice(pi as never);
     assert.ok(
       registered.has("viva_computer_audit"),
-      "the audit tool is registered alongside the office tools",
+      "the audit tool is registered alongside Viva tools",
     );
     assert.ok(
       ![...registered.keys()].some((name) => name.includes("type") || name.includes("click")),
@@ -88,7 +88,7 @@ test("the office entry registers the read-only computer audit tool", () => {
   });
 });
 
-test("the audit tool runs the office CLI and reports its payload", () =>
+test("the audit tool runs the viva CLI and reports its payload", () =>
   withEnv(BASE_ENV, async () => {
     const env = officeEnv(process.env)!;
     env.vivaBin = fakeViva('#!/bin/sh\necho \'{ "audited": ["orca-computer"] }\'\n');

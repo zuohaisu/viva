@@ -354,7 +354,7 @@ fn skill_lifecycle_never_touches_the_body_file() {
         )
         .expect("register");
 
-    // Enabled by default, listed, then disabled — office state only.
+    // Enabled by default, listed, then disabled — Viva state only.
     assert!(registry.list_skills(true).expect("skills").len() == 1);
     registry
         .set_skill_enabled(&skill.skill_id, false)

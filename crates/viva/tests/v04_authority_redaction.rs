@@ -200,8 +200,8 @@ fn chat_identity_gets_read_only_and_never_viva_wide_power() {
         Err(DenialReason::NoGrant)
     );
 
-    // Creating a task from chat identity does not auto-grant office power:
-    // task creation is an office action requiring a live grant as well.
+    // Creating a task from chat identity does not auto-grant Viva-wide power:
+    // task creation requires a live grant as well.
     assert_eq!(
         engine.check(&chatter, "create_task", None).expect("check"),
         Err(DenialReason::NoGrant)

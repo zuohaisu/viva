@@ -1,10 +1,10 @@
 /**
- * Tests for the Viva office extension (V09). Run with:
+ * Tests for the Viva Pi extension (V09). Run with:
  *   npm test   (node --experimental-strip-types --test test/)
  *
  * The subprocess envelope is tested against a fake `viva` binary so the
  * whole chain (plan -> spawn -> parse -> refusal) is exercised for real,
- * without a live office.
+ * without a live server.
  *
  * A fake accepts ANY arguments, so nothing in this file proves the real CLI
  * understands the commands the extension emits. That is the job of
@@ -58,7 +58,7 @@ const BASE_ENV: NodeJS.ProcessEnv = {
 test("officeEnv parses the harness context and stays inert without identity", () => {
   withEnv(BASE_ENV, () => {
     const env = officeEnv(process.env);
-    assert.ok(env, "office launch must produce context");
+    assert.ok(env, "Viva launch must produce context");
     assert.equal(env.memberId, "mem-1");
     assert.equal(env.taskId, "task-1");
     assert.equal(env.grantId, "grant-1");
@@ -66,11 +66,11 @@ test("officeEnv parses the harness context and stays inert without identity", ()
   });
 
   withEnv({ VIVA_OFFICE_MEMBER_NAME: "Samuel" }, () => {
-    assert.equal(officeEnv(process.env), null, "no member id -> no office context");
+    assert.equal(officeEnv(process.env), null, "no member id -> no Viva context");
   });
 
   withEnv({ VIVA_OFFICE_MEMBER_ID: "mem-1" }, () => {
-    assert.equal(officeEnv(process.env), null, "no member name -> no office context");
+    assert.equal(officeEnv(process.env), null, "no member name -> no Viva context");
   });
 });
 
@@ -155,10 +155,10 @@ test("runEnvelope parses real CLI JSON and surfaces real failures", async () => 
     const payload = await runEnvelope({ ...env, vivaBin: good }, ["status"]);
     assert.ok((payload as { ok: boolean }).ok);
 
-    const failing = fakeViva('#!/bin/sh\necho "no active office" >&2\nexit 3\n');
+    const failing = fakeViva('#!/bin/sh\necho "no active server" >&2\nexit 3\n');
     await assert.rejects(
       runEnvelope({ ...env, vivaBin: failing }, ["dispatch"]),
-      /exit 3[\s\S]*no active office/,
+      /exit 3[\s\S]*no active server/,
     );
 
     const malformed = fakeViva('#!/bin/sh\necho "not json"\n');
@@ -174,9 +174,9 @@ test("runEnvelope parses real CLI JSON and surfaces real failures", async () => 
   });
 });
 
-test("the extension registers office tools and refuses unauthorized dispatch", async () => {
+test("the extension registers its tools and refuses unauthorized dispatch", async () => {
   // No grant in the environment from the start: the factory captures the
-  // office context at load time, so the authorization must already be
+  // Viva context at load time, so the authorization must already be
   // absent when it runs.
   await withEnv({ ...BASE_ENV, VIVA_OFFICE_GRANT_ID: "" }, async () => {
     const registered: Map<string, { execute: (args: Record<string, unknown>) => Promise<{ content: string; isError?: boolean }> }> =
@@ -217,7 +217,7 @@ test("the extension registers office tools and refuses unauthorized dispatch", a
   });
 });
 
-test("the extension stays inert without office context", () => {
+test("the extension stays inert without Viva context", () => {
   withEnv({ VIVA_OFFICE_MEMBER_NAME: "Samuel" }, () => {
     let tools = 0;
     const fakePi = {
@@ -230,6 +230,6 @@ test("the extension stays inert without office context", () => {
       registerCommand() {},
     };
     vivaOffice(fakePi as never);
-    assert.equal(tools, 0, "no office context -> no tools, no claims");
+    assert.equal(tools, 0, "no Viva context -> no tools, no claims");
   });
 });

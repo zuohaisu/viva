@@ -4,19 +4,19 @@
 //! Division of labor (ADR 0011): Viva owns members/tasks/worktrees/terminals
 //! and the terminal process; Pi owns its chat UI, model calls, tool loop and
 //! compaction. This module builds the *launch combination* — explicit argv
-//! plus the office-context environment the extension reads — and probes
+//! plus the Viva-context environment the extension reads — and probes
 //! availability honestly. It never starts a fallback harness when Pi is
 //! missing: an unavailable provider is an error, not a swap.
 //!
 //! Identity rules encoded here:
 //! - The member is whatever configuration says. The coordinating member is
-//!   resolved by the caller (office configuration); `Samuel` is never
+//!   resolved by the caller (Viva configuration); `Samuel` is never
 //!   hard-coded in this crate.
 //! - Member identity travels as `VIVA_OFFICE_MEMBER_ID`; display name and
 //!   model binding are captured at launch as configuration facts. Changing
 //!   a binding later never rewrites identity or history.
-//! - The dispatch grant, if any, is per-task and comes from the office's
-//!   own grant records. Plain chat never receives an office-wide grant.
+//! - The dispatch grant, if any, is per-task and comes from Viva's
+//!   own grant records. Plain chat never receives a Viva-wide grant.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -64,8 +64,8 @@ impl PiHarness {
 
     /// Build the launch combination for one member's interactive session.
     /// `task` attaches the current task context (brief and handoff target);
-    /// `grant` is the office's live per-task grant reference — passing one
-    /// is an office decision recorded at dispatch, never a chat capability.
+    /// `grant` is Viva's live per-task grant reference — passing one
+    /// is a Viva decision recorded at dispatch, never a chat capability.
     pub fn launch(
         &self,
         member: &MemberRecord,
@@ -249,7 +249,7 @@ mod tests {
     #[test]
     fn plain_chat_has_no_grant_reference() {
         // Without a task and without a grant, the environment carries
-        // identity only — chat never inherits office authority.
+        // identity only — chat never inherits Viva authority.
         let repo = std::env::temp_dir();
         let harness = PiHarness::for_repo(&repo);
         let m = member();

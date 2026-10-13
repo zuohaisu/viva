@@ -231,7 +231,7 @@ fn shared_writable_checkouts_are_refused_and_adoption_records_ownership() {
     );
     assert!(branches.contains(&"task-gamma-1".to_string()));
 
-    // The office refuses to create another writable checkout of it…
+    // Viva refuses to create another writable checkout of it…
     let err = service
         .create_task_worktree(
             &pair.seed,
@@ -306,7 +306,7 @@ fn discovery_marks_dirty_worktrees_without_modifying_them() {
     let content = std::fs::read_to_string(wt.worktree_path.join("file.txt")).expect("read");
     assert_eq!(content, "dirty change\n");
 
-    // QA round additions: the discovery shows the office claim's source,
+    // QA round additions: the discovery shows the claim's source,
     // and the diff API returns a bounded, real diff against HEAD.
     assert_eq!(
         mine.office_source,

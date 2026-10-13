@@ -1011,10 +1011,10 @@ fn reap_under_lock(core: &mut SessionCore) -> Result<Option<TerminalExit>> {
 
 impl Drop for TerminalHandle {
     fn drop(&mut self) {
-        // Never kill on drop (stopping is an explicit office decision), but
+        // Never kill on drop (stopping is an explicit Viva decision), but
         // reap in the background so an exited child does not linger as a
         // zombie. Polling reap: no lock is held across the sleep. If the
-        // child is still running it keeps running — the office records
+        // child is still running it keeps running — Viva records
         // ownership and decides separately.
         let shared = self.shared.clone();
         std::thread::spawn(move || {
@@ -1033,7 +1033,7 @@ impl Drop for TerminalHandle {
     }
 }
 
-/// Normalize the OS exit status into the office's honest exit record: the
+/// Normalize the OS exit status into Viva's honest exit record: the
 /// exit code, or the signal name when the process was killed.
 fn exit_from_status(status: &std::process::ExitStatus, via: ExitVia) -> TerminalExit {
     use std::os::unix::process::ExitStatusExt as _;

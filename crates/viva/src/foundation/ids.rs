@@ -88,7 +88,7 @@ macro_rules! define_id {
 }
 
 define_id!(
-    /// A member of the office. Members are configuration, never hard-coded
+    /// A member of Viva. Members are configuration, never hard-coded
     /// identity: `Viva ≠ Samuel`.
     MemberId,
     "mem"
@@ -109,7 +109,7 @@ define_id!(
     "wt"
 );
 define_id!(
-    /// A task delivered through the office.
+    /// A task delivered through Viva.
     TaskId,
     "task"
 );
@@ -119,7 +119,7 @@ define_id!(
     "exec"
 );
 define_id!(
-    /// An office-side conversation/execution session reference.
+    /// A Viva-side conversation/execution session reference.
     SessionId,
     "sess"
 );
@@ -129,7 +129,7 @@ define_id!(
     "grant"
 );
 define_id!(
-    /// A terminal hosted by the office (member execution, user shell, …).
+    /// A terminal hosted by Viva (member execution, user shell, …).
     TerminalId,
     "term"
 );
@@ -144,7 +144,7 @@ define_id!(
     "chan"
 );
 define_id!(
-    /// An append-only office event.
+    /// An append-only event.
     EventId,
     "evt"
 );

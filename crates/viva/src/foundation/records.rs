@@ -1,4 +1,4 @@
-//! Office reference records: session kinds, attribution snapshots, execution
+//! Reference records: session kinds, attribution snapshots, execution
 //! records, launch specifications, terminal events, and the workbench
 //! query/action contracts.
 //!
@@ -51,7 +51,7 @@ pub struct HarnessSessionRef {
     pub native_session_id: String,
 }
 
-/// An office-side session record: metadata and references, never a copy of
+/// A Viva-side session record: metadata and references, never a copy of
 /// the conversation itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRecord {

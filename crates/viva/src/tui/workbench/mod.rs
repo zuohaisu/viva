@@ -1,11 +1,11 @@
-//! The parallel-development workbench (V14, issue #27): one office spanning
+//! The parallel-development workbench (V14, issue #27): one Viva spanning
 //! many projects, tasks and worktrees, with real terminals per worktree.
 //!
 //! Since the resident-server split (S1, issue #43; ADR 0012) this module is
 //! the CLIENT: facts arrive as `WorkbenchView` projections over the control
 //! channel, actions go back as requests, and `q` detaches while the server
 //! keeps every terminal running. The server side of the projections lives
-//! in [`assemble_view`], called by the office host.
+//! in [`assemble_view`], called by the server.
 //!
 //! Composition rules (this module only combines; the domains stay theirs):
 //! - Facts come from the existing registries (projects/tasks V02–V03,
@@ -93,7 +93,7 @@ pub struct WorktreeRow {
     /// unknown (unreadable tree) — displayed as unknown, never guessed.
     pub dirty: Option<bool>,
     pub task_id: Option<String>,
-    /// created (office allocated) or adopted (explicitly selected).
+    /// created (Viva allocated) or adopted (explicitly selected).
     pub source: String,
     /// V15-2: the branch's PR state via gh (`open`/`merged`/`closed`).
     #[serde(default)]
@@ -118,7 +118,7 @@ pub struct TerminalRow {
     pub worktree_id: Option<String>,
     pub purpose: String,
     pub owner_label: String,
-    /// Office's real knowledge; `None` is shown as unknown.
+    /// Viva's real knowledge; `None` is shown as unknown.
     pub live: Option<bool>,
     /// Agent status observations, PER SOURCE (S4): controlled reports are
     /// authoritative, screen inference is auxiliary. They sit side by
@@ -127,7 +127,7 @@ pub struct TerminalRow {
     pub agent_status: Vec<crate::agents::AgentStatusRecord>,
 }
 
-/// A needs-attention marker: a fact recorded by the office that a human
+/// A needs-attention marker: a fact recorded by Viva that a human
 /// should look at (a failed execution, an unresolved launch). Projections
 /// only — the workbench never decides what to do about them.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -272,7 +272,7 @@ enum DragState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilePanel {
     pub worktree_id: String,
-    /// `(path, status)` rows as served by the office (bounded: may be a
+    /// `(path, status)` rows as served by Viva (bounded: may be a
     /// truncation of the full inventory — see `truncated`/`total`).
     pub rows: Vec<(String, String)>,
     pub truncated: bool,
@@ -2770,7 +2770,7 @@ fn contains_point(rect: Rect, x: u16, y: u16) -> bool {
 // executes actions against the owning registries
 // ---------------------------------------------------------------------------
 
-/// The workbench's data + action layer over the real office store. It owns
+/// The workbench's data + action layer over the real store. It owns
 /// no state of its own beyond the references it borrows; every fact is read
 /// from the registries, every action goes through the owning domain.
 pub struct WorkbenchStore<'a> {
@@ -2885,7 +2885,7 @@ impl<'a> WorkbenchStore<'a> {
         if failed > 0 {
             attention.push(AttentionMarker {
                 kind: "execution_failed".into(),
-                detail: format!("{failed} execution(s) failed — see the office records"),
+                detail: format!("{failed} execution(s) failed — see Viva's records"),
             });
         }
         let unresolved: i64 = self.store.connection().query_row(
@@ -3128,7 +3128,7 @@ pub fn assemble_view(
 // The product entry: run the workbench as a CLIENT of the resident server
 // ---------------------------------------------------------------------------
 
-/// Run the interactive workbench as a client of the resident office server
+/// Run the interactive workbench as a client of the resident server
 /// (ADR 0012, issue #43). All facts arrive as [`WorkbenchView`] projections
 /// over the control channel; all actions go back as requests. `q` DETACHES:
 /// the client exits, the server keeps every terminal running, and a later

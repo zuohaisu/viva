@@ -1,8 +1,8 @@
 //! G0 cross-interface acceptance tests (issue #10).
 //!
 //! These tests cross the foundation interfaces: sessions → executions with
-//! attribution → launch specs → terminal events → control envelope → office
-//! events, all persisted in SQLite and reloaded after a full store reopen
+//! attribution → launch specs → terminal events → control envelope → event
+//! log, all persisted in SQLite and reloaded after a full store reopen
 //! ("restart"), plus the real binary writing and reloading an event in an
 //! isolated `VIVA_HOME` across two separate processes.
 
@@ -113,7 +113,7 @@ fn help_prints_usage_and_exits_zero() {
         let (ok, stdout, stderr) = run_viva(home.path(), args);
         assert!(ok, "{args:?} must exit 0: {stderr}");
         assert!(
-            stdout.contains("viva — the Personal AI Office host"),
+            stdout.contains("viva — local-first personal AI collaboration system"),
             "{args:?} stdout: {stdout}"
         );
         assert!(
@@ -124,7 +124,7 @@ fn help_prints_usage_and_exits_zero() {
     }
 }
 
-/// The G0 cross-interface test: one office flow across every frozen
+/// The G0 cross-interface test: one flow across every frozen
 /// interface, reloaded after a full reopen.
 #[test]
 fn cross_interface_flow_survives_reopen() {
@@ -207,7 +207,7 @@ fn cross_interface_flow_survives_reopen() {
         }
     ));
 
-    // One office event closes the loop.
+    // One event closes the loop.
     let recorded = events::append(
         &store,
         NewEvent {

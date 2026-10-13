@@ -1,6 +1,6 @@
 //! Workspaces: the primary work context that groups projects (V02, #11).
 //!
-//! A workspace is an office-level selection of work context. Members and
+//! A workspace is a selection of work context. Members and
 //! tasks reference workspaces by id; switching a workspace never rewrites
 //! history (V03 attributes executions at creation time).
 

@@ -1,4 +1,4 @@
-//! The office error taxonomy.
+//! The error taxonomy.
 //!
 //! G0 error semantics: every failure carries a stable, human-readable cause;
 //! control-channel rejections carry a machine-readable [`envelope::RejectionReason`]

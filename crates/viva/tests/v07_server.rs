@@ -1,4 +1,4 @@
-//! V07 acceptance tests (issue #16): the active Office control plane over a
+//! V07 acceptance tests (issue #16): the active control plane over a
 //! real Unix-socket channel — CLI dispatch/observe/stop, single active host
 //! per VIVA_HOME, honest rejection without a daemon, graceful shutdown, and
 //! crash-restart reconciliation that never re-runs finished work.
@@ -333,7 +333,7 @@ fn mutation_without_active_server_is_rejected_and_starts_no_daemon() {
         dispatch_request(&seed, "req-no-host", vec!["/bin/sleep".into(), "1".into()]),
     )
     .expect_err("no host listening");
-    assert!(err.contains("no active office"), "got: {err}");
+    assert!(err.contains("no active server"), "got: {err}");
     assert!(
         !home.join(server::SOCKET_NAME).exists(),
         "the client must not have conjured a socket/daemon into existence"
@@ -579,7 +579,7 @@ use std::str::FromStr as _;
 fn graceful_shutdown_records_every_exit_before_the_handoff() {
     // D1: after a graceful shutdown, every dispatched execution has its
     // exit recorded (intent exited), and the NEXT host must NOT write a
-    // false "execution_orphaned" recovery for anything this office
+    // false "execution_orphaned" recovery for anything this server
     // stopped itself.
     let dir = TempDir::new().expect("dir");
     let home = dir.path().to_path_buf();
@@ -674,7 +674,7 @@ fn host_home_and_channel_are_private_and_authenticated() {
         assert_eq!(
             mode & 0o777,
             0o700,
-            "the office home must be private even when the host created it"
+            "the Viva home must be private even when the host created it"
         );
     }
 

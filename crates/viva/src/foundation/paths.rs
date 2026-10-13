@@ -1,6 +1,6 @@
 //! Resolution of the Viva persistent state root.
 //!
-//! All office state lives under one private per-user directory (`~/.viva` by
+//! All Viva state lives under one private per-user directory (`~/.viva` by
 //! default, overridable via `VIVA_HOME` for tests and parallel lanes). Each
 //! development lane must use its own `VIVA_HOME`, database and scratch repos.
 //!
@@ -45,7 +45,7 @@ pub fn ensure_private_dir(path: &Path) -> std::io::Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
-/// The office database path inside the state root.
+/// The database path inside the state root.
 pub fn database_path(home: &Path) -> PathBuf {
     home.join(DATABASE_FILE)
 }

@@ -4,7 +4,7 @@
  *
  * Why this exists: `viva-office.test.ts` drives the extension against a fake
  * `viva` script that returns fixed JSON for ANY arguments. It stayed green
- * while the extension kept calling the retired `viva office ...` namespace,
+ * while the extension kept calling a retired command namespace,
  * which the real binary rejects with "unknown or missing subcommand". A fake
  * cannot catch a renamed command; only the real binary can.
  *
@@ -12,8 +12,8 @@
  * would execute it, against the real binary and a throwaway VIVA_HOME. The
  * argv under test is therefore whatever the extension really emits, never a
  * copy of it written into this file. No `viva server` is started, so
- * `handoff` and `dispatch` are expected to be refused by the office
- * ("no active office") — which proves the CLI recognised them. Their
+ * `handoff` and `dispatch` are expected to be refused by Viva
+ * ("no active server") — which proves the CLI recognised them. Their
  * success paths are deliberately not exercised here.
  *
  * The binary comes from VIVA_BIN, else `target/debug/viva`:
@@ -39,8 +39,8 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "
 
 /** What the real binary says when it does not recognise a command. */
 const UNRECOGNISED = /unknown or missing subcommand/;
-/** What the office says when no resident server is running: a business-layer refusal. */
-const NO_ACTIVE_OFFICE = /no active office/;
+/** What Viva says when no resident server is running: a business-layer refusal. */
+const NO_ACTIVE_SERVER = /no active server/;
 
 const GOAL = "contract test goal";
 
@@ -149,19 +149,19 @@ function tool(name: string): Tool {
 }
 
 /**
- * The command was understood by the CLI and refused by the office, not by
+ * The command was understood by the CLI and refused by Viva, not by
  * the argument parser. (No resident server runs in this test.)
  */
 function assertRecognisedButRefused(result: ToolResult, what: string): void {
-  assert.equal(result.isError, true, `${what}: with no office running the call must be refused`);
+  assert.equal(result.isError, true, `${what}: with no server running the call must be refused`);
   assert.doesNotMatch(result.content, UNRECOGNISED, `${what}: the real CLI did not recognise the command`);
-  assert.match(result.content, NO_ACTIVE_OFFICE, `${what}: expected the office's own refusal`);
+  assert.match(result.content, NO_ACTIVE_SERVER, `${what}: expected Viva's own refusal`);
 }
 
-test("control: the real binary rejects the retired `office` namespace", () => {
+test("control: the real binary rejects an unknown command namespace", () => {
   assert.ok(fx);
-  const out = runViva(fx.bin, fx.home, ["office", "status"]);
-  assert.notEqual(out.status, 0, "`viva office status` must stay retired");
+  const out = runViva(fx.bin, fx.home, ["no-such-namespace", "status"]);
+  assert.notEqual(out.status, 0, "`viva no-such-namespace status` must be rejected");
   // Also proves UNRECOGNISED matches a real rejection, so the negative
   // assertions below are not vacuous.
   assert.match(out.stderr, UNRECOGNISED);

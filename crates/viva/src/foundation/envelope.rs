@@ -5,7 +5,7 @@
 //!   client may claim any role it likes inside its own messages — the claim is
 //!   informational and never evidence. A worker source therefore cannot be
 //!   self-declared through a flag or an environment variable; it exists only
-//!   if this office issued a channel for it.
+//!   if this server issued a channel for it.
 //! - Every request carries a version and a request id; payloads are size
 //!   bounded; rejections carry a machine-readable [`RejectionReason`].
 //! - Submissions are idempotent: the same request id replays the recorded
@@ -143,7 +143,7 @@ impl ChannelRegistry {
     pub fn validate(&self, caller: &CallerIdentity) -> Result<CallerRole, String> {
         let Some(issued) = self.get(&caller.channel_id) else {
             return Err(format!(
-                "channel `{caller}` was never issued by this office"
+                "channel `{caller}` was never issued by this server"
             ));
         };
         if issued.revoked {

@@ -46,7 +46,7 @@ fn store() -> Store {
 fn cli_memory_default_store_is_isolated_by_viva_home() {
     let dir = tempfile::TempDir::new().unwrap();
     let home = dir.path().join("viva-home");
-    // `status` opens only the isolated office and probes only its derived
+    // `status` opens only the isolated Viva home and probes only its derived
     // memory path. It must not inspect the user's Hermes database.
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_viva"))
         .env("VIVA_HOME", &home)
@@ -126,7 +126,7 @@ macro_rules! real_service {
     };
 }
 
-/// A granted exit actor: memory exits are office-state mutations and need
+/// A granted exit actor: memory exits are Viva-state mutations and need
 /// a live `maintain_knowledge` grant (same action as knowledge curation).
 fn exit_actor(store: &Store, member: &MemberId) -> Actor {
     let authority = AuthorityEngine::new(store);

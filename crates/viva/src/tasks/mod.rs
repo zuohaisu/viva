@@ -11,7 +11,7 @@
 //! - Task results (process / QA / PR+CI / user) are separate sources with
 //!   dedup keys. A duplicate or stale result can never re-close a task,
 //!   because results never close tasks at all.
-//! - Attribution is captured once at creation; switching the office's current
+//! - Attribution is captured once at creation; switching Viva's current
 //!   member/workspace never rewrites historical ownership.
 
 use std::str::FromStr as _;
