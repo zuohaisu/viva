@@ -11,7 +11,7 @@ use std::str::FromStr as _;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{WorkspaceId, utc_now};
 use crate::foundation::store::{DOMAIN_WORKSPACES_PROJECTS, MigrationRegistry, Store};
 
@@ -82,10 +82,10 @@ impl<'a> WorkspaceRegistry<'a> {
         Self { store }
     }
 
-    pub fn create(&self, display_name: impl Into<String>) -> OfficeResult<WorkspaceRecord> {
+    pub fn create(&self, display_name: impl Into<String>) -> Result<WorkspaceRecord> {
         let display_name = display_name.into();
         if display_name.trim().is_empty() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "workspace display_name must not be empty".into(),
             ));
         }
@@ -105,7 +105,7 @@ impl<'a> WorkspaceRegistry<'a> {
         Ok(record)
     }
 
-    pub fn get(&self, workspace_id: &WorkspaceId) -> OfficeResult<Option<WorkspaceRecord>> {
+    pub fn get(&self, workspace_id: &WorkspaceId) -> Result<Option<WorkspaceRecord>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT workspace_id, display_name, created_at FROM workspaces WHERE workspace_id = ?1",
         )?;
@@ -129,15 +129,14 @@ impl<'a> WorkspaceRegistry<'a> {
         Ok(row)
     }
 
-    pub fn require(&self, workspace_id: &WorkspaceId) -> OfficeResult<WorkspaceRecord> {
-        self.get(workspace_id)?
-            .ok_or_else(|| OfficeError::NotFound {
-                entity: "workspace",
-                id: workspace_id.to_string(),
-            })
+    pub fn require(&self, workspace_id: &WorkspaceId) -> Result<WorkspaceRecord> {
+        self.get(workspace_id)?.ok_or_else(|| Error::NotFound {
+            entity: "workspace",
+            id: workspace_id.to_string(),
+        })
     }
 
-    pub fn list(&self) -> OfficeResult<Vec<WorkspaceRecord>> {
+    pub fn list(&self) -> Result<Vec<WorkspaceRecord>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT workspace_id, display_name, created_at
              FROM workspaces ORDER BY created_at, workspace_id",

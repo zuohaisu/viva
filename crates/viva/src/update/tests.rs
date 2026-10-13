@@ -15,7 +15,7 @@ struct FakeDownload {
     calls: RefCell<Vec<String>>,
 }
 impl Download for FakeDownload {
-    fn fetch(&self, url: &str, destination: &Path, max_bytes: u64) -> OfficeResult<()> {
+    fn fetch(&self, url: &str, destination: &Path, max_bytes: u64) -> Result<()> {
         self.calls.borrow_mut().push(url.into());
         let bytes = self
             .files
@@ -106,7 +106,7 @@ impl Fixture {
         );
     }
 
-    fn run(&self, check: bool) -> OfficeResult<bool> {
+    fn run(&self, check: bool) -> Result<bool> {
         update_native(
             &version("0.2.0").unwrap(),
             &self.target,

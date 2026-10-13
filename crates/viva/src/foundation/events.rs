@@ -11,7 +11,7 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{EventId, utc_now};
 use crate::foundation::store::{Domain, Store};
 
@@ -46,35 +46,33 @@ pub struct RecordedEvent {
 }
 
 /// Append one event with autocommit semantics.
-pub fn append(store: &Store, event: NewEvent) -> OfficeResult<RecordedEvent> {
+pub fn append(store: &Store, event: NewEvent) -> Result<RecordedEvent> {
     append_within(store.connection(), event)
 }
 
 /// Append one event inside a caller-owned transaction so related fact changes
 /// commit atomically (ADR 0011 §8). `tx` derefs to `Connection`.
-pub fn append_in(tx: &rusqlite::Transaction<'_>, event: NewEvent) -> OfficeResult<RecordedEvent> {
+pub fn append_in(tx: &rusqlite::Transaction<'_>, event: NewEvent) -> Result<RecordedEvent> {
     append_within(tx, event)
 }
 
-fn append_within(conn: &rusqlite::Connection, event: NewEvent) -> OfficeResult<RecordedEvent> {
+fn append_within(conn: &rusqlite::Connection, event: NewEvent) -> Result<RecordedEvent> {
     if event.kind.trim().is_empty() {
-        return Err(OfficeError::Validation(
-            "event kind must not be empty".into(),
-        ));
+        return Err(Error::Validation("event kind must not be empty".into()));
     }
     if event.subject_type.trim().is_empty() || event.subject_id.trim().is_empty() {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "event subject_type and subject_id must not be empty".into(),
         ));
     }
     if event.origin.trim().is_empty() || event.origin.len() > 128 {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "event origin must be 1..=128 characters".into(),
         ));
     }
     let payload = serde_json::to_string(&event.payload)?;
     if payload.len() > MAX_EVENT_PAYLOAD_BYTES {
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "event payload is {} bytes; the bound is {MAX_EVENT_PAYLOAD_BYTES}",
             payload.len()
         )));
@@ -109,7 +107,7 @@ fn append_within(conn: &rusqlite::Connection, event: NewEvent) -> OfficeResult<R
 }
 
 /// Read the most recent events, newest first.
-pub fn list(store: &Store, limit: u32) -> OfficeResult<Vec<RecordedEvent>> {
+pub fn list(store: &Store, limit: u32) -> Result<Vec<RecordedEvent>> {
     let conn = store.connection();
     let mut stmt = conn.prepare(
         "SELECT seq, event_id, occurred_at, domain, kind, subject_type, subject_id, origin, payload
@@ -148,7 +146,7 @@ pub fn list(store: &Store, limit: u32) -> OfficeResult<Vec<RecordedEvent>> {
 }
 
 /// Fetch one event by id, if present.
-pub fn get(store: &Store, event_id: &EventId) -> OfficeResult<Option<RecordedEvent>> {
+pub fn get(store: &Store, event_id: &EventId) -> Result<Option<RecordedEvent>> {
     let conn = store.connection();
     let mut stmt = conn.prepare(
         "SELECT seq, event_id, occurred_at, domain, kind, subject_type, subject_id, origin, payload

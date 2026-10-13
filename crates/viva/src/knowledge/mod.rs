@@ -26,7 +26,7 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{ExecutionId, MemberId, ProjectId, utc_now};
 use crate::foundation::store::{DOMAIN_KNOWLEDGE, MigrationRegistry, Store};
 
@@ -285,33 +285,33 @@ impl<'a> KnowledgeRegistry<'a> {
         tags: Vec<String>,
         external_ref: Option<String>,
         external_state: ExternalState,
-    ) -> OfficeResult<KnowledgeItem> {
+    ) -> Result<KnowledgeItem> {
         let title = title.into();
         let provenance = provenance.into();
         let body_path = body_path.into();
         if title.trim().is_empty() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "knowledge title must not be empty".into(),
             ));
         }
         if provenance.trim().is_empty() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "knowledge requires provenance (source/origin); an entry without provenance is rejected".into(),
             ));
         }
         if !body_path.is_absolute() {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "knowledge body path must be absolute: {}",
                 body_path.display()
             )));
         }
         if scope == Scope::Personal && owner_member_id.is_none() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "personal knowledge must name its owner member".into(),
             ));
         }
         if external_state == ExternalState::Unavailable && external_ref.is_none() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "an unavailable external reference must record what the reference is".into(),
             ));
         }
@@ -365,7 +365,7 @@ impl<'a> KnowledgeRegistry<'a> {
         item_id: &str,
         reason: impl Into<String>,
         actor: impl Into<String>,
-    ) -> OfficeResult<LifecycleEvent> {
+    ) -> Result<LifecycleEvent> {
         self.exit_action(
             item_id,
             "archived",
@@ -381,7 +381,7 @@ impl<'a> KnowledgeRegistry<'a> {
         item_id: &str,
         reason: impl Into<String>,
         actor: impl Into<String>,
-    ) -> OfficeResult<LifecycleEvent> {
+    ) -> Result<LifecycleEvent> {
         self.exit_action(
             item_id,
             "withdrawn",
@@ -399,7 +399,7 @@ impl<'a> KnowledgeRegistry<'a> {
         by_item_id: &str,
         reason: impl Into<String>,
         actor: impl Into<String>,
-    ) -> OfficeResult<LifecycleEvent> {
+    ) -> Result<LifecycleEvent> {
         self.exit_action(
             item_id,
             "superseded",
@@ -418,12 +418,12 @@ impl<'a> KnowledgeRegistry<'a> {
         superseded_by: Option<&str>,
         reason: impl Into<String>,
         actor: impl Into<String>,
-    ) -> OfficeResult<LifecycleEvent> {
+    ) -> Result<LifecycleEvent> {
         self.require_item(item_id)?;
         let reason = reason.into();
         let actor = actor.into();
         if reason.trim().is_empty() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "a lifecycle action requires a reason".into(),
             ));
         }
@@ -466,7 +466,7 @@ impl<'a> KnowledgeRegistry<'a> {
         item_id: &str,
         reason: impl Into<String>,
         actor: impl Into<String>,
-    ) -> OfficeResult<LifecycleEvent> {
+    ) -> Result<LifecycleEvent> {
         self.require_item(item_id)?;
         let reason = reason.into();
         let actor = actor.into();
@@ -492,7 +492,7 @@ impl<'a> KnowledgeRegistry<'a> {
         })
     }
 
-    pub fn lifecycle(&self, item_id: &str) -> OfficeResult<Vec<LifecycleEvent>> {
+    pub fn lifecycle(&self, item_id: &str) -> Result<Vec<LifecycleEvent>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT seq, item_id, action, reason, actor, recorded_at
              FROM knowledge_lifecycle WHERE item_id = ?1 ORDER BY seq",
@@ -514,15 +514,14 @@ impl<'a> KnowledgeRegistry<'a> {
         Ok(events)
     }
 
-    fn require_item(&self, item_id: &str) -> OfficeResult<KnowledgeItem> {
-        self.get_item(item_id)?
-            .ok_or_else(|| OfficeError::NotFound {
-                entity: "knowledge item",
-                id: item_id.to_string(),
-            })
+    fn require_item(&self, item_id: &str) -> Result<KnowledgeItem> {
+        self.get_item(item_id)?.ok_or_else(|| Error::NotFound {
+            entity: "knowledge item",
+            id: item_id.to_string(),
+        })
     }
 
-    pub fn get_item(&self, item_id: &str) -> OfficeResult<Option<KnowledgeItem>> {
+    pub fn get_item(&self, item_id: &str) -> Result<Option<KnowledgeItem>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT item_id, title, scope, owner_member_id, project_id, tags_json, body_path,
                     provenance, status, superseded_by, external_ref, external_state,
@@ -551,7 +550,7 @@ impl<'a> KnowledgeRegistry<'a> {
         context: &SelectionContext,
         terms: &[&str],
         options: SelectionOptions,
-    ) -> OfficeResult<Vec<SelectedKnowledge>> {
+    ) -> Result<Vec<SelectedKnowledge>> {
         let status_filter = if options.include_inactive {
             "1 = 1"
         } else {
@@ -635,7 +634,7 @@ impl<'a> KnowledgeRegistry<'a> {
         Ok(selected)
     }
 
-    fn read_body_for(&self, item: KnowledgeItem) -> OfficeResult<SelectedKnowledge> {
+    fn read_body_for(&self, item: KnowledgeItem) -> Result<SelectedKnowledge> {
         // External references that were never verified stay unavailable —
         // the office says so instead of inventing content.
         if item.external_state == ExternalState::Unavailable {
@@ -692,7 +691,7 @@ impl<'a> KnowledgeRegistry<'a> {
         item_id: &str,
         execution_id: &ExecutionId,
         note: impl Into<String>,
-    ) -> OfficeResult<UsageRecord> {
+    ) -> Result<UsageRecord> {
         self.require_item(item_id)?;
         let note = note.into();
         let now = utc_now();
@@ -712,7 +711,7 @@ impl<'a> KnowledgeRegistry<'a> {
 
     /// Usage evidence for an entry — the only honest basis for a reuse
     /// claim.
-    pub fn usage_of(&self, item_id: &str) -> OfficeResult<Vec<UsageRecord>> {
+    pub fn usage_of(&self, item_id: &str) -> Result<Vec<UsageRecord>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT seq, item_id, execution_id, used_at, note
              FROM knowledge_usage WHERE item_id = ?1 ORDER BY seq",
@@ -757,16 +756,16 @@ impl<'a> KnowledgeRegistry<'a> {
         provenance: impl Into<String>,
         owner: Option<MemberId>,
         tags: Vec<String>,
-    ) -> OfficeResult<SkillRegistration> {
+    ) -> Result<SkillRegistration> {
         let entry_path = entry_path.into();
         if !entry_path.is_absolute() {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "skill entry path must be absolute: {}",
                 entry_path.display()
             )));
         }
         if !entry_path.is_file() {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "skill entry file does not exist: {}",
                 entry_path.display()
             )));
@@ -807,7 +806,7 @@ impl<'a> KnowledgeRegistry<'a> {
 
     /// Disable (or re-enable) a skill. Office state only — the SKILL.md
     /// file on disk is untouched.
-    pub fn set_skill_enabled(&self, skill_id: &str, enabled: bool) -> OfficeResult<()> {
+    pub fn set_skill_enabled(&self, skill_id: &str, enabled: bool) -> Result<()> {
         let n = self.store.connection().execute(
             "UPDATE skills SET enabled = ?2, disabled_at = ?3 WHERE skill_id = ?1",
             rusqlite::params![
@@ -817,7 +816,7 @@ impl<'a> KnowledgeRegistry<'a> {
             ],
         )?;
         if n == 0 {
-            return Err(OfficeError::NotFound {
+            return Err(Error::NotFound {
                 entity: "skill",
                 id: skill_id.to_string(),
             });
@@ -825,7 +824,7 @@ impl<'a> KnowledgeRegistry<'a> {
         Ok(())
     }
 
-    pub fn skill(&self, skill_id: &str) -> OfficeResult<Option<SkillRegistration>> {
+    pub fn skill(&self, skill_id: &str) -> Result<Option<SkillRegistration>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT skill_id, item_id, entry_path, enabled, registered_at, disabled_at
              FROM skills WHERE skill_id = ?1",
@@ -834,7 +833,7 @@ impl<'a> KnowledgeRegistry<'a> {
         Ok(row)
     }
 
-    pub fn list_skills(&self, enabled_only: bool) -> OfficeResult<Vec<SkillRegistration>> {
+    pub fn list_skills(&self, enabled_only: bool) -> Result<Vec<SkillRegistration>> {
         let sql = format!(
             "SELECT skill_id, item_id, entry_path, enabled, registered_at, disabled_at
              FROM skills {} ORDER BY registered_at",
@@ -858,7 +857,7 @@ impl<'a> KnowledgeRegistry<'a> {
     /// Export the domain for backup: entries with provenance, lifecycle
     /// history and usage evidence; bodies are read from their authoritative
     /// files (missing bodies exported as absent, honestly).
-    pub fn export_json(&self) -> OfficeResult<serde_json::Value> {
+    pub fn export_json(&self) -> Result<serde_json::Value> {
         let mut stmt = self.store.connection().prepare(
             "SELECT item_id, title, scope, owner_member_id, project_id, tags_json, body_path,
                     provenance, status, superseded_by, external_ref, external_state,

@@ -20,7 +20,7 @@ use std::str::FromStr as _;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{ChannelId, ExecutionId, GrantId, MemberId, TaskId, utc_now};
 use crate::foundation::store::{DOMAIN_AUTHORITY, MigrationRegistry, Store};
 
@@ -95,13 +95,13 @@ impl GrantMode {
     }
 
     /// Parse the persisted/CLI spelling of a mode.
-    pub fn from_str_value(text: &str) -> OfficeResult<Self> {
+    pub fn from_str_value(text: &str) -> Result<Self> {
         match text {
             "READ" => Ok(GrantMode::Read),
             "PROPOSE" => Ok(GrantMode::Propose),
             "ACT_WITH_APPROVAL" => Ok(GrantMode::ActWithApproval),
             "ACT_AUTONOMOUSLY" => Ok(GrantMode::ActAutonomously),
-            other => Err(OfficeError::Validation(format!(
+            other => Err(Error::Validation(format!(
                 "unknown grant mode `{other}` (READ | PROPOSE | ACT_WITH_APPROVAL | \
                  ACT_AUTONOMOUSLY)"
             ))),
@@ -255,14 +255,14 @@ impl<'a> AuthorityEngine<'a> {
         actions: Vec<String>,
         mode: GrantMode,
         expires_at: Option<String>,
-    ) -> OfficeResult<Grant> {
+    ) -> Result<Grant> {
         if actions.is_empty() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "a grant must list at least one action".into(),
             ));
         }
         if actions.iter().any(|a| Self::is_protected(a)) {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "protected actions can never be granted".into(),
             ));
         }
@@ -294,21 +294,19 @@ impl<'a> AuthorityEngine<'a> {
         actions: Vec<String>,
         mode: GrantMode,
         expires_at: Option<String>,
-    ) -> OfficeResult<Grant> {
+    ) -> Result<Grant> {
         let parent = self.require_grant(parent_grant_id)?;
         match parent.status {
             GrantStatus::Live => {}
             GrantStatus::Revoked => {
-                return Err(OfficeError::Validation(
-                    "a revoked grant cannot delegate".into(),
-                ));
+                return Err(Error::Validation("a revoked grant cannot delegate".into()));
             }
         }
         // Child never widens: the ceiling holds in TIME too. An expired
         // parent delegates nothing, and a child never outlives its parent.
         if let Some(expires_at) = &parent.expires_at {
             if expires_at.as_str() <= utc_now().as_str() {
-                return Err(OfficeError::Validation(
+                return Err(Error::Validation(
                     "an expired grant cannot delegate — refresh or reissue the parent first".into(),
                 ));
             }
@@ -316,12 +314,12 @@ impl<'a> AuthorityEngine<'a> {
         // Child never widens: action subset.
         for action in &actions {
             if Self::is_protected(action) {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "protected action `{action}` can never be granted, not even by delegation"
                 )));
             }
             if !parent.actions.contains(action) {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "child grant action `{action}` is outside the parent's scope — \
                      a child grant may never widen its parent"
                 )));
@@ -329,7 +327,7 @@ impl<'a> AuthorityEngine<'a> {
         }
         // Child never widens: mode ceiling.
         if mode > parent.mode {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "child grant mode {} exceeds the parent's {} — a child grant may never widen its parent",
                 mode.as_str(),
                 parent.mode.as_str()
@@ -365,14 +363,14 @@ impl<'a> AuthorityEngine<'a> {
 
     /// Revoke a grant. Revocation takes effect immediately at every later
     /// check; a revoked grant also cannot authorize anything retroactively.
-    pub fn revoke(&self, grant_id: &GrantId, reason: impl Into<String>) -> OfficeResult<()> {
+    pub fn revoke(&self, grant_id: &GrantId, reason: impl Into<String>) -> Result<()> {
         let n = self.store.connection().execute(
             "UPDATE grants SET status = 'revoked', revoked_at = ?2, revoke_reason = ?3
              WHERE grant_id = ?1 AND status = 'live'",
             rusqlite::params![grant_id.as_str(), utc_now(), reason.into()],
         )?;
         if n == 0 {
-            return Err(OfficeError::NotFound {
+            return Err(Error::NotFound {
                 entity: "live grant",
                 id: grant_id.to_string(),
             });
@@ -380,7 +378,7 @@ impl<'a> AuthorityEngine<'a> {
         Ok(())
     }
 
-    pub fn get_grant(&self, grant_id: &GrantId) -> OfficeResult<Option<Grant>> {
+    pub fn get_grant(&self, grant_id: &GrantId) -> Result<Option<Grant>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT grant_id, parent_grant_id, principal_member_id, issued_by, task_id,
                     actions_json, mode, status, expires_at, created_at, revoked_at, revoke_reason
@@ -390,12 +388,11 @@ impl<'a> AuthorityEngine<'a> {
         Ok(row)
     }
 
-    pub fn require_grant(&self, grant_id: &GrantId) -> OfficeResult<Grant> {
-        self.get_grant(grant_id)?
-            .ok_or_else(|| OfficeError::NotFound {
-                entity: "grant",
-                id: grant_id.to_string(),
-            })
+    pub fn require_grant(&self, grant_id: &GrantId) -> Result<Grant> {
+        self.get_grant(grant_id)?.ok_or_else(|| Error::NotFound {
+            entity: "grant",
+            id: grant_id.to_string(),
+        })
     }
 
     // -- Authorization -------------------------------------------------------
@@ -408,7 +405,7 @@ impl<'a> AuthorityEngine<'a> {
         actor: &Actor,
         action: &str,
         task_id: Option<&TaskId>,
-    ) -> OfficeResult<Result<(), DenialReason>> {
+    ) -> Result<Result<(), DenialReason>> {
         let outcome = self.evaluate(actor, action, task_id)?;
         if let Err(ref reason) = outcome {
             self.record_denial(actor, action, reason)?;
@@ -421,7 +418,7 @@ impl<'a> AuthorityEngine<'a> {
         actor: &Actor,
         action: &str,
         task_id: Option<&TaskId>,
-    ) -> OfficeResult<Result<(), DenialReason>> {
+    ) -> Result<Result<(), DenialReason>> {
         // Protected actions are closed to every actor, always.
         if Self::is_protected(action) {
             return Ok(Err(DenialReason::ProtectedAction));
@@ -486,7 +483,7 @@ impl<'a> AuthorityEngine<'a> {
         channel: &ChannelId,
         execution: Option<ExecutionId>,
         member: MemberId,
-    ) -> OfficeResult<String> {
+    ) -> Result<String> {
         let credential_id = format!("cred-{}", uuid::Uuid::new_v4().simple());
         self.store.connection().execute(
             "INSERT INTO worker_credentials(credential_id, channel_id, execution_id, member_id, status, issued_at)
@@ -509,7 +506,7 @@ impl<'a> AuthorityEngine<'a> {
         &self,
         credential_id: &str,
         as_user: bool,
-    ) -> OfficeResult<Result<(), DenialReason>> {
+    ) -> Result<Result<(), DenialReason>> {
         let outcome = if as_user {
             Err(DenialReason::WorkerImpersonatesUser)
         } else {
@@ -541,14 +538,14 @@ impl<'a> AuthorityEngine<'a> {
     }
 
     /// Revoke a worker credential (host-side, when the worker is gone).
-    pub fn revoke_worker_credential(&self, credential_id: &str) -> OfficeResult<()> {
+    pub fn revoke_worker_credential(&self, credential_id: &str) -> Result<()> {
         let n = self.store.connection().execute(
             "UPDATE worker_credentials SET status = 'revoked', revoked_at = ?2
              WHERE credential_id = ?1 AND status = 'active'",
             rusqlite::params![credential_id, utc_now()],
         )?;
         if n == 0 {
-            return Err(OfficeError::NotFound {
+            return Err(Error::NotFound {
                 entity: "worker credential",
                 id: credential_id.to_string(),
             });
@@ -558,12 +555,7 @@ impl<'a> AuthorityEngine<'a> {
 
     // -- Denial log ------------------------------------------------------------
 
-    fn record_denial(
-        &self,
-        actor: &Actor,
-        action: &str,
-        reason: &DenialReason,
-    ) -> OfficeResult<()> {
+    fn record_denial(&self, actor: &Actor, action: &str, reason: &DenialReason) -> Result<()> {
         let subject = match actor {
             Actor::Member { member, grant } => match grant {
                 Some(g) => format!("member:{} grant:{}", member.as_str(), g.as_str()),
@@ -580,10 +572,7 @@ impl<'a> AuthorityEngine<'a> {
     }
 
     /// Recent denials, newest first (audit view).
-    pub fn recent_denials(
-        &self,
-        limit: u32,
-    ) -> OfficeResult<Vec<(String, String, String, String)>> {
+    pub fn recent_denials(&self, limit: u32) -> Result<Vec<(String, String, String, String)>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT subject, action, reason, occurred_at
              FROM grant_denials ORDER BY seq DESC LIMIT ?1",
@@ -603,7 +592,7 @@ impl<'a> AuthorityEngine<'a> {
         Ok(denials)
     }
 
-    fn insert_grant(&self, grant: &Grant) -> OfficeResult<()> {
+    fn insert_grant(&self, grant: &Grant) -> Result<()> {
         self.store.connection().execute(
             "INSERT INTO grants(grant_id, parent_grant_id, principal_member_id, issued_by,
                                 task_id, actions_json, mode, status, expires_at, created_at,

@@ -27,7 +27,7 @@ use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
-use crate::foundation::error::OfficeResult;
+use crate::foundation::error::Result;
 
 pub mod chrome;
 pub mod conversations;
@@ -68,9 +68,9 @@ pub struct OfficeOverview {
 /// The read-only data source of the shell. There are deliberately no
 /// mutators: navigation can never change what it navigates over.
 pub trait OfficeData {
-    fn overview(&self) -> OfficeResult<OfficeOverview>;
-    fn tasks(&self) -> OfficeResult<Vec<TaskRow>>;
-    fn terminals(&self) -> OfficeResult<Vec<TerminalRow>>;
+    fn overview(&self) -> Result<OfficeOverview>;
+    fn tasks(&self) -> Result<Vec<TaskRow>>;
+    fn terminals(&self) -> Result<Vec<TerminalRow>>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -428,13 +428,12 @@ pub struct TerminalGuard;
 #[cfg(unix)]
 impl TerminalGuard {
     /// Enter the alternate screen with raw mode enabled.
-    pub fn enter() -> OfficeResult<Self> {
+    pub fn enter() -> Result<Self> {
         use ratatui::crossterm::ExecutableCommand as _;
         use ratatui::crossterm::event::{EnableBracketedPaste, EnableMouseCapture};
         use ratatui::crossterm::terminal::{self as ct, EnterAlternateScreen};
-        ct::enable_raw_mode().map_err(|e| {
-            crate::foundation::OfficeError::Io(std::io::Error::other(e.to_string()))
-        })?;
+        ct::enable_raw_mode()
+            .map_err(|e| crate::foundation::Error::Io(std::io::Error::other(e.to_string())))?;
         let mut out = std::io::stdout();
         let _ = out.execute(EnterAlternateScreen);
         let _ = out.execute(EnableMouseCapture);
@@ -520,13 +519,13 @@ mod tests {
     }
 
     impl OfficeData for Fixture {
-        fn overview(&self) -> OfficeResult<OfficeOverview> {
+        fn overview(&self) -> Result<OfficeOverview> {
             Ok(self.overview.clone())
         }
 
-        fn tasks(&self) -> OfficeResult<Vec<TaskRow>> {
+        fn tasks(&self) -> Result<Vec<TaskRow>> {
             if self.fail_tasks {
-                Err(crate::foundation::OfficeError::Validation(
+                Err(crate::foundation::Error::Validation(
                     "task store unreachable".into(),
                 ))
             } else {
@@ -534,7 +533,7 @@ mod tests {
             }
         }
 
-        fn terminals(&self) -> OfficeResult<Vec<TerminalRow>> {
+        fn terminals(&self) -> Result<Vec<TerminalRow>> {
             Ok(self.terminals.clone())
         }
     }

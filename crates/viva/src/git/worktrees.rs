@@ -25,7 +25,7 @@ use std::sync::Mutex;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{TaskId, WorktreeId, utc_now};
 use crate::foundation::store::{DOMAIN_GIT, Store};
 use crate::git::cli::{CliRunner, GitFailure, TreeState, current_branch, head_sha, tree_state};
@@ -179,7 +179,7 @@ impl<'a> WorktreeService<'a> {
 
     /// Git-native discovery of every worktree of `repo_root`, annotated
     /// with dirty state and office occupancy. Read-only.
-    pub fn discover(&self, repo_root: &Path) -> OfficeResult<Vec<DiscoveredWorktree>> {
+    pub fn discover(&self, repo_root: &Path) -> Result<Vec<DiscoveredWorktree>> {
         let out = self
             .runner
             .git_ok(repo_root, &["worktree", "list", "--porcelain"])?;
@@ -259,20 +259,20 @@ impl<'a> WorktreeService<'a> {
         repo_root: &Path,
         worktree_path: &Path,
         task_id: &TaskId,
-    ) -> OfficeResult<TaskWorktreeRecord> {
+    ) -> Result<TaskWorktreeRecord> {
         if !worktree_path.exists() {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "cannot adopt a missing worktree: {}",
                 worktree_path.display()
             )));
         }
         let branch = current_branch(&self.runner, worktree_path)?.ok_or_else(|| {
-            OfficeError::Validation(
+            Error::Validation(
                 "cannot adopt a detached-HEAD worktree for a task; give it a branch first".into(),
             )
         })?;
         if self.protected.is_protected(&branch) {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "`{branch}` is a protected ref; tasks never adopt a writable protected checkout"
             )));
         }
@@ -285,7 +285,7 @@ impl<'a> WorktreeService<'a> {
             w.branch.as_deref() == Some(branch.as_str())
                 && std::fs::canonicalize(&w.path).unwrap_or_else(|_| w.path.clone()) != target
         }) {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "branch `{branch}` is already checked out elsewhere — one writable checkout per branch"
             )));
         }
@@ -316,14 +316,14 @@ impl<'a> WorktreeService<'a> {
         base_dir: &Path,
         task_id: &TaskId,
         task_branch: &str,
-    ) -> OfficeResult<TaskWorktreeRecord> {
+    ) -> Result<TaskWorktreeRecord> {
         if task_branch.trim().is_empty() || task_branch.contains(char::is_whitespace) {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "`{task_branch}` is not a valid branch name"
             )));
         }
         if self.protected.is_protected(task_branch) {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "`{task_branch}` is a protected ref; task worktrees must use a task branch"
             )));
         }
@@ -331,7 +331,7 @@ impl<'a> WorktreeService<'a> {
         // one branch per repo across processes (DB UNIQUE below).
         let _guard = self.lock_repo(repo_root);
         if self.branch_checked_out_anywhere(repo_root, task_branch)? {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "branch `{task_branch}` already has a writable checkout — one checkout per branch"
             )));
         }
@@ -340,13 +340,13 @@ impl<'a> WorktreeService<'a> {
         self.runner
             .git(repo_root, &["fetch", "--prune", "origin"])
             .map_err(|failure| match failure {
-                GitFailure::AuthMissing { detail } => OfficeError::Validation(format!(
+                GitFailure::AuthMissing { detail } => Error::Validation(format!(
                     "git authentication missing while fetching (configure credentials for the user; the office stores none): {detail}"
                 )),
-                GitFailure::Network { detail } => OfficeError::Validation(format!(
+                GitFailure::Network { detail } => Error::Validation(format!(
                     "network unreachable while fetching; no task worktree was created: {detail}"
                 )),
-                other => OfficeError::Validation(other.to_string()),
+                other => Error::Validation(other.to_string()),
             })?;
 
         let default_branch = self.remote_default_branch(repo_root)?;
@@ -388,7 +388,7 @@ impl<'a> WorktreeService<'a> {
 
     /// The remote's default branch: `refs/remotes/origin/HEAD` when set,
     /// else the first existing of main/master on the remote.
-    pub fn remote_default_branch(&self, repo_root: &Path) -> OfficeResult<String> {
+    pub fn remote_default_branch(&self, repo_root: &Path) -> Result<String> {
         if let Ok(out) = self.runner.git(
             repo_root,
             &["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
@@ -408,7 +408,7 @@ impl<'a> WorktreeService<'a> {
                 return Ok(candidate.to_string());
             }
         }
-        Err(OfficeError::Validation(
+        Err(Error::Validation(
             "cannot determine the remote default branch; set origin/HEAD or fetch origin".into(),
         ))
     }
@@ -416,14 +416,14 @@ impl<'a> WorktreeService<'a> {
     /// Release a task worktree from the registry. **No deletion happens** —
     /// releasing only records that the office no longer claims it; removing
     /// the directory requires a human request naming the exact target.
-    pub fn release(&self, worktree_id: &WorktreeId) -> OfficeResult<()> {
+    pub fn release(&self, worktree_id: &WorktreeId) -> Result<()> {
         let n = self.store.connection().execute(
             "UPDATE task_worktrees SET released_at = ?2
              WHERE worktree_id = ?1 AND released_at IS NULL",
             rusqlite::params![worktree_id.as_str(), utc_now()],
         )?;
         if n == 0 {
-            return Err(OfficeError::NotFound {
+            return Err(Error::NotFound {
                 entity: "task worktree",
                 id: worktree_id.to_string(),
             });
@@ -431,7 +431,7 @@ impl<'a> WorktreeService<'a> {
         Ok(())
     }
 
-    pub fn record(&self, worktree_id: &WorktreeId) -> OfficeResult<Option<TaskWorktreeRecord>> {
+    pub fn record(&self, worktree_id: &WorktreeId) -> Result<Option<TaskWorktreeRecord>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT worktree_id, task_id, repo_root, worktree_path, branch, base_sha,
                     source, created_at, released_at
@@ -444,7 +444,7 @@ impl<'a> WorktreeService<'a> {
     }
 
     /// All registry records, including released (history preserved).
-    pub fn all_records(&self) -> OfficeResult<Vec<TaskWorktreeRecord>> {
+    pub fn all_records(&self) -> Result<Vec<TaskWorktreeRecord>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT worktree_id, task_id, repo_root, worktree_path, branch, base_sha,
                     source, created_at, released_at
@@ -478,7 +478,7 @@ impl<'a> WorktreeService<'a> {
 
     /// Whether any worktree of `repo_root` (git-discovered) has `branch`
     /// checked out — including ones the office never created.
-    fn branch_checked_out_anywhere(&self, repo_root: &Path, branch: &str) -> OfficeResult<bool> {
+    fn branch_checked_out_anywhere(&self, repo_root: &Path, branch: &str) -> Result<bool> {
         Ok(self
             .discover(repo_root)?
             .iter()
@@ -491,7 +491,7 @@ impl<'a> WorktreeService<'a> {
         &self,
         repo_root: &Path,
         branch: &str,
-    ) -> OfficeResult<Option<(TaskId, WorktreeSource)>> {
+    ) -> Result<Option<(TaskId, WorktreeSource)>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT task_id, source FROM task_worktrees
              WHERE repo_root = ?1 AND branch = ?2 AND released_at IS NULL LIMIT 1",
@@ -516,7 +516,7 @@ impl<'a> WorktreeService<'a> {
 
     /// Bounded working-tree diff against HEAD for a worktree (V14 need:
     /// real diff, bounded, aligned with head). Read-only.
-    pub fn worktree_diff(&self, worktree_path: &Path, max_bytes: usize) -> OfficeResult<String> {
+    pub fn worktree_diff(&self, worktree_path: &Path, max_bytes: usize) -> Result<String> {
         let out = self
             .runner
             .git_ok(worktree_path, &["--no-pager", "diff", "HEAD", "--"])?;
@@ -526,7 +526,7 @@ impl<'a> WorktreeService<'a> {
         ))
     }
 
-    fn insert_record(&self, record: &TaskWorktreeRecord) -> OfficeResult<()> {
+    fn insert_record(&self, record: &TaskWorktreeRecord) -> Result<()> {
         let inserted = self.store.connection().execute(
             "INSERT INTO task_worktrees(worktree_id, task_id, repo_root, worktree_path,
                                          branch, base_sha, source, created_at, released_at)
@@ -545,7 +545,7 @@ impl<'a> WorktreeService<'a> {
         );
         if let Err(rusqlite::Error::SqliteFailure(err, message)) = inserted {
             if err.code == rusqlite::ErrorCode::ConstraintViolation {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "another task already claims this repo/branch ({})",
                     message.unwrap_or_default()
                 )));

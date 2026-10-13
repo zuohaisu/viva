@@ -20,7 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{MemberId, SessionId, TaskId, utc_now};
 use crate::foundation::store::Store;
 
@@ -88,11 +88,11 @@ impl ForkCapability {
         }
     }
 
-    pub fn from_str_value(text: &str) -> OfficeResult<Self> {
+    pub fn from_str_value(text: &str) -> Result<Self> {
         match text {
             "native_fork" => Ok(ForkCapability::NativeFork),
             "handoff_only" => Ok(ForkCapability::HandoffOnly),
-            other => Err(OfficeError::Validation(format!(
+            other => Err(Error::Validation(format!(
                 "unknown fork capability `{other}`"
             ))),
         }
@@ -152,7 +152,7 @@ impl<'a> ConversationRegistry<'a> {
         session_id: &SessionId,
         display_name: impl Into<String>,
         harness: impl Into<String>,
-    ) -> OfficeResult<ConversationNode> {
+    ) -> Result<ConversationNode> {
         self.insert_node(ConversationNode {
             node_id: new_node_id(),
             session_id: session_id.clone(),
@@ -176,10 +176,10 @@ impl<'a> ConversationRegistry<'a> {
         display_name: impl Into<String>,
         native_session_id: Option<String>,
         native_node_id: Option<String>,
-    ) -> OfficeResult<ConversationNode> {
+    ) -> Result<ConversationNode> {
         let parent = self.require_node(parent_node_id)?;
         if parent.archived_at.is_some() {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "cannot fork an archived branch `{}`",
                 parent.display_name
             )));
@@ -201,14 +201,14 @@ impl<'a> ConversationRegistry<'a> {
 
     /// Rename in the office. This never touches the harness's own title —
     /// the display name is office-owned metadata.
-    pub fn rename(&self, node_id: &str, display_name: impl Into<String>) -> OfficeResult<()> {
+    pub fn rename(&self, node_id: &str, display_name: impl Into<String>) -> Result<()> {
         let display_name = validate_name(display_name)?;
         let n = self.store.connection().execute(
             "UPDATE conversation_nodes SET display_name = ?2 WHERE node_id = ?1",
             rusqlite::params![node_id, display_name],
         )?;
         if n == 0 {
-            return Err(OfficeError::NotFound {
+            return Err(Error::NotFound {
                 entity: "conversation node",
                 id: node_id.to_string(),
             });
@@ -224,12 +224,12 @@ impl<'a> ConversationRegistry<'a> {
         node_id: &str,
         native_session_id: impl Into<String>,
         native_node_id: Option<String>,
-    ) -> OfficeResult<()> {
+    ) -> Result<()> {
         let node = self.require_node(node_id)?;
         let native_session_id = native_session_id.into();
         if let Some(existing) = &node.native_session_id {
             if existing != &native_session_id {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "node `{}` already points at native session `{existing}`; \
                      the office never rewrites a harness-native reference",
                     node.display_name
@@ -246,13 +246,13 @@ impl<'a> ConversationRegistry<'a> {
 
     /// Attach a task to a branch (explicit, selective). Forks and plain
     /// chat never get one automatically.
-    pub fn attach_task(&self, node_id: &str, task_id: &TaskId) -> OfficeResult<()> {
+    pub fn attach_task(&self, node_id: &str, task_id: &TaskId) -> Result<()> {
         let n = self.store.connection().execute(
             "UPDATE conversation_nodes SET task_id = ?2 WHERE node_id = ?1",
             rusqlite::params![node_id, task_id.as_str()],
         )?;
         if n == 0 {
-            return Err(OfficeError::NotFound {
+            return Err(Error::NotFound {
                 entity: "conversation node",
                 id: node_id.to_string(),
             });
@@ -260,13 +260,13 @@ impl<'a> ConversationRegistry<'a> {
         Ok(())
     }
 
-    pub fn detach_task(&self, node_id: &str) -> OfficeResult<()> {
+    pub fn detach_task(&self, node_id: &str) -> Result<()> {
         let n = self.store.connection().execute(
             "UPDATE conversation_nodes SET task_id = NULL WHERE node_id = ?1",
             rusqlite::params![node_id],
         )?;
         if n == 0 {
-            return Err(OfficeError::NotFound {
+            return Err(Error::NotFound {
                 entity: "conversation node",
                 id: node_id.to_string(),
             });
@@ -276,13 +276,13 @@ impl<'a> ConversationRegistry<'a> {
 
     /// Archive one branch. Its history stays, its children stay untouched,
     /// and completing a task never archives anything silently.
-    pub fn archive(&self, node_id: &str) -> OfficeResult<()> {
+    pub fn archive(&self, node_id: &str) -> Result<()> {
         let n = self.store.connection().execute(
             "UPDATE conversation_nodes SET archived_at = ?2 WHERE node_id = ?1 AND archived_at IS NULL",
             rusqlite::params![node_id, utc_now()],
         )?;
         if n == 0 {
-            return Err(OfficeError::NotFound {
+            return Err(Error::NotFound {
                 entity: "conversation node",
                 id: node_id.to_string(),
             });
@@ -291,7 +291,7 @@ impl<'a> ConversationRegistry<'a> {
     }
 
     /// The full tree of a session, parents before children.
-    pub fn tree(&self, session_id: &SessionId) -> OfficeResult<Vec<ConversationNode>> {
+    pub fn tree(&self, session_id: &SessionId) -> Result<Vec<ConversationNode>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT node_id, session_id, parent_node_id, display_name, harness,
                     native_session_id, native_node_id, task_id, created_at, archived_at
@@ -305,7 +305,7 @@ impl<'a> ConversationRegistry<'a> {
         Ok(nodes)
     }
 
-    pub fn get_node(&self, node_id: &str) -> OfficeResult<Option<ConversationNode>> {
+    pub fn get_node(&self, node_id: &str) -> Result<Option<ConversationNode>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT node_id, session_id, parent_node_id, display_name, harness,
                     native_session_id, native_node_id, task_id, created_at, archived_at
@@ -314,19 +314,18 @@ impl<'a> ConversationRegistry<'a> {
         let row = stmt
             .query_row([node_id], map_node)
             .optional()
-            .map_err(OfficeError::from)?;
+            .map_err(Error::from)?;
         Ok(row)
     }
 
-    fn require_node(&self, node_id: &str) -> OfficeResult<ConversationNode> {
-        self.get_node(node_id)?
-            .ok_or_else(|| OfficeError::NotFound {
-                entity: "conversation node",
-                id: node_id.to_string(),
-            })
+    fn require_node(&self, node_id: &str) -> Result<ConversationNode> {
+        self.get_node(node_id)?.ok_or_else(|| Error::NotFound {
+            entity: "conversation node",
+            id: node_id.to_string(),
+        })
     }
 
-    fn insert_node(&self, node: ConversationNode) -> OfficeResult<ConversationNode> {
+    fn insert_node(&self, node: ConversationNode) -> Result<ConversationNode> {
         // The session must exist: nodes hang off real office sessions.
         let exists: i64 = self.store.connection().query_row(
             "SELECT COUNT(*) FROM office_sessions WHERE session_id = ?1",
@@ -334,7 +333,7 @@ impl<'a> ConversationRegistry<'a> {
             |row| row.get(0),
         )?;
         if exists == 0 {
-            return Err(OfficeError::NotFound {
+            return Err(Error::NotFound {
                 entity: "session",
                 id: node.session_id.to_string(),
             });
@@ -378,7 +377,7 @@ impl<'a> ConversationRegistry<'a> {
         task_id: Option<TaskId>,
         brief_snapshot: Option<String>,
         history_ref: Option<String>,
-    ) -> OfficeResult<ConversationHandoff> {
+    ) -> Result<ConversationHandoff> {
         self.record_handoff_checked(
             from_node_id,
             to_harness,
@@ -406,7 +405,7 @@ impl<'a> ConversationRegistry<'a> {
         task_id: Option<TaskId>,
         brief_snapshot: Option<String>,
         history_ref: Option<String>,
-    ) -> OfficeResult<(ConversationHandoff, bool)> {
+    ) -> Result<(ConversationHandoff, bool)> {
         self.require_node(from_node_id)?;
         let to_harness = to_harness.into();
         // Idempotent: the SAME handoff (same source node, target harness,
@@ -440,7 +439,7 @@ impl<'a> ConversationRegistry<'a> {
                 map_handoff,
             )
             .optional()
-            .map_err(OfficeError::from)?
+            .map_err(Error::from)?
         };
         if let Some(handoff) = existing {
             return Ok((handoff, true));
@@ -479,7 +478,7 @@ impl<'a> ConversationRegistry<'a> {
         Ok((handoff, false))
     }
 
-    pub fn handoffs_for_node(&self, node_id: &str) -> OfficeResult<Vec<ConversationHandoff>> {
+    pub fn handoffs_for_node(&self, node_id: &str) -> Result<Vec<ConversationHandoff>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT handoff_id, from_node_id, to_harness, to_capability,
                     native_session_id, identity_member_id, task_id,
@@ -537,10 +536,10 @@ fn map_handoff(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationHandoff>
     })
 }
 
-fn validate_name(name: impl Into<String>) -> OfficeResult<String> {
+fn validate_name(name: impl Into<String>) -> Result<String> {
     let name = name.into();
     if name.trim().is_empty() {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "conversation display name must not be empty".into(),
         ));
     }

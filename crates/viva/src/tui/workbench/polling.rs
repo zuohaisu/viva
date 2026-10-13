@@ -1,7 +1,7 @@
 //! Bounded background socket clients. Git/network projections and large
 //! snapshots never sit in the physical terminal's event/render path.
 use super::WorkbenchModel;
-use crate::foundation::OfficeResult;
+use crate::foundation::Result;
 use crate::office::{OfficeClient, OfficeRequestKind};
 use crate::terminal::TerminalSnapshot;
 use std::sync::{
@@ -20,7 +20,7 @@ pub struct Polling {
     stop: Arc<AtomicBool>,
 }
 impl Polling {
-    pub fn start(client: &OfficeClient) -> OfficeResult<Self> {
+    pub fn start(client: &OfficeClient) -> Result<Self> {
         let mut model_client = client.independent()?;
         let mut screen_client = client.independent()?;
         let mut input_client = client.independent()?;
@@ -80,7 +80,7 @@ impl Polling {
                         })?;
                         serde_json::from_value(v).map_err(Into::into)
                     })()
-                    .map_err(|e: crate::foundation::OfficeError| e.to_string());
+                    .map_err(|e: crate::foundation::Error| e.to_string());
                     let _ = screen_tx.try_send((id, result));
                 }
             }

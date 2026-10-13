@@ -20,7 +20,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 
 /// Current wire-protocol version. A bump is a coordinated contract change.
 /// v2 (ADR 0012 / issue #43): the resident-server split adds headless
@@ -339,16 +339,13 @@ impl OfficeResponse {
 /// silently void that (QA F14 — a 16s sync cycle errored at the client at
 /// 10.03s while the server completed the work). Default callers get
 /// [`IO_TIMEOUT`].
-pub fn read_message(stream: &mut UnixStream) -> OfficeResult<String> {
+pub fn read_message(stream: &mut UnixStream) -> Result<String> {
     read_message_within(stream, IO_TIMEOUT)
 }
 
 /// [`read_message`] with an explicit read budget (server-side waits may
 /// legitimately outlive the default 10s).
-pub fn read_message_within(
-    stream: &mut UnixStream,
-    read_timeout: Duration,
-) -> OfficeResult<String> {
+pub fn read_message_within(stream: &mut UnixStream, read_timeout: Duration) -> Result<String> {
     stream.set_read_timeout(Some(read_timeout))?;
     let mut reader = BufReader::new(std::io::Read::take(
         stream.try_clone()?,
@@ -357,12 +354,12 @@ pub fn read_message_within(
     let mut line = String::new();
     let n = reader.read_line(&mut line)?;
     if n == 0 {
-        return Err(OfficeError::Io(std::io::Error::other(
+        return Err(Error::Io(std::io::Error::other(
             "control channel closed before a message arrived",
         )));
     }
     if line.len() > MAX_MESSAGE_BYTES {
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "control message is {} bytes; the bound is {MAX_MESSAGE_BYTES}",
             line.len()
         )));
@@ -371,13 +368,13 @@ pub fn read_message_within(
 }
 
 /// Write one framed JSON message.
-pub fn write_message(stream: &mut UnixStream, value: &impl Serialize) -> OfficeResult<()> {
+pub fn write_message(stream: &mut UnixStream, value: &impl Serialize) -> Result<()> {
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     let mut text = serde_json::to_string(value)?;
     text.push('\n');
     let bytes = text.into_bytes();
     if bytes.len() > MAX_MESSAGE_BYTES {
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "control message is {} bytes; the bound is {MAX_MESSAGE_BYTES}",
             bytes.len()
         )));
@@ -389,10 +386,7 @@ pub fn write_message(stream: &mut UnixStream, value: &impl Serialize) -> OfficeR
 
 /// Send one request and wait for its correlated response (default read
 /// budget: [`IO_TIMEOUT`]).
-pub fn round_trip(
-    stream: &mut UnixStream,
-    request: &OfficeRequest,
-) -> OfficeResult<OfficeResponse> {
+pub fn round_trip(stream: &mut UnixStream, request: &OfficeRequest) -> Result<OfficeResponse> {
     round_trip_within(stream, request, IO_TIMEOUT)
 }
 
@@ -402,14 +396,14 @@ pub fn round_trip_within(
     stream: &mut UnixStream,
     request: &OfficeRequest,
     read_timeout: Duration,
-) -> OfficeResult<OfficeResponse> {
+) -> Result<OfficeResponse> {
     write_message(stream, request)?;
     let line = read_message_within(stream, read_timeout)?;
     let response: OfficeResponse = serde_json::from_str(&line).map_err(|e| {
-        OfficeError::Validation(format!("control channel sent a malformed response: {e}"))
+        Error::Validation(format!("control channel sent a malformed response: {e}"))
     })?;
     if response.request_id != request.request_id {
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "response id `{}` does not match request `{}`",
             response.request_id, request.request_id
         )));

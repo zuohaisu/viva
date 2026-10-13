@@ -48,7 +48,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::authority::{Actor, AuthorityEngine};
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{GrantId, MemberId, TaskId, TerminalId, WorktreeId, utc_now};
 use crate::foundation::records::{AttributionSnapshot, LaunchSpec, RequestOrigin, TerminalOwner};
 use crate::foundation::store::{Domain, MigrationRegistry, Store};
@@ -234,7 +234,7 @@ impl OfficeHost {
     /// socket; claims a stale socket only with a recovery record. The home
     /// is forced to private 0700 permissions first — the socket is the
     /// control plane, and its directory is part of its access control.
-    pub fn open(home: &Path) -> OfficeResult<Self> {
+    pub fn open(home: &Path) -> Result<Self> {
         crate::foundation::paths::ensure_private_dir(home)?;
         let socket_path = home.join(OFFICE_SOCKET_NAME);
         let host_id = format!("host-{}", uuid::Uuid::new_v4().simple());
@@ -242,14 +242,14 @@ impl OfficeHost {
         if socket_path.exists() {
             match Self::probe_socket(&socket_path) {
                 Ok(Some(pid)) => {
-                    return Err(OfficeError::Validation(format!(
+                    return Err(Error::Validation(format!(
                         "an office host is already active for {} (pid {pid}); \
                          refusing to start a second host",
                         home.display()
                     )));
                 }
                 Ok(None) => {
-                    return Err(OfficeError::Validation(format!(
+                    return Err(Error::Validation(format!(
                         "socket {} exists but no healthy host answered the probe; \
                          refusing to claim it blindly — inspect the wedged host first",
                         socket_path.display()
@@ -309,16 +309,16 @@ impl OfficeHost {
 
     /// Probe a socket: `Ok(Some(pid))` = healthy host; `Ok(None)` = socket
     /// answers but the handshake failed (wedged); `Err` = nobody listening.
-    fn probe_socket(socket_path: &Path) -> OfficeResult<Option<u32>> {
+    fn probe_socket(socket_path: &Path) -> Result<Option<u32>> {
         let mut stream = UnixStream::connect(socket_path)?;
         stream.set_read_timeout(Some(Duration::from_secs(2)))?;
         let request = new_request(OfficeRequestKind::Ping);
         write_message(&mut stream, &request)?;
         let line = read_message(&mut stream)?;
         let response: OfficeResponse = serde_json::from_str(&line)
-            .map_err(|e| OfficeError::Validation(format!("bad probe response: {e}")))?;
+            .map_err(|e| Error::Validation(format!("bad probe response: {e}")))?;
         if !response.ok {
-            return Err(OfficeError::Validation("probe rejected".into()));
+            return Err(Error::Validation("probe rejected".into()));
         }
         Ok(response
             .result
@@ -330,7 +330,7 @@ impl OfficeHost {
     /// `crashed`, resolves interrupted intents, and stops (in the office's
     /// records) executions whose supervision died with that host. Nothing
     /// is re-run; nothing is killed; completed work is never touched.
-    fn reconcile(store: &Store, new_host_id: &str) -> OfficeResult<String> {
+    fn reconcile(store: &Store, new_host_id: &str) -> Result<String> {
         let now = utc_now();
         let previous: Vec<(String, i64)> = {
             let mut stmt = store
@@ -457,7 +457,7 @@ impl OfficeHost {
 
     /// Serve until a shutdown request (or a fatal accept error). Blocks the
     /// calling thread; each connection gets its own thread.
-    pub fn serve(self) -> OfficeResult<()> {
+    pub fn serve(self) -> Result<()> {
         let shared = self.shared;
         let listener = self.listener;
         listener.set_nonblocking(true)?;
@@ -493,7 +493,7 @@ impl OfficeHost {
                     std::thread::sleep(Duration::from_millis(25));
                 }
                 Err(e) => {
-                    let err = OfficeError::Io(e);
+                    let err = Error::Io(e);
                     let _ = Self::shutdown_shared(&shared);
                     return Err(err);
                 }
@@ -507,7 +507,7 @@ impl OfficeHost {
     /// every stop lands in the ledger BEFORE the handoff is written, then
     /// persist the handoff and release the channel. Also the workbench
     /// quit path (D6: QuitRequested is really consumed).
-    pub fn shutdown_shared(shared: &OfficeShared) -> OfficeResult<()> {
+    pub fn shutdown_shared(shared: &OfficeShared) -> Result<()> {
         // Live-handoff exit: the terminals were transferred to the resumed
         // server and are NOT ours to stop — record the handoff and leave
         // every process running.
@@ -583,7 +583,7 @@ impl OfficeHost {
     }
 }
 
-fn record_recovery(store: &Store, host_id: &str, kind: &str, detail: &str) -> OfficeResult<()> {
+fn record_recovery(store: &Store, host_id: &str, kind: &str, detail: &str) -> Result<()> {
     store.connection().execute(
         "INSERT INTO office_recovery_events(host_id, kind, detail, recorded_at)
          VALUES (?1, ?2, ?3, ?4)",
@@ -679,7 +679,7 @@ mod peer_tests {
 // Connection handling
 // ---------------------------------------------------------------------------
 
-fn handle_connection(shared: Arc<OfficeShared>, mut stream: UnixStream) -> OfficeResult<()> {
+fn handle_connection(shared: Arc<OfficeShared>, mut stream: UnixStream) -> Result<()> {
     // Caller binding is issued by the host on accept (never self-declared).
     // Interactive CLI callers are the user; the role exists only because
     // this host issued it.
@@ -726,10 +726,7 @@ fn handle_connection(shared: Arc<OfficeShared>, mut stream: UnixStream) -> Offic
     }
 }
 
-fn handle_request(
-    shared: Arc<OfficeShared>,
-    request: &OfficeRequest,
-) -> OfficeResult<serde_json::Value> {
+fn handle_request(shared: Arc<OfficeShared>, request: &OfficeRequest) -> Result<serde_json::Value> {
     // The socket authorization gate (ADR 0012 decision 4, issue #43):
     // grant semantics extend to every request before any handler runs.
     authorize_socket_request(&shared, request)?;
@@ -766,7 +763,7 @@ fn handle_request(
             let handle = shared
                 .terminals
                 .handle(&id)?
-                .ok_or_else(|| OfficeError::NotFound {
+                .ok_or_else(|| Error::NotFound {
                     entity: "terminal",
                     id: terminal_id.clone(),
                 })?;
@@ -815,7 +812,7 @@ fn handle_request(
             let required = || {
                 value
                     .as_deref()
-                    .ok_or_else(|| OfficeError::Validation("workspace action needs value".into()))
+                    .ok_or_else(|| Error::Validation("workspace action needs value".into()))
             };
             let id = match action.as_str() {
                 "open" => Some(nav.open(Path::new(required()?))?),
@@ -825,34 +822,34 @@ fn handle_request(
                     nav.selected()?
                 }
                 "add" => {
-                    let id = nav.selected()?.ok_or_else(|| {
-                        OfficeError::Validation("select a workspace first".into())
-                    })?;
+                    let id = nav
+                        .selected()?
+                        .ok_or_else(|| Error::Validation("select a workspace first".into()))?;
                     nav.add(&id, serde_json::json!({"path":required()?}), Path::new("/"))?;
                     Some(id)
                 }
                 "remove" => {
-                    let id = nav.selected()?.ok_or_else(|| {
-                        OfficeError::Validation("select a workspace first".into())
-                    })?;
+                    let id = nav
+                        .selected()?
+                        .ok_or_else(|| Error::Validation("select a workspace first".into()))?;
                     nav.remove(
                         &id,
-                        project_id.as_deref().ok_or_else(|| {
-                            OfficeError::Validation("remove needs project_id".into())
-                        })?,
+                        project_id
+                            .as_deref()
+                            .ok_or_else(|| Error::Validation("remove needs project_id".into()))?,
                     )?;
                     Some(id)
                 }
                 "save" => {
-                    let id = nav.selected()?.ok_or_else(|| {
-                        OfficeError::Validation("select a workspace first".into())
-                    })?;
+                    let id = nav
+                        .selected()?
+                        .ok_or_else(|| Error::Validation("select a workspace first".into()))?;
                     nav.save_as(&id, Path::new(required()?))?;
                     Some(id)
                 }
                 "list" => nav.selected()?,
                 _ => {
-                    return Err(OfficeError::Validation(
+                    return Err(Error::Validation(
                         "workspace action: open | new | select | add | remove | save | list".into(),
                     ));
                 }
@@ -1000,7 +997,7 @@ fn is_member_gated_kind(kind: &OfficeRequestKind) -> bool {
 ///    delegated-dispatch checks in its handler.
 /// 3. With no member attribution, the peer is the OS-authenticated owner
 ///    (same-uid, enforced at accept time) acting as the user.
-fn authorize_socket_request(shared: &OfficeShared, request: &OfficeRequest) -> OfficeResult<()> {
+fn authorize_socket_request(shared: &OfficeShared, request: &OfficeRequest) -> Result<()> {
     let Some(grant_text) = &request.grant else {
         // No grant presented. Owner path is fine; a member-attributed
         // mutating request without any grant is exactly the "未携带有效
@@ -1021,18 +1018,18 @@ fn authorize_socket_request(shared: &OfficeShared, request: &OfficeRequest) -> O
     let verdict = {
         let store = shared.store.lock().expect("office store");
         let authority = AuthorityEngine::new(&store);
-        (|| -> OfficeResult<crate::authority::Grant> {
+        (|| -> Result<crate::authority::Grant> {
             let grant_id = GrantId::from_str(grant_text)?;
             let grant = authority.require_grant(&grant_id)?;
             if grant.status != crate::authority::GrantStatus::Live {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "grant `{grant_text}` is not live (status: {:?})",
                     grant.status
                 )));
             }
             if let Some(expires_at) = &grant.expires_at {
                 if expires_at.as_str() <= utc_now().as_str() {
-                    return Err(OfficeError::Validation(format!(
+                    return Err(Error::Validation(format!(
                         "grant `{grant_text}` expired at {expires_at}"
                     )));
                 }
@@ -1040,7 +1037,7 @@ fn authorize_socket_request(shared: &OfficeShared, request: &OfficeRequest) -> O
             if let Some(member_text) = &request.member {
                 if let Some(principal) = &grant.principal_member_id {
                     if principal.to_string() != *member_text {
-                        return Err(OfficeError::Validation(format!(
+                        return Err(Error::Validation(format!(
                             "grant `{grant_text}` belongs to member `{principal}`, not `{member_text}`; \
                              grants are not transferable between members"
                         )));
@@ -1108,7 +1105,7 @@ fn authorize_socket_request(shared: &OfficeShared, request: &OfficeRequest) -> O
 
 /// Record one socket-grant denial as an append-only office event and return
 /// the matching error for the caller.
-fn audit_grant_denial(shared: &OfficeShared, request: &OfficeRequest, reason: &str) -> OfficeError {
+fn audit_grant_denial(shared: &OfficeShared, request: &OfficeRequest, reason: &str) -> Error {
     let store = shared.store.lock().expect("office store");
     let payload = serde_json::json!({
         "kind": format!("{:?}", std::mem::discriminant(&request.kind)),
@@ -1128,7 +1125,7 @@ fn audit_grant_denial(shared: &OfficeShared, request: &OfficeRequest, reason: &s
             payload,
         },
     );
-    OfficeError::Validation(format!("socket request denied: {reason}"))
+    Error::Validation(format!("socket request denied: {reason}"))
 }
 
 /// Spawn one terminal in the resident server: the headless path (fixed
@@ -1146,13 +1143,13 @@ fn terminal_create(
     purpose: &str,
     worktree_id: Option<&str>,
     owner_text: &str,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     let owner = match owner_text {
         "user_shell" => TerminalOwner::UserShell,
         "agent_cli" => TerminalOwner::AgentCli,
         "test_run" => TerminalOwner::TestRun,
         other => {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "terminal owner `{other}` is not spawnable over the socket; \
                  use user_shell | agent_cli | test_run (execution-owned terminals \
                  come only from dispatch)"
@@ -1188,12 +1185,12 @@ fn terminal_resize(
     terminal_id: &str,
     cols: u16,
     rows: u16,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     let terminal_id = TerminalId::from_str(terminal_id)?;
     let handle = shared
         .terminals
         .handle(&terminal_id)?
-        .ok_or_else(|| OfficeError::NotFound {
+        .ok_or_else(|| Error::NotFound {
             entity: "terminal",
             id: terminal_id.to_string(),
         })?;
@@ -1203,7 +1200,7 @@ fn terminal_resize(
 
 /// The workbench projection over the real registries — the same assembly
 /// the in-process workbench used, now served to attach clients.
-fn workbench_view(shared: Arc<OfficeShared>) -> OfficeResult<serde_json::Value> {
+fn workbench_view(shared: Arc<OfficeShared>) -> Result<serde_json::Value> {
     // V15-4: the automatic sync cycle runs off-thread (network git must
     // never block the view); the TTL/pause checks happen before spawning.
     if auto_sync_due(&shared) {
@@ -1409,27 +1406,22 @@ fn workbench_view(shared: Arc<OfficeShared>) -> OfficeResult<serde_json::Value> 
         }
     }
 
-    serde_json::to_value(&model).map_err(|e| OfficeError::Validation(format!("view: {e}")))
+    serde_json::to_value(&model).map_err(|e| Error::Validation(format!("view: {e}")))
 }
 
 /// The pane-layout preference store (QA F5): the client persists its pane
 /// tree so a later attach rebuilds the same view. A UI preference in
 /// office_settings - bounded, validated as JSON, never an office fact.
-fn workbench_layout(
-    shared: &OfficeShared,
-    layout_json: Option<&str>,
-) -> OfficeResult<serde_json::Value> {
+fn workbench_layout(shared: &OfficeShared, layout_json: Option<&str>) -> Result<serde_json::Value> {
     let store = shared.store.lock().expect("office store");
     match layout_json {
         Some(json) => {
             if json.len() > 64 * 1024 {
-                return Err(OfficeError::Validation(
-                    "layout exceeds the 64 KiB bound".into(),
-                ));
+                return Err(Error::Validation("layout exceeds the 64 KiB bound".into()));
             }
             // Must parse: a layout the client cannot restore is junk.
             serde_json::from_str::<serde_json::Value>(json)
-                .map_err(|e| OfficeError::Validation(format!("layout is not valid JSON: {e}")))?;
+                .map_err(|e| Error::Validation(format!("layout is not valid JSON: {e}")))?;
             store.connection().execute("INSERT OR IGNORE INTO office_settings(key,value) SELECT 'workbench_layout_legacy',value FROM office_settings WHERE key='workbench_layout' AND json_extract(value,'$.version') IS NULL",[])?;
             store.connection().execute(
                 "INSERT INTO office_settings(key, value) VALUES ('workbench_layout', ?1)
@@ -1454,7 +1446,7 @@ fn workbench_layout(
 
 /// The real bounded diff of one worktree against HEAD (served over the
 /// socket for the workbench `d` action).
-fn workbench_diff(shared: &OfficeShared, worktree_id: &str) -> OfficeResult<serde_json::Value> {
+fn workbench_diff(shared: &OfficeShared, worktree_id: &str) -> Result<serde_json::Value> {
     let worktree_id = WorktreeId::from_str(worktree_id)?;
     let store = shared.store.lock().expect("office store");
     let service = crate::git::worktrees::WorktreeService::new(
@@ -1463,7 +1455,7 @@ fn workbench_diff(shared: &OfficeShared, worktree_id: &str) -> OfficeResult<serd
     );
     let record = service
         .record(&worktree_id)?
-        .ok_or_else(|| OfficeError::NotFound {
+        .ok_or_else(|| Error::NotFound {
             entity: "worktree",
             id: worktree_id.to_string(),
         })?;
@@ -1476,7 +1468,7 @@ fn workbench_diff(shared: &OfficeShared, worktree_id: &str) -> OfficeResult<serd
 fn terminal_open_in_worktree(
     shared: &OfficeShared,
     worktree_id: &str,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     if let Some(pid) = worktree_id.strip_prefix("directory:") {
         let store = shared.store.lock().expect("office store");
         let project = crate::projects::ProjectRegistry::new(&store)
@@ -1505,7 +1497,7 @@ fn terminal_open_in_worktree(
         Some(r) => (r.worktree_path, r.branch),
         None => crate::workspaces::navigation::Navigation { store: &store }
             .checkout(worktree_id.as_str())?
-            .ok_or_else(|| OfficeError::NotFound {
+            .ok_or_else(|| Error::NotFound {
                 entity: "worktree",
                 id: worktree_id.to_string(),
             })?,
@@ -1537,12 +1529,12 @@ fn worktree_create_for_task(
     task_id: &str,
     branch: Option<&str>,
     base_dir: Option<&str>,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     let task_id = TaskId::from_str(task_id)?;
     let store = shared.store.lock().expect("office store");
     let task = TaskRegistry::new(&store).require_task(&task_id)?;
     let project_id = task.project_id.ok_or_else(|| {
-        OfficeError::Validation(format!(
+        Error::Validation(format!(
             "task `{task_id}` has no project; a worktree needs the project's repo root"
         ))
     })?;
@@ -1559,7 +1551,7 @@ fn worktree_create_for_task(
         crate::git::worktrees::ProtectedRefs::new(vec![]),
     );
     let record = service.create_task_worktree(&repo_root, &base, &task_id, &branch)?;
-    serde_json::to_value(&record).map_err(|e| OfficeError::Validation(format!("record: {e}")))
+    serde_json::to_value(&record).map_err(|e| Error::Validation(format!("record: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -1607,19 +1599,17 @@ fn agent_report(
     status: &str,
     detail: &str,
     reset_at: Option<&str>,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     let terminal_id = TerminalId::from_str(terminal_id)?;
     let status = crate::agents::AgentStatus::parse(status)?;
     if agent.trim().is_empty() {
-        return Err(OfficeError::Validation(
-            "agent name must not be empty".into(),
-        ));
+        return Err(Error::Validation("agent name must not be empty".into()));
     }
     // A report about a terminal this office hosts: identity checks out.
     shared
         .terminals
         .handle(&terminal_id)?
-        .ok_or_else(|| OfficeError::NotFound {
+        .ok_or_else(|| Error::NotFound {
             entity: "terminal",
             id: terminal_id.to_string(),
         })?;
@@ -1654,7 +1644,7 @@ fn agent_report(
     // cancels the open plan — the limit is over.
     if status == crate::agents::AgentStatus::RateLimited {
         let Some(reset_at) = reset_at else {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "rate_limited requires reset_at (RFC3339); the office does not \
                  schedule recovery for an unknown time"
                     .into(),
@@ -1682,7 +1672,7 @@ fn agent_report(
         )?;
     }
 
-    serde_json::to_value(&record).map_err(|e| OfficeError::Validation(format!("record: {e}")))
+    serde_json::to_value(&record).map_err(|e| Error::Validation(format!("record: {e}")))
 }
 
 /// Submit agent content for the self-model container's intake. The content
@@ -1696,19 +1686,17 @@ fn agent_content_submit(
     kind: &str,
     content: &str,
     source_ref: Option<&str>,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     if kind.trim().is_empty() {
-        return Err(OfficeError::Validation(
-            "content kind must not be empty".into(),
-        ));
+        return Err(Error::Validation("content kind must not be empty".into()));
     }
     if content.is_empty() {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "content must not be empty; the channel moves real material, not placeholders".into(),
         ));
     }
     if content.len() > 1024 * 1024 {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "content exceeds the 1 MiB channel bound; split the submission".into(),
         ));
     }
@@ -1788,22 +1776,22 @@ fn agent_prompt(
     shared: &OfficeShared,
     terminal_id: &str,
     prompt: &str,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     let terminal_id = TerminalId::from_str(terminal_id)?;
     if prompt.is_empty() {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "an empty prompt is not a prompt; the channel moves real material".into(),
         ));
     }
     if prompt.len() > 256 * 1024 {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "prompt exceeds the 256 KiB bound; split it".into(),
         ));
     }
     let handle = shared
         .terminals
         .handle(&terminal_id)?
-        .ok_or_else(|| OfficeError::NotFound {
+        .ok_or_else(|| Error::NotFound {
             entity: "terminal",
             id: terminal_id.to_string(),
         })?;
@@ -1839,14 +1827,14 @@ fn agent_wait(
     terminal_id: &str,
     status: &str,
     timeout_secs: u64,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     let terminal_id = TerminalId::from_str(terminal_id)?;
     let wanted = crate::agents::AgentStatus::parse(status)?;
     let timeout = Duration::from_secs(timeout_secs.min(300));
     shared
         .terminals
         .handle(&terminal_id)?
-        .ok_or_else(|| OfficeError::NotFound {
+        .ok_or_else(|| Error::NotFound {
             entity: "terminal",
             id: terminal_id.to_string(),
         })?;
@@ -1909,11 +1897,7 @@ fn agent_wait(
 /// The durable event feed: office events after a sequence number. This is
 /// how a disconnected orchestrator catches up - reconnect and ask again
 /// with the last seq you saw.
-fn events_feed(
-    shared: &OfficeShared,
-    since_seq: u64,
-    limit: u32,
-) -> OfficeResult<serde_json::Value> {
+fn events_feed(shared: &OfficeShared, since_seq: u64, limit: u32) -> Result<serde_json::Value> {
     let limit = limit.clamp(1, 500);
     let store = shared.store.lock().expect("office store");
     let mut stmt = store.connection().prepare(
@@ -1952,7 +1936,7 @@ fn events_feed(
 
 /// Owner pause/resume: flip the gate, persist it (the semantics survive a
 /// restart), and audit. Running executions are untouched by design.
-fn pause_server(shared: &OfficeShared, paused: bool) -> OfficeResult<serde_json::Value> {
+fn pause_server(shared: &OfficeShared, paused: bool) -> Result<serde_json::Value> {
     shared.paused.store(paused, Ordering::SeqCst);
     {
         let store = shared.store.lock().expect("office store");
@@ -1995,7 +1979,7 @@ fn pause_server(shared: &OfficeShared, paused: bool) -> OfficeResult<serde_json:
 /// pause, so the gate holds even with no live host - the pause itself
 /// persists, and this keeps "pause stops new dispatch AND maintenance
 /// cycles" true end to end.
-pub fn assert_maintenance_allowed(store: &Store) -> OfficeResult<()> {
+pub fn assert_maintenance_allowed(store: &Store) -> Result<()> {
     let paused: bool = store
         .connection()
         .query_row(
@@ -2006,7 +1990,7 @@ pub fn assert_maintenance_allowed(store: &Store) -> OfficeResult<()> {
         .map(|value| value == "true")
         .unwrap_or(false);
     if paused {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "office is paused: maintenance windows are gated (running executions are \
              unaffected; `viva resume` lifts the pause)"
                 .into(),
@@ -2020,12 +2004,12 @@ pub fn assert_maintenance_allowed(store: &Store) -> OfficeResult<()> {
 /// clears any pause; `None` (an unadorned shutdown) leaves the CURRENT
 /// state untouched - an operator-paused office that is shut down comes
 /// back paused, because the pause was an explicit owner decision.
-fn apply_close_policy(shared: &OfficeShared, close_policy: Option<&str>) -> OfficeResult<()> {
+fn apply_close_policy(shared: &OfficeShared, close_policy: Option<&str>) -> Result<()> {
     match close_policy {
         Some("pause") => pause_server(shared, true).map(|_| ()),
         Some("continue") => pause_server(shared, false).map(|_| ()),
         None => Ok(()),
-        Some(other) => Err(OfficeError::Validation(format!(
+        Some(other) => Err(Error::Validation(format!(
             "unknown close policy `{other}` (continue | pause)"
         ))),
     }
@@ -2040,12 +2024,12 @@ fn apply_close_policy(shared: &OfficeShared, close_policy: Option<&str>) -> Offi
 /// response goes out immediately — the CLI then starts the resumed server,
 /// which connects to the rendezvous socket. On any transfer failure the
 /// host keeps serving (nothing was given away: fd passing duplicates).
-fn begin_server_restart(shared: &Arc<OfficeShared>) -> OfficeResult<serde_json::Value> {
+fn begin_server_restart(shared: &Arc<OfficeShared>) -> Result<serde_json::Value> {
     let handoff_path = shared.home.join(HANDOFF_SOCKET_NAME);
     {
         let mut slot = shared.handoff_listener.lock().expect("handoff slot");
         if slot.is_some() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "a server restart is already in progress; connect to its handoff socket                  or wait for the timeout"
                     .into(),
             ));
@@ -2083,7 +2067,7 @@ fn perform_handoff(
     // terminal — nothing is read or frozen yet, so a failure here leaves
     // the host byte-for-byte as it was. `collected` stays alive for the
     // failure branch, which needs every id to put the readers back.
-    let collect = (|| -> OfficeResult<Vec<(crate::terminal::TerminalEntry, RawFd, std::sync::Arc<crate::terminal::TerminalHandle>)>> {
+    let collect = (|| -> Result<Vec<(crate::terminal::TerminalEntry, RawFd, std::sync::Arc<crate::terminal::TerminalHandle>)>> {
         let mut collected = Vec::new();
         for entry in shared.terminals.list() {
             let handle = match shared.terminals.handle(&entry.terminal_id).ok().flatten() {
@@ -2118,7 +2102,7 @@ fn perform_handoff(
             return;
         }
     };
-    let outcome = (|| -> OfficeResult<usize> {
+    let outcome = (|| -> Result<usize> {
         // Stop OUR readers FIRST, before any screen is taken — not only
         // because two readers on one master would split the child's bytes
         // between the old and the new server, but because the manifest's
@@ -2176,13 +2160,13 @@ fn perform_handoff(
                                 libc::close(*fd);
                             }
                         }
-                        return Err(OfficeError::Validation(
+                        return Err(Error::Validation(
                             "no resumed server connected within the handoff timeout".into(),
                         ));
                     }
                     std::thread::sleep(Duration::from_millis(100));
                 }
-                Err(e) => return Err(OfficeError::Io(e)),
+                Err(e) => return Err(Error::Io(e)),
             }
         };
         let mut stream = stream;
@@ -2268,7 +2252,7 @@ fn perform_handoff(
 /// rendezvous socket, adopt every transferred session under its ORIGINAL
 /// terminal identity, wait for the old host to release the control socket,
 /// then claim and serve as usual.
-pub fn resume_server(home: &Path) -> OfficeResult<()> {
+pub fn resume_server(home: &Path) -> Result<()> {
     crate::foundation::paths::ensure_private_dir(home)?;
     let handoff_path = home.join(HANDOFF_SOCKET_NAME);
     // The old host creates the rendezvous in its ServerRestart handler;
@@ -2281,7 +2265,7 @@ pub fn resume_server(home: &Path) -> OfficeResult<()> {
             }
         }
         if Instant::now() >= deadline {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "no handoff socket appeared at {} within {HANDOFF_TIMEOUT:?}",
                 handoff_path.display()
             )));
@@ -2306,7 +2290,7 @@ pub fn resume_server(home: &Path) -> OfficeResult<()> {
                 libc::close(fd);
             }
         }
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "the old host never released the control socket; the handoff was abandoned              (the old host's recovery records name what happened)"
                 .into(),
         ));
@@ -2316,7 +2300,7 @@ pub fn resume_server(home: &Path) -> OfficeResult<()> {
         let shared = host.shared();
         let store = shared.store.lock().expect("office store");
         for (entry, fd) in manifest.entries.iter().zip(fds) {
-            let adopt = (|| -> OfficeResult<()> {
+            let adopt = (|| -> Result<()> {
                 let terminal_id = TerminalId::from_str(&entry.terminal_id)?;
                 let owner = owner_from_label(&entry.owner)?;
                 let worktree = entry
@@ -2376,7 +2360,7 @@ pub fn resume_server(home: &Path) -> OfficeResult<()> {
 
 /// Parse an owner label back into its typed value (the inverse of
 /// [`owner_label`]; labels are host-issued, never client-declared).
-fn owner_from_label(text: &str) -> OfficeResult<TerminalOwner> {
+fn owner_from_label(text: &str) -> Result<TerminalOwner> {
     use std::str::FromStr as _;
     if let Some(execution) = text.strip_prefix("member_execution:") {
         return Ok(TerminalOwner::MemberExecution(
@@ -2387,16 +2371,16 @@ fn owner_from_label(text: &str) -> OfficeResult<TerminalOwner> {
         "user_shell" => Ok(TerminalOwner::UserShell),
         "agent_cli" => Ok(TerminalOwner::AgentCli),
         "test_run" => Ok(TerminalOwner::TestRun),
-        other => Err(OfficeError::Validation(format!(
+        other => Err(Error::Validation(format!(
             "unknown terminal owner label `{other}`"
         ))),
     }
 }
 
-fn status(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
+fn status(shared: &OfficeShared) -> Result<serde_json::Value> {
     let store = shared.store.lock().expect("office store");
     let (row_count_executions, running, completed): (i64, i64, i64) = {
-        let count = |status: &str| -> OfficeResult<i64> {
+        let count = |status: &str| -> Result<i64> {
             Ok(store.connection().query_row(
                 "SELECT COUNT(*) FROM office_executions WHERE status = ?1",
                 [status],
@@ -2461,12 +2445,12 @@ fn dispatch(
     argv: &[String],
     cwd: &Path,
     worktree_id: Option<&str>,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     // The pause gate (S6): no NEW dispatch while paused. Running
     // executions are never touched here - stopping one is the explicit,
     // separate stop.
     if shared.paused.load(Ordering::SeqCst) {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "office is paused: no new dispatch (running executions are unaffected;              `viva resume` lifts the pause)"
                 .into(),
         ));
@@ -2479,7 +2463,7 @@ fn dispatch(
     let members = MemberRegistry::new(&store);
     let _member = members.require(&member_id)?;
     let binding = members.binding(&member_id)?.ok_or_else(|| {
-        OfficeError::Validation(format!(
+        Error::Validation(format!(
             "member `{member_id}` has no model/tool binding; dispatch needs one"
         ))
     })?;
@@ -2491,7 +2475,7 @@ fn dispatch(
     let authority = AuthorityEngine::new(&store);
     let grant = authority.require_grant(&grant_id)?;
     if grant.principal_member_id.as_ref() != Some(&member_id) {
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "dispatch denied: grant `{grant_id}` was not issued to member `{member_id}` \
              (principal: {:?}) — grants are not transferable between members",
             grant
@@ -2517,9 +2501,7 @@ fn dispatch(
     ) {
         Ok(Ok(())) => {}
         Ok(Err(denial)) => {
-            return Err(OfficeError::Validation(format!(
-                "dispatch denied: {denial}"
-            )));
+            return Err(Error::Validation(format!("dispatch denied: {denial}")));
         }
         Err(err) => return Err(err),
     }
@@ -2527,7 +2509,7 @@ fn dispatch(
     let tasks = TaskRegistry::new(&store);
     let task = tasks.require_task(&task_id)?;
     if matches!(task.status, TaskStatus::Done | TaskStatus::Cancelled) {
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "task `{}` is {}; a finished task is never executed again",
             task.task_id,
             task.status.as_str()
@@ -2535,7 +2517,7 @@ fn dispatch(
     }
 
     if !cwd.is_absolute() {
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "dispatch cwd must be absolute: {}",
             cwd.display()
         )));
@@ -2552,7 +2534,7 @@ fn dispatch(
             |row| row.get(0),
         )?;
         if known == 0 {
-            return Err(OfficeError::NotFound {
+            return Err(Error::NotFound {
                 entity: "worktree",
                 id: worktree.to_string(),
             });
@@ -2581,14 +2563,14 @@ fn dispatch(
             // returning the other caller's execution would make it look
             // started when it never ran.
             if intent.task_id != task_id {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "request key `{request_key}` already belongs to task `{}`; \
                      keys are replayed per task — use a different key for task `{task_id}`",
                     intent.task_id
                 )));
             }
             if intent.member_id != member_id {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "request key `{request_key}` was already used by member `{}`; \
                      keys are replayed per (task, member) — use a different key",
                     intent.member_id
@@ -2705,7 +2687,7 @@ fn dispatch(
     }))
 }
 
-fn terminal_list(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
+fn terminal_list(shared: &OfficeShared) -> Result<serde_json::Value> {
     let terminals = shared
         .terminals
         .list()
@@ -2722,12 +2704,12 @@ fn terminal_list(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
     Ok(serde_json::json!({ "terminals": terminals }))
 }
 
-fn terminal_snapshot(shared: &OfficeShared, terminal_id: &str) -> OfficeResult<serde_json::Value> {
+fn terminal_snapshot(shared: &OfficeShared, terminal_id: &str) -> Result<serde_json::Value> {
     let terminal_id = TerminalId::from_str(terminal_id)?;
     let handle = shared
         .terminals
         .handle(&terminal_id)?
-        .ok_or_else(|| OfficeError::NotFound {
+        .ok_or_else(|| Error::NotFound {
             entity: "terminal",
             id: terminal_id.to_string(),
         })?;
@@ -2739,12 +2721,12 @@ fn terminal_input(
     shared: &OfficeShared,
     terminal_id: &str,
     bytes_hex: &str,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     let terminal_id = TerminalId::from_str(terminal_id)?;
     let handle = shared
         .terminals
         .handle(&terminal_id)?
-        .ok_or_else(|| OfficeError::NotFound {
+        .ok_or_else(|| Error::NotFound {
             entity: "terminal",
             id: terminal_id.to_string(),
         })?;
@@ -2753,7 +2735,7 @@ fn terminal_input(
     Ok(serde_json::json!({"written": bytes.len()}))
 }
 
-fn terminal_stop(shared: &OfficeShared, terminal_id: &str) -> OfficeResult<serde_json::Value> {
+fn terminal_stop(shared: &OfficeShared, terminal_id: &str) -> Result<serde_json::Value> {
     let terminal_id = TerminalId::from_str(terminal_id)?;
     let store = shared.store.lock().expect("office store");
     let exit = shared
@@ -2762,7 +2744,7 @@ fn terminal_stop(shared: &OfficeShared, terminal_id: &str) -> OfficeResult<serde
     Ok(serde_json::to_value(&exit)?)
 }
 
-fn task_results(shared: &OfficeShared, task_id: &str) -> OfficeResult<serde_json::Value> {
+fn task_results(shared: &OfficeShared, task_id: &str) -> Result<serde_json::Value> {
     let task_id = TaskId::from_str(task_id)?;
     let store = shared.store.lock().expect("office store");
     let tasks = TaskRegistry::new(&store);
@@ -2779,11 +2761,11 @@ fn handoff(
     task_id: &str,
     member_id: &str,
     summary: &str,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     let task_id = TaskId::from_str(task_id)?;
     let member_id = MemberId::from_str(member_id)?;
     if summary.trim().is_empty() {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "handoff summary must not be empty".into(),
         ));
     }
@@ -2846,10 +2828,10 @@ fn fnv1a(text: &str) -> u64 {
 
 /// Send one request to the active office host over the real channel. When
 /// no host listens, this fails cleanly and never starts a daemon.
-pub fn send_request(home: &Path, request: OfficeRequest) -> OfficeResult<OfficeResponse> {
+pub fn send_request(home: &Path, request: OfficeRequest) -> Result<OfficeResponse> {
     let socket_path = home.join(OFFICE_SOCKET_NAME);
     if !socket_path.exists() {
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "no active office in {} (mutation rejected; start one with `viva start`)",
             home.display()
         )));
@@ -2860,7 +2842,7 @@ pub fn send_request(home: &Path, request: OfficeRequest) -> OfficeResult<OfficeR
 
 /// Offline status: read the store directly (no host required). Reports the
 /// last host row and whether the socket is alive; never claims a live host.
-pub fn offline_status(home: &Path) -> OfficeResult<serde_json::Value> {
+pub fn offline_status(home: &Path) -> Result<serde_json::Value> {
     use rusqlite::OptionalExtension;
 
     let socket_path = home.join(OFFICE_SOCKET_NAME);
@@ -2939,7 +2921,7 @@ fn auto_sync_due(shared: &OfficeShared) -> bool {
 }
 
 /// V15-4: the user-facing switch (default off, persisted).
-fn set_auto_pull(shared: &OfficeShared, on: bool) -> OfficeResult<serde_json::Value> {
+fn set_auto_pull(shared: &OfficeShared, on: bool) -> Result<serde_json::Value> {
     let store = shared.store.lock().expect("office store");
     store.connection().execute(
         "INSERT INTO office_settings(key, value) VALUES ('auto_pull', ?1)
@@ -2973,9 +2955,9 @@ fn set_auto_pull(shared: &OfficeShared, on: bool) -> OfficeResult<serde_json::Va
 /// every stored value is normalized to the same offset. A local offset
 /// like `+08:00` must NEVER be stored verbatim: it would make a due plan
 /// look und Due and an undu one due under string ordering.
-fn normalize_rfc3339_utc(text: &str) -> OfficeResult<String> {
+fn normalize_rfc3339_utc(text: &str) -> Result<String> {
     let parsed = time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
-        .map_err(|e| OfficeError::Validation(format!("`{text}` is not RFC3339: {e}")))?;
+        .map_err(|e| Error::Validation(format!("`{text}` is not RFC3339: {e}")))?;
     // to_offset (NOT replace_offset): it CONVERTS the instant so the
     // wall clock reads the same moment in UTC. replace_offset only
     // relabels the zone and keeps the wall clock — the exact bug QA F1
@@ -2989,7 +2971,7 @@ fn normalize_rfc3339_utc(text: &str) -> OfficeResult<String> {
         Err(_) => utc,
     };
     utc.format(&time::format_description::well_known::Rfc3339)
-        .map_err(|e| OfficeError::Validation(format!("recovery time formatting failed: {e}")))
+        .map_err(|e| Error::Validation(format!("recovery time formatting failed: {e}")))
 }
 
 /// The gh program to invoke for PR probes: the shared override (tests)
@@ -3022,7 +3004,7 @@ fn read_auto_pull(store: &Store) -> bool {
 /// checkout and fetch every task worktree. Pause gates the automatic path;
 /// `force = true` (explicit `viva sync now`) bypasses both the TTL and the
 /// pause, because a human asked. Task worktrees are fetched, NEVER pulled.
-fn auto_sync_all(shared: &OfficeShared, force: bool) -> OfficeResult<serde_json::Value> {
+fn auto_sync_all(shared: &OfficeShared, force: bool) -> Result<serde_json::Value> {
     // Single-flight guard (QA F2): one cycle at a time, across threads.
     // Set BEFORE any early-return probe, cleared on EVERY exit path — the
     // 3-5 Hz workbench view must never spawn concurrent cycles that
@@ -3046,7 +3028,7 @@ fn auto_sync_all(shared: &OfficeShared, force: bool) -> OfficeResult<serde_json:
     auto_sync_all_inner(shared, force)
 }
 
-fn auto_sync_all_inner(shared: &OfficeShared, force: bool) -> OfficeResult<serde_json::Value> {
+fn auto_sync_all_inner(shared: &OfficeShared, force: bool) -> Result<serde_json::Value> {
     if !force {
         if shared.paused.load(Ordering::SeqCst) {
             return Ok(serde_json::json!({ "skipped": "paused" }));
@@ -3263,7 +3245,7 @@ fn sweep_recovery_plans(shared: &OfficeShared) {
 /// V15-1: the file inventory of one worktree — every tracked file plus
 /// untracked entries, each with its porcelain status. Clean files are
 /// marked `clean`; there is no second guessing of git's verdicts.
-fn worktree_files(shared: &OfficeShared, worktree_id: &str) -> OfficeResult<serde_json::Value> {
+fn worktree_files(shared: &OfficeShared, worktree_id: &str) -> Result<serde_json::Value> {
     let wid = WorktreeId::from_str(worktree_id)?;
     let cwd = {
         let store = shared.store.lock().expect("office store");
@@ -3271,7 +3253,7 @@ fn worktree_files(shared: &OfficeShared, worktree_id: &str) -> OfficeResult<serd
             &store,
             crate::git::worktrees::ProtectedRefs::new(vec![]),
         );
-        let record = service.record(&wid)?.ok_or_else(|| OfficeError::NotFound {
+        let record = service.record(&wid)?.ok_or_else(|| Error::NotFound {
             entity: "worktree",
             id: worktree_id.to_string(),
         })?;
@@ -3359,11 +3341,11 @@ fn worktree_file_content(
     shared: &OfficeShared,
     worktree_id: &str,
     path: &str,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     let wid = WorktreeId::from_str(worktree_id)?;
     // Path safety: the client names a RELATIVE path inside the worktree.
     if path.starts_with('/') || path.split('/').any(|part| part == "..") {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "file paths must be relative to the worktree and may not contain `..`".into(),
         ));
     }
@@ -3373,7 +3355,7 @@ fn worktree_file_content(
             &store,
             crate::git::worktrees::ProtectedRefs::new(vec![]),
         );
-        let record = service.record(&wid)?.ok_or_else(|| OfficeError::NotFound {
+        let record = service.record(&wid)?.ok_or_else(|| Error::NotFound {
             entity: "worktree",
             id: worktree_id.to_string(),
         })?;
@@ -3412,7 +3394,7 @@ fn worktree_file_content(
     }
 
     // Otherwise: bounded content, honest binary verdict.
-    let bytes = std::fs::read(&full_path).map_err(OfficeError::Io)?;
+    let bytes = std::fs::read(&full_path).map_err(Error::Io)?;
     let probe = &bytes[..bytes.len().min(8192)];
     if probe.contains(&0u8) {
         return Ok(serde_json::json!({
@@ -3440,7 +3422,7 @@ fn worktree_cleanup(
     shared: &OfficeShared,
     worktree_id: &str,
     requested_by: &str,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     let wid = WorktreeId::from_str(worktree_id)?;
     // Phase A — record lookup under the lock, then DROP it: the gh probe
     // below is a network call (30s timeout); holding the mutex across it
@@ -3451,7 +3433,7 @@ fn worktree_cleanup(
             &store,
             crate::git::worktrees::ProtectedRefs::new(vec![]),
         );
-        let record = service.record(&wid)?.ok_or_else(|| OfficeError::NotFound {
+        let record = service.record(&wid)?.ok_or_else(|| Error::NotFound {
             entity: "worktree",
             id: worktree_id.to_string(),
         })?;
@@ -3486,7 +3468,7 @@ fn worktree_cleanup(
                 }),
             },
         )?;
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "cleanup requires a MERGED PR for branch `{branch}` (current: {state}); \
              deleting work is a human decision",
         )));
@@ -3529,7 +3511,7 @@ fn worktree_cleanup(
                 }),
             },
         )?;
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "worktree `{}` was released in the office records but its directory could \
              not be removed ({}); remove it by hand after checking the tree",
             worktree_path.display(),
@@ -3573,11 +3555,11 @@ fn agent_handoff(
     worktree_id: &str,
     to_agent: &str,
     requested_by: &str,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     let wid = WorktreeId::from_str(worktree_id)?;
     let to_agent = to_agent.trim().to_string();
     if to_agent.is_empty() || to_agent.contains(char::is_whitespace) || to_agent.contains('/') {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "handoff target must be a bare command name (no spaces, no paths)".into(),
         ));
     }
@@ -3586,7 +3568,7 @@ fn agent_handoff(
         &store,
         crate::git::worktrees::ProtectedRefs::new(vec![]),
     );
-    let record = service.record(&wid)?.ok_or_else(|| OfficeError::NotFound {
+    let record = service.record(&wid)?.ok_or_else(|| Error::NotFound {
         entity: "worktree",
         id: worktree_id.to_string(),
     })?;
@@ -3706,13 +3688,13 @@ fn agent_handoff(
 }
 
 /// V15-4 manual trigger + the read-only listing.
-fn sync_now(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
+fn sync_now(shared: &OfficeShared) -> Result<serde_json::Value> {
     // Through the guarded wrapper (QA round 6 G2): a manual cycle must
     // also honor the single-flight guard, not stampede a running one.
     auto_sync_all(shared, true)
 }
 
-fn recovery_list(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
+fn recovery_list(shared: &OfficeShared) -> Result<serde_json::Value> {
     let store = shared.store.lock().expect("office store");
     let mut stmt = store.connection().prepare(
         "SELECT id, terminal_id, task_id, reset_at, action, state, created_at, fired_at
@@ -3739,7 +3721,7 @@ fn recovery_schedule(
     terminal_id: &str,
     reset_at: &str,
     task_id: Option<&str>,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     // Normalize to UTC before storing (QA F1): sweeps compare reset times
     // as UTC text.
     let reset_at = normalize_rfc3339_utc(reset_at)?;
@@ -3747,7 +3729,7 @@ fn recovery_schedule(
     shared
         .terminals
         .handle(&terminal)?
-        .ok_or_else(|| OfficeError::NotFound {
+        .ok_or_else(|| Error::NotFound {
             entity: "terminal",
             id: terminal_id.to_string(),
         })?;
@@ -3772,7 +3754,7 @@ fn recovery_schedule(
     Ok(serde_json::json!({ "id": id, "reset_at": reset_at, "state": "scheduled" }))
 }
 
-fn recovery_cancel(shared: &OfficeShared, plan_id: i64) -> OfficeResult<serde_json::Value> {
+fn recovery_cancel(shared: &OfficeShared, plan_id: i64) -> Result<serde_json::Value> {
     let store = shared.store.lock().expect("office store");
     let changed = store.connection().execute(
         "UPDATE recovery_plans SET state = 'cancelled', fired_at = ?2
@@ -3780,7 +3762,7 @@ fn recovery_cancel(shared: &OfficeShared, plan_id: i64) -> OfficeResult<serde_js
         rusqlite::params![plan_id, utc_now()],
     )?;
     if changed == 0 {
-        return Err(OfficeError::NotFound {
+        return Err(Error::NotFound {
             entity: "scheduled recovery plan",
             id: plan_id.to_string(),
         });
@@ -3792,21 +3774,19 @@ fn recovery_cancel(shared: &OfficeShared, plan_id: i64) -> OfficeResult<serde_js
 // Small helpers
 // ---------------------------------------------------------------------------
 
-fn hex_decode(text: &str) -> OfficeResult<Vec<u8>> {
+fn hex_decode(text: &str) -> Result<Vec<u8>> {
     let text = text.as_bytes();
     if text.len() % 2 != 0 {
-        return Err(OfficeError::Validation(
-            "hex input must be even-length".into(),
-        ));
+        return Err(Error::Validation("hex input must be even-length".into()));
     }
     (0..text.len() / 2)
         .map(|i| {
             u8::from_str_radix(
                 std::str::from_utf8(&text[i * 2..i * 2 + 2])
-                    .map_err(|_| OfficeError::Validation("hex input must be ASCII".into()))?,
+                    .map_err(|_| Error::Validation("hex input must be ASCII".into()))?,
                 16,
             )
-            .map_err(|_| OfficeError::Validation(format!("invalid hex byte at {i}")))
+            .map_err(|_| Error::Validation(format!("invalid hex byte at {i}")))
         })
         .collect()
 }

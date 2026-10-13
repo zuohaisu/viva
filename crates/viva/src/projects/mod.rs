@@ -18,7 +18,7 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{ProjectId, WorkspaceId, utc_now};
 use crate::foundation::store::Store;
 
@@ -89,16 +89,16 @@ impl<'a> ProjectRegistry<'a> {
         workspace_id: Option<WorkspaceId>,
         display_name: impl Into<String>,
         repo_path: impl Into<PathBuf>,
-    ) -> OfficeResult<ProjectRecord> {
+    ) -> Result<ProjectRecord> {
         let display_name = display_name.into();
         let repo_path = repo_path.into();
         if display_name.trim().is_empty() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "project display_name must not be empty".into(),
             ));
         }
         if !repo_path.is_absolute() {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "project path must be absolute: {}",
                 repo_path.display()
             )));
@@ -130,7 +130,7 @@ impl<'a> ProjectRegistry<'a> {
 
     /// Deactivate a project. The row, its id and everything referencing them
     /// survive; only `active` flips.
-    pub fn deactivate(&self, project_id: &ProjectId) -> OfficeResult<()> {
+    pub fn deactivate(&self, project_id: &ProjectId) -> Result<()> {
         self.require(project_id)?;
         let n = self.store.connection().execute(
             "UPDATE projects SET active = 0, deactivated_at = ?2 WHERE project_id = ?1",
@@ -141,7 +141,7 @@ impl<'a> ProjectRegistry<'a> {
     }
 
     /// Re-activate a previously deactivated project.
-    pub fn activate(&self, project_id: &ProjectId) -> OfficeResult<()> {
+    pub fn activate(&self, project_id: &ProjectId) -> Result<()> {
         self.require(project_id)?;
         self.store.connection().execute(
             "UPDATE projects SET active = 1, deactivated_at = NULL WHERE project_id = ?1",
@@ -150,7 +150,7 @@ impl<'a> ProjectRegistry<'a> {
         Ok(())
     }
 
-    pub fn get(&self, project_id: &ProjectId) -> OfficeResult<Option<ProjectRecord>> {
+    pub fn get(&self, project_id: &ProjectId) -> Result<Option<ProjectRecord>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT project_id, workspace_id, display_name, repo_path, active, created_at, deactivated_at
              FROM projects WHERE project_id = ?1",
@@ -161,15 +161,15 @@ impl<'a> ProjectRegistry<'a> {
         Ok(row)
     }
 
-    pub fn require(&self, project_id: &ProjectId) -> OfficeResult<ProjectRecord> {
-        self.get(project_id)?.ok_or_else(|| OfficeError::NotFound {
+    pub fn require(&self, project_id: &ProjectId) -> Result<ProjectRecord> {
+        self.get(project_id)?.ok_or_else(|| Error::NotFound {
             entity: "project",
             id: project_id.to_string(),
         })
     }
 
     /// All registered projects; `active_only` filters out deactivated ones.
-    pub fn list(&self, active_only: bool) -> OfficeResult<Vec<ProjectRecord>> {
+    pub fn list(&self, active_only: bool) -> Result<Vec<ProjectRecord>> {
         let sql = format!(
             "SELECT project_id, workspace_id, display_name, repo_path, active, created_at, deactivated_at
              FROM projects {} ORDER BY created_at, project_id",
@@ -193,11 +193,11 @@ impl<'a> ProjectRegistry<'a> {
         reference_path: impl Into<PathBuf>,
         kind: ReferenceKind,
         note: impl Into<String>,
-    ) -> OfficeResult<ProjectReference> {
+    ) -> Result<ProjectReference> {
         self.require(project_id)?;
         let reference_path = reference_path.into();
         if !reference_path.is_absolute() {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "reference path must be absolute: {}",
                 reference_path.display()
             )));
@@ -227,11 +227,7 @@ impl<'a> ProjectRegistry<'a> {
 
     /// Explicitly remove a reference edge. The edge keeps its history with a
     /// removal timestamp; it does not disappear.
-    pub fn remove_reference(
-        &self,
-        project_id: &ProjectId,
-        reference_path: &Path,
-    ) -> OfficeResult<()> {
+    pub fn remove_reference(&self, project_id: &ProjectId, reference_path: &Path) -> Result<()> {
         let n = self.store.connection().execute(
             "UPDATE project_references SET removed_at = ?3
              WHERE project_id = ?1 AND reference_path = ?2 AND removed_at IS NULL",
@@ -242,7 +238,7 @@ impl<'a> ProjectRegistry<'a> {
             ],
         )?;
         if n == 0 {
-            return Err(OfficeError::NotFound {
+            return Err(Error::NotFound {
                 entity: "project reference",
                 id: format!("{project_id} → {}", reference_path.display()),
             });
@@ -251,7 +247,7 @@ impl<'a> ProjectRegistry<'a> {
     }
 
     /// Live (not removed) reference edges of a project.
-    pub fn references(&self, project_id: &ProjectId) -> OfficeResult<Vec<ProjectReference>> {
+    pub fn references(&self, project_id: &ProjectId) -> Result<Vec<ProjectReference>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT project_id, reference_path, kind, note, added_at, removed_at
              FROM project_references
@@ -267,7 +263,7 @@ impl<'a> ProjectRegistry<'a> {
     }
 
     /// All reference edges including removed ones (history view).
-    pub fn reference_history(&self, project_id: &ProjectId) -> OfficeResult<Vec<ProjectReference>> {
+    pub fn reference_history(&self, project_id: &ProjectId) -> Result<Vec<ProjectReference>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT project_id, reference_path, kind, note, added_at, removed_at
              FROM project_references WHERE project_id = ?1 ORDER BY added_at, reference_path",
@@ -282,16 +278,16 @@ impl<'a> ProjectRegistry<'a> {
 
     /// Open a plain directory without registering it: no rows are written;
     /// the office simply returns a handle-shaped record for this session.
-    pub fn open_plain_directory(&self, path: impl Into<PathBuf>) -> OfficeResult<PlainDirectory> {
+    pub fn open_plain_directory(&self, path: impl Into<PathBuf>) -> Result<PlainDirectory> {
         let path = path.into();
         if !path.is_absolute() {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "directory path must be absolute: {}",
                 path.display()
             )));
         }
         if !path.is_dir() {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "path is not a directory: {}",
                 path.display()
             )));
@@ -304,7 +300,7 @@ impl<'a> ProjectRegistry<'a> {
 
     /// Export the domain as portable JSON (backup/migration). Ids, statuses
     /// and reference history are preserved verbatim.
-    pub fn export_json(&self) -> OfficeResult<serde_json::Value> {
+    pub fn export_json(&self) -> Result<serde_json::Value> {
         Ok(json!({
             "projects": self.list(false)?,
             "reference_history": {

@@ -16,7 +16,7 @@ pub mod pi;
 
 use std::path::PathBuf;
 
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::MemberId;
 
 /// One harness launch combination. `name` is display/selection data only —
@@ -45,7 +45,7 @@ impl HarnessSpec {
         name: impl Into<String>,
         argv: Vec<String>,
         cwd: impl Into<PathBuf>,
-    ) -> OfficeResult<Self> {
+    ) -> Result<Self> {
         let spec = Self {
             name: name.into(),
             argv,
@@ -57,24 +57,22 @@ impl HarnessSpec {
         Ok(spec)
     }
 
-    pub fn validate(&self) -> OfficeResult<()> {
+    pub fn validate(&self) -> Result<()> {
         if self.name.trim().is_empty() {
-            return Err(OfficeError::Validation(
-                "harness name must not be empty".into(),
-            ));
+            return Err(Error::Validation("harness name must not be empty".into()));
         }
         let Some(program) = self.argv.first() else {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "harness argv must name a program; empty argv is rejected".into(),
             ));
         };
         if program.trim().is_empty() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "harness argv[0] must be a program, not an empty string".into(),
             ));
         }
         if !self.cwd.is_absolute() {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "harness cwd must be absolute: {}",
                 self.cwd.display()
             )));
