@@ -91,7 +91,35 @@ def seed_office(home: Path) -> dict:
     return seeded
 
 
-def wait_for_socket(sock_path: Path, timeout: float = 15.0) -> None:
+HOST_STDERR_LOG = "host.stderr.log"
+STDERR_TAIL_BYTES = 2000
+
+
+class HostStartupError(RuntimeError):
+    """The host did not become reachable; the message carries why, in its words."""
+
+
+def stderr_tail(stderr_log: Path | None) -> str:
+    """The last bytes the host wrote to stderr, or a note that it wrote none."""
+    if stderr_log is None or not stderr_log.exists():
+        return "(host stderr was not captured)"
+    data = stderr_log.read_bytes()[-STDERR_TAIL_BYTES:]
+    text = data.decode("utf-8", errors="replace").strip()
+    return text or "(host wrote nothing to stderr)"
+
+
+def wait_for_socket(
+    sock_path: Path,
+    timeout: float = 15.0,
+    host: subprocess.Popen | None = None,
+    stderr_log: Path | None = None,
+) -> None:
+    """Wait until the office socket accepts connections.
+
+    Pass `host` to stop early when the host process exits. Every failure
+    reports the host's state (exit code, or still running) and the tail of its
+    stderr: "never became reachable" alone hides the reason the host printed.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -101,8 +129,22 @@ def wait_for_socket(sock_path: Path, timeout: float = 15.0) -> None:
             s.close()
             return
         except OSError:
-            time.sleep(0.05)
-    raise TimeoutError(f"office socket never became reachable: {sock_path}")
+            pass
+        if host is not None and host.poll() is not None:
+            raise HostStartupError(
+                f"office host exited with exit code {host.returncode} before the "
+                f"socket became reachable: {sock_path}\n"
+                f"host stderr (tail):\n{stderr_tail(stderr_log)}"
+            )
+        time.sleep(0.05)
+    state = "unknown (no host process given)"
+    if host is not None:
+        state = "still running" if host.poll() is None else f"exit code {host.returncode}"
+    raise HostStartupError(
+        f"office socket never became reachable within {timeout:g}s: {sock_path}\n"
+        f"host: {state}\n"
+        f"host stderr (tail):\n{stderr_tail(stderr_log)}"
+    )
 
 
 def viva(binary: Path, home: Path, *args: str, check: bool = True) -> dict | str:
@@ -170,14 +212,18 @@ def _run(binary: Path, home: Path, window: Path, out: Path) -> int:
                 f"{socket_path} — use a shorter home"
             )
         home.mkdir(parents=True, exist_ok=True)
-        host = subprocess.Popen(
-            [str(binary), "server"],
-            env={"VIVA_HOME": str(home), "PATH": "/usr/bin:/bin"},
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        # The host's stderr goes to a file in the home, not /dev/null: when it
+        # fails to start, that file is the only record of why.
+        host_stderr_log = home / HOST_STDERR_LOG
+        with host_stderr_log.open("wb") as host_stderr:
+            host = subprocess.Popen(
+                [str(binary), "server"],
+                env={"VIVA_HOME": str(home), "PATH": "/usr/bin:/bin"},
+                stdout=subprocess.DEVNULL,
+                stderr=host_stderr,
+            )
         try:
-            wait_for_socket(socket_path)
+            wait_for_socket(socket_path, host=host, stderr_log=host_stderr_log)
 
             # 3. Dispatch 16 real supervised processes across 3 tasks
             #    (round-robin), timing every control-plane round trip.
