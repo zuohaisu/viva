@@ -214,48 +214,35 @@ then through a pull request and a merge into the remote default branch.
   assumptions or skipped checks, and — when the workflow applies — the branch,
   commit, worktree location, and PR URL.
 
-## Post-Merge npm Releases and Version Policy
+## npm Releases and Version Policy
 
-- **Every merged delivery must produce a new npm release.** After the
-  repository owner (or an explicitly authorized Controller) merges a task into
-  the remote default branch, publish a new version of `@zuohaisu/viva` and its
-  platform packages as part of that task's delivery. Routine patch releases
-  do not require a separate request from Haisu. A merged PR alone is not a
-  completed release. There is deliberately no batching mode: Haisu's merge is
-  the release trigger, and release timing is controlled by when PRs get
-  merged, not by a separate scheduling decision — release-per-merge is
-  one rule with no exceptions. Documentation- and process-only merges
-  (charter edits, Wiki notes) are the one boundary: they do not consume a
-  version number and ride the next release's notes (precedent: PR #68).
-  This rule does **not** authorize an agent to merge or approve its own PR,
-  push a protected branch, or bypass release checks.
-- **Without Haisu's explicit instruction, change only the third (patch)
-  component of `major.minor.patch`.** Preserve the first two components and
-  increment the patch number: on the current `0.3.x` line, `0.3.0 → 0.3.1 →
-  0.3.2`. Moving to `0.4.0`, `1.0.0`, or any other major/minor line requires
-  Haisu to explicitly authorize that version change; a new feature, breaking
-  change, milestone, or an agent's SemVer judgment is not that authorization.
-- **One PR carries its own version bump — never open a version-prep PR.**
-  The delivery PR includes the bump in its isolated worktree: keep
-  `crates/viva/Cargo.toml` and the Viva entry in `Cargo.lock` aligned, and
-  branch off the latest `origin/main` so the bump inherits whatever the last
-  release already set. Check the latest remote default branch, release tags,
-  and npm versions; choose the next unused patch on the authorized major/minor
-  line and re-check for concurrent releases before tagging. Never reuse,
-  overwrite, or force-update a released version or tag.
-- Publish **only after merge**, from the validated merged source, using the
-  existing `v<version>` tag flow in `.github/workflows/release.yml` and
+- **Releases are human-managed; agent delivery ends at an open PR.** Haisu
+  decides when to release and which version to publish, and performs the
+  release. A merged PR does not oblige any agent to publish, tag, or prepare
+  a release. An agent may operate a release only when Haisu explicitly
+  authorizes that specific release; the authorization covers that one
+  release and names its version, and it never authorizes an agent to merge
+  or approve its own PR, push a protected branch, or bypass release checks.
+- **PRs never change version numbers.** Do not bump `crates/viva/Cargo.toml`,
+  the Viva entry in `Cargo.lock`, or any package `version` field (npm
+  wrapper or platform packages) in a delivery PR, and do not open
+  version-prep PRs. Agents do not choose or propose SemVer components.
+- Never reuse, overwrite, or force-update a released version or tag.
+- Reference for human-run (or explicitly authorized) releases: publish only
+  after merge, from the validated merged source, using the existing
+  `v<version>` tag flow in `.github/workflows/release.yml` and
   `packaging/npm/README.md`. Tag, binary, npm wrapper, platform package, and
   wrapper dependency versions must agree. Publish platform packages before
   the wrapper; do not add a parallel publishing pipeline or change token
   permissions to work around a failure.
-- Verify the official npm registry exposes the new version and expected
-  `latest` tags for all release packages, then perform a clean install and
-  confirm `viva --version`. npm upload acceptance, queued processing, or a
-  green workflow alone is **not** proof of a usable release. Report pending
+- When an agent operates an authorized release, verify the official npm
+  registry exposes the new version and expected `latest` tags for all
+  release packages, then perform a clean install and confirm
+  `viva --version`. npm upload acceptance, queued processing, or a green
+  workflow alone is **not** proof of a usable release. Report pending
   propagation, missing credentials, failed checks, or rejected publication
-  honestly, with the release/PR links and the smallest required owner action;
-  do not blindly republish an accepted version.
+  honestly, with the release/PR links and the smallest required owner
+  action; do not blindly republish an accepted version.
 
 ## Boundaries With Sibling Repos
 
