@@ -4,7 +4,12 @@
  *
  * The subprocess envelope is tested against a fake `viva` binary so the
  * whole chain (plan -> spawn -> parse -> refusal) is exercised for real,
- * without needing the Rust binary or a live office.
+ * without a live office.
+ *
+ * A fake accepts ANY arguments, so nothing in this file proves the real CLI
+ * understands the commands the extension emits. That is the job of
+ * `viva-office.contract.test.ts`, which runs them against the real `viva`
+ * binary (build it first: `cargo build -p viva`).
  */
 
 import { test } from "node:test";
@@ -123,7 +128,6 @@ test("planDispatch builds the fixed CLI envelope argv", () => {
     if (plan.kind === "run") {
       assert.deepEqual(plan.argv, [
         "viva",
-        "office",
         "dispatch",
         "--task",
         "task-1",
@@ -148,23 +152,23 @@ test("runEnvelope parses real CLI JSON and surfaces real failures", async () => 
     const env = officeEnv(process.env)!;
 
     const good = fakeViva('#!/bin/sh\necho \'{"ok": true}\'\n');
-    const payload = await runEnvelope({ ...env, vivaBin: good }, ["office", "status"]);
+    const payload = await runEnvelope({ ...env, vivaBin: good }, ["status"]);
     assert.ok((payload as { ok: boolean }).ok);
 
     const failing = fakeViva('#!/bin/sh\necho "no active office" >&2\nexit 3\n');
     await assert.rejects(
-      runEnvelope({ ...env, vivaBin: failing }, ["office", "dispatch"]),
+      runEnvelope({ ...env, vivaBin: failing }, ["dispatch"]),
       /exit 3[\s\S]*no active office/,
     );
 
     const malformed = fakeViva('#!/bin/sh\necho "not json"\n');
     await assert.rejects(
-      runEnvelope({ ...env, vivaBin: malformed }, ["office", "status"]),
+      runEnvelope({ ...env, vivaBin: malformed }, ["status"]),
       /malformed JSON/,
     );
 
     await assert.rejects(
-      runEnvelope({ ...env, vivaBin: "/nonexistent/viva" }, ["office", "status"]),
+      runEnvelope({ ...env, vivaBin: "/nonexistent/viva" }, ["status"]),
       /not usable/,
     );
   });

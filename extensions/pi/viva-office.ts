@@ -52,7 +52,7 @@ export default function vivaOffice(pi: ExtensionAPI): void {
     parameters: { type: "object", properties: {}, additionalProperties: false },
     execute: async () => {
       try {
-        const payload = await runEnvelope(env, ["office", "status"]);
+        const payload = await runEnvelope(env, ["status"]);
         return { content: toolText(payload) };
       } catch (err) {
         return { content: `office status unavailable: ${String(err)}`, isError: true };
@@ -76,7 +76,7 @@ export default function vivaOffice(pi: ExtensionAPI): void {
         return { content: "no task is attached to this session", isError: true };
       }
       try {
-        const payload = await runEnvelope(env, ["office", "brief", taskId]);
+        const payload = await runEnvelope(env, ["brief", taskId]);
         return { content: toolText(payload) };
       } catch (err) {
         return { content: `task brief unavailable: ${String(err)}`, isError: true };
@@ -151,7 +151,6 @@ export default function vivaOffice(pi: ExtensionAPI): void {
       }
       try {
         const payload = await runEnvelope(env, [
-          "office",
           "handoff",
           "--task",
           taskId,

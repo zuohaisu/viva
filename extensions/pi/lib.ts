@@ -2,9 +2,12 @@
  * Office-envelope plumbing for the Viva Pi extension (V09, issue #18).
  *
  * The fixed CLI envelope: the extension calls the `viva` binary's
- * `office` subcommands (JSON on stdout, non-zero exit on rejection) and
- * never speaks for the office itself. Everything here is deliberately
- * boring and side-effect-free unless it is actually spawning that CLI.
+ * top-level control commands — `status`, `brief`, `dispatch`, `handoff`
+ * (JSON on stdout, non-zero exit on rejection) — and never speaks for the
+ * office itself. There is no `office` namespace to type through, and
+ * `test/viva-office.contract.test.ts` runs these commands against the real
+ * binary. Everything here is deliberately boring and side-effect-free
+ * unless it is actually spawning that CLI.
  *
  * Authority rules this module enforces structurally:
  * - Without a member identity in the environment the extension has no
@@ -97,7 +100,6 @@ export function planDispatch(env: OfficeEnv, req: DispatchRequest): DispatchPlan
     kind: "run",
     argv: [
       env.vivaBin,
-      "office",
       "dispatch",
       "--task",
       taskId,
