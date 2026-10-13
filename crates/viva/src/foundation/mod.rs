@@ -5,6 +5,7 @@
 //! - [`paths`]: `VIVA_HOME` resolution and private directory rules
 //! - [`error`]: the office error taxonomy
 //! - [`store`]: SQLite open/WAL, schema metadata, per-domain migration registry
+//! - [`legacy`]: the one-time rename of pre-removal table and value names
 //! - [`events`]: the append-only office event log
 //! - [`envelope`]: control requests/results — caller binding, idempotency,
 //!   rejection reasons
@@ -15,6 +16,7 @@ pub mod envelope;
 pub mod error;
 pub mod events;
 pub mod ids;
+pub mod legacy;
 pub mod paths;
 pub mod records;
 pub mod store;

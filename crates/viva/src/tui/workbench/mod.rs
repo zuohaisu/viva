@@ -2878,7 +2878,7 @@ impl<'a> WorkbenchStore<'a> {
         // Needs-attention markers: recorded facts that deserve eyes.
         let mut attention = Vec::new();
         let failed: i64 = self.store.connection().query_row(
-            "SELECT COUNT(*) FROM office_executions WHERE status = 'failed'",
+            "SELECT COUNT(*) FROM executions WHERE status = 'failed'",
             [],
             |row| row.get(0),
         )?;

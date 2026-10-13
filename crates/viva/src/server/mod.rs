@@ -56,13 +56,13 @@ use crate::members::MemberRegistry;
 use crate::tasks::{ExecutionStart, TaskRegistry, TaskStatus};
 use crate::terminal::{StopPolicy, TerminalRegistry};
 
-/// The `office_host` migration domain: host registry, recovery records and
+/// The `host` migration domain: host registry, recovery records and
 /// a tiny settings table (S6 close-policy / pause persistence).
-pub const DOMAIN_HOST: Domain = Domain::new("office_host");
+pub const DOMAIN_HOST: Domain = Domain::new("host");
 
 pub const HOST_V1_SQL: &str = r#"
 -- One row per office-host process that ever claimed this VIVA_HOME.
-CREATE TABLE office_hosts (
+CREATE TABLE hosts (
     host_id    TEXT PRIMARY KEY,
     pid        INTEGER NOT NULL,
     started_at TEXT NOT NULL,
@@ -71,7 +71,7 @@ CREATE TABLE office_hosts (
 );
 -- Honest recovery records: crash reconciliation notes written by a later
 -- host about what the previous host left behind (never rewritten).
-CREATE TABLE office_recovery_events (
+CREATE TABLE recovery_events (
     seq         INTEGER PRIMARY KEY AUTOINCREMENT,
     host_id     TEXT NOT NULL,
     kind        TEXT NOT NULL,
@@ -80,17 +80,17 @@ CREATE TABLE office_recovery_events (
 );
 "#;
 
-/// The office_host v2 slice: key/value settings for owner-controlled
+/// The host v2 slice: key/value settings for owner-controlled
 /// semantics that must survive a restart (close-policy pause, and the
 /// pause itself).
 pub const HOST_V2_SQL: &str = r#"
-CREATE TABLE office_settings (
+CREATE TABLE settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 "#;
 
-/// The office_host v3 slice: rate-limit recovery plans (V15-5). A plan is
+/// The host v3 slice: rate-limit recovery plans (V15-5). A plan is
 /// created by a `rate_limited` report WITH a reset time (or the owner via
 /// the CLI); it fires by prompting the terminal to continue, and every
 /// outcome is audited.
@@ -157,15 +157,10 @@ pub fn migrations() -> &'static crate::foundation::store::FrozenMigrations {
         let registry = crate::maintenance::register_migrations(registry);
         let registry = crate::tools::computer::register_migrations(registry);
         let registry = crate::memory::register_migrations(registry);
-        let registry = registry.register(DOMAIN_HOST, 2, "office host v2 (settings)", HOST_V2_SQL);
-        let registry = registry.register(
-            DOMAIN_HOST,
-            3,
-            "office host v3 (recovery plans)",
-            HOST_V3_SQL,
-        );
+        let registry = registry.register(DOMAIN_HOST, 2, "host v2 (settings)", HOST_V2_SQL);
+        let registry = registry.register(DOMAIN_HOST, 3, "host v3 (recovery plans)", HOST_V3_SQL);
         registry
-            .register(DOMAIN_HOST, 1, "office host v1", HOST_V1_SQL)
+            .register(DOMAIN_HOST, 1, "host v1", HOST_V1_SQL)
             .freeze()
             .expect("office registry is well-formed")
     })
@@ -263,14 +258,14 @@ impl Host {
         let persisted_pause: bool = store
             .connection()
             .query_row(
-                "SELECT value FROM office_settings WHERE key = 'paused'",
+                "SELECT value FROM settings WHERE key = 'paused'",
                 [],
                 |row| row.get::<_, String>(0),
             )
             .map(|value| value == "true")
             .unwrap_or(false);
         store.connection().execute(
-            "INSERT INTO office_hosts(host_id, pid, started_at) VALUES (?1, ?2, ?3)",
+            "INSERT INTO hosts(host_id, pid, started_at) VALUES (?1, ?2, ?3)",
             rusqlite::params![host_id, std::process::id() as i64, utc_now()],
         )?;
 
@@ -327,14 +322,14 @@ impl Host {
         let previous: Vec<(String, i64)> = {
             let mut stmt = store
                 .connection()
-                .prepare("SELECT host_id, pid FROM office_hosts WHERE exited_at IS NULL")?;
+                .prepare("SELECT host_id, pid FROM hosts WHERE exited_at IS NULL")?;
             let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
         let persisted_pause: bool = store
             .connection()
             .query_row(
-                "SELECT value FROM office_settings WHERE key = 'paused'",
+                "SELECT value FROM settings WHERE key = 'paused'",
                 [],
                 |row| row.get::<_, String>(0),
             )
@@ -342,7 +337,7 @@ impl Host {
             .unwrap_or(false);
         for (old_host, pid) in previous {
             store.connection().execute(
-                "UPDATE office_hosts SET exited_at = ?2, exit_kind = 'crashed' WHERE host_id = ?1",
+                "UPDATE hosts SET exited_at = ?2, exit_kind = 'crashed' WHERE host_id = ?1",
                 rusqlite::params![old_host, now],
             )?;
             record_recovery(
@@ -393,7 +388,7 @@ impl Host {
         let orphans: Vec<(String, Option<i64>, Option<String>)> = {
             let mut stmt = store.connection().prepare(
                 "SELECT execution_id, process_exit, completion_evidence
-                 FROM office_executions WHERE status = 'running'",
+                 FROM executions WHERE status = 'running'",
             )?;
             let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -409,7 +404,7 @@ impl Host {
                 )
                 .ok();
             store.connection().execute(
-                "UPDATE office_executions SET status = 'stopped', updated_at = ?2
+                "UPDATE executions SET status = 'stopped', updated_at = ?2
                  WHERE execution_id = ?1 AND status = 'running'",
                 rusqlite::params![execution_id, now],
             )?;
@@ -535,7 +530,7 @@ impl Host {
         }
         let store = shared.store.lock().expect("office store");
         store.connection().execute(
-            "UPDATE office_hosts SET exited_at = ?2, exit_kind = 'graceful'
+            "UPDATE hosts SET exited_at = ?2, exit_kind = 'graceful'
              WHERE host_id = ?1 AND exited_at IS NULL",
             rusqlite::params![shared.host_id, utc_now()],
         )?;
@@ -577,7 +572,7 @@ impl Host {
 
 fn record_recovery(store: &Store, host_id: &str, kind: &str, detail: &str) -> Result<()> {
     store.connection().execute(
-        "INSERT INTO office_recovery_events(host_id, kind, detail, recorded_at)
+        "INSERT INTO recovery_events(host_id, kind, detail, recorded_at)
          VALUES (?1, ?2, ?3, ?4)",
         rusqlite::params![host_id, kind, detail, utc_now()],
     )?;
@@ -1109,7 +1104,7 @@ fn audit_grant_denial(shared: &Shared, request: &Request, reason: &str) -> Error
             kind: "socket_grant_denied".into(),
             subject_type: "socket_request".into(),
             subject_id: request.request_id.clone(),
-            origin: "office_host".into(),
+            origin: "host".into(),
             payload,
         },
     );
@@ -1321,7 +1316,7 @@ fn workbench_view(shared: Arc<Shared>) -> Result<serde_json::Value> {
             store
                 .connection()
                 .query_row(
-                    "SELECT value FROM office_settings WHERE key = 'last_sync_note'",
+                    "SELECT value FROM settings WHERE key = 'last_sync_note'",
                     [],
                     |row| row.get(0),
                 )
@@ -1399,7 +1394,7 @@ fn workbench_view(shared: Arc<Shared>) -> Result<serde_json::Value> {
 
 /// The pane-layout preference store (QA F5): the client persists its pane
 /// tree so a later attach rebuilds the same view. A UI preference in
-/// office_settings - bounded, validated as JSON, never an office fact.
+/// settings - bounded, validated as JSON, never an office fact.
 fn workbench_layout(shared: &Shared, layout_json: Option<&str>) -> Result<serde_json::Value> {
     let store = shared.store.lock().expect("office store");
     match layout_json {
@@ -1410,9 +1405,9 @@ fn workbench_layout(shared: &Shared, layout_json: Option<&str>) -> Result<serde_
             // Must parse: a layout the client cannot restore is junk.
             serde_json::from_str::<serde_json::Value>(json)
                 .map_err(|e| Error::Validation(format!("layout is not valid JSON: {e}")))?;
-            store.connection().execute("INSERT OR IGNORE INTO office_settings(key,value) SELECT 'workbench_layout_legacy',value FROM office_settings WHERE key='workbench_layout' AND json_extract(value,'$.version') IS NULL",[])?;
+            store.connection().execute("INSERT OR IGNORE INTO settings(key,value) SELECT 'workbench_layout_legacy',value FROM settings WHERE key='workbench_layout' AND json_extract(value,'$.version') IS NULL",[])?;
             store.connection().execute(
-                "INSERT INTO office_settings(key, value) VALUES ('workbench_layout', ?1)
+                "INSERT INTO settings(key, value) VALUES ('workbench_layout', ?1)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 [json],
             )?;
@@ -1422,7 +1417,7 @@ fn workbench_layout(shared: &Shared, layout_json: Option<&str>) -> Result<serde_
             let saved: Option<String> = store
                 .connection()
                 .query_row(
-                    "SELECT value FROM office_settings WHERE key = 'workbench_layout'",
+                    "SELECT value FROM settings WHERE key = 'workbench_layout'",
                     [],
                     |row| row.get(0),
                 )
@@ -1615,7 +1610,7 @@ fn agent_report(
             kind: "agent_status_reported".into(),
             subject_type: "terminal".into(),
             subject_id: terminal_id.to_string(),
-            origin: "office_host".into(),
+            origin: "host".into(),
             payload: serde_json::json!({
                 "agent": agent,
                 "status": status.as_str(),
@@ -1719,7 +1714,7 @@ fn agent_content_submit(
             kind: "agent_content_submitted".into(),
             subject_type: "agent_content".into(),
             subject_id: content_id.clone(),
-            origin: "office_host".into(),
+            origin: "host".into(),
             payload: serde_json::json!({
                 "kind": kind,
                 "terminal_id": terminal_id,
@@ -1785,7 +1780,7 @@ fn agent_prompt(shared: &Shared, terminal_id: &str, prompt: &str) -> Result<serd
             kind: "agent_prompt_sent".into(),
             subject_type: "terminal".into(),
             subject_id: terminal_id.to_string(),
-            origin: "office_host".into(),
+            origin: "host".into(),
             payload: serde_json::json!({
                 "bytes": prompt.len(),
                 "digest_fnv1a_64": format!("{:016x}", fnv1a_64(prompt.as_bytes())),
@@ -1838,7 +1833,7 @@ fn agent_wait(
                     kind: "agent_wait_matched".into(),
                     subject_type: "terminal".into(),
                     subject_id: terminal_id.to_string(),
-                    origin: "office_host".into(),
+                    origin: "host".into(),
                     payload: serde_json::json!({
                         "status": wanted.as_str(),
                         "detail": record.detail,
@@ -1861,7 +1856,7 @@ fn agent_wait(
                     kind: "agent_wait_timeout".into(),
                     subject_type: "terminal".into(),
                     subject_id: terminal_id.to_string(),
-                    origin: "office_host".into(),
+                    origin: "host".into(),
                     payload: serde_json::json!({ "status": wanted.as_str() }),
                 },
             )?;
@@ -1883,7 +1878,7 @@ fn events_feed(shared: &Shared, since_seq: u64, limit: u32) -> Result<serde_json
     let store = shared.store.lock().expect("office store");
     let mut stmt = store.connection().prepare(
         "SELECT seq, event_id, occurred_at, domain, kind, subject_type, subject_id, origin, payload
-         FROM office_events WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",
+         FROM events WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",
     )?;
     let rows = stmt.query_map(rusqlite::params![since_seq as i64, limit], |row| {
         Ok(serde_json::json!({
@@ -1922,7 +1917,7 @@ fn pause_server(shared: &Shared, paused: bool) -> Result<serde_json::Value> {
     {
         let store = shared.store.lock().expect("office store");
         store.connection().execute(
-            "INSERT INTO office_settings(key, value) VALUES ('paused', ?1)
+            "INSERT INTO settings(key, value) VALUES ('paused', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             rusqlite::params![if paused { "true" } else { "false" }],
         )?;
@@ -1930,15 +1925,10 @@ fn pause_server(shared: &Shared, paused: bool) -> Result<serde_json::Value> {
             &store,
             crate::foundation::events::NewEvent {
                 domain: DOMAIN_HOST,
-                kind: if paused {
-                    "office_paused"
-                } else {
-                    "office_resumed"
-                }
-                .into(),
-                subject_type: "office".into(),
+                kind: if paused { "paused" } else { "resumed" }.into(),
+                subject_type: "host".into(),
                 subject_id: shared.host_id.clone(),
-                origin: "office_host".into(),
+                origin: "host".into(),
                 payload: serde_json::json!({
                     "note": if paused {
                         "no new dispatch, no maintenance cycles; running executions untouched"
@@ -1964,7 +1954,7 @@ pub fn assert_maintenance_allowed(store: &Store) -> Result<()> {
     let paused: bool = store
         .connection()
         .query_row(
-            "SELECT value FROM office_settings WHERE key = 'paused'",
+            "SELECT value FROM settings WHERE key = 'paused'",
             [],
             |row| row.get::<_, String>(0),
         )
@@ -2231,6 +2221,10 @@ fn perform_handoff(shared: Arc<Shared>, listener: UnixListener, handoff_path: st
 /// then claim and serve as usual.
 pub fn resume_server(home: &Path) -> Result<()> {
     crate::foundation::paths::ensure_private_dir(home)?;
+    // An older server that still runs on the previous table names cannot hand
+    // its terminals to a binary that renames them. Refuse before touching the
+    // handoff socket: the old server times out waiting and keeps serving.
+    crate::foundation::legacy::refuse_live_handoff(&crate::foundation::paths::database_path(home))?;
     let handoff_path = home.join(HANDOFF_SOCKET_NAME);
     // The old host creates the rendezvous in its ServerRestart handler;
     // poll for it (the CLI starts this process right after that response).
@@ -2359,13 +2353,13 @@ fn status(shared: &Shared) -> Result<serde_json::Value> {
     let (row_count_executions, running, completed): (i64, i64, i64) = {
         let count = |status: &str| -> Result<i64> {
             Ok(store.connection().query_row(
-                "SELECT COUNT(*) FROM office_executions WHERE status = ?1",
+                "SELECT COUNT(*) FROM executions WHERE status = ?1",
                 [status],
                 |row| row.get(0),
             )?)
         };
         (
-            store.row_count("office_executions")?,
+            store.row_count("executions")?,
             count("running")?,
             count("completed")?,
         )
@@ -2632,7 +2626,7 @@ fn dispatch(
                 // a stop, not a failure — correct the record and say why.
                 if server_stopped {
                     let _ = store.connection().execute(
-                        "UPDATE office_executions SET status = 'stopped', updated_at = ?2
+                        "UPDATE executions SET status = 'stopped', updated_at = ?2
                          WHERE execution_id = ?1 AND status = 'failed'",
                         rusqlite::params![watcher_execution.as_str(), utc_now()],
                     );
@@ -2838,7 +2832,7 @@ pub fn offline_status(home: &Path) -> Result<serde_json::Value> {
     let store = Store::open(&db, migrations())?;
     let last_host: Option<(String, i64, Option<String>, Option<String>)> = {
         let mut stmt = store.connection().prepare(
-            "SELECT host_id, pid, exited_at, exit_kind FROM office_hosts
+            "SELECT host_id, pid, exited_at, exit_kind FROM hosts
              ORDER BY started_at DESC LIMIT 1",
         )?;
         stmt.query_row([], |row| {
@@ -2849,9 +2843,7 @@ pub fn offline_status(home: &Path) -> Result<serde_json::Value> {
     let recoveries: i64 =
         store
             .connection()
-            .query_row("SELECT COUNT(*) FROM office_recovery_events", [], |row| {
-                row.get(0)
-            })?;
+            .query_row("SELECT COUNT(*) FROM recovery_events", [], |row| row.get(0))?;
     let mut value = serde_json::json!({
         "home": home.display().to_string(),
         "socket_present": socket_path.exists(),
@@ -2901,7 +2893,7 @@ fn auto_sync_due(shared: &Shared) -> bool {
 fn set_auto_pull(shared: &Shared, on: bool) -> Result<serde_json::Value> {
     let store = shared.store.lock().expect("office store");
     store.connection().execute(
-        "INSERT INTO office_settings(key, value) VALUES ('auto_pull', ?1)
+        "INSERT INTO settings(key, value) VALUES ('auto_pull', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         rusqlite::params![if on { "true" } else { "false" }],
     )?;
@@ -2910,9 +2902,9 @@ fn set_auto_pull(shared: &Shared, on: bool) -> Result<serde_json::Value> {
         crate::foundation::events::NewEvent {
             domain: DOMAIN_HOST,
             kind: "auto_pull_toggled".into(),
-            subject_type: "office".into(),
+            subject_type: "host".into(),
             subject_id: shared.host_id.clone(),
-            origin: "office_host".into(),
+            origin: "host".into(),
             payload: serde_json::json!({ "on": on }),
         },
     )?;
@@ -2968,7 +2960,7 @@ fn read_auto_pull(store: &Store) -> bool {
     store
         .connection()
         .query_row(
-            "SELECT value FROM office_settings WHERE key = 'auto_pull'",
+            "SELECT value FROM settings WHERE key = 'auto_pull'",
             [],
             |row| row.get::<_, String>(0),
         )
@@ -3109,7 +3101,7 @@ fn auto_sync_all_inner(shared: &Shared, force: bool) -> Result<serde_json::Value
                     .or_else(|| row["worktree"].as_str())
                     .unwrap_or("unknown")
                     .to_string(),
-                origin: "office_host".into(),
+                origin: "host".into(),
                 payload: row.clone(),
             },
         )?;
@@ -3123,7 +3115,7 @@ fn auto_sync_all_inner(shared: &Shared, force: bool) -> Result<serde_json::Value
     store
         .connection()
         .execute(
-            "INSERT INTO office_settings(key, value) VALUES ('last_sync_note', ?1)
+            "INSERT INTO settings(key, value) VALUES ('last_sync_note', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             rusqlite::params![note],
         )
@@ -3208,7 +3200,7 @@ fn sweep_recovery_plans(shared: &Shared) {
                 kind: "recovery_plan_fired".into(),
                 subject_type: "recovery_plan".into(),
                 subject_id: id.to_string(),
-                origin: "office_host".into(),
+                origin: "host".into(),
                 payload: serde_json::json!({
                     "outcome": outcome,
                     "note": note,
@@ -3436,7 +3428,7 @@ fn worktree_cleanup(
                 kind: "worktree_cleanup_refused".into(),
                 subject_type: "worktree".into(),
                 subject_id: worktree_id.to_string(),
-                origin: "office_host".into(),
+                origin: "host".into(),
                 payload: serde_json::json!({
                     "branch": branch,
                     "pr_state": state,
@@ -3479,7 +3471,7 @@ fn worktree_cleanup(
                 kind: "worktree_cleanup_failed".into(),
                 subject_type: "worktree".into(),
                 subject_id: worktree_id.to_string(),
-                origin: "office_host".into(),
+                origin: "host".into(),
                 payload: serde_json::json!({
                     "path": worktree_path.display().to_string(),
                     "requested_by": requested_by,
@@ -3503,7 +3495,7 @@ fn worktree_cleanup(
             kind: "worktree_cleaned".into(),
             subject_type: "worktree".into(),
             subject_id: worktree_id.to_string(),
-            origin: "office_host".into(),
+            origin: "host".into(),
             payload: serde_json::json!({
                 "path": worktree_path.display().to_string(),
                 "branch": branch,
@@ -3647,7 +3639,7 @@ fn agent_handoff(
             kind: "agent_handoff".into(),
             subject_type: "worktree".into(),
             subject_id: worktree_id.to_string(),
-            origin: "office_host".into(),
+            origin: "host".into(),
             payload: serde_json::json!({
                 "requested_by": requested_by,
                 "to_agent": to_agent,
@@ -3724,7 +3716,7 @@ fn recovery_schedule(
             kind: "recovery_plan_scheduled".into(),
             subject_type: "recovery_plan".into(),
             subject_id: id.to_string(),
-            origin: "office_host".into(),
+            origin: "host".into(),
             payload: serde_json::json!({ "terminal_id": terminal_id, "reset_at": reset_at }),
         },
     )?;
@@ -3964,7 +3956,7 @@ mod server_split_tests {
         host.shutdown();
     }
 
-    /// An invalid grant is rejected AND audited (office_events keeps the
+    /// An invalid grant is rejected AND audited (events keeps the
     /// refusal — the denial is a recorded fact, not a silent close).
     #[test]
     fn invalid_grant_is_rejected_and_audited() {
@@ -3994,7 +3986,7 @@ mod server_split_tests {
         let denials: i64 = store
             .connection()
             .query_row(
-                "SELECT COUNT(*) FROM office_events WHERE kind = 'socket_grant_denied'",
+                "SELECT COUNT(*) FROM events WHERE kind = 'socket_grant_denied'",
                 [],
                 |row| row.get(0),
             )
@@ -4419,7 +4411,7 @@ mod s3_handoff_tests {
             let out: i64 = store
                 .connection()
                 .query_row(
-                    "SELECT COUNT(*) FROM office_recovery_events WHERE kind = 'live_handoff_out'",
+                    "SELECT COUNT(*) FROM recovery_events WHERE kind = 'live_handoff_out'",
                     [],
                     |row| row.get(0),
                 )
@@ -4427,7 +4419,7 @@ mod s3_handoff_tests {
             let inn: i64 = store
                 .connection()
                 .query_row(
-                    "SELECT COUNT(*) FROM office_recovery_events WHERE kind = 'live_handoff_in'",
+                    "SELECT COUNT(*) FROM recovery_events WHERE kind = 'live_handoff_in'",
                     [],
                     |row| row.get(0),
                 )
@@ -4661,7 +4653,7 @@ mod s3_handoff_tests {
             let failed: i64 = store
                 .connection()
                 .query_row(
-                    "SELECT COUNT(*) FROM office_recovery_events WHERE kind = 'live_handoff_failed'",
+                    "SELECT COUNT(*) FROM recovery_events WHERE kind = 'live_handoff_failed'",
                     [],
                     |row| row.get(0),
                 )
@@ -4712,7 +4704,7 @@ mod s3_handoff_tests {
             let detail: String = store
                 .connection()
                 .query_row(
-                    "SELECT detail FROM office_recovery_events WHERE kind = 'live_handoff_failed' \
+                    "SELECT detail FROM recovery_events WHERE kind = 'live_handoff_failed' \
                      ORDER BY seq DESC LIMIT 1",
                     [],
                     |row| row.get(0),
@@ -4885,7 +4877,7 @@ mod s4_agent_status_tests {
         let audited: i64 = store
             .connection()
             .query_row(
-                "SELECT COUNT(*) FROM office_events WHERE kind = 'agent_status_reported'",
+                "SELECT COUNT(*) FROM events WHERE kind = 'agent_status_reported'",
                 [],
                 |row| row.get(0),
             )
@@ -5031,7 +5023,7 @@ mod s4_agent_status_tests {
         let audited: i64 = store
             .connection()
             .query_row(
-                "SELECT COUNT(*) FROM office_events WHERE kind = 'agent_content_submitted' AND subject_id = ?1",
+                "SELECT COUNT(*) FROM events WHERE kind = 'agent_content_submitted' AND subject_id = ?1",
                 [content_id.as_str()],
                 |row| row.get(0),
             )
@@ -5279,7 +5271,7 @@ mod s5_orchestration_tests {
         let timeouts: i64 = store
             .connection()
             .query_row(
-                "SELECT COUNT(*) FROM office_events WHERE kind = 'agent_wait_timeout'",
+                "SELECT COUNT(*) FROM events WHERE kind = 'agent_wait_timeout'",
                 [],
                 |row| row.get(0),
             )
@@ -5733,7 +5725,7 @@ mod v15_tests {
         let audited: i64 = store
             .connection()
             .query_row(
-                "SELECT COUNT(*) FROM office_events WHERE kind = 'worktree_cleaned'",
+                "SELECT COUNT(*) FROM events WHERE kind = 'worktree_cleaned'",
                 [],
                 |row| row.get(0),
             )
@@ -6097,7 +6089,7 @@ mod v15_tests {
         let audited: i64 = store
             .connection()
             .query_row(
-                "SELECT COUNT(*) FROM office_events WHERE kind = 'recovery_plan_fired'",
+                "SELECT COUNT(*) FROM events WHERE kind = 'recovery_plan_fired'",
                 [],
                 |row| row.get(0),
             )
@@ -6211,7 +6203,7 @@ mod v15_tests {
             let note: String = store
                 .connection()
                 .query_row(
-                    "SELECT detail FROM office_recovery_events
+                    "SELECT detail FROM recovery_events
                      WHERE kind = 'recovery_plan_expired' ORDER BY seq DESC LIMIT 1",
                     [],
                     |row| row.get(0),
@@ -6370,7 +6362,7 @@ mod s6_pause_tests {
             let value: String = store
                 .connection()
                 .query_row(
-                    "SELECT value FROM office_settings WHERE key = 'paused'",
+                    "SELECT value FROM settings WHERE key = 'paused'",
                     [],
                     |row| row.get(0),
                 )
@@ -6396,7 +6388,7 @@ mod s6_pause_tests {
             store
                 .connection()
                 .execute(
-                    "UPDATE office_settings SET value = 'false' WHERE key = 'paused'",
+                    "UPDATE settings SET value = 'false' WHERE key = 'paused'",
                     [],
                 )
                 .expect("cleanup");
@@ -6432,7 +6424,7 @@ mod s6_pause_tests {
             store
                 .connection()
                 .query_row(
-                    "SELECT COUNT(*) FROM office_recovery_events WHERE kind = 'pause_restored'",
+                    "SELECT COUNT(*) FROM recovery_events WHERE kind = 'pause_restored'",
                     [],
                     |row| row.get(0),
                 )
@@ -6591,7 +6583,7 @@ mod qa_round4_tests {
             let audited: i64 = store
                 .connection()
                 .query_row(
-                    "SELECT COUNT(*) FROM office_events WHERE kind = 'git_auto_sync'",
+                    "SELECT COUNT(*) FROM events WHERE kind = 'git_auto_sync'",
                     [],
                     |row| row.get(0),
                 )
@@ -6735,7 +6727,7 @@ mod qa_round5_tests {
             let audited: i64 = store
                 .connection()
                 .query_row(
-                    "SELECT COUNT(*) FROM office_events WHERE kind = 'git_auto_sync'",
+                    "SELECT COUNT(*) FROM events WHERE kind = 'git_auto_sync'",
                     [],
                     |row| row.get(0),
                 )
@@ -6826,7 +6818,7 @@ mod qa_round5_tests {
             store
                 .connection()
                 .execute(
-                    "INSERT INTO office_settings(key, value) VALUES ('auto_pull', 'true')
+                    "INSERT INTO settings(key, value) VALUES ('auto_pull', 'true')
                      ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                     [],
                 )

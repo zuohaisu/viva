@@ -309,7 +309,7 @@ fn cross_interface_flow_survives_reopen() {
         2,
         "accepted + rejected"
     );
-    assert_eq!(reopened.row_count("office_events").expect("events"), 1);
+    assert_eq!(reopened.row_count("events").expect("events"), 1);
 
     let reloaded_event = events::get(&reopened, &recorded.event_id)
         .expect("get")
