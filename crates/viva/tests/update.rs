@@ -169,7 +169,7 @@ fn update_restarts_a_running_server_through_live_handover() {
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
 
-    use viva::office::{OFFICE_SOCKET_NAME, OfficeClient, OfficeHost, OfficeRequestKind};
+    use viva::server::{Client, Host, RequestKind, SOCKET_NAME};
 
     let dir = TempDir::new().unwrap();
     // The global npm layout the updater validates, with a stub npm that
@@ -229,17 +229,17 @@ fn update_restarts_a_running_server_through_live_handover() {
     // A live host (the old generation) with one real terminal.
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    let host = OfficeHost::open(&home).expect("host claims the slot");
+    let host = Host::open(&home).expect("host claims the slot");
     let old_pid = std::process::id();
     let server = host.serve_background();
-    let socket = home.join(OFFICE_SOCKET_NAME);
+    let socket = home.join(SOCKET_NAME);
     let deadline = Instant::now() + Duration::from_secs(5);
     while !socket.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
-    let mut client = OfficeClient::connect(&home).expect("client");
+    let mut client = Client::connect(&home).expect("client");
     let created = client
-        .call(OfficeRequestKind::TerminalCreate {
+        .call(RequestKind::TerminalCreate {
             argv: vec![
                 "/bin/sh".into(),
                 "-c".into(),
@@ -289,16 +289,16 @@ fn update_restarts_a_running_server_through_live_handover() {
     // A NEW process serves, and the live terminal survived the upgrade.
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut client = loop {
-        if let Ok(client) = OfficeClient::connect(&home) {
+        if let Ok(client) = Client::connect(&home) {
             break client;
         }
         assert!(Instant::now() < deadline, "the resumed host never answered");
         std::thread::sleep(Duration::from_millis(100));
     };
-    let status = client.call(OfficeRequestKind::Ping).expect("ping");
+    let status = client.call(RequestKind::Ping).expect("ping");
     let new_pid = status.get("pid").and_then(|p| p.as_u64()).expect("pid");
     assert_ne!(new_pid, u64::from(old_pid), "a new process must serve");
-    let list = client.call(OfficeRequestKind::TerminalList).expect("list");
+    let list = client.call(RequestKind::TerminalList).expect("list");
     assert!(
         format!("{list}").contains(&terminal_id),
         "the terminal survived the update restart: {list}"
@@ -306,7 +306,7 @@ fn update_restarts_a_running_server_through_live_handover() {
 
     // Clean teardown of the resumed (detached) server.
     client
-        .call(OfficeRequestKind::Shutdown { close_policy: None })
+        .call(RequestKind::Shutdown { close_policy: None })
         .expect("shutdown");
     drop(client);
     let deadline = Instant::now() + Duration::from_secs(15);

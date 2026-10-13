@@ -163,7 +163,7 @@ crates/viva/src/
   git/          worktrees (discover/create/adopt), read-only GitHub evidence
   knowledge/    sources, lifecycle, selection, usage evidence
   conversations/                        tree, forks, handoffs (V10)
-  office/       active host, control channel, reconciliation (V07)
+  server/       active host, control channel, reconciliation (V07)
   harness/      explicit launch combinations; Pi specialization (V09)
   tui/          shell, parallel-development workbench (V14), conversations
 extensions/pi/  the Pi member extension (TypeScript, independently tested)

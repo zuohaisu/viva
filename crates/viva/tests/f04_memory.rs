@@ -45,7 +45,7 @@ fn store() -> Store {
 #[test]
 fn cli_memory_default_store_is_isolated_by_viva_home() {
     let dir = tempfile::TempDir::new().unwrap();
-    let home = dir.path().join("office");
+    let home = dir.path().join("viva-home");
     // `status` opens only the isolated office and probes only its derived
     // memory path. It must not inspect the user's Hermes database.
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_viva"))
@@ -145,7 +145,7 @@ fn exit_actor(store: &Store, member: &MemberId) -> Actor {
     }
 }
 
-const EN_FACT: &str = "Viva F04: the office release train deploys every Tuesday at noon";
+const EN_FACT: &str = "Viva F04: the team release train deploys every Tuesday at noon";
 const CN_FACT: &str = "Viva F04 测试：演示环境每周五下午重建";
 
 /// Acceptance: "真实 Holographic 写入/检索有证据" — a real write through

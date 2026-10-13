@@ -543,14 +543,14 @@ fn npm_wrapper_entry(prefix: &Path) -> PathBuf {
 /// the old generation serving and says so instead of failing the install,
 /// which already succeeded.
 fn restart_running_server(home: &Path, entry: &Path) {
-    let socket = home.join(crate::office::OFFICE_SOCKET_NAME);
+    let socket = home.join(crate::server::SOCKET_NAME);
     if !socket.exists() {
         println!("No running resident server; the next `viva` start will use the new version.");
         return;
     }
     // Only a healthy host can hand over. A socket nobody answers is left
-    // for the next start to claim (`OfficeHost::open` records that).
-    if crate::office::OfficeClient::connect(home).is_err() {
+    // for the next start to claim (`Host::open` records that).
+    if crate::server::Client::connect(home).is_err() {
         eprintln!(
             "viva: socket {} answered no healthy host; nothing to restart — \
              the next `viva` start will claim it if it is stale",
@@ -558,7 +558,7 @@ fn restart_running_server(home: &Path, entry: &Path) {
         );
         return;
     }
-    match crate::office::restart_server_with(home, entry) {
+    match crate::server::restart_server_with(home, entry) {
         Ok(new_pid) => println!(
             "Resident server restarted on the new version (pid {new_pid}); \
              its terminals carried over — reconnect the TUI."

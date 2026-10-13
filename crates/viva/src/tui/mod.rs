@@ -60,22 +60,22 @@ pub struct TerminalRow {
 
 /// Office overview: members and projects (display configuration only).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct OfficeOverview {
+pub struct Overview {
     pub members: Vec<String>,
     pub projects: Vec<String>,
 }
 
 /// The read-only data source of the shell. There are deliberately no
 /// mutators: navigation can never change what it navigates over.
-pub trait OfficeData {
-    fn overview(&self) -> Result<OfficeOverview>;
+pub trait OverviewSource {
+    fn overview(&self) -> Result<Overview>;
     fn tasks(&self) -> Result<Vec<TaskRow>>;
     fn terminals(&self) -> Result<Vec<TerminalRow>>;
 }
 
 #[derive(Debug, Clone, Default)]
 struct Cache {
-    overview: OfficeOverview,
+    overview: Overview,
     tasks: Vec<TaskRow>,
     terminals: Vec<TerminalRow>,
     last_error: Option<String>,
@@ -104,7 +104,7 @@ pub enum KeyOutcome {
 
 /// The TUI application shell. Pure view state + cached projections; drive
 /// it with [`TuiApp::on_key`], [`TuiApp::refresh`] and [`TuiApp::draw`].
-pub struct TuiApp<D: OfficeData> {
+pub struct TuiApp<D: OverviewSource> {
     data: D,
     cache: Cache,
     focus: Focus,
@@ -114,7 +114,7 @@ pub struct TuiApp<D: OfficeData> {
     status_line: String,
 }
 
-impl<D: OfficeData> TuiApp<D> {
+impl<D: OverviewSource> TuiApp<D> {
     pub fn new(data: D) -> Self {
         Self {
             data,
@@ -459,8 +459,8 @@ impl Drop for TerminalGuard {
 /// The run loop's quit step: ask the office to pause (callback), then the
 /// guard's drop restores the terminal. Kept as an explicit function so
 /// tests can prove the pause runs exactly once before restore.
-pub fn shutdown_with_pause(pause_office: &mut impl FnMut()) {
-    pause_office();
+pub fn shutdown_with_pause(pause_server: &mut impl FnMut()) {
+    pause_server();
 }
 
 #[cfg(test)]
@@ -472,7 +472,7 @@ mod tests {
     /// Static fixture with a mutation counter: the trait has no mutators,
     /// so the counter must stay zero through any navigation.
     struct Fixture {
-        overview: OfficeOverview,
+        overview: Overview,
         tasks: Vec<TaskRow>,
         terminals: Vec<TerminalRow>,
         fail_tasks: bool,
@@ -481,7 +481,7 @@ mod tests {
     impl Fixture {
         fn sample() -> Self {
             Self {
-                overview: OfficeOverview {
+                overview: Overview {
                     members: vec!["Samuel".into(), "Rook".into()],
                     projects: vec!["viva".into(), "VicTrader".into()],
                 },
@@ -518,8 +518,8 @@ mod tests {
         }
     }
 
-    impl OfficeData for Fixture {
-        fn overview(&self) -> Result<OfficeOverview> {
+    impl OverviewSource for Fixture {
+        fn overview(&self) -> Result<Overview> {
             Ok(self.overview.clone())
         }
 
@@ -599,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn navigation_never_mutates_office_data() {
+    fn navigation_never_mutates_overview_data() {
         // The trait has no mutators, so mutation is unrepresentable; the
         // strong version of the guarantee: even data that *fails* stays
         // untouched, and the cache is only refreshed explicitly.

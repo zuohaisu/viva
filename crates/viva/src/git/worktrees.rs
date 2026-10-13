@@ -243,7 +243,7 @@ impl<'a> WorktreeService<'a> {
                 entry.tree = tree_state(&self.runner, &entry.path);
             }
             if let Some(branch) = entry.branch.clone() {
-                let claim = self.office_claim(repo_root, &branch)?;
+                let claim = self.claim(repo_root, &branch)?;
                 entry.occupied_by_task = claim.as_ref().map(|(task, _)| task.clone());
                 entry.office_source = claim.map(|(_, source)| source);
             }
@@ -487,11 +487,7 @@ impl<'a> WorktreeService<'a> {
 
     /// The office's live claim on a branch: which task holds it and via
     /// which source (created vs adopted).
-    fn office_claim(
-        &self,
-        repo_root: &Path,
-        branch: &str,
-    ) -> Result<Option<(TaskId, WorktreeSource)>> {
+    fn claim(&self, repo_root: &Path, branch: &str) -> Result<Option<(TaskId, WorktreeSource)>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT task_id, source FROM task_worktrees
              WHERE repo_root = ?1 AND branch = ?2 AND released_at IS NULL LIMIT 1",

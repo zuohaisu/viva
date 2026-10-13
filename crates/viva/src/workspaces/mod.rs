@@ -198,7 +198,7 @@ mod tests {
         let created = {
             let store = Store::open(&db, &frozen).expect("open");
             WorkspaceRegistry::new(&store)
-                .create("Haisu's office")
+                .create("Haisu's workspace")
                 .expect("create")
         };
         let reopened = Store::open(&db, &frozen).expect("reopen");

@@ -2,7 +2,7 @@
 //! snapshots never sit in the physical terminal's event/render path.
 use super::WorkbenchModel;
 use crate::foundation::Result;
-use crate::office::{OfficeClient, OfficeRequestKind};
+use crate::server::{Client, RequestKind};
 use crate::terminal::TerminalSnapshot;
 use std::sync::{
     Arc,
@@ -20,7 +20,7 @@ pub struct Polling {
     stop: Arc<AtomicBool>,
 }
 impl Polling {
-    pub fn start(client: &OfficeClient) -> Result<Self> {
+    pub fn start(client: &Client) -> Result<Self> {
         let mut model_client = client.independent()?;
         let mut screen_client = client.independent()?;
         let mut input_client = client.independent()?;
@@ -35,7 +35,7 @@ impl Polling {
         std::thread::spawn(move || {
             while !halt.load(Ordering::Relaxed) {
                 let result = model_client
-                    .call(OfficeRequestKind::WorkbenchView)
+                    .call(RequestKind::WorkbenchView)
                     .and_then(|v| serde_json::from_value(v).map_err(Into::into))
                     .map_err(|e| e.to_string());
                 if model_tx.try_send(result).is_err() && halt.load(Ordering::Relaxed) {
@@ -67,14 +67,14 @@ impl Polling {
                     }
                     let result = (|| {
                         if sizes.get(&id) != Some(&(cols, rows)) {
-                            screen_client.call(OfficeRequestKind::TerminalResize {
+                            screen_client.call(RequestKind::TerminalResize {
                                 terminal_id: id.clone(),
                                 cols,
                                 rows,
                             })?;
                             sizes.insert(id.clone(), (cols, rows));
                         }
-                        let v = screen_client.call(OfficeRequestKind::TerminalViewport {
+                        let v = screen_client.call(RequestKind::TerminalViewport {
                             terminal_id: id.clone(),
                             scrollback: offset,
                         })?;
@@ -93,9 +93,9 @@ impl Polling {
                 else {
                     continue;
                 };
-                let result = input_client.call(OfficeRequestKind::TerminalInput {
+                let result = input_client.call(RequestKind::TerminalInput {
                     terminal_id: id,
-                    bytes_hex: crate::office::hex_encode(&data),
+                    bytes_hex: crate::server::hex_encode(&data),
                 });
                 bytes.fetch_sub(data.len(), Ordering::Relaxed);
                 if let Err(e) = result {

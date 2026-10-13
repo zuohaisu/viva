@@ -34,10 +34,10 @@ pub const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One request over the control channel.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct OfficeRequest {
+pub struct Request {
     pub request_id: String,
     pub version: u32,
-    pub kind: OfficeRequestKind,
+    pub kind: RequestKind,
     /// Optional live-grant reference carried by the caller. Any presented
     /// grant is validated by the host before the request runs; an invalid,
     /// revoked or expired one is rejected and audited (ADR 0012 decision 4:
@@ -56,7 +56,7 @@ pub struct OfficeRequest {
 /// the store alone; every other kind needs the live host.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum OfficeRequestKind {
+pub enum RequestKind {
     /// Liveness probe; no side effects.
     Ping,
     /// Office snapshot: host identity, terminal list, execution counts.
@@ -302,7 +302,7 @@ fn default_rows() -> u16 {
 
 /// One response, correlated by request id.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct OfficeResponse {
+pub struct Response {
     pub request_id: String,
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -311,7 +311,7 @@ pub struct OfficeResponse {
     pub error: Option<String>,
 }
 
-impl OfficeResponse {
+impl Response {
     pub fn ok(request_id: impl Into<String>, result: Value) -> Self {
         Self {
             request_id: request_id.into(),
@@ -386,7 +386,7 @@ pub fn write_message(stream: &mut UnixStream, value: &impl Serialize) -> Result<
 
 /// Send one request and wait for its correlated response (default read
 /// budget: [`IO_TIMEOUT`]).
-pub fn round_trip(stream: &mut UnixStream, request: &OfficeRequest) -> Result<OfficeResponse> {
+pub fn round_trip(stream: &mut UnixStream, request: &Request) -> Result<Response> {
     round_trip_within(stream, request, IO_TIMEOUT)
 }
 
@@ -394,12 +394,12 @@ pub fn round_trip(stream: &mut UnixStream, request: &OfficeRequest) -> Result<Of
 /// `call_with_timeout` relies on.
 pub fn round_trip_within(
     stream: &mut UnixStream,
-    request: &OfficeRequest,
+    request: &Request,
     read_timeout: Duration,
-) -> Result<OfficeResponse> {
+) -> Result<Response> {
     write_message(stream, request)?;
     let line = read_message_within(stream, read_timeout)?;
-    let response: OfficeResponse = serde_json::from_str(&line).map_err(|e| {
+    let response: Response = serde_json::from_str(&line).map_err(|e| {
         Error::Validation(format!("control channel sent a malformed response: {e}"))
     })?;
     if response.request_id != request.request_id {
@@ -412,8 +412,8 @@ pub fn round_trip_within(
 }
 
 /// Build a request with a fresh id and the current protocol version.
-pub fn new_request(kind: OfficeRequestKind) -> OfficeRequest {
-    OfficeRequest {
+pub fn new_request(kind: RequestKind) -> Request {
+    Request {
         request_id: format!("req-{}", uuid::Uuid::new_v4().simple()),
         version: PROTOCOL_VERSION,
         kind,
@@ -425,10 +425,10 @@ pub fn new_request(kind: OfficeRequestKind) -> OfficeRequest {
 /// Attach a live-grant reference (and optional member attribution) to a
 /// request under construction.
 pub fn with_grant(
-    mut request: OfficeRequest,
+    mut request: Request,
     grant: impl Into<String>,
     member: Option<String>,
-) -> OfficeRequest {
+) -> Request {
     request.grant = Some(grant.into());
     request.member = member;
     request
@@ -447,13 +447,13 @@ mod tests {
     #[test]
     fn request_and_response_round_trip_over_a_real_socket() {
         let (mut client, mut server) = pair();
-        let request = new_request(OfficeRequestKind::Ping);
+        let request = new_request(RequestKind::Ping);
         let sent = request.clone();
         let writer = std::thread::spawn(move || {
             write_message(&mut server, &sent).expect("write");
         });
         let line = read_message(&mut client).expect("read");
-        let received: OfficeRequest = serde_json::from_str(&line).expect("parse");
+        let received: Request = serde_json::from_str(&line).expect("parse");
         writer.join().expect("writer");
         assert_eq!(received, request);
         assert_eq!(received.version, PROTOCOL_VERSION);
@@ -462,9 +462,8 @@ mod tests {
     #[test]
     fn response_correlation_is_enforced() {
         let (mut client, mut server) = pair();
-        let request = new_request(OfficeRequestKind::Ping);
-        write_message(&mut server, &OfficeResponse::err("other-id", "mismatch"))
-            .expect("write response");
+        let request = new_request(RequestKind::Ping);
+        write_message(&mut server, &Response::err("other-id", "mismatch")).expect("write response");
         let err = round_trip(&mut client, &request).expect_err("correlation must fail");
         assert!(err.to_string().contains("does not match"), "got: {err}");
     }

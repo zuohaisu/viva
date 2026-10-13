@@ -46,7 +46,7 @@ git diff --check
 | change how authority or delegation works | `crates/viva/src/authority/` (and ADR 0007) |
 | change where work happens (worktrees, GitHub evidence) | `crates/viva/src/git/` (and ADR 0009) |
 | change tasks, results, handoff briefs | `crates/viva/src/tasks/` |
-| change dispatch/stop/status/recovery (control plane) | `crates/viva/src/office/` |
+| change dispatch/stop/status/recovery (control plane) | `crates/viva/src/server/` |
 | change knowledge ownership or reuse evidence | `crates/viva/src/knowledge/` (and ADR 0010) |
 | change conversation trees, forks, handoffs | `crates/viva/src/conversations/` |
 | change the surfaces | `crates/viva/src/tui/`, `crates/viva/src/main.rs`, `extensions/pi/` |

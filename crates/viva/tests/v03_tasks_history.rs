@@ -396,7 +396,7 @@ fn handoff_brief_is_complete_and_survives_restart() {
         let member = MemberId::new();
         let task = tasks
             .create_task(
-                "Migrate the office host",
+                "Migrate the resident server",
                 vec!["keep grant boundaries".into(), "no fake memory".into()],
                 Some(member.clone()),
                 None,
@@ -449,7 +449,7 @@ fn handoff_brief_is_complete_and_survives_restart() {
         .latest_brief(&task_id)
         .expect("brief")
         .expect("persisted");
-    assert_eq!(brief["goal"], "Migrate the office host");
+    assert_eq!(brief["goal"], "Migrate the resident server");
     assert_eq!(
         brief["constraints"].as_array().expect("constraints").len(),
         2,

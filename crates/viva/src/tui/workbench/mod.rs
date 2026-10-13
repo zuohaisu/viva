@@ -3133,7 +3133,7 @@ pub fn assemble_view(
 /// over the control channel; all actions go back as requests. `q` DETACHES:
 /// the client exits, the server keeps every terminal running, and a later
 /// attach restores the same view from server-held state.
-pub fn run_client(mut client: crate::office::OfficeClient) -> Result<()> {
+pub fn run_client(mut client: crate::server::Client) -> Result<()> {
     // Honest gate: a workbench without a real terminal cannot work. Fail
     // loudly instead of half-working against a pipe.
     #[cfg(unix)]
@@ -3155,7 +3155,7 @@ pub fn run_client(mut client: crate::office::OfficeClient) -> Result<()> {
     result
 }
 
-fn run_client_inner(client: &mut crate::office::OfficeClient) -> Result<()> {
+fn run_client_inner(client: &mut crate::server::Client) -> Result<()> {
     use ratatui::crossterm::event::{self, Event, KeyEventKind};
     let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
     let mut terminal = ratatui::Terminal::new(backend)
@@ -3164,7 +3164,7 @@ fn run_client_inner(client: &mut crate::office::OfficeClient) -> Result<()> {
     let mut app = WorkbenchApp::new();
     let polling = polling::Polling::start(client)?;
     let mut saved_layout = client
-        .call(crate::office::OfficeRequestKind::WorkbenchLayout { layout_json: None })
+        .call(crate::server::RequestKind::WorkbenchLayout { layout_json: None })
         .ok()
         .and_then(|v| v.get("layout").and_then(|v| v.as_str()).map(str::to_string));
     loop {
@@ -3211,7 +3211,7 @@ fn run_client_inner(client: &mut crate::office::OfficeClient) -> Result<()> {
             .map_err(|e| crate::foundation::Error::Io(std::io::Error::other(e.to_string())))?
         {
             if app.layout_dirty() {
-                match client.call(crate::office::OfficeRequestKind::WorkbenchLayout {
+                match client.call(crate::server::RequestKind::WorkbenchLayout {
                     layout_json: Some(app.serialize_layout()),
                 }) {
                     Ok(_) => app.clear_layout_dirty(),
@@ -3230,7 +3230,7 @@ fn run_client_inner(client: &mut crate::office::OfficeClient) -> Result<()> {
                     // Detach, not shutdown: the resident server keeps running.
                     KeyOutcome::QuitRequested => {
                         if app.layout_dirty() {
-                            client.call(crate::office::OfficeRequestKind::WorkbenchLayout {
+                            client.call(crate::server::RequestKind::WorkbenchLayout {
                                 layout_json: Some(app.serialize_layout()),
                             })?;
                         }
@@ -3281,7 +3281,7 @@ fn run_client_inner(client: &mut crate::office::OfficeClient) -> Result<()> {
         if app.layout_dirty() {
             let payload = app.serialize_layout();
             if client
-                .call(crate::office::OfficeRequestKind::WorkbenchLayout {
+                .call(crate::server::RequestKind::WorkbenchLayout {
                     layout_json: Some(payload),
                 })
                 .is_ok()
@@ -3295,7 +3295,7 @@ fn run_client_inner(client: &mut crate::office::OfficeClient) -> Result<()> {
 
 /// Execute one workbench action against the resident server.
 fn apply_client_action(
-    client: &mut crate::office::OfficeClient,
+    client: &mut crate::server::Client,
     app: &mut WorkbenchApp,
     action: WorkbenchAction,
 ) -> Result<()> {
@@ -3313,7 +3313,7 @@ fn apply_client_action(
                     }
                 }
             }
-            let v = client.call(crate::office::OfficeRequestKind::Workspace {
+            let v = client.call(crate::server::RequestKind::Workspace {
                 action,
                 value,
                 project_id,
@@ -3342,14 +3342,14 @@ fn apply_client_action(
             Ok(())
         }
         WorkbenchAction::StopTerminal(id) => {
-            client.call(crate::office::OfficeRequestKind::TerminalStop {
+            client.call(crate::server::RequestKind::TerminalStop {
                 terminal_id: id.clone(),
             })?;
             app.set_status(format!("terminal {id} stopped"));
             Ok(())
         }
         WorkbenchAction::ShowDiff(worktree_id) => {
-            let value = client.call(crate::office::OfficeRequestKind::WorkbenchDiff {
+            let value = client.call(crate::server::RequestKind::WorkbenchDiff {
                 worktree_id: worktree_id.clone(),
             })?;
             let diff = value
@@ -3375,8 +3375,8 @@ fn apply_client_action(
             if !has_tab && !app.new_tab("Terminal".into()) {
                 return Ok(());
             }
-            let value = client
-                .call(crate::office::OfficeRequestKind::TerminalOpenInWorktree { worktree_id })?;
+            let value =
+                client.call(crate::server::RequestKind::TerminalOpenInWorktree { worktree_id })?;
             let terminal_id = value
                 .get("terminal_id")
                 .and_then(|v| v.as_str())
@@ -3389,7 +3389,7 @@ fn apply_client_action(
             Ok(())
         }
         WorkbenchAction::BrowseFiles(worktree_id) => {
-            let value = client.call(crate::office::OfficeRequestKind::WorktreeFiles {
+            let value = client.call(crate::server::RequestKind::WorktreeFiles {
                 worktree_id: worktree_id.clone(),
             })?;
             let rows = value
@@ -3439,7 +3439,7 @@ fn apply_client_action(
             Ok(())
         }
         WorkbenchAction::ViewFile { worktree_id, path } => {
-            let value = client.call(crate::office::OfficeRequestKind::WorktreeFileContent {
+            let value = client.call(crate::server::RequestKind::WorktreeFileContent {
                 worktree_id: worktree_id.clone(),
                 path: path.clone(),
             })?;
@@ -3481,7 +3481,7 @@ fn apply_client_action(
             Ok(())
         }
         WorkbenchAction::CleanupWorktree(worktree_id) => {
-            let value = client.call(crate::office::OfficeRequestKind::WorktreeCleanup {
+            let value = client.call(crate::server::RequestKind::WorktreeCleanup {
                 worktree_id: worktree_id.clone(),
             })?;
             let path = value
@@ -3493,7 +3493,7 @@ fn apply_client_action(
             Ok(())
         }
         WorkbenchAction::HandoffTo { worktree_id, agent } => {
-            let value = client.call(crate::office::OfficeRequestKind::AgentHandoff {
+            let value = client.call(crate::server::RequestKind::AgentHandoff {
                 worktree_id: worktree_id.clone(),
                 to_agent: agent.clone(),
             })?;
@@ -3509,7 +3509,7 @@ fn apply_client_action(
         }
         WorkbenchAction::ToggleAutoPull => {
             let on = !app.model.auto_pull;
-            client.call(crate::office::OfficeRequestKind::SetAutoPull { on })?;
+            client.call(crate::server::RequestKind::SetAutoPull { on })?;
             app.model.auto_pull = on;
             app.set_status(format!(
                 "auto_pull {} (main checkout only; worktrees stay fetch-only)",
@@ -3518,7 +3518,7 @@ fn apply_client_action(
             Ok(())
         }
         WorkbenchAction::CreateTaskWorktree(task_id) => {
-            let value = client.call(crate::office::OfficeRequestKind::WorktreeCreateForTask {
+            let value = client.call(crate::server::RequestKind::WorktreeCreateForTask {
                 task_id: task_id.clone(),
                 branch: None,
                 base_dir: None,
@@ -3538,7 +3538,7 @@ fn apply_client_action(
 /// terminal has one, else the client's own directory. The pane focus moves
 /// into the new leaf.
 fn spawn_and_split(
-    client: &mut crate::office::OfficeClient,
+    client: &mut crate::server::Client,
     app: &mut WorkbenchApp,
     axis: SplitAxis,
 ) -> Result<()> {
@@ -3573,7 +3573,7 @@ fn spawn_and_split(
                 .display()
                 .to_string()
         });
-    let value = client.call(crate::office::OfficeRequestKind::TerminalCreate {
+    let value = client.call(crate::server::RequestKind::TerminalCreate {
         argv: vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())],
         cwd,
         env: vec![],
@@ -3596,7 +3596,7 @@ fn spawn_and_split(
         // orphaned. The raw-mode client has no log sink — the status line
         // is the record — so a FAILED rollback says so instead of being
         // swallowed.
-        match client.call(crate::office::OfficeRequestKind::TerminalStop {
+        match client.call(crate::server::RequestKind::TerminalStop {
             terminal_id: terminal_id.clone(),
         }) {
             Ok(_) => app.set_status(format!("split refused — terminal {terminal_id} stopped")),

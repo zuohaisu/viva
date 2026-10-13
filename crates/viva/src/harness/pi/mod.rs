@@ -201,7 +201,7 @@ mod tests {
         let m = member();
         let task = crate::tasks::TaskRecord {
             task_id: crate::foundation::ids::TaskId::new(),
-            goal: "write the office loop".into(),
+            goal: "write the server loop".into(),
             constraints: vec![],
             assignee_member_id: Some(m.member_id.clone()),
             workspace_id: None,

@@ -507,7 +507,9 @@ mod tests {
     fn export_json_roundtrips_through_serde() {
         let store = store();
         let registry = ProjectRegistry::new(&store);
-        let ws = WorkspaceRegistry::new(&store).create("office").expect("ws");
+        let ws = WorkspaceRegistry::new(&store)
+            .create("main-workspace")
+            .expect("ws");
         let project = registry
             .register(
                 Some(ws.workspace_id.clone()),

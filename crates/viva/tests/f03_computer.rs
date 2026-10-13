@@ -47,7 +47,7 @@ fn store() -> Store {
 fn cli_lists_and_conditionally_releases_only_authorized_unknown_leases() {
     use std::process::Command;
     let dir = tempfile::TempDir::new().unwrap();
-    let home = dir.path().join("office");
+    let home = dir.path().join("viva-home");
     let cli = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_viva"))
             .env("VIVA_HOME", &home)

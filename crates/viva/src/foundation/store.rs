@@ -679,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn office_events_is_append_only_at_the_database_level() {
+    fn event_log_is_append_only_at_the_database_level() {
         let store = Store::open_in_memory(&foundation_only()).expect("open");
         store
             .connection()

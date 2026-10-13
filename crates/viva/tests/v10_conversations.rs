@@ -14,7 +14,7 @@ use tempfile::TempDir;
 use viva::conversations::{ConversationRegistry, ForkCapability};
 use viva::foundation::records::{SessionKind, SessionRecord, insert_session};
 use viva::foundation::store::Store;
-use viva::office::office_migrations;
+use viva::server::migrations;
 use viva::tasks::TaskRegistry;
 
 fn run_viva(home: &std::path::Path, args: &[&str]) -> (i32, String, String) {
@@ -37,11 +37,8 @@ fn conversation_tree_survives_restart_and_task_closure() {
 
     // Seed a session + a task in the store directly.
     let (session_id, task_id) = {
-        let store = Store::open(
-            &viva::foundation::paths::database_path(&home),
-            office_migrations(),
-        )
-        .expect("store");
+        let store = Store::open(&viva::foundation::paths::database_path(&home), migrations())
+            .expect("store");
         let session = SessionRecord::new(SessionKind::Conversation, "Design chat");
         insert_session(&store, &session).expect("session");
         let task = TaskRegistry::new(&store)
@@ -129,11 +126,8 @@ fn conversation_tree_survives_restart_and_task_closure() {
 
     // Close (complete) the task: the conversation tree must survive.
     {
-        let store = Store::open(
-            &viva::foundation::paths::database_path(&home),
-            office_migrations(),
-        )
-        .expect("reopen");
+        let store = Store::open(&viva::foundation::paths::database_path(&home), migrations())
+            .expect("reopen");
         TaskRegistry::new(&store)
             .complete_task(&task_id, "design accepted by the owner", "owner")
             .expect("complete");
@@ -167,11 +161,8 @@ fn conversation_tree_survives_restart_and_task_closure() {
 fn handoff_to_a_capability_declared_harness_stays_traceable() {
     let dir = TempDir::new().expect("dir");
     let home = dir.path().join("home");
-    let store = Store::open(
-        &viva::foundation::paths::database_path(&home),
-        office_migrations(),
-    )
-    .expect("store");
+    let store =
+        Store::open(&viva::foundation::paths::database_path(&home), migrations()).expect("store");
     let session = SessionRecord::new(SessionKind::Conversation, "Handoff source");
     insert_session(&store, &session).expect("session");
     let session_id = session.session_id.clone();
@@ -205,7 +196,7 @@ fn handoff_to_a_capability_declared_harness_stays_traceable() {
             "--capability",
             "handoff_only",
             "--brief",
-            "Design decisions so far: tree in office, transcript stays in Pi",
+            "Design decisions so far: tree in Viva, transcript stays in Pi",
             "--history-ref",
             "node-history-ref-1",
         ],
@@ -215,16 +206,13 @@ fn handoff_to_a_capability_declared_harness_stays_traceable() {
     assert_eq!(handoff["to_capability"], value_text("handoff_only"));
     assert_eq!(
         handoff["brief_snapshot"],
-        value_text("Design decisions so far: tree in office, transcript stays in Pi")
+        value_text("Design decisions so far: tree in Viva, transcript stays in Pi")
     );
     assert_eq!(handoff["history_ref"], value_text("node-history-ref-1"));
 
     // The original record is untouched and traceable from the handoff.
-    let store = Store::open(
-        &viva::foundation::paths::database_path(&home),
-        office_migrations(),
-    )
-    .expect("reopen");
+    let store =
+        Store::open(&viva::foundation::paths::database_path(&home), migrations()).expect("reopen");
     let registry = ConversationRegistry::new(&store);
     let handoffs = registry.handoffs_for_node(&root_id).expect("handoffs");
     assert_eq!(handoffs.len(), 1);
