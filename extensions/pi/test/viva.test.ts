@@ -190,10 +190,10 @@ test("the extension registers its tools and refuses unauthorized dispatch", asyn
       [...fake.tools.keys()].sort(),
       [
         "viva_computer_audit",
-        "viva_memory_remember",
-        "viva_memory_search",
         "viva_dispatch",
         "viva_handoff",
+        "viva_memory_remember",
+        "viva_memory_search",
         "viva_status",
         "viva_task_brief",
       ],
@@ -228,7 +228,7 @@ test("tools answer in Pi's result shape: text content, structured details, isErr
     const bad = load(fakeViva('#!/bin/sh\necho "no active server" >&2\nexit 3\n'));
     const badResult = await callTool(toolNamed(bad, "viva_status"), {});
     assert.equal(badResult.isError, true);
-    assert.match(textOf(badResult), /office status unavailable/);
+    assert.match(textOf(badResult), /Viva status unavailable/);
     assert.match(textOf(badResult), /no active server/);
     assert.deepEqual(badResult.details, {});
   });

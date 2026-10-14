@@ -150,13 +150,12 @@ function runVivaJson(bin: string, home: string, args: string[]): Record<string, 
 }
 
 /** Load the extension the way Pi does: factory call with the harness env. */
-function loadExtension(raw: NodeJS.ProcessEnv): FakePi {
-  assert.ok(fx);
+function loadExtension(raw: NodeJS.ProcessEnv, extensionFactory: (pi: PiHost) => void): FakePi {
   const fake = createFakePi();
   const saved = process.env;
   process.env = raw;
   try {
-    fx.extensionFactory(fake.host);
+    extensionFactory(fake.host);
   } finally {
     process.env = saved;
   }
@@ -191,16 +190,15 @@ before(async () => {
   const task = runVivaJson(bin, home, ["create-task", "--goal", GOAL]);
   const taskId = String(task.task_id);
 
-  const fake = loadExtension(
-    cleanEnv({
-      VIVA_BIN: bin,
-      VIVA_HOME: home,
-      [harnessConstant("ENV_MEMBER_ID")]: "mem-00000000000000000000000000000001",
-      [harnessConstant("ENV_MEMBER_NAME")]: "Contract Member",
-      [harnessConstant("ENV_TASK_ID")]: taskId,
-      [harnessConstant("ENV_GRANT_ID")]: "grant-00000000000000000000000000000001",
-    }),
-  );
+  const harnessEnvForInit = cleanEnv({
+    VIVA_BIN: bin,
+    VIVA_HOME: home,
+    [harnessConstant("ENV_MEMBER_ID")]: "mem-00000000000000000000000000000001",
+    [harnessConstant("ENV_MEMBER_NAME")]: "Contract Member",
+    [harnessConstant("ENV_TASK_ID")]: taskId,
+    [harnessConstant("ENV_GRANT_ID")]: "grant-00000000000000000000000000000001",
+  });
+  const fake = loadExtension(harnessEnvForInit, loaded.default);
 
   fx = { bin, root, home, taskId, extensionFactory: loaded.default, fake };
 });
@@ -248,6 +246,7 @@ test("the retired VIVA_OFFICE_* variables no longer activate the extension", () 
       [RETIRED.taskId]: fx.taskId,
       [RETIRED.grantId]: "grant-00000000000000000000000000000001",
     }),
+    fx.extensionFactory,
   );
   assert.deepEqual([...fake.tools.keys()], [], "the old names must not be honoured, not even as a fallback");
 });
@@ -262,6 +261,7 @@ test("a retired task or grant variable next to the new identity is ignored", asy
       [NAMES.memberName]: "Contract Member",
       [RETIRED.taskId]: fx.taskId,
     }),
+    fx.extensionFactory,
   );
   const brief = await callTool(toolNamed(oldTask, "viva_task_brief"), {});
   assert.equal(brief.isError, true, `an old task variable must not attach a task: ${textOf(brief)}`);
@@ -276,6 +276,7 @@ test("a retired task or grant variable next to the new identity is ignored", asy
       [NAMES.taskId]: fx.taskId,
       [RETIRED.grantId]: "grant-00000000000000000000000000000001",
     }),
+    fx.extensionFactory,
   );
   const dispatch = await callTool(toolNamed(oldGrant, "viva_dispatch"), {
     argv: ["/bin/true"],
@@ -288,7 +289,7 @@ test("a retired task or grant variable next to the new identity is ignored", asy
 
 test("the session notice and tool descriptions speak of Viva, not of an office", async () => {
   assert.ok(fx);
-  const fake = loadExtension(harnessEnv(fx));
+  const fake = loadExtension(harnessEnv(fx), fx.extensionFactory);
   const notices: string[] = [];
   await emit(fake, "session_start", {}, { ui: { notify: (text: string) => notices.push(text) } });
   const notice = notices.join("\n");
@@ -301,7 +302,7 @@ test("the session notice and tool descriptions speak of Viva, not of an office",
     assert.doesNotMatch(toolNamed(fake, name).description ?? "", /office/i, `${name}: the description names an office`);
   }
 
-  const plain = loadExtension(harnessEnv(fx, false, false));
+  const plain = loadExtension(harnessEnv(fx, false, false), fx.extensionFactory);
   const plainNotices: string[] = [];
   await emit(plain, "session_start", {}, { ui: { notify: (text: string) => plainNotices.push(text) } });
   assert.match(plainNotices.join("\n"), /no Viva-wide authority/);

@@ -50,10 +50,10 @@ const CONVERSATIONS_ENTRY = join(EXTENSION_ROOT, "conversations", "index.ts");
 
 const HARNESS_ENTRY_TOOLS = [
   "viva_computer_audit",
-  "viva_memory_remember",
-  "viva_memory_search",
   "viva_dispatch",
   "viva_handoff",
+  "viva_memory_remember",
+  "viva_memory_search",
   "viva_status",
   "viva_task_brief",
 ];
