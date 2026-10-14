@@ -30,10 +30,13 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import vivaOffice from "../viva-office.ts";
+import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 
-type ToolResult = { content: string; isError?: boolean };
-type Tool = { execute: (args: Record<string, unknown>) => Promise<ToolResult> | ToolResult };
+import vivaOffice from "../viva-office.ts";
+import { callTool, createFakePi, textOf, type RegisteredTool } from "./fake-pi.ts";
+
+type ToolResult = AgentToolResult<unknown>;
+type Tool = RegisteredTool;
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
@@ -93,24 +96,15 @@ function runVivaJson(bin: string, home: string, args: string[]): Record<string, 
 
 /** Load the extension the way Pi does: factory call with the harness env. */
 function loadExtensionTools(raw: NodeJS.ProcessEnv): Map<string, Tool> {
-  const tools = new Map<string, Tool>();
-  const fakePi = {
-    on() {
-      return () => {};
-    },
-    registerTool(name: string, tool: Tool) {
-      tools.set(name, tool);
-    },
-    registerCommand() {},
-  };
+  const fake = createFakePi();
   const saved = process.env;
   process.env = raw;
   try {
-    vivaOffice(fakePi as never);
+    vivaOffice(fake.host);
   } finally {
     process.env = saved;
   }
-  return tools;
+  return fake.tools;
 }
 
 before(() => {
@@ -154,8 +148,8 @@ function tool(name: string): Tool {
  */
 function assertRecognisedButRefused(result: ToolResult, what: string): void {
   assert.equal(result.isError, true, `${what}: with no office running the call must be refused`);
-  assert.doesNotMatch(result.content, UNRECOGNISED, `${what}: the real CLI did not recognise the command`);
-  assert.match(result.content, NO_ACTIVE_OFFICE, `${what}: expected the office's own refusal`);
+  assert.doesNotMatch(textOf(result), UNRECOGNISED, `${what}: the real CLI did not recognise the command`);
+  assert.match(textOf(result), NO_ACTIVE_OFFICE, `${what}: expected the office's own refusal`);
 }
 
 test("control: the real binary rejects the retired `office` namespace", () => {
@@ -170,28 +164,29 @@ test("control: the real binary rejects the retired `office` namespace", () => {
 
 test("viva_office_status is accepted and returns the real status", async () => {
   assert.ok(fx);
-  const result = await tool("viva_office_status").execute({});
-  assert.notEqual(result.isError, true, `status failed: ${result.content}`);
-  const payload = JSON.parse(result.content) as { home?: string };
+  const result = await callTool(tool("viva_office_status"), {});
+  assert.notEqual(result.isError, true, `status failed: ${textOf(result)}`);
+  const payload = JSON.parse(textOf(result)) as { home?: string };
   assert.equal(typeof payload.home, "string", "status payload names its home");
   assert.equal(realpathSync(payload.home as string), realpathSync(fx.home));
 });
 
 test("viva_office_task_brief is accepted and returns the real task brief", async () => {
-  const result = await tool("viva_office_task_brief").execute({});
-  assert.notEqual(result.isError, true, `brief failed: ${result.content}`);
-  const payload = JSON.parse(result.content) as { goal?: string };
+  const result = await callTool(tool("viva_office_task_brief"), {});
+  assert.notEqual(result.isError, true, `brief failed: ${textOf(result)}`);
+  const payload = JSON.parse(textOf(result)) as { goal?: string };
   assert.equal(payload.goal, GOAL);
+  assert.deepEqual(result.details, payload, "the real CLI payload is kept as details");
 });
 
 test("viva_office_handoff is recognised by the real CLI", async () => {
-  const result = await tool("viva_office_handoff").execute({ summary: "contract test handoff" });
+  const result = await callTool(tool("viva_office_handoff"), { summary: "contract test handoff" });
   assertRecognisedButRefused(result, "handoff");
 });
 
 test("viva_office_dispatch is recognised by the real CLI", async () => {
   assert.ok(fx);
-  const result = await tool("viva_office_dispatch").execute({
+  const result = await callTool(tool("viva_office_dispatch"), {
     argv: ["/bin/true"],
     cwd: fx.root,
     request_key: "contract-test-request-key",

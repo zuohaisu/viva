@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { tryNativeFork } from "../conversations/index.ts";
 import vivaConversations from "../conversations/index.ts";
 import { officeEnv, type OfficeEnv } from "../lib.ts";
+import { callTool, createFakePi, textOf, toolNamed, type FakePi } from "./fake-pi.ts";
 
 const BASE_ENV: NodeJS.ProcessEnv = {
   VIVA_OFFICE_MEMBER_ID: "mem-1",
@@ -48,24 +49,11 @@ function harnessWith(vivaBin: string): OfficeEnv {
   return { home: "/tmp/viva-home", memberId: "mem-1", memberName: "Samuel", vivaBin };
 }
 
-type Tool = {
-  execute: (args: Record<string, unknown>, ctx?: unknown) => Promise<{ content: string; isError?: boolean }>;
-};
-
-function fakePiWith(env: OfficeEnv) {
-  const registered = new Map<string, Tool>();
-  const fakePi = {
-    on() {
-      return () => {};
-    },
-    registerTool(name: string, tool: Tool) {
-      registered.set(name, tool);
-    },
-    registerCommand() {},
-  };
+function fakePiWith(env: OfficeEnv): FakePi {
+  const fake = createFakePi();
   process.env.VIVA_BIN = env.vivaBin;
-  vivaConversations(fakePi as never);
-  return registered;
+  vivaConversations(fake.host);
+  return fake;
 }
 
 test("tryNativeFork feature-detects the documented entries and refuses honestly", async () => {
@@ -89,14 +77,16 @@ test("fork records in the office only after the native fork succeeds", async () 
     const viva = fakeViva(
       '#!/bin/sh\necho "$@" >> /tmp/viva-conv-calls.log\necho \'{"node_id": "node-new"}\'\n',
     );
-    const registered = fakePiWith(harnessWith(viva));
-    const fork = registered.get("viva_conversations_fork")!;
-    const result = await fork.execute(
+    const fake = fakePiWith(harnessWith(viva));
+    const fork = toolNamed(fake, "viva_conversations_fork");
+    const result = await callTool(
+      fork,
       { display_name: "Theme C", parent_node_id: "node-1" },
       { sessionManager: { fork: async () => ({ sessionId: "pi-native-8" }) } },
     );
-    assert.equal(result.isError, undefined, "fork + record succeeded: {content}");
-    assert.match(result.content, /node-new/);
+    assert.equal(result.isError, undefined, `fork + record succeeded: ${textOf(result)}`);
+    assert.match(textOf(result), /node-new/);
+    assert.deepEqual(result.details, { node_id: "node-new" }, "the CLI payload is kept as details");
   });
 });
 
@@ -107,15 +97,16 @@ test("fork without a native entry point refuses and records nothing", async () =
     // script can't be observed from JS, but the log file can.
     const callLog = join(tmpdir(), `viva-conv-calls-${process.pid}-${Date.now()}.log`);
     const viva = fakeViva(`#!/bin/sh\necho "$@" >> ${callLog}\necho "{}"\n`);
-    const registered = fakePiWith(harnessWith(viva));
-    const fork = registered.get("viva_conversations_fork")!;
-    const result = await fork.execute(
+    const fake = fakePiWith(harnessWith(viva));
+    const fork = toolNamed(fake, "viva_conversations_fork");
+    const result = await callTool(
+      fork,
       { display_name: "Theme D", parent_node_id: "node-1" },
       { sessionManager: {} },
     );
     assert.equal(result.isError, true);
-    assert.match(result.content, /no native fork entry point/);
-    assert.match(result.content, /nothing was recorded/);
+    assert.match(textOf(result), /no native fork entry point/);
+    assert.match(textOf(result), /nothing was recorded/);
     assert.equal(
       existsSync(callLog),
       false,
@@ -127,36 +118,28 @@ test("fork without a native entry point refuses and records nothing", async () =
 test("rename is office-owned and handoff declares its capability", async () => {
   await withEnv(BASE_ENV, async () => {
     const viva = fakeViva('#!/bin/sh\necho \'{"ok": true, "argv": "\'"\'"$*"\'"\'"}\'\n');
-    const registered = fakePiWith(harnessWith(viva));
+    const fake = fakePiWith(harnessWith(viva));
 
-    const rename = registered.get("viva_conversations_rename")!;
-    const renamed = await rename.execute({ node_id: "n1", display_name: "New name" });
-    assert.match(renamed.content, /New name/);
+    const rename = toolNamed(fake, "viva_conversations_rename");
+    const renamed = await callTool(rename, { node_id: "n1", display_name: "New name" });
+    assert.match(textOf(renamed), /New name/);
 
-    const handoff = registered.get("viva_conversations_handoff")!;
-    const result = await handoff.execute({
+    const handoff = toolNamed(fake, "viva_conversations_handoff");
+    const result = await callTool(handoff, {
       node_id: "n1",
       to_harness: "codex",
       capability: "handoff_only",
       brief: "context summary",
     });
-    assert.match(result.content, /ok/);
+    assert.match(textOf(result), /ok/);
   });
 });
 
 test("the sub-extension stays inert without office context", () => {
   withEnv({ VIVA_OFFICE_MEMBER_NAME: "Samuel" }, () => {
-    let tools = 0;
-    vivaConversations({
-      on() {
-        return () => {};
-      },
-      registerTool() {
-        tools += 1;
-      },
-      registerCommand() {},
-    } as never);
-    assert.equal(tools, 0);
+    const fake = createFakePi();
+    vivaConversations(fake.host);
+    assert.equal(fake.tools.size, 0);
   });
 });
 

@@ -16,21 +16,22 @@
  *   office environment before registering).
  */
 
-import type { ExtensionAPI } from "../pi-api.ts";
-import { runEnvelope, toolText, type OfficeEnv } from "../lib.ts";
+import { Type } from "typebox";
+import { runEnvelope, toolFailure, toolSuccess, type OfficeEnv, type PiHost } from "../lib.ts";
 
-export function registerComputerTools(pi: ExtensionAPI, env: OfficeEnv): void {
-  pi.registerTool("viva_computer_audit", {
+export function registerComputerTools(pi: PiHost, env: OfficeEnv): void {
+  pi.registerTool({
+    name: "viva_computer_audit",
+    label: "Viva computer audit",
     description:
       "Audit which reused computer tools (orca computer, osascript) are present and " +
       "permissioned on this host. Read-only; evidence is recorded in the office store.",
-    parameters: { type: "object", properties: {}, additionalProperties: false },
+    parameters: Type.Object({}, { additionalProperties: false }),
     execute: async () => {
       try {
-        const payload = await runEnvelope(env, ["tools", "computer", "audit"]);
-        return { content: toolText(payload) };
+        return toolSuccess(await runEnvelope(env, ["tools", "computer", "audit"]));
       } catch (err) {
-        return { content: `computer audit unavailable: ${String(err)}`, isError: true };
+        return toolFailure(`computer audit unavailable: ${String(err)}`);
       }
     },
   });
