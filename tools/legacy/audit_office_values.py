@@ -3,8 +3,8 @@
 
 Used for issue #97 (rename of the database-internal names): run it on a
 database BEFORE the upgrade to see what the migration will rewrite, and AFTER
-to confirm nothing it owns is left. It never writes: the file is opened with
-`mode=ro` and no WAL checkpoint is requested.
+to confirm nothing it owns is left. It never writes application data: queries
+are read-only (see ``sqlite_open.open_existing`` for WAL quiet-state opening).
 
     python3 tools/legacy/audit_office_values.py --db /path/to/office.db
 
@@ -28,6 +28,9 @@ import collections
 import sqlite3
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from sqlite_open import open_existing  # noqa: E402
 
 WORD = "office"
 # Event rows appended by a person through the CLI keep their words.
@@ -147,7 +150,11 @@ def main(argv: list[str] | None = None) -> int:
     if not args.db.is_file():
         print(f"audit: {args.db} is not a file", file=sys.stderr)
         return 2
-    con = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+    try:
+        con = open_existing(args.db)
+    except sqlite3.OperationalError as exc:
+        print(f"audit: cannot open {args.db} ({exc})", file=sys.stderr)
+        return 1
     try:
         must, content = audit(con)
     finally:

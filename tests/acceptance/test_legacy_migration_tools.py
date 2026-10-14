@@ -301,3 +301,40 @@ def test_audit_passes_a_database_with_only_user_content_left(tmp_path: Path) -> 
 def test_audit_requires_an_explicit_database(tmp_path: Path) -> None:
     assert run(AUDIT_TOOL).returncode == 2
     assert run(AUDIT_TOOL, "--db", str(tmp_path / "missing.db")).returncode == 2
+
+
+def _strip_wal_sidecars(db: Path) -> None:
+    for suffix in ("-wal", "-shm"):
+        side = Path(f"{db}{suffix}")
+        if side.exists():
+            side.unlink()
+
+
+def _wal_quiet(db: Path) -> None:
+    con = sqlite3.connect(db)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    con.commit()
+    con.close()
+    _strip_wal_sidecars(db)
+
+
+def test_tools_open_a_wal_database_with_no_sidecar_files(tmp_path: Path) -> None:
+    """After a clean shutdown only the main file remains; URI mode=ro cannot open it."""
+    audit_db = legacy_db(tmp_path / "office.db")
+    _wal_quiet(audit_db)
+    before = digest(audit_db)
+    assert not any(p.name.endswith(("-wal", "-shm")) for p in tmp_path.iterdir())
+
+    audit = run(AUDIT_TOOL, "--db", str(audit_db))
+    assert audit.returncode == 1, audit.stderr or audit.stdout
+    assert "MUST BE CLEAN" in audit.stdout
+    assert digest(audit_db) == before
+
+    hermes_db = tmp_path / "memory.db"
+    make_hermes_db(hermes_db)
+    _wal_quiet(hermes_db)
+    hermes = run(HERMES_TOOL, "--db", str(hermes_db))
+    assert hermes.returncode == 0, hermes.stderr or hermes.stdout
+    assert "dry run" in hermes.stdout
+    assert "not a readable SQLite database" not in hermes.stderr

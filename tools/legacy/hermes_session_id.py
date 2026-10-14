@@ -13,8 +13,8 @@ Safe by construction:
 * `--db` is required and there is no default. The tool never looks at
   `$HERMES_HOME` or `~/.hermes`: pointing it at a real memory store is always
   an explicit act.
-* The default run is a dry run. It opens the database read-only, reports what
-  it found and changes nothing.
+* The default run is a dry run. It opens the database without writing rows,
+  reports what it found and changes nothing.
 * `--apply` first writes a verified, private (0600) backup next to the
   database (`<db>.pre-office-removal.<UTC stamp>`), then rewrites inside one
   `BEGIN IMMEDIATE` transaction and checks the result before committing. If
@@ -40,6 +40,9 @@ import os
 import sqlite3
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from sqlite_open import open_existing  # noqa: E402
 
 OLD_ID = "viva-office-adapter"
 NEW_ID = "viva-adapter"
@@ -125,14 +128,14 @@ def make_backup(db: Path) -> Path:
             raise Refused(f"cannot create the backup {target}: {exc}; nothing was changed") from exc
         os.close(fd)
         try:
-            source = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            source = open_existing(db)
             dest = sqlite3.connect(target)
             try:
                 source.backup(dest)
             finally:
                 dest.close()
                 source.close()
-            check = sqlite3.connect(f"file:{target}?mode=ro", uri=True)
+            check = open_existing(target)
             try:
                 verdict = check.execute("PRAGMA quick_check").fetchone()[0]
             finally:
@@ -148,7 +151,7 @@ def make_backup(db: Path) -> Path:
 
 def apply(db: Path, old: str, new: str) -> tuple[Path | None, int]:
     """Back up, rewrite, verify, commit. Returns (backup, rows rewritten)."""
-    probe = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    probe = open_existing(db)
     try:
         if report_count(scan(probe, old)) == 0:
             return None, 0
@@ -209,11 +212,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if not db.is_file():
             raise Refused(f"{db} is not an existing file; the tool never creates a database")
-        probe = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            probe = open_existing(db)
+        except sqlite3.OperationalError as exc:
+            raise Refused(f"cannot open {db} ({exc}); check permissions and that the path is a SQLite file") from exc
         try:
             found = scan(probe, args.old)
         except sqlite3.DatabaseError as exc:
-            raise Refused(f"{db} is not a readable SQLite database: {exc}") from exc
+            raise Refused(f"{db} opened but could not be read as SQLite: {exc}") from exc
         finally:
             probe.close()
 
