@@ -69,3 +69,35 @@ fn a_listening_old_socket_blocks_rename_and_leaves_office_db() {
     assert!(home.join(OLD_DATABASE_FILE).exists());
     assert!(!home.join(DATABASE_FILE).exists());
 }
+
+#[test]
+fn offline_status_refuses_when_only_office_db_is_present() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    seed_legacy_db_file(home);
+    assert!(!database_path(home).exists());
+
+    let err = match server::offline_status(home) {
+        Err(err) => err,
+        Ok(value) => panic!("expected refusal, got {value}"),
+    };
+    let message = err.to_string();
+    assert!(message.contains(OLD_DATABASE_FILE), "{message}");
+    assert!(message.contains("viva shutdown"), "{message}");
+}
+
+#[test]
+fn offline_status_refuses_while_the_old_control_socket_is_live() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    Store::open(&database_path(home), server::migrations()).expect("new store");
+    let _listener = UnixListener::bind(home.join(OLD_SOCKET_NAME)).expect("bind");
+
+    let err = match server::offline_status(home) {
+        Err(err) => err,
+        Ok(value) => panic!("expected refusal, got {value}"),
+    };
+    let message = err.to_string();
+    assert!(message.contains(OLD_SOCKET_NAME), "{message}");
+    assert!(message.contains("viva shutdown"), "{message}");
+}

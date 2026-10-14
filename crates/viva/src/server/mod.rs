@@ -2776,6 +2776,7 @@ pub fn send_request(home: &Path, request: Request) -> Result<Response> {
 pub fn offline_status(home: &Path) -> Result<serde_json::Value> {
     use rusqlite::OptionalExtension;
 
+    crate::foundation::legacy::refuse_unmigrated_home_layout(home)?;
     let socket_path = home.join(SOCKET_NAME);
     let db = crate::foundation::paths::database_path(home);
     if !db.exists() {

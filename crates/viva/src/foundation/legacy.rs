@@ -165,10 +165,16 @@ pub fn refuse_live_handoff(db_path: &Path) -> Result<()> {
 
 fn cross_version_upgrade_blocked(detail: &str) -> Error {
     Error::Validation(format!(
-        "{detail}. A live handoff cannot migrate across this upgrade while the old server is \
-         running; the running server was left untouched. Stop it with the previous version's \
-         `viva shutdown`, then start Viva again to finish the migration"
+        "{detail}. This upgrade cannot use the previous on-disk layout while the old server may \
+         still be active; any running server was left untouched. Stop it with the previous \
+         version's `viva shutdown`, then start Viva again to finish the migration"
     ))
+}
+
+/// Read-only CLI paths (`viva status`, …) must not report an empty store when
+/// the previous `office.db` / `office.sock` layout is still present.
+pub fn refuse_unmigrated_home_layout(home: &Path) -> Result<()> {
+    refuse_live_handoff(&home.join(DATABASE_FILE))
 }
 
 /// True when the old control socket exists and a server is listening on it.
