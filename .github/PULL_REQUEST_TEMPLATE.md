@@ -3,7 +3,7 @@
 <!-- 改了什么、为什么。 -->
 
 Closes #<issue>
-<!-- PR 只完成 GitHub issue 的一部分时，写 Refs #<issue>。每个 PR 都必须对应一个 GitHub issue（见 AGENTS.md）。 -->
+<!-- PR 只完成 GitHub issue 的一部分时，写 Refs #<issue>。验收含独立 QA、真实环境或 owner 决定等本 PR 做不到的项时，也写 Refs，不写 Closes。每个 PR 都必须对应一个 GitHub issue（见 AGENTS.md）。 -->
 
 ## 验收标准
 

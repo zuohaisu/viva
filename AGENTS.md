@@ -101,6 +101,9 @@ agent-specific automatic discovery is required.
 When explicitly asked to perform independent QA, read that file and apply it
 to the named PR, branch or commit range. Reading this charter alone does not
 activate QA or add a mandatory dev→QA pipeline. Prefer a fresh review session.
+The delivery rule that a merge waits for a QA conclusion does not start that
+session and does not add a pipeline in the product. The steps are in
+[`.agents/prompts/delivery.md`](.agents/prompts/delivery.md).
 
 One-line invocation:
 
@@ -227,6 +230,13 @@ then through a pull request and a merge into the remote default branch.
 - **Merge authority is unchanged by this workflow.** Per Actor-Aware Delivery
   Authority, no agent merges or approves its own PR; the repository owner
   performs the merge (or explicitly authorizes an agent for that one merge).
+  By default the owner merges only after independent QA has a mergeable
+  conclusion on the current head and no open blocker remains. The owner may
+  explicitly authorize merging one named PR before that conclusion. A green
+  main CI run does not replace QA. Closing the issue waits until the
+  acceptance items the PR cannot finish are actually done, the owner has
+  confirmed the merge, and the corresponding main CI is green. The procedure
+  is in `.agents/prompts/delivery.md`.
 - If authentication, permissions, or network block push or PR creation,
   complete all safe local work and validation, then report the exact blocker
   and the smallest user action needed. Never work around access controls.

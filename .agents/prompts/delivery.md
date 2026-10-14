@@ -39,7 +39,10 @@
   ```
 
 - 其他平台（如 Multica）上的任务和评论只是 GitHub issue 的副本或指针，那边可以只写一句指向 GitHub 评论的话。
-- PR 正文写 `Closes #<N>`（PR 完整满足该 issue）或 `Refs #<N>`（只完成一部分）。
+- PR 正文写 `Closes #<N>`（这个 PR 本身完成了该 issue 的全部验收）或 `Refs #<N>`（只完成一部分）。
+- 验收里有 PR 做不到的项（独立 QA、真实环境验收、owner 的决定）时，写 `Refs #<N>`，不写 `Closes #<N>`。这些事项都有完成证据、owner 已确认合并、并且合并后对应的 main CI 正常，才关闭 issue。执行关闭的可以是 owner，也可以是获得这次授权的 agent。main CI 变绿不能代替还没做的 QA 或真实验收。
+- 结论评论的前两三句用大白话写：坏在哪、影响什么、要谁决定什么。没有缺陷、也不需要决定时，直接说没有，不硬凑问题。
+- 交付评论的最后一行写「下一步：」加上负责人和动作。有前提就写在同一行，例如「下一步：等独立 QA 对当前 head 给出可合并结论」。
 
 ## 3. 环境
 
@@ -67,6 +70,7 @@ git status --short                           # 只应有本任务的文件
 ## 5. 边界：只做到开 PR
 
 - 不改版本号，不合并，不发版，不删 worktree，不批准自己的 PR。
+- 默认等独立 QA 对**当前 PR head** 给出可合并结论、并且没有未处理的阻塞项，再交给 owner 决定合并。失败或证据不足不能写成通过。只有 owner 对这一次 PR 明确说先合并，才可以先合并；原来的 pending 或 fail、授权出处、后续验收归谁，都保留。这是合并前的证据要求，不是在产品代码里写死 Dev→QA 流水线，读 `AGENTS.md` 也不会自动开一个 QA 任务。
 - `main` 已开启分支保护，只能通过 PR 更新（`AGENTS.md` "Concurrent Development"）；不 push `main`，不 force push，不删远端分支。
 - PR 不改任何版本号；版本和发布由 owner 人工负责。规则见 `AGENTS.md` 的 "npm Releases and Version Policy"。
 - 其他权限边界见 `AGENTS.md` 的 "Actor-Aware Delivery Authority"。
@@ -98,3 +102,4 @@ PR 正文用 [`.github/PULL_REQUEST_TEMPLATE.md`](../../.github/PULL_REQUEST_TEM
 | 日期 | 现象 | 以后怎么做 | 出处 |
 | --- | --- | --- | --- |
 | 2026-10-13 | 用假 `viva` 二进制的测试抓不到 CLI 命令已经改名：Pi 扩展仍在调用已退役的 `viva office ...`，测试却是绿的。 | 凡涉及 CLI 调用的改动，加一个用真实二进制的契约测试，并在改代码前确认它会失败。 | #86 |
+| 2026-10-14 | PR 写了 `Closes`，合并时把验收还没做完的 issue 关掉了。 | 验收里有 PR 做不到的项就写 `Refs`。默认等独立 QA 对当前 head 给出可合并结论再合并。 | #86、#100 |
