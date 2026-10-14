@@ -32,21 +32,24 @@ are configuration, and every completion claim carries recorded evidence.
 - **Foundation** — `viva init` creates the home and applies the full Viva
   schema; `viva doctor` reports state, schema versions and table counts;
   `viva event add/list` persists and reloads events across restarts.
-- **Active control plane** — `viva start` becomes the single
-  active host for the home (a second start refuses and names the running
-  one) and serves a private Unix-socket channel. From any other process:
+- **Resident server** — `viva server` (alias `viva start`) runs the
+  single resident server for the home (a second start refuses and names the
+  running one); it owns the store, every terminal and a private Unix-socket
+  channel until `viva shutdown` ends it. Plain `viva` attaches the workbench
+  and spawns a detached server first when none runs. From any other process:
   `viva status/dispatch/terminals/stop-terminal/result/handoff/shutdown`.
   Dispatch is grant-checked at the moment of effect, idempotent by request
-  key, and launches a real PTY in the task's worktree. With no active
-  host, mutations are clean rejections — no daemon is ever started behind
-  your back. On a crash, the next host reconciles: interrupted launches and
+  key, and launches a real PTY in the task's worktree. With no server
+  running, mutations are clean rejections; only `viva` and `viva server`
+  start one. On a crash, the next server reconciles: interrupted launches and
   orphaned executions get honest recovery records; nothing is re-run,
   nothing is killed, finished tasks refuse re-dispatch.
 - **Parallel development workbench** — one Viva instance spans projects, tasks,
   worktrees and terminals (see `crates/viva/src/tui/workbench/`): real git
   facts (branch/dirty/diff), purpose-terminals per worktree with focused
-  keyboard input that never crosses neighbors, and a quit protocol that
-  stops owned processes while preserving every worktree and record.
+  keyboard input that never crosses neighbors. `q` detaches the TUI while
+  the server keeps every terminal running; `viva shutdown` stops owned
+  processes while preserving every worktree and record.
 - **Conversation metadata** — `viva conversations` keeps the Viva-owned
   tree: display names, fork hierarchy, write-once native session pointers,
   explicit task attachment, and cross-harness handoffs with declared
@@ -55,14 +58,22 @@ are configuration, and every completion claim carries recorded evidence.
   inside a Viva terminal (`crates/viva/src/harness/pi/` +
   [extensions/pi/](extensions/pi/)). The extension injects the member's
   task context and offers status queries, grant-controlled dispatch and
-  explicit handoff. It states plainly when no external memory is connected.
+  explicit handoff. External memory (F04) is an explicit, optional
+  integration: `viva memory …` adds member/project scope, provenance and
+  recoverable archive over the Holographic provider in the user's local
+  Hermes checkout (`unavailable` without it). There is no automatic recall
+  or write-back. Since #101 the Pi memory tools register against the real Pi
+  API, but they have not yet been exercised end to end in real Pi, and
+  real-provider tests are pending independent re-verification.
 - **Data preservation** — `viva data export --out <dir>` dumps every fact
   table read-only to JSON with a manifest. Historical Ticket Autopilot data
   is never read, written or migrated.
 
 **Not implemented, and never faked**: automatic reflection, self-model
-evolution, automatic memory promotion, a daemon, automatic remote writes,
-multi-user support. Unavailable models/tools/providers fail loudly; Viva
+evolution, automatic memory promotion, starting at login (planned, to be
+configurable), an automatic task-scheduling daemon (a required goal; today
+the server only runs scheduled recovery and auto-sync), automatic remote
+writes, multi-user support. Unavailable models/tools/providers fail loudly; Viva
 never substitutes one silently.
 
 ## Install
@@ -112,18 +123,21 @@ Native updates replace **only the executable**; refresh bundled Pi extension
 sources separately from the matching release if you use them. Checksums verify
 integrity, not an independent publisher signature.
 
-Updates do not open/migrate `VIVA_HOME`, alter members/tasks/history, or
-restart running servers/agents. After installing, explicitly run
-`viva server-restart` to use the new binary in a running server, then reconnect
-the TUI. Upgrades are user-invoked, not automatic member maintenance actions.
+Updates do not open/migrate `VIVA_HOME` or alter members/tasks/history.
+After installing, a running resident server is restarted through the live
+handoff: the new binary takes over and the terminals survive; reconnect the
+TUI afterwards. `viva update --no-restart` skips this (`viva server-restart`
+does it later); with no server running, nothing is started. Upgrades are
+user-invoked, not automatic member maintenance actions.
 Older releases without this command need a one-time npm reinstall or release
 download before `viva update` becomes available.
 
 **Run Viva:**
 
 ```bash
-viva start               # the active host for this VIVA_HOME
+viva                     # attach the workbench (starts the resident server if needed)
 viva status              # from any second terminal/process
+viva shutdown            # stop the resident server and its owned processes
 ```
 
 ## Documentation

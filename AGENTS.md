@@ -5,11 +5,16 @@ persistent AI members work through Viva; Viva is **not** an AI member.
 
 # Project North Star and Drift Guard
 
-This repository's North Star is:
+This repository's North Star is the one in the Wiki's `Core-Thesis`, quoted
+verbatim:
 
-> Build Viva so Haisu's AI members keep their continuity
-> while working through tasks, worktrees, workers and cognitive engines — and
-> where the history of that work outlives every worker session.
+```text
+Haisu's AI members should keep their continuity over time:
+each member keeps its own role, history and knowledge;
+tasks that outlive any single worker session;
+executions whose attribution and authority are always recoverable;
+work that actually gets done through real tools.
+```
 
 Core ontology invariants — every design must preserve them:
 
@@ -66,6 +71,11 @@ the relevant Wiki page as part of the same task:
 5. update the affected cross-links;
 6. update `Roadmap` when the current stage or milestone is affected.
 
+Wiki edits do not go through pull requests. Commit directly to the Wiki's
+`master`, one change per commit, never force-push, and post each commit link
+on the GitHub issue the change belongs to. The step-by-step procedure is in
+[`.agents/prompts/delivery.md`](.agents/prompts/delivery.md) §6.
+
 When historical repository documents (or Git history) conflict with current
 Wiki content, the Wiki represents the current canonical understanding — but
 historical evidence is never deleted or rewritten: provenance stays traceable
@@ -91,6 +101,9 @@ agent-specific automatic discovery is required.
 When explicitly asked to perform independent QA, read that file and apply it
 to the named PR, branch or commit range. Reading this charter alone does not
 activate QA or add a mandatory dev→QA pipeline. Prefer a fresh review session.
+The delivery rule that a merge waits for a QA conclusion does not start that
+session and does not add a pipeline in the product. The steps are in
+[`.agents/prompts/delivery.md`](.agents/prompts/delivery.md).
 
 One-line invocation:
 
@@ -135,19 +148,29 @@ capabilities that were still useful live in the Rust implementation
 retired in V13 (issue #22); the Rust binary is the only `viva` entry. Historical run data (`~/.ticket-autopilot/`, `qa-verdict.json`,
 `tasks/` archives) is preserved and must not be deleted or rewritten.
 
+## GitHub Issues Are the Source of Truth
+
+Every development task has a GitHub issue in `zuohaisu/viva`. Conclusions —
+specifications, PR links, check evidence, QA verdicts and retrospectives — are
+posted on that issue. Tasks and comments on other platforms (for example
+Multica) are copies of, or pointers to, the GitHub issue. Do not open a PR for
+work that has no GitHub issue.
+
 ## Concurrent Development: Worktree(+Branch) → Commits → PR → Merge
 
 Multiple agents and the repository owner develop this repo in parallel. The
 main checkout is shared state: never do task work directly in it. Every change
 is delivered from an isolated worktree as one or more commits on its branch,
 then through a pull request and a merge into the remote default branch.
+`main` is branch-protected: it changes only through merged pull requests.
 
 - Treat any user request to implement, fix, refactor, or otherwise change the
   repository as authorization to deliver through the full workflow below. The
   user only describes the desired outcome; they do not need to pick branch
   names, approve routine commits, push, or separately ask for a PR.
-  Documentation-only edits follow the same workflow unless the user explicitly
-  asks for local-only changes.
+  Repository documentation-only edits follow the same workflow unless the
+  user explicitly asks for local-only changes. Wiki edits follow the Wiki
+  rule in "Documentation and Project Knowledge" instead.
 - **One task = one worktree + one branch.** Create a dedicated git worktree per
   task (viva's own worktree service may allocate it; `worktrees/` is ignored in
   the main checkout). Derive the base from the remote default branch — run
@@ -171,7 +194,13 @@ then through a pull request and a merge into the remote default branch.
   tooling and `extensions/pi` has its own npm suite), `git diff --check`,
   and an inspection of the final diff for secrets and generated
   artifacts. Report blocked or unrun checks honestly; never weaken
-  or skip tests to make them pass.
+  or skip tests to make them pass. A `skip`, `ignored`, or unrun check is
+  not evidence that the item passed. A real CLI, host, or SDK contract
+  change needs a real binary, host, or official-SDK check. When fixing a
+  known failure, reproduce it on a recorded pre-fix commit, then verify
+  the same scenario; do not manufacture a failure on `main`. When the
+  change only adds coverage, record the old skip or miss and what the new
+  run actually executed. The procedure is in `.agents/prompts/delivery.md`.
 
   #### Docs-only fast path
 
@@ -199,14 +228,25 @@ then through a pull request and a merge into the remote default branch.
   to `origin` with upstream tracking. Never force-push, delete remote
   branches, or alter branch protection as part of this workflow.
 - Open one PR per task branch, in **Ready for review** state unless the user
-  asks for a draft, targeting the remote default branch. The body must contain
+  asks for a draft, targeting the remote default branch. A task whose spec
+  must be approved first does not enter formal implementation before that
+  approval. If the work cannot wait, the early implementation may proceed
+  only as a Draft PR whose body says 「规格未批准」. It stays Draft, and it
+  is not merged, until the spec is approved. The body must contain
   Summary, Validation (exact commands and results), Risk/Safety Boundaries,
   and Known Limitations.
 - After pushing, rebase or merge the latest base if the branch conflicts, fix
   task-caused failures, and push follow-up commits.
 - **Merge authority is unchanged by this workflow.** Per Actor-Aware Delivery
   Authority, no agent merges or approves its own PR; the repository owner
-  performs (or explicitly authorizes the Controller for) the merge.
+  performs the merge (or explicitly authorizes an agent for that one merge).
+  By default the owner merges only after independent QA has a mergeable
+  conclusion on the current head and no open blocker remains. The owner may
+  explicitly authorize merging one named PR before that conclusion. A green
+  main CI run does not replace QA. Closing the issue waits until the
+  acceptance items the PR cannot finish are actually done, the owner has
+  confirmed the merge, and the corresponding main CI is green. The procedure
+  is in `.agents/prompts/delivery.md`.
 - If authentication, permissions, or network block push or PR creation,
   complete all safe local work and validation, then report the exact blocker
   and the smallest user action needed. Never work around access controls.
@@ -259,10 +299,10 @@ under real pressure.
 
 Safety restrictions apply to autonomous Agents, not to the repository owner.
 Developer and QA Agents may never push a protected branch, authorize their own
-override, approve their own work, or merge a Pull Request. The Controller may
-push an isolated feature branch or merge only when the repository owner
-explicitly authorizes that exact action and the audit record includes actor,
-action, timestamp, and reason. Workers and AI members invoked by Viva inherit
+override, approve their own work, or merge a Pull Request. An agent may merge
+only when the repository owner explicitly authorizes that exact merge, and the
+audit record includes actor, action, timestamp, and reason. Pushing an
+isolated task branch and opening its PR is the normal delivery workflow above. Workers and AI members invoked by Viva inherit
 this rule: they never gain owner authority.
 
 `QA_PENDING` and `HUMAN_VISUAL_REVIEW_PENDING` are evidence states, not
@@ -294,9 +334,6 @@ Report what the tests and the real runs show, and name what was not run.
 
 ## Current Focus
 
-Viva's minimal loop (members → tasks → executions → delegation →
-recovery → knowledge/GitHub linkage) is implemented and tested. The next
-milestones grow it one coherent step at a time — structured workflows on top of
-Tasks, knowledge curation loops, and execution-driver integrations — each with
-measurable evidence. The Start Prompt research and comparison tooling remains a
-parked supporting track.
+The current stage, milestone and next steps are maintained only in the Wiki's
+`Roadmap`; this charter does not restate them. The Start Prompt research and
+comparison tooling remains a parked supporting track.

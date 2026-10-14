@@ -57,7 +57,7 @@
 | server、PTY、终端与恢复 | 重复请求、断连、退出、崩溃、live handoff、resize、stop 的竞态；fd、进程组和 host 所有权；一个任务的输入或停止是否影响邻居；恢复是否误重跑已完成工作。 |
 | TUI 与交互 | 焦点、鼠标、布局、终端输入与用户看到的状态是否一致；测试替身或截图是否不能证明实际交互；缺少真实视觉/交互走查时保留 pending，不编造视觉通过。 |
 | harness 与外部 provider | 真实 CLI/provider 与 mock 的差异；不可用工具是否明确报错而非静默替换；resume/fork/handoff 是否符合该 harness 的实际能力；忽略的真 provider 测试是否被误算成通过。 |
-| 工作流、GitHub 与发布 | 检查和审核证据是否绑定当前 head；旧提交的绿灯是否被用于新提交；状态是否冒充授权；版本、tag、二进制、npm wrapper 与平台依赖是否一致；发布是否遵循现有合并后流程与 patch-only 规则。 |
+| 工作流、GitHub 与发布 | 检查和审核证据是否绑定当前 head；旧提交的绿灯是否被用于新提交；状态是否冒充授权；PR 是否改了任何版本号（PR 不改版本号，发版由 owner 人工管理，见 `AGENTS.md` "npm Releases and Version Policy"）；只有被明确授权的发版，才核对 tag、二进制、npm wrapper 与平台依赖的版本是否一致。 |
 
 这些是风险入口，不是新产品要求；判断依据仍需引用当前契约、源码或实际复现。
 
@@ -96,4 +96,4 @@
 - 结论：需要修改 / 未发现可确认的阻塞问题 / 证据不足；存在次要发现时仍须明确列出，不能把“无阻塞”写成“无缺陷”。
 - 下一步：需要修复、需要实际环境复验，还是可以交由 Haisu 决策；只给建议，不代替 owner 批准或合并。
 
-“未发现问题”不等于“证明完全正确”。缺少审核或视觉证据时分别保留 `QA_PENDING` / `HUMAN_VISUAL_REVIEW_PENDING`，用户 override 不得改写成 PASS；只有操作实际因凭据、网络、冲突或远端拒绝失败时，才标 `TECHNICAL_BLOCKED`。
+结论要写明所审核的 head，以及按当前证据能否合并。失败或证据不足不是可合并结论，不能改写成通过。“未发现问题”不等于“证明完全正确”。缺少审核或视觉证据时分别保留 `QA_PENDING` / `HUMAN_VISUAL_REVIEW_PENDING`，用户 override 不得改写成 PASS；只有操作实际因凭据、网络、冲突或远端拒绝失败时，才标 `TECHNICAL_BLOCKED`。
