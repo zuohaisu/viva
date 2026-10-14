@@ -58,7 +58,9 @@ are configuration, and every completion claim carries recorded evidence.
   inside a Viva terminal (`crates/viva/src/harness/pi/` +
   [extensions/pi/](extensions/pi/)). The extension injects the member's
   task context and offers status queries, grant-controlled dispatch and
-  explicit handoff. It states plainly when no external memory is connected.
+  explicit handoff. Its memory tools reach the F04 Holographic link layer
+  (`viva memory`; pending independent re-verification), and an unreachable
+  store is reported as unavailable.
 - **Data preservation** — `viva data export --out <dir>` dumps every fact
   table read-only to JSON with a manifest. Historical Ticket Autopilot data
   is never read, written or migrated.

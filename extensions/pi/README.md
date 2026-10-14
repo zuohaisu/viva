@@ -16,14 +16,22 @@ brief, and offers controlled actions through the `viva` CLI.
   reference. Without one it refuses with a proposal to ask the user — chat
   never self-authorizes, and Viva's dispatch endpoint re-checks the
   grant server-side at the moment of effect.
+- **External memory tools (F04, issue #26)**: `viva_memory_search`
+  (read-only recall scoped to this session's member) and
+  `viva_memory_remember` (an explicit write that always records provenance)
+  go through `viva memory`, Viva's link layer over the real Holographic
+  store (see [memory/README.md](memory/README.md)). An unreachable store is
+  reported as unavailable. F04 is pending independent re-verification, and
+  no memory backend has been chosen as the default.
 - **Explicit handoff**: `viva_office_handoff` records a member-reported
   summary for the current task. It is stored as a fact ("member X reported
   this"), never as a completion verdict and never as acceptance PASS.
 
 ## What it does NOT do
 
-- No external memory integration: it states plainly that no memory system
-  is connected. No "remembers", no "learned", no fake Holographic.
+- No memory beyond the linked store: archive and restore are not chat tools,
+  the provider's physical delete is never offered, and nothing claims
+  "remembers" or "learned" without a recorded fact behind it.
 - No second chat engine, no agent loop: Pi keeps its own UI and loop.
 - Sessions started outside Viva (no member identity in the
   environment) leave the extension inert — it registers nothing and claims
