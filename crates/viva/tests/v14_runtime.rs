@@ -6,14 +6,14 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use viva::office::{OFFICE_SOCKET_NAME, OfficeClient, OfficeHost, OfficeRequestKind};
+use viva::server::{Client, Host, RequestKind, SOCKET_NAME};
 
 fn viva_bin() -> &'static str {
     env!("CARGO_BIN_EXE_viva")
 }
 
 fn wait_for_socket(home: &Path, secs: u64) {
-    let socket = home.join(OFFICE_SOCKET_NAME);
+    let socket = home.join(SOCKET_NAME);
     let deadline = Instant::now() + Duration::from_secs(secs);
     while !socket.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
@@ -31,14 +31,14 @@ fn server_restart_is_reachable_and_hands_over_through_the_real_binary() {
     std::fs::create_dir_all(&home).expect("home");
 
     // A live host in-process (the old generation) with one real terminal.
-    let host = OfficeHost::open(&home).expect("host claims the slot");
+    let host = Host::open(&home).expect("host claims the slot");
     let old_pid = std::process::id();
     let server = host.serve_background();
     wait_for_socket(&home, 5);
 
-    let mut client = OfficeClient::connect(&home).expect("client");
+    let mut client = Client::connect(&home).expect("client");
     let created = client
-        .call(OfficeRequestKind::TerminalCreate {
+        .call(RequestKind::TerminalCreate {
             argv: vec![
                 "/bin/sh".into(),
                 "-c".into(),
@@ -78,18 +78,18 @@ fn server_restart_is_reachable_and_hands_over_through_the_real_binary() {
     // The new host answers, and it is NOT the old process.
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut client = loop {
-        if let Ok(client) = OfficeClient::connect(&home) {
+        if let Ok(client) = Client::connect(&home) {
             break client;
         }
         assert!(Instant::now() < deadline, "the resumed host never answered");
         std::thread::sleep(Duration::from_millis(100));
     };
-    let status = client.call(OfficeRequestKind::Ping).expect("ping");
+    let status = client.call(RequestKind::Ping).expect("ping");
     let new_pid = status.get("pid").and_then(|p| p.as_u64()).expect("pid");
     assert_ne!(new_pid, u64::from(old_pid), "a new process must serve");
 
     // The live terminal survived the upgrade.
-    let list = client.call(OfficeRequestKind::TerminalList).expect("list");
+    let list = client.call(RequestKind::TerminalList).expect("list");
     assert!(
         format!("{list}").contains(&terminal_id),
         "the terminal survived the real-binary upgrade: {list}"
@@ -97,11 +97,11 @@ fn server_restart_is_reachable_and_hands_over_through_the_real_binary() {
 
     // Clean teardown of the resumed (detached) server.
     client
-        .call(OfficeRequestKind::Shutdown { close_policy: None })
+        .call(RequestKind::Shutdown { close_policy: None })
         .expect("shutdown");
     drop(client);
     {
-        let socket = home.join(OFFICE_SOCKET_NAME);
+        let socket = home.join(SOCKET_NAME);
         let deadline = Instant::now() + Duration::from_secs(15);
         while socket.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(100));

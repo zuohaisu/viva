@@ -176,7 +176,7 @@ fn revoke_racing_dispatch_is_caught_at_the_launch_time_check() {
 /// Acceptance: "普通聊天没有 task grant 时只聊天/读允许的资料，派发须取得对应
 /// live grant；创建新任务不因聊天身份自动获办公室全权".
 #[test]
-fn chat_identity_gets_read_only_and_never_office_wide_power() {
+fn chat_identity_gets_read_only_and_never_viva_wide_power() {
     let dir = tempfile::TempDir::new().expect("dir");
     let db = dir.path().join("office.db");
     let store = Store::open(&db, &frozen()).expect("open");

@@ -224,19 +224,19 @@ fn cross_interface_flow_survives_reopen() {
     // The workbench contract is implementable against frozen signatures.
     struct Bench;
     impl WorkbenchQuery for Bench {
-        fn projects(&self) -> viva::foundation::OfficeResult<Vec<ProjectSummary>> {
+        fn projects(&self) -> viva::foundation::Result<Vec<ProjectSummary>> {
             Ok(Vec::new())
         }
         fn worktrees(
             &self,
             _project: &ProjectId,
-        ) -> viva::foundation::OfficeResult<Vec<WorktreeSummary>> {
+        ) -> viva::foundation::Result<Vec<WorktreeSummary>> {
             Ok(Vec::new())
         }
         fn terminals(
             &self,
             _worktree: &WorktreeId,
-        ) -> viva::foundation::OfficeResult<Vec<WorkbenchTerminalSummary>> {
+        ) -> viva::foundation::Result<Vec<WorkbenchTerminalSummary>> {
             Ok(Vec::new())
         }
     }
@@ -245,18 +245,14 @@ fn cross_interface_flow_survives_reopen() {
             &mut self,
             _worktree: &WorktreeId,
             owner: TerminalOwner,
-        ) -> viva::foundation::OfficeResult<viva::foundation::records::WorkbenchTerminalSummary>
-        {
+        ) -> viva::foundation::Result<viva::foundation::records::WorkbenchTerminalSummary> {
             Ok(viva::foundation::records::WorkbenchTerminalSummary {
                 terminal_id: TerminalId::new(),
                 worktree_id: WorktreeId::new(),
                 owner,
             })
         }
-        fn stop_terminal(
-            &mut self,
-            _terminal_id: &TerminalId,
-        ) -> viva::foundation::OfficeResult<()> {
+        fn stop_terminal(&mut self, _terminal_id: &TerminalId) -> viva::foundation::Result<()> {
             Ok(())
         }
     }

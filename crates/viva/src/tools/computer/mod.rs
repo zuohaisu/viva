@@ -32,7 +32,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::authority::{Actor, AuthorityEngine, CapabilityReport, GrantMode, Issuer};
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::foundation::events::{self, NewEvent};
 use crate::foundation::ids::{MemberId, TaskId, utc_now};
 use crate::foundation::store::{DOMAIN_TOOLS_COMPUTER, MigrationRegistry, Store};
@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS foreground_leases (
 /// Preserve every lease row while repairing the two-column prerelease table.
 /// v2 is already registered on disk and cannot be edited to fix old homes.
 /// An unknown legacy holder has no PID: reconciliation must fail closed.
-fn repair_lease_shape(tx: &rusqlite::Transaction<'_>) -> OfficeResult<()> {
+fn repair_lease_shape(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     let columns: Vec<String> = {
         let mut stmt = tx.prepare("PRAGMA table_info(foreground_leases)")?;
         stmt.query_map([], |row| row.get(1))?
@@ -123,7 +123,7 @@ fn repair_lease_shape(tx: &rusqlite::Transaction<'_>) -> OfficeResult<()> {
         return Ok(()); // healthy v2; preserve live PID/marker evidence
     }
     if columns != ["task_id", "acquired_at"] {
-        return Err(OfficeError::Migration(format!(
+        return Err(Error::Migration(format!(
             "foreground_leases has unsupported columns {columns:?}; refusing to lose lease ownership"
         )));
     }
@@ -277,10 +277,7 @@ impl<'a> ForegroundCoordinator<'a> {
     /// dead holder. For legacy markerless rows the recorded acquisition
     /// time is compared to the OS process age; never steal a live holder
     /// solely because its action ran long.
-    pub fn try_acquire_foreground(
-        &self,
-        task_id: &str,
-    ) -> OfficeResult<Option<ForegroundLease<'_>>> {
+    pub fn try_acquire_foreground(&self, task_id: &str) -> Result<Option<ForegroundLease<'_>>> {
         let tx = self.store.transaction()?;
         {
             let rows: Vec<(String, Option<i64>, Option<String>, String)> = {
@@ -323,9 +320,7 @@ impl<'a> ForegroundCoordinator<'a> {
         }
         let pid = std::process::id() as i64;
         let marker = process_start_marker(pid).ok_or_else(|| {
-            OfficeError::Validation(
-                "cannot identify foreground holder process; refusing input".into(),
-            )
+            Error::Validation("cannot identify foreground holder process; refusing input".into())
         })?;
         let acquired_at = utc_now();
         let insert = tx.execute(
@@ -350,14 +345,14 @@ impl<'a> ForegroundCoordinator<'a> {
 
     /// Block until this task holds the single foreground lane (bounded by
     /// the acquire timeout — waiting forever would wedge the host).
-    pub fn acquire_foreground(&self, task_id: &str) -> OfficeResult<ForegroundLease<'_>> {
+    pub fn acquire_foreground(&self, task_id: &str) -> Result<ForegroundLease<'_>> {
         let deadline = std::time::Instant::now() + self.acquire_timeout;
         loop {
             if let Some(lease) = self.try_acquire_foreground(task_id)? {
                 return Ok(lease);
             }
             if std::time::Instant::now() >= deadline {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "the foreground input lane is still held after {}s — pausing instead of \
                      interleaving keystrokes",
                     self.acquire_timeout.as_secs()
@@ -369,7 +364,7 @@ impl<'a> ForegroundCoordinator<'a> {
 
     /// Every persisted holder, including impossible multi-row states.
     /// Read-only: this never reconciles or silently releases a lease.
-    pub fn leases(&self) -> OfficeResult<Vec<ForegroundLeaseRecord>> {
+    pub fn leases(&self) -> Result<Vec<ForegroundLeaseRecord>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT task_id, host_pid, pid_start_marker, acquired_at
              FROM foreground_leases ORDER BY task_id",
@@ -398,9 +393,9 @@ impl<'a> ForegroundCoordinator<'a> {
         reason: &str,
         actor: &Actor,
         authority: &AuthorityEngine<'_>,
-    ) -> OfficeResult<()> {
+    ) -> Result<()> {
         if acquired_at.trim().is_empty() || reason.trim().is_empty() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "lease release requires acquired-at and a nonempty reason".into(),
             ));
         }
@@ -409,7 +404,7 @@ impl<'a> ForegroundCoordinator<'a> {
             grant: Some(grant_id),
         } = actor
         else {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "lease release requires a named member and live task grant".into(),
             ));
         };
@@ -419,7 +414,7 @@ impl<'a> ForegroundCoordinator<'a> {
             || grant.issued_by != Issuer::User
             || grant.mode != GrantMode::ActWithApproval
         {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "lease release needs an owner-issued ACT_WITH_APPROVAL grant naming this member and task".into(),
             ));
         }
@@ -431,7 +426,7 @@ impl<'a> ForegroundCoordinator<'a> {
         )?;
         if let Err(denial) = authority.check(actor, "release_foreground_lease", Some(task))? {
             tx.commit()?; // retain the authority engine's denial audit row
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "lease release authorization rejected: {denial}"
             )));
         }
@@ -442,7 +437,7 @@ impl<'a> ForegroundCoordinator<'a> {
             rusqlite::params![task.as_str(), acquired_at],
         )?;
         if deleted != 1 {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "lease missing, changed, or has a known PID; no release occurred".into(),
             ));
         }
@@ -468,7 +463,7 @@ impl<'a> ForegroundCoordinator<'a> {
     }
 
     /// Who holds the lane right now (observability).
-    pub fn holder(&self) -> OfficeResult<Option<String>> {
+    pub fn holder(&self) -> Result<Option<String>> {
         let row: Option<String> = self
             .store
             .connection()
@@ -755,7 +750,7 @@ impl<'a> ComputerEngine<'a> {
     /// Probe every reused tool for real and record the result. A missing
     /// or failing probe is `unavailable` with the reason — never a pass
     /// on a promise.
-    pub fn audit(&self) -> OfficeResult<Vec<CapabilityReport>> {
+    pub fn audit(&self) -> Result<Vec<CapabilityReport>> {
         let mut reports = Vec::new();
         for tool in AUDITED_TOOLS {
             let now = utc_now();
@@ -794,7 +789,7 @@ impl<'a> ComputerEngine<'a> {
         Ok(reports)
     }
 
-    pub fn capability(&self, tool: &str) -> OfficeResult<Option<(bool, String, String, String)>> {
+    pub fn capability(&self, tool: &str) -> Result<Option<(bool, String, String, String)>> {
         let row = self
             .store
             .connection()
@@ -826,11 +821,11 @@ impl<'a> ComputerEngine<'a> {
         actor: &Actor,
         task_id: &TaskId,
         spec: &ActionSpec,
-    ) -> OfficeResult<ActionRecord> {
+    ) -> Result<ActionRecord> {
         let member = match actor {
             Actor::Member { member, .. } => member.clone(),
             Actor::Worker { .. } => {
-                return Err(OfficeError::Validation(
+                return Err(Error::Validation(
                     "workers do not drive the computer; member grants only".into(),
                 ));
             }
@@ -991,7 +986,7 @@ impl<'a> ComputerEngine<'a> {
             .runner
             .run(spec.program, &spec.locator)
             .map_err(|failure| {
-                OfficeError::Validation(format!("post-action verify failed: {failure}"))
+                Error::Validation(format!("post-action verify failed: {failure}"))
             })?;
         let mut failures: Vec<String> = Vec::new();
         if let (Some(marker), Some(output)) = (&spec.expect_action_output, &action_output) {
@@ -1038,11 +1033,11 @@ impl<'a> ComputerEngine<'a> {
     }
 
     /// Who holds the foreground lane right now (observability).
-    pub fn holder(&self) -> OfficeResult<Option<String>> {
+    pub fn holder(&self) -> Result<Option<String>> {
         ForegroundCoordinator::new(self.store).holder()
     }
 
-    pub fn actions_for_task(&self, task_id: &TaskId) -> OfficeResult<Vec<ActionRecord>> {
+    pub fn actions_for_task(&self, task_id: &TaskId) -> Result<Vec<ActionRecord>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT action_id, task_id, actor_member_id, grant_id, tool, target, argv_json,
                     state, reason, pre_state, action_output, post_state, foreground,
@@ -1057,7 +1052,7 @@ impl<'a> ComputerEngine<'a> {
         Ok(records)
     }
 
-    fn record(&self, record: ActionRecord) -> OfficeResult<ActionRecord> {
+    fn record(&self, record: ActionRecord) -> Result<ActionRecord> {
         self.store.connection().execute(
             "INSERT INTO computer_actions(action_id, task_id, actor_member_id, grant_id,
                                           tool, target, argv_json, state, reason,

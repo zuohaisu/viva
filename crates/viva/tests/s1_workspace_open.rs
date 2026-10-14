@@ -1,7 +1,7 @@
 //! S1 acceptance (issue #74): opening and composing workspaces over real
 //! `.code-workspace` files, real git repositories in unrelated parent
 //! directories, real linked worktrees, real PTY terminals and the real
-//! office host socket. Each test maps to one line of the #74 acceptance list.
+//! host socket. Each test maps to one line of the #74 acceptance list.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -63,7 +63,7 @@ fn add_linked(repo: &Path, path: &Path, branch: &str) -> PathBuf {
 }
 
 fn store() -> Store {
-    Store::open_in_memory(viva::office::office_migrations()).expect("store")
+    Store::open_in_memory(viva::server::migrations()).expect("store")
 }
 
 fn model(store: &Store, terminals: &TerminalRegistry) -> WorkbenchModel {
@@ -273,7 +273,7 @@ fn a_composition_saves_a_file_vscode_can_open_and_reopening_keeps_everything() {
     );
 
     // A different process (fresh store) reopens it with the same names/relations.
-    let fresh = Store::open_in_memory(viva::office::office_migrations()).unwrap();
+    let fresh = Store::open_in_memory(viva::server::migrations()).unwrap();
     let nav2 = Navigation { store: &fresh };
     let reopened = nav2.open(&saved).unwrap();
     let rows = nav2.folders(&reopened).unwrap();
@@ -974,7 +974,7 @@ fn wait_until(what: &str, timeout: Duration, mut probe: impl FnMut() -> bool) {
 fn only_the_owner_composes_workspaces_over_the_real_host_socket() {
     use viva::authority::{AuthorityEngine, GrantMode};
     use viva::members::{MemberBinding, MemberRegistry};
-    use viva::office::{self, OfficeHost, OfficeRequestKind};
+    use viva::server::{self, Host, RequestKind};
 
     let f = fixture();
     let home = f.root.join("home");
@@ -982,7 +982,7 @@ fn only_the_owner_composes_workspaces_over_the_real_host_socket() {
     let (member_id, grant_id) = {
         let store = Store::open(
             &viva::foundation::paths::database_path(&home),
-            office::office_migrations(),
+            server::migrations(),
         )
         .unwrap();
         let members = MemberRegistry::new(&store);
@@ -1009,20 +1009,20 @@ fn only_the_owner_composes_workspaces_over_the_real_host_socket() {
     };
     let host_home = home.clone();
     let host = std::thread::spawn(move || {
-        let host = OfficeHost::open(&host_home).expect("host");
+        let host = Host::open(&host_home).expect("host");
         host.serve().expect("serve");
     });
     wait_until("socket", Duration::from_secs(10), || {
-        std::os::unix::net::UnixStream::connect(home.join(office::OFFICE_SOCKET_NAME)).is_ok()
+        std::os::unix::net::UnixStream::connect(home.join(server::SOCKET_NAME)).is_ok()
     });
 
-    let request = |member: Option<&str>, grant: Option<&str>, kind: OfficeRequestKind| {
-        let mut r = office::new_request(kind);
+    let request = |member: Option<&str>, grant: Option<&str>, kind: RequestKind| {
+        let mut r = server::new_request(kind);
         r.member = member.map(str::to_string);
         r.grant = grant.map(str::to_string);
-        office::send_request(&home, r).expect("socket answers")
+        server::send_request(&home, r).expect("socket answers")
     };
-    let open = |p: &Path| OfficeRequestKind::Workspace {
+    let open = |p: &Path| RequestKind::Workspace {
         action: "open".into(),
         value: Some(p.to_str().unwrap().to_string()),
         project_id: None,
@@ -1052,7 +1052,7 @@ fn only_the_owner_composes_workspaces_over_the_real_host_socket() {
     let list = request(
         None,
         None,
-        OfficeRequestKind::Workspace {
+        RequestKind::Workspace {
             action: "list".into(),
             value: None,
             project_id: None,
@@ -1061,9 +1061,9 @@ fn only_the_owner_composes_workspaces_over_the_real_host_socket() {
     let workspaces = list.result.unwrap()["workspaces"].as_array().unwrap().len();
     assert_eq!(workspaces, 1, "the refused opens changed nothing");
 
-    let _ = office::send_request(
+    let _ = server::send_request(
         &home,
-        office::new_request(OfficeRequestKind::Shutdown { close_policy: None }),
+        server::new_request(RequestKind::Shutdown { close_policy: None }),
     );
     host.join().ok();
 }
@@ -1075,7 +1075,7 @@ fn only_the_owner_composes_workspaces_over_the_real_host_socket() {
 #[test]
 fn the_cli_composes_workspaces_over_the_resident_server_and_open_gates_on_a_tty() {
     use std::process::Stdio;
-    use viva::office::{OfficeClient, OfficeRequestKind};
+    use viva::server::{Client, RequestKind};
 
     let f = fixture();
     let home = TempDir::new().expect("home");
@@ -1099,7 +1099,7 @@ fn the_cli_composes_workspaces_over_the_resident_server_and_open_gates_on_a_tty(
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        OfficeClient::connect(home.path()).is_err(),
+        Client::connect(home.path()).is_err(),
         "a call that must fail left no resident server behind"
     );
 
@@ -1122,7 +1122,7 @@ fn the_cli_composes_workspaces_over_the_resident_server_and_open_gates_on_a_tty(
         .map(KillOnDrop)
         .expect("server starts");
     wait_until("the resident server", Duration::from_secs(20), || {
-        OfficeClient::connect(home.path()).is_ok()
+        Client::connect(home.path()).is_ok()
     });
 
     let json = |out: &std::process::Output| -> Value {
@@ -1192,7 +1192,7 @@ fn the_cli_composes_workspaces_over_the_resident_server_and_open_gates_on_a_tty(
         "the source file was not touched by any of it"
     );
 
-    let mut client = OfficeClient::connect(home.path()).expect("client");
-    let _ = client.call(OfficeRequestKind::Shutdown { close_policy: None });
+    let mut client = Client::connect(home.path()).expect("client");
+    let _ = client.call(RequestKind::Shutdown { close_policy: None });
     let _ = server.0.wait();
 }

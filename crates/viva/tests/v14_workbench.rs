@@ -96,7 +96,7 @@ fn bench() -> Bench {
     let home = dir.path().join("home");
     let store = viva::foundation::store::Store::open(
         &viva::foundation::paths::database_path(&home),
-        viva::office::office_migrations(),
+        viva::server::migrations(),
     )
     .expect("store");
     let terminals = TerminalRegistry::new();

@@ -27,7 +27,7 @@ use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
-use crate::foundation::error::OfficeResult;
+use crate::foundation::error::Result;
 
 pub mod chrome;
 pub mod conversations;
@@ -60,22 +60,22 @@ pub struct TerminalRow {
 
 /// Office overview: members and projects (display configuration only).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct OfficeOverview {
+pub struct Overview {
     pub members: Vec<String>,
     pub projects: Vec<String>,
 }
 
 /// The read-only data source of the shell. There are deliberately no
 /// mutators: navigation can never change what it navigates over.
-pub trait OfficeData {
-    fn overview(&self) -> OfficeResult<OfficeOverview>;
-    fn tasks(&self) -> OfficeResult<Vec<TaskRow>>;
-    fn terminals(&self) -> OfficeResult<Vec<TerminalRow>>;
+pub trait OverviewSource {
+    fn overview(&self) -> Result<Overview>;
+    fn tasks(&self) -> Result<Vec<TaskRow>>;
+    fn terminals(&self) -> Result<Vec<TerminalRow>>;
 }
 
 #[derive(Debug, Clone, Default)]
 struct Cache {
-    overview: OfficeOverview,
+    overview: Overview,
     tasks: Vec<TaskRow>,
     terminals: Vec<TerminalRow>,
     last_error: Option<String>,
@@ -104,7 +104,7 @@ pub enum KeyOutcome {
 
 /// The TUI application shell. Pure view state + cached projections; drive
 /// it with [`TuiApp::on_key`], [`TuiApp::refresh`] and [`TuiApp::draw`].
-pub struct TuiApp<D: OfficeData> {
+pub struct TuiApp<D: OverviewSource> {
     data: D,
     cache: Cache,
     focus: Focus,
@@ -114,7 +114,7 @@ pub struct TuiApp<D: OfficeData> {
     status_line: String,
 }
 
-impl<D: OfficeData> TuiApp<D> {
+impl<D: OverviewSource> TuiApp<D> {
     pub fn new(data: D) -> Self {
         Self {
             data,
@@ -428,13 +428,12 @@ pub struct TerminalGuard;
 #[cfg(unix)]
 impl TerminalGuard {
     /// Enter the alternate screen with raw mode enabled.
-    pub fn enter() -> OfficeResult<Self> {
+    pub fn enter() -> Result<Self> {
         use ratatui::crossterm::ExecutableCommand as _;
         use ratatui::crossterm::event::{EnableBracketedPaste, EnableMouseCapture};
         use ratatui::crossterm::terminal::{self as ct, EnterAlternateScreen};
-        ct::enable_raw_mode().map_err(|e| {
-            crate::foundation::OfficeError::Io(std::io::Error::other(e.to_string()))
-        })?;
+        ct::enable_raw_mode()
+            .map_err(|e| crate::foundation::Error::Io(std::io::Error::other(e.to_string())))?;
         let mut out = std::io::stdout();
         let _ = out.execute(EnterAlternateScreen);
         let _ = out.execute(EnableMouseCapture);
@@ -460,8 +459,8 @@ impl Drop for TerminalGuard {
 /// The run loop's quit step: ask the office to pause (callback), then the
 /// guard's drop restores the terminal. Kept as an explicit function so
 /// tests can prove the pause runs exactly once before restore.
-pub fn shutdown_with_pause(pause_office: &mut impl FnMut()) {
-    pause_office();
+pub fn shutdown_with_pause(pause_server: &mut impl FnMut()) {
+    pause_server();
 }
 
 #[cfg(test)]
@@ -473,7 +472,7 @@ mod tests {
     /// Static fixture with a mutation counter: the trait has no mutators,
     /// so the counter must stay zero through any navigation.
     struct Fixture {
-        overview: OfficeOverview,
+        overview: Overview,
         tasks: Vec<TaskRow>,
         terminals: Vec<TerminalRow>,
         fail_tasks: bool,
@@ -482,7 +481,7 @@ mod tests {
     impl Fixture {
         fn sample() -> Self {
             Self {
-                overview: OfficeOverview {
+                overview: Overview {
                     members: vec!["Samuel".into(), "Rook".into()],
                     projects: vec!["viva".into(), "VicTrader".into()],
                 },
@@ -519,14 +518,14 @@ mod tests {
         }
     }
 
-    impl OfficeData for Fixture {
-        fn overview(&self) -> OfficeResult<OfficeOverview> {
+    impl OverviewSource for Fixture {
+        fn overview(&self) -> Result<Overview> {
             Ok(self.overview.clone())
         }
 
-        fn tasks(&self) -> OfficeResult<Vec<TaskRow>> {
+        fn tasks(&self) -> Result<Vec<TaskRow>> {
             if self.fail_tasks {
-                Err(crate::foundation::OfficeError::Validation(
+                Err(crate::foundation::Error::Validation(
                     "task store unreachable".into(),
                 ))
             } else {
@@ -534,7 +533,7 @@ mod tests {
             }
         }
 
-        fn terminals(&self) -> OfficeResult<Vec<TerminalRow>> {
+        fn terminals(&self) -> Result<Vec<TerminalRow>> {
             Ok(self.terminals.clone())
         }
     }
@@ -600,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn navigation_never_mutates_office_data() {
+    fn navigation_never_mutates_overview_data() {
         // The trait has no mutators, so mutation is unrepresentable; the
         // strong version of the guarantee: even data that *fails* stays
         // untouched, and the cache is only refreshed explicitly.

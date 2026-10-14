@@ -33,7 +33,7 @@
 use super::WorkspaceRegistry;
 use crate::foundation::ids::{WorkspaceId, WorktreeId, utc_now};
 use crate::foundation::store::Store;
-use crate::foundation::{OfficeError, OfficeResult};
+use crate::foundation::{Error, Result};
 use crate::git::worktrees::{DiscoveredWorktree, ProtectedRefs, WorktreeService};
 use crate::projects::{ProjectRecord, ProjectRegistry};
 use rusqlite::OptionalExtension;
@@ -168,7 +168,7 @@ struct StoredFolder {
 
 /// Strip comments and trailing commas without interpreting anything inside strings.
 /// VS Code configuration is data; tasks/launch/settings are never executed.
-pub fn parse_jsonc(text: &str) -> OfficeResult<Value> {
+pub fn parse_jsonc(text: &str) -> Result<Value> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let b = text.as_bytes();
     let mut out = b.to_vec();
@@ -217,7 +217,7 @@ pub fn parse_jsonc(text: &str) -> OfficeResult<Value> {
                 i += 1;
             }
             if !closed {
-                return Err(OfficeError::Validation("unterminated JSONC comment".into()));
+                return Err(Error::Validation("unterminated JSONC comment".into()));
             }
             continue;
         }
@@ -248,7 +248,7 @@ pub fn parse_jsonc(text: &str) -> OfficeResult<Value> {
         i += 1;
     }
     serde_json::from_slice(&out)
-        .map_err(|e| OfficeError::Validation(format!("invalid workspace JSONC: {e}")))
+        .map_err(|e| Error::Validation(format!("invalid workspace JSONC: {e}")))
 }
 
 /// Index after whitespace and `//` / `/* */` comments.
@@ -522,25 +522,25 @@ fn resolve_folder(folder: &Value, base: &Path) -> (Option<PathBuf>, Option<Strin
     }
 }
 
-fn read_limited(path: &Path) -> OfficeResult<String> {
+fn read_limited(path: &Path) -> Result<String> {
     let meta = std::fs::metadata(path)
-        .map_err(|e| OfficeError::Validation(format!("cannot read {}: {e}", path.display())))?;
+        .map_err(|e| Error::Validation(format!("cannot read {}: {e}", path.display())))?;
     if meta.len() > MAX_FILE_BYTES {
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "{} exceeds 1 MiB",
             path.display()
         )));
     }
     std::fs::read_to_string(path)
-        .map_err(|e| OfficeError::Validation(format!("cannot read {}: {e}", path.display())))
+        .map_err(|e| Error::Validation(format!("cannot read {}: {e}", path.display())))
 }
 
 /// Write via a sibling temp file and rename, keeping an existing file's
 /// permissions (a new file gets the user's umask default, not 0600).
-fn write_atomic(target: &Path, text: &str) -> OfficeResult<()> {
+fn write_atomic(target: &Path, text: &str) -> Result<()> {
     use std::io::Write;
-    let name = basename(target)
-        .ok_or_else(|| OfficeError::Validation("Save As needs a file name".into()))?;
+    let name =
+        basename(target).ok_or_else(|| Error::Validation("Save As needs a file name".into()))?;
     let tmp = target.with_file_name(format!(".{name}.viva-tmp-{}", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     let result = (|| -> std::io::Result<()> {
@@ -594,19 +594,19 @@ pub struct Navigation<'a> {
 impl<'a> Navigation<'a> {
     /// Every workspace in creation order — stable across switches, which is
     /// what the top switcher cycles through.
-    pub fn list(&self) -> OfficeResult<Vec<WorkspaceRow>> {
+    pub fn list(&self) -> Result<Vec<WorkspaceRow>> {
         self.workspace_rows("ORDER BY w.rowid", None)
     }
 
     /// Most recently opened first; the "open recent" list.
-    pub fn recent(&self, limit: usize) -> OfficeResult<Vec<WorkspaceRow>> {
+    pub fn recent(&self, limit: usize) -> Result<Vec<WorkspaceRow>> {
         self.workspace_rows(
             "ORDER BY COALESCE(c.opened_at, w.created_at) DESC, w.rowid DESC",
             Some(limit),
         )
     }
 
-    fn workspace_rows(&self, order: &str, limit: Option<usize>) -> OfficeResult<Vec<WorkspaceRow>> {
+    fn workspace_rows(&self, order: &str, limit: Option<usize>) -> Result<Vec<WorkspaceRow>> {
         let sql = format!(
             "SELECT w.workspace_id, w.display_name, c.source_path,
                     COALESCE(c.opened_at, w.created_at)
@@ -627,7 +627,7 @@ impl<'a> Navigation<'a> {
     }
 
     /// The current workspace id; `None` is the unfiltered "All projects" view.
-    pub fn selected(&self) -> OfficeResult<Option<String>> {
+    pub fn selected(&self) -> Result<Option<String>> {
         Ok(self
             .store
             .connection()
@@ -641,7 +641,7 @@ impl<'a> Navigation<'a> {
     }
 
     /// The current workspace resolved to its folders.
-    pub fn selection(&self) -> OfficeResult<Option<WorkspaceSelection>> {
+    pub fn selection(&self) -> Result<Option<WorkspaceSelection>> {
         let Some(id) = self.selected()? else {
             return Ok(None);
         };
@@ -649,7 +649,7 @@ impl<'a> Navigation<'a> {
             .list()?
             .into_iter()
             .find(|w| w.workspace_id == id)
-            .ok_or_else(|| OfficeError::NotFound {
+            .ok_or_else(|| Error::NotFound {
                 entity: "workspace",
                 id: id.clone(),
             })?;
@@ -661,7 +661,7 @@ impl<'a> Navigation<'a> {
         }))
     }
 
-    pub fn select(&self, id: &str) -> OfficeResult<()> {
+    pub fn select(&self, id: &str) -> Result<()> {
         self.set_selection(id)?;
         // A switch re-reads the repos so checkouts created or removed outside
         // Viva show up. Best effort: failures are visible as diagnostics.
@@ -669,7 +669,7 @@ impl<'a> Navigation<'a> {
         Ok(())
     }
 
-    fn set_selection(&self, id: &str) -> OfficeResult<()> {
+    fn set_selection(&self, id: &str) -> Result<()> {
         WorkspaceRegistry::new(self.store).require(&WorkspaceId::from_str(id)?)?;
         self.store.connection().execute(
             "INSERT INTO navigation_selection VALUES(1,?1)
@@ -684,7 +684,7 @@ impl<'a> Navigation<'a> {
     }
 
     /// Back to the unfiltered "All projects" view. Nothing is closed or deleted.
-    pub fn select_all(&self) -> OfficeResult<()> {
+    pub fn select_all(&self) -> Result<()> {
         self.store.connection().execute(
             "INSERT INTO navigation_selection VALUES(1,NULL)
              ON CONFLICT(singleton) DO UPDATE SET workspace_id=NULL",
@@ -693,13 +693,13 @@ impl<'a> Navigation<'a> {
         Ok(())
     }
 
-    fn name_of(&self, id: &str) -> OfficeResult<String> {
+    fn name_of(&self, id: &str) -> Result<String> {
         Ok(WorkspaceRegistry::new(self.store)
             .require(&WorkspaceId::from_str(id)?)?
             .display_name)
     }
 
-    fn stored_folders(&self, id: &str) -> OfficeResult<Vec<StoredFolder>> {
+    fn stored_folders(&self, id: &str) -> Result<Vec<StoredFolder>> {
         let mut st = self.store.connection().prepare(
             "SELECT ordinal,project_id,folder,resolved_path,diagnostic
              FROM workspace_folders WHERE workspace_id=?1 ORDER BY ordinal",
@@ -717,7 +717,7 @@ impl<'a> Navigation<'a> {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    pub fn folders(&self, id: &str) -> OfficeResult<Vec<FolderRow>> {
+    pub fn folders(&self, id: &str) -> Result<Vec<FolderRow>> {
         Ok(self
             .stored_folders(id)?
             .into_iter()
@@ -730,7 +730,7 @@ impl<'a> Navigation<'a> {
             .collect())
     }
 
-    pub fn create(&self, name: &str) -> OfficeResult<String> {
+    pub fn create(&self, name: &str) -> Result<String> {
         let w = WorkspaceRegistry::new(self.store).create(name)?;
         self.store.connection().execute(
             "INSERT INTO workspace_compositions(workspace_id,opened_at) VALUES(?1,?2)",
@@ -742,9 +742,9 @@ impl<'a> Navigation<'a> {
 
     /// Open a directory (a single repo, no ceremony) or a `.code-workspace`
     /// file. The same directory or file always maps to the same workspace.
-    pub fn open(&self, path: &Path) -> OfficeResult<String> {
+    pub fn open(&self, path: &Path) -> Result<String> {
         let path = std::fs::canonicalize(path).map_err(|e| {
-            OfficeError::Validation(format!(
+            Error::Validation(format!(
                 "workspace path not found: {} ({e})",
                 path.display()
             ))
@@ -757,7 +757,7 @@ impl<'a> Navigation<'a> {
         Ok(id)
     }
 
-    fn open_directory(&self, dir: &Path) -> OfficeResult<String> {
+    fn open_directory(&self, dir: &Path) -> Result<String> {
         let name = basename(dir).unwrap_or_else(|| "Workspace".into());
         let existing: Option<String> = self
             .store
@@ -784,14 +784,14 @@ impl<'a> Navigation<'a> {
         Ok(id)
     }
 
-    fn open_file(&self, file: &Path) -> OfficeResult<String> {
+    fn open_file(&self, file: &Path) -> Result<String> {
         let doc = parse_jsonc(&read_limited(file)?)?;
         let folders = doc
             .get("folders")
             .and_then(Value::as_array)
-            .ok_or_else(|| OfficeError::Validation("workspace needs a folders array".into()))?;
+            .ok_or_else(|| Error::Validation("workspace needs a folders array".into()))?;
         if folders.len() > MAX_FOLDERS {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "workspace exceeds {MAX_FOLDERS} folders"
             )));
         }
@@ -832,13 +832,7 @@ impl<'a> Navigation<'a> {
         Ok(id)
     }
 
-    fn reload_folders(
-        &self,
-        id: &str,
-        doc: &Value,
-        folders: &[Value],
-        base: &Path,
-    ) -> OfficeResult<()> {
+    fn reload_folders(&self, id: &str, doc: &Value, folders: &[Value], base: &Path) -> Result<()> {
         self.store
             .connection()
             .execute("DELETE FROM workspace_folders WHERE workspace_id=?1", [id])?;
@@ -854,17 +848,11 @@ impl<'a> Navigation<'a> {
 
     /// Add a folder to a composition. Adding a repo that is already part of
     /// it (through any of its checkouts) changes nothing.
-    pub fn add(&self, id: &str, folder: Value, base: &Path) -> OfficeResult<AddOutcome> {
+    pub fn add(&self, id: &str, folder: Value, base: &Path) -> Result<AddOutcome> {
         self.add_entry(id, folder, base, true)
     }
 
-    fn add_entry(
-        &self,
-        id: &str,
-        folder: Value,
-        base: &Path,
-        dedupe: bool,
-    ) -> OfficeResult<AddOutcome> {
+    fn add_entry(&self, id: &str, folder: Value, base: &Path, dedupe: bool) -> Result<AddOutcome> {
         self.name_of(id)?;
         let count: i64 = self.store.connection().query_row(
             "SELECT COUNT(*) FROM workspace_folders WHERE workspace_id=?1",
@@ -872,7 +860,7 @@ impl<'a> Navigation<'a> {
             |r| r.get(0),
         )?;
         if count as usize >= MAX_FOLDERS {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "workspace exceeds {MAX_FOLDERS} folders"
             )));
         }
@@ -909,7 +897,7 @@ impl<'a> Navigation<'a> {
     /// Resolve one entry on disk and, when it is a usable directory, attach
     /// its Project and checkouts. Reads only; nothing in the entry (or the
     /// workspace file around it) is ever executed.
-    fn resolve_entry(&self, folder: &Value, base: &Path) -> OfficeResult<EntryState> {
+    fn resolve_entry(&self, folder: &Value, base: &Path) -> Result<EntryState> {
         let (resolved, mut diagnostic) = resolve_folder(folder, base);
         let mut project_id = None;
         if let (Some(dir), None) = (&resolved, &diagnostic) {
@@ -955,7 +943,7 @@ impl<'a> Navigation<'a> {
         &self,
         project: &ProjectRecord,
         listed: &[DiscoveredWorktree],
-    ) -> OfficeResult<()> {
+    ) -> Result<()> {
         let conn = self.store.connection();
         let mut live = Vec::new();
         for w in listed.iter().filter(|w| !w.bare && w.prunable.is_none()) {
@@ -995,7 +983,7 @@ impl<'a> Navigation<'a> {
     /// repaired paths become usable, vanished ones become diagnostics, and
     /// the checkout list follows what git reports now. Returns the
     /// diagnostics that remain.
-    pub fn rescan(&self, id: &str) -> OfficeResult<Vec<String>> {
+    pub fn rescan(&self, id: &str) -> Result<Vec<String>> {
         let base = self.base_dir(id)?;
         let tx = self.store.transaction()?;
         for stored in self.stored_folders(id)? {
@@ -1021,7 +1009,7 @@ impl<'a> Navigation<'a> {
     }
 
     /// Relative folder entries resolve against the workspace file's directory.
-    fn base_dir(&self, id: &str) -> OfficeResult<PathBuf> {
+    fn base_dir(&self, id: &str) -> Result<PathBuf> {
         let source: Option<String> = self.store.connection().query_row(
             "SELECT source_path FROM workspace_compositions WHERE workspace_id=?1",
             [id],
@@ -1036,14 +1024,14 @@ impl<'a> Navigation<'a> {
     /// Remove folders from a composition by project id, resolved path or the
     /// entry's own `path` text. Membership only: files, history, processes
     /// and records are untouched.
-    pub fn remove(&self, id: &str, key: &str) -> OfficeResult<usize> {
+    pub fn remove(&self, id: &str, key: &str) -> Result<usize> {
         let n = self.store.connection().execute(
             "DELETE FROM workspace_folders WHERE workspace_id=?1
                AND (project_id=?2 OR resolved_path=?2 OR json_extract(folder,'$.path')=?2)",
             rusqlite::params![id, key],
         )?;
         if n == 0 {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "nothing in this workspace matches `{key}`"
             )));
         }
@@ -1053,22 +1041,20 @@ impl<'a> Navigation<'a> {
     /// Save the composition as a VS Code workspace file and bind the
     /// workspace to it (the file is what reopening restores). Returns the
     /// path actually written (`.code-workspace` is appended when missing).
-    pub fn save_as(&self, id: &str, path: &Path) -> OfficeResult<PathBuf> {
+    pub fn save_as(&self, id: &str, path: &Path) -> Result<PathBuf> {
         if !path.is_absolute() {
-            return Err(OfficeError::Validation(
-                "Save As needs an absolute path".into(),
-            ));
+            return Err(Error::Validation("Save As needs an absolute path".into()));
         }
         self.name_of(id)?;
         let mut path = normalize_lexical(path);
-        let name = basename(&path)
-            .ok_or_else(|| OfficeError::Validation("Save As needs a file name".into()))?;
+        let name =
+            basename(&path).ok_or_else(|| Error::Validation("Save As needs a file name".into()))?;
         if !name.ends_with(WORKSPACE_EXT) {
             path.set_file_name(format!("{name}{WORKSPACE_EXT}"));
         }
         let parent = path.parent().unwrap_or(Path::new("/"));
         let dir = std::fs::canonicalize(parent).map_err(|_| {
-            OfficeError::Validation(format!(
+            Error::Validation(format!(
                 "cannot save into {}: the directory does not exist",
                 parent.display()
             ))
@@ -1090,7 +1076,7 @@ impl<'a> Navigation<'a> {
             )
             .optional()?;
         if let Some(other) = bound_elsewhere {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "{} is already open as workspace `{other}`",
                 target.display()
             )));
@@ -1142,7 +1128,7 @@ impl<'a> Navigation<'a> {
 
     /// An explicit save may replace a workspace file (or an empty
     /// placeholder), never an arbitrary file the user mistyped.
-    fn guard_overwrite(&self, target: &Path) -> OfficeResult<()> {
+    fn guard_overwrite(&self, target: &Path) -> Result<()> {
         let Ok(meta) = std::fs::metadata(target) else {
             return Ok(());
         };
@@ -1155,14 +1141,14 @@ impl<'a> Navigation<'a> {
         if is_workspace {
             Ok(())
         } else {
-            Err(OfficeError::Validation(format!(
+            Err(Error::Validation(format!(
                 "refusing to overwrite {}: it is not a workspace file",
                 target.display()
             )))
         }
     }
 
-    pub fn checkout(&self, id: &str) -> OfficeResult<Option<(PathBuf, String)>> {
+    pub fn checkout(&self, id: &str) -> Result<Option<(PathBuf, String)>> {
         Ok(self
             .store
             .connection()
@@ -1183,15 +1169,15 @@ impl<'a> Navigation<'a> {
         action: &str,
         value: Option<&str>,
         project_id: Option<&str>,
-    ) -> OfficeResult<Value> {
+    ) -> Result<Value> {
         let need = || {
             value
                 .filter(|v| !v.trim().is_empty())
-                .ok_or_else(|| OfficeError::Validation(format!("workspace {action} needs a value")))
+                .ok_or_else(|| Error::Validation(format!("workspace {action} needs a value")))
         };
         let current = || {
             self.selected()?
-                .ok_or_else(|| OfficeError::Validation("select or open a workspace first".into()))
+                .ok_or_else(|| Error::Validation("select or open a workspace first".into()))
         };
         let message = match action {
             "open" => {
@@ -1231,9 +1217,7 @@ impl<'a> Navigation<'a> {
                 let key = project_id
                     .or(value)
                     .filter(|k| !k.is_empty())
-                    .ok_or_else(|| {
-                        OfficeError::Validation("remove needs a project id or path".into())
-                    })?;
+                    .ok_or_else(|| Error::Validation("remove needs a project id or path".into()))?;
                 let n = self.remove(&id, key)?;
                 format!(
                     "removed {n} folder(s) from the composition; nothing was deleted or stopped"
@@ -1250,7 +1234,7 @@ impl<'a> Navigation<'a> {
             }
             "list" => String::new(),
             _ => {
-                return Err(OfficeError::Validation(
+                return Err(Error::Validation(
                     "workspace action: open | new | select | add | remove | save | refresh | list"
                         .into(),
                 ));
@@ -1371,7 +1355,7 @@ mod tests {
     }
 
     fn store() -> Store {
-        Store::open_in_memory(crate::office::office_migrations()).expect("store")
+        Store::open_in_memory(crate::server::migrations()).expect("store")
     }
 
     #[test]

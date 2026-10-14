@@ -30,7 +30,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::authority::{Actor, AuthorityEngine};
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::utc_now;
 use crate::foundation::store::{DOMAIN_MAINTENANCE, MigrationRegistry, Store};
 use crate::git::cli::CliRunner;
@@ -210,7 +210,7 @@ pub struct MaintenanceSession {
 impl MaintenanceSession {
     /// Open a session for this process. The host calls this when the office
     /// becomes active.
-    pub fn open(store: &Store) -> OfficeResult<MaintenanceSession> {
+    pub fn open(store: &Store) -> Result<MaintenanceSession> {
         let session = MaintenanceSession {
             session_id: format!("maint-{}", uuid::Uuid::new_v4().simple()),
         };
@@ -228,7 +228,7 @@ impl MaintenanceSession {
 
     /// Close the window. Pending proposals stay exactly as they are —
     /// restoring them after a restart is a read, never a replay.
-    pub fn end(self, store: &Store) -> OfficeResult<()> {
+    pub fn end(self, store: &Store) -> Result<()> {
         store.connection().execute(
             "UPDATE maintenance_sessions SET ended_at = ?2 WHERE session_id = ?1",
             rusqlite::params![self.session_id, utc_now()],
@@ -262,14 +262,14 @@ impl<'a> MaintenanceService<'a> {
         session: &MaintenanceSession,
         registry: &KnowledgeRegistry<'_>,
         stale_after_days: u32,
-    ) -> OfficeResult<ScanReport> {
+    ) -> Result<ScanReport> {
         let scan_id = self.open_scan(session, "knowledge_review")?;
         let mut proposed = Vec::new();
         let mut already = 0usize;
 
         let cutoff = (OffsetDateTime::now_utc() - time::Duration::days(stale_after_days as i64))
             .format(&Rfc3339)
-            .map_err(|e| OfficeError::Validation(format!("cutoff format: {e}")))?;
+            .map_err(|e| Error::Validation(format!("cutoff format: {e}")))?;
 
         for item in registry_export_items(registry)? {
             if item.status != crate::knowledge::KnowledgeStatus::Active {
@@ -279,7 +279,7 @@ impl<'a> MaintenanceService<'a> {
                 Ok(updated) => {
                     let updated = updated
                         .format(&Rfc3339)
-                        .map_err(|e| OfficeError::Validation(format!("timestamp format: {e}")))?;
+                        .map_err(|e| Error::Validation(format!("timestamp format: {e}")))?;
                     if updated.as_str() > cutoff.as_str() {
                         continue;
                     }
@@ -377,7 +377,7 @@ impl<'a> MaintenanceService<'a> {
         &self,
         session: &MaintenanceSession,
         records: &[TaskWorktreeRecord],
-    ) -> OfficeResult<ScanReport> {
+    ) -> Result<ScanReport> {
         let scan_id = self.open_scan(session, "worktree_review")?;
         let mut proposed = Vec::new();
         let mut already = 0usize;
@@ -429,7 +429,7 @@ impl<'a> MaintenanceService<'a> {
         &self,
         session: &MaintenanceSession,
         repo_root: &Path,
-    ) -> OfficeResult<ScanReport> {
+    ) -> Result<ScanReport> {
         let scan_id = self.open_scan(session, "repo_review")?;
         let output = CliRunner::default().run("git", repo_root, &["status", "--porcelain"]);
 
@@ -491,7 +491,7 @@ impl<'a> MaintenanceService<'a> {
 
     /// Every open proposal, oldest first — the restart view. Reading this
     /// executes nothing.
-    pub fn open_proposals(&self) -> OfficeResult<Vec<Proposal>> {
+    pub fn open_proposals(&self) -> Result<Vec<Proposal>> {
         self.proposals_by_status("open")
     }
 
@@ -508,16 +508,16 @@ impl<'a> MaintenanceService<'a> {
         authority: &AuthorityEngine<'_>,
         registry: &KnowledgeRegistry<'_>,
         note: impl Into<String>,
-    ) -> OfficeResult<Proposal> {
+    ) -> Result<Proposal> {
         let proposal = self.require_proposal(proposal_id)?;
         if proposal.status != ProposalStatus::Open {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "proposal `{proposal_id}` is already {}",
                 proposal.status.as_str()
             )));
         }
         if proposal.suggested_action == SuggestedAction::HumanReview {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "this proposal is for human review only — maintenance never prunes \
                  worktrees, deletes files or touches remotes; a human must name the \
                  exact action"
@@ -528,9 +528,7 @@ impl<'a> MaintenanceService<'a> {
         // task-scoped grant is refused by the cross-task check on purpose.
         authority
             .check(actor, "maintain_knowledge", None)?
-            .map_err(|reason| {
-                OfficeError::Validation(format!("maintenance not authorized: {reason}"))
-            })?;
+            .map_err(|reason| Error::Validation(format!("maintenance not authorized: {reason}")))?;
 
         let note = note.into();
         let now = utc_now();
@@ -555,7 +553,7 @@ impl<'a> MaintenanceService<'a> {
             rusqlite::params![proposal_id, now, actor_str, note],
         )?;
         self.get_proposal(proposal_id)?
-            .ok_or_else(|| OfficeError::NotFound {
+            .ok_or_else(|| Error::NotFound {
                 entity: "proposal",
                 id: proposal_id.to_string(),
             })
@@ -571,10 +569,10 @@ impl<'a> MaintenanceService<'a> {
         actor: &Actor,
         authority: &AuthorityEngine<'_>,
         note: impl Into<String>,
-    ) -> OfficeResult<Proposal> {
+    ) -> Result<Proposal> {
         let proposal = self.require_proposal(proposal_id)?;
         if proposal.status != ProposalStatus::Open {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "proposal `{proposal_id}` is already {}",
                 proposal.status.as_str()
             )));
@@ -582,7 +580,7 @@ impl<'a> MaintenanceService<'a> {
         authority
             .check(actor, "maintain_knowledge", None)?
             .map_err(|reason| {
-                OfficeError::Validation(format!("maintenance dismissal not authorized: {reason}"))
+                Error::Validation(format!("maintenance dismissal not authorized: {reason}"))
             })?;
         let note = note.into();
         let actor_str = match actor {
@@ -596,13 +594,13 @@ impl<'a> MaintenanceService<'a> {
             rusqlite::params![proposal_id, utc_now(), actor_str, note],
         )?;
         self.get_proposal(proposal_id)?
-            .ok_or_else(|| OfficeError::NotFound {
+            .ok_or_else(|| Error::NotFound {
                 entity: "proposal",
                 id: proposal_id.to_string(),
             })
     }
 
-    pub fn get_proposal(&self, proposal_id: &str) -> OfficeResult<Option<Proposal>> {
+    pub fn get_proposal(&self, proposal_id: &str) -> Result<Option<Proposal>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT proposal_id, session_id, dedup_key, kind, subject, evidence,
                     suggested_action, status, created_at, resolved_at, resolved_by,
@@ -613,15 +611,15 @@ impl<'a> MaintenanceService<'a> {
         Ok(row)
     }
 
-    fn require_proposal(&self, proposal_id: &str) -> OfficeResult<Proposal> {
+    fn require_proposal(&self, proposal_id: &str) -> Result<Proposal> {
         self.get_proposal(proposal_id)?
-            .ok_or_else(|| OfficeError::NotFound {
+            .ok_or_else(|| Error::NotFound {
                 entity: "proposal",
                 id: proposal_id.to_string(),
             })
     }
 
-    fn proposals_by_status(&self, status: &str) -> OfficeResult<Vec<Proposal>> {
+    fn proposals_by_status(&self, status: &str) -> Result<Vec<Proposal>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT proposal_id, session_id, dedup_key, kind, subject, evidence,
                     suggested_action, status, created_at, resolved_at, resolved_by,
@@ -638,7 +636,7 @@ impl<'a> MaintenanceService<'a> {
 
     // -- Internals -------------------------------------------------------------
 
-    fn open_scan(&self, session: &MaintenanceSession, kind: &str) -> OfficeResult<String> {
+    fn open_scan(&self, session: &MaintenanceSession, kind: &str) -> Result<String> {
         let scan_id = format!("scan-{}", uuid::Uuid::new_v4().simple());
         self.store.connection().execute(
             "INSERT INTO maintenance_scans(scan_id, session_id, kind, started_at)
@@ -648,7 +646,7 @@ impl<'a> MaintenanceService<'a> {
         Ok(scan_id)
     }
 
-    fn close_scan(&self, scan_id: &str, proposed: usize, already: usize) -> OfficeResult<()> {
+    fn close_scan(&self, scan_id: &str, proposed: usize, already: usize) -> Result<()> {
         self.store.connection().execute(
             "UPDATE maintenance_scans SET finished_at = ?2, proposed = ?3, duplicates = ?4
              WHERE scan_id = ?1",
@@ -662,7 +660,7 @@ impl<'a> MaintenanceService<'a> {
         session: &MaintenanceSession,
         scan_id: &str,
         new: NewProposal,
-    ) -> OfficeResult<Option<Proposal>> {
+    ) -> Result<Option<Proposal>> {
         // Dedup rule: a proposal is unique per (kind, subject, generation).
         // The generation counts EXECUTED proposals for the subject — an
         // executed exit removes the subject from the scan population, so
@@ -784,7 +782,7 @@ fn map_proposal(row: &rusqlite::Row<'_>) -> rusqlite::Result<Proposal> {
 /// Snapshot the registry's items (the maintenance view over knowledge).
 fn registry_export_items(
     registry: &KnowledgeRegistry<'_>,
-) -> OfficeResult<Vec<crate::knowledge::KnowledgeItem>> {
+) -> Result<Vec<crate::knowledge::KnowledgeItem>> {
     let export = registry.export_json()?;
     let mut items = Vec::new();
     if let Some(entries) = export.get("entries").and_then(|e| e.as_array()) {

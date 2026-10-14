@@ -19,7 +19,7 @@ pub use session::{
 
 use std::sync::{Arc, Mutex};
 
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{ExecutionId, TerminalId};
 use crate::foundation::records::{TerminalEventKind, TerminalOwner};
 use crate::foundation::store::Store;
@@ -63,7 +63,7 @@ impl TerminalRegistry {
         purpose: impl Into<String>,
         disk_log: Option<Arc<DiskLog>>,
         store: Option<&Store>,
-    ) -> OfficeResult<(TerminalId, Arc<TerminalHandle>)> {
+    ) -> Result<(TerminalId, Arc<TerminalHandle>)> {
         let handle = TerminalHandle::spawn(&spec, &owner, disk_log)?;
         let terminal_id = TerminalId::new();
         let entry = TerminalEntry {
@@ -84,7 +84,7 @@ impl TerminalRegistry {
     }
 
     /// The live handle of a registered terminal.
-    pub fn handle(&self, terminal_id: &TerminalId) -> OfficeResult<Option<Arc<TerminalHandle>>> {
+    pub fn handle(&self, terminal_id: &TerminalId) -> Result<Option<Arc<TerminalHandle>>> {
         Ok(self
             .sessions
             .lock()
@@ -94,7 +94,7 @@ impl TerminalRegistry {
             .map(|(_, handle)| handle.clone()))
     }
 
-    pub fn entry(&self, terminal_id: &TerminalId) -> OfficeResult<Option<TerminalEntry>> {
+    pub fn entry(&self, terminal_id: &TerminalId) -> Result<Option<TerminalEntry>> {
         Ok(self
             .sessions
             .lock()
@@ -126,7 +126,7 @@ impl TerminalRegistry {
         terminal_id: &TerminalId,
         policy: StopPolicy,
         store: Option<&Store>,
-    ) -> OfficeResult<TerminalExit> {
+    ) -> Result<TerminalExit> {
         let (entry, handle) = self
             .sessions
             .lock()
@@ -134,7 +134,7 @@ impl TerminalRegistry {
             .iter()
             .find(|(entry, _)| &entry.terminal_id == terminal_id)
             .map(|(entry, handle)| (entry.clone(), handle.clone()))
-            .ok_or_else(|| OfficeError::NotFound {
+            .ok_or_else(|| Error::NotFound {
                 entity: "terminal",
                 id: terminal_id.to_string(),
             })?;
@@ -177,7 +177,7 @@ impl TerminalRegistry {
         rows: u16,
         history: Vec<String>,
         disk_log: Option<Arc<DiskLog>>,
-    ) -> OfficeResult<()> {
+    ) -> Result<()> {
         self.adopt_with_screen(
             terminal_id,
             owner,
@@ -213,7 +213,7 @@ impl TerminalRegistry {
         // the adopted parser before its reader starts (see
         // `TerminalHandle::adopt_with_screen`).
         pending: &[u8],
-    ) -> OfficeResult<()> {
+    ) -> Result<()> {
         let handle = Arc::new(TerminalHandle::adopt_with_screen(
             master_fd,
             pid,

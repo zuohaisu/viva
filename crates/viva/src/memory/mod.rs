@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::authority::{Actor, AuthorityEngine};
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{MemberId, ProjectId, utc_now};
 use crate::foundation::store::{DOMAIN_MEMORY, MigrationRegistry, Store};
 
@@ -329,7 +329,7 @@ impl<'a> MemoryService<'a> {
     /// Run the adapter's real status command (a read-only `list` through
     /// the provider) so readiness is reported from an actual round trip —
     /// never from file existence alone.
-    pub fn probe_adapter_status(&self) -> OfficeResult<serde_json::Value> {
+    pub fn probe_adapter_status(&self) -> Result<serde_json::Value> {
         let answer = self.run_adapter(json!({ "command": "status" }))?;
         Ok(json!({
             "ok": answer.ok,
@@ -355,14 +355,12 @@ impl<'a> MemoryService<'a> {
         source: &str,
         category: &str,
         tags: &str,
-    ) -> OfficeResult<MemoryLink> {
+    ) -> Result<MemoryLink> {
         if content.trim().is_empty() {
-            return Err(OfficeError::Validation(
-                "memory content must not be empty".into(),
-            ));
+            return Err(Error::Validation("memory content must not be empty".into()));
         }
         if source.trim().is_empty() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "memory writes require a source (who wrote this, from which conversation/task)"
                     .into(),
             ));
@@ -374,7 +372,7 @@ impl<'a> MemoryService<'a> {
             "tags": tags,
         }))?;
         if !answer.ok || answer.state != "fetched" {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "memory write unavailable: {}",
                 answer
                     .error
@@ -382,7 +380,7 @@ impl<'a> MemoryService<'a> {
             )));
         }
         let Some(fact) = answer.fact else {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "adapter answered ok without a fact id".into(),
             ));
         };
@@ -398,11 +396,9 @@ impl<'a> MemoryService<'a> {
         member: &MemberId,
         project: Option<&ProjectId>,
         source: &str,
-    ) -> OfficeResult<MemoryLink> {
+    ) -> Result<MemoryLink> {
         if source.trim().is_empty() {
-            return Err(OfficeError::Validation(
-                "memory links require a source".into(),
-            ));
+            return Err(Error::Validation("memory links require a source".into()));
         }
         if let Some(existing) = self.link_for(fact_id, member)? {
             return Ok(existing);
@@ -446,9 +442,9 @@ impl<'a> MemoryService<'a> {
         project: Option<&ProjectId>,
         query: &str,
         max_total_bytes: usize,
-    ) -> OfficeResult<MemorySearch> {
+    ) -> Result<MemorySearch> {
         if query.trim().is_empty() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "memory search query must not be empty".into(),
             ));
         }
@@ -513,9 +509,9 @@ impl<'a> MemoryService<'a> {
         project: Option<&ProjectId>,
         entity: &str,
         max_total_bytes: usize,
-    ) -> OfficeResult<MemorySearch> {
+    ) -> Result<MemorySearch> {
         if entity.trim().is_empty() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "memory probe entity must not be empty".into(),
             ));
         }
@@ -541,7 +537,7 @@ impl<'a> MemoryService<'a> {
         hits: Vec<AdapterFact>,
         query: &str,
         max_total_bytes: usize,
-    ) -> OfficeResult<MemorySearch> {
+    ) -> Result<MemorySearch> {
         let mut facts = Vec::new();
         let mut hidden_unclaimable = 0usize;
         let mut used_bytes = 0usize;
@@ -590,7 +586,7 @@ impl<'a> MemoryService<'a> {
         reason: &str,
         actor: &Actor,
         authority: &AuthorityEngine<'_>,
-    ) -> OfficeResult<MemoryLink> {
+    ) -> Result<MemoryLink> {
         self.exit_flip(fact_id, LinkStatus::Archived, reason, actor, authority)
     }
 
@@ -600,7 +596,7 @@ impl<'a> MemoryService<'a> {
         reason: &str,
         actor: &Actor,
         authority: &AuthorityEngine<'_>,
-    ) -> OfficeResult<MemoryLink> {
+    ) -> Result<MemoryLink> {
         self.exit_flip(fact_id, LinkStatus::Active, reason, actor, authority)
     }
 
@@ -611,9 +607,9 @@ impl<'a> MemoryService<'a> {
         reason: &str,
         actor: &Actor,
         authority: &AuthorityEngine<'_>,
-    ) -> OfficeResult<MemoryLink> {
+    ) -> Result<MemoryLink> {
         let Actor::Member { member, grant: _ } = actor else {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "workers do not exit memories; member grants only".into(),
             ));
         };
@@ -621,18 +617,16 @@ impl<'a> MemoryService<'a> {
         // the authority engine appends its own denial record.
         authority
             .check(actor, "maintain_knowledge", None)?
-            .map_err(|reason| {
-                OfficeError::Validation(format!("memory exit not authorized: {reason}"))
-            })?;
+            .map_err(|reason| Error::Validation(format!("memory exit not authorized: {reason}")))?;
         // Owner condition: a member exits only their OWN claim on a fact.
         let Some(_link) = self.link_for(fact_id, member)? else {
-            return Err(OfficeError::NotFound {
+            return Err(Error::NotFound {
                 entity: "own memory link",
                 id: fact_id.to_string(),
             });
         };
         if reason.trim().is_empty() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "a memory exit action requires a reason".into(),
             ));
         }
@@ -661,7 +655,7 @@ impl<'a> MemoryService<'a> {
             }
         }
         self.link_for(fact_id, member)?
-            .ok_or_else(|| OfficeError::NotFound {
+            .ok_or_else(|| Error::NotFound {
                 entity: "own memory link",
                 id: fact_id.to_string(),
             })
@@ -670,7 +664,7 @@ impl<'a> MemoryService<'a> {
     // -- Records -----------------------------------------------------------------
 
     /// The viewer's own link on a fact, if any.
-    pub fn link_for(&self, fact_id: i64, member: &MemberId) -> OfficeResult<Option<MemoryLink>> {
+    pub fn link_for(&self, fact_id: i64, member: &MemberId) -> Result<Option<MemoryLink>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT link_id, fact_id, member_id, project_id, source, status, created_at,
                     archived_at, archived_reason
@@ -717,7 +711,7 @@ impl<'a> MemoryService<'a> {
         Ok(row)
     }
 
-    pub fn usage_of(&self, fact_id: i64) -> OfficeResult<Vec<UsageRecord>> {
+    pub fn usage_of(&self, fact_id: i64) -> Result<Vec<UsageRecord>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT seq, fact_id, member_id, query, used_at
              FROM memory_usages WHERE fact_id = ?1 ORDER BY seq",
@@ -745,7 +739,7 @@ impl<'a> MemoryService<'a> {
         Ok(records)
     }
 
-    fn record_usage(&self, fact_id: i64, member: &MemberId, query: &str) -> OfficeResult<()> {
+    fn record_usage(&self, fact_id: i64, member: &MemberId, query: &str) -> Result<()> {
         self.store.connection().execute(
             "INSERT INTO memory_usages(fact_id, member_id, query, used_at)
              VALUES (?1, ?2, ?3, ?4)",
@@ -760,7 +754,7 @@ impl<'a> MemoryService<'a> {
     /// no HERMES_* leakage beyond the documented checkout path, and the
     /// db path is ALWAYS explicit (the adapter refuses without one — the
     /// user's real store can never be a silent default).
-    fn run_adapter(&self, request: serde_json::Value) -> OfficeResult<AdapterAnswer> {
+    fn run_adapter(&self, request: serde_json::Value) -> Result<AdapterAnswer> {
         let script = &self.adapter.adapter_script;
         if !script.is_file() {
             return Ok(unavailable_answer(format!(
@@ -832,7 +826,7 @@ impl<'a> MemoryService<'a> {
             }
             "status" => {} // no extra flags
             other => {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "unknown adapter command `{other}`"
                 )));
             }

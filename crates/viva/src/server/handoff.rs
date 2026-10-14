@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 
 /// Handoff wire version.
 pub const HANDOFF_PROTOCOL: u32 = 1;
@@ -67,9 +67,9 @@ pub fn send_entries(
     stream: &mut UnixStream,
     manifest: &HandoffManifest,
     fds: &[RawFd],
-) -> OfficeResult<()> {
+) -> Result<()> {
     if manifest.entries.len() != fds.len() {
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "handoff manifest has {} entries but {} fds",
             manifest.entries.len(),
             fds.len()
@@ -80,7 +80,7 @@ pub fn send_entries(
     let mut text = serde_json::to_string(manifest)?;
     text.push('\n');
     if text.len() > 64 * 1024 * 1024 {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "handoff manifest exceeds 64 MiB; old server stays resident".into(),
         ));
     }
@@ -95,7 +95,7 @@ pub fn send_entries(
     let mut reader = std::io::BufReader::new(stream.try_clone()?);
     let _ = std::io::BufRead::read_line(&mut reader, &mut ack);
     if !ack.contains("\"ok\":true") && !ack.contains("\"ok\": true") {
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "handoff receiver did not ack: {}",
             ack.trim()
         )));
@@ -113,7 +113,7 @@ pub fn send_entries(
 /// and a control buffer on EVERY call, collecting fds per segment and
 /// parsing the manifest from the byte stream - coalescing then cannot
 /// lose anything.
-pub fn receive_entries(stream: &UnixStream) -> OfficeResult<(HandoffManifest, Vec<RawFd>)> {
+pub fn receive_entries(stream: &UnixStream) -> Result<(HandoffManifest, Vec<RawFd>)> {
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     // SAFETY: every recvmsg below targets our own connected fd with valid
@@ -156,14 +156,12 @@ pub fn receive_entries(stream: &UnixStream) -> OfficeResult<(HandoffManifest, Ve
                 }
             }
             if n < 0 {
-                break Err(OfficeError::Io(std::io::Error::last_os_error()));
+                break Err(Error::Io(std::io::Error::last_os_error()));
             }
             let n = n as usize;
             data.extend_from_slice(&chunk[..n]);
             if data.len() > 64 * 1024 * 1024 {
-                break Err(OfficeError::Validation(
-                    "handoff manifest exceeds 64 MiB".into(),
-                ));
+                break Err(Error::Validation("handoff manifest exceeds 64 MiB".into()));
             }
             if manifest.is_none() {
                 if let Some(pos) = data.iter().position(|b| *b == b'\n') {
@@ -171,7 +169,7 @@ pub fn receive_entries(stream: &UnixStream) -> OfficeResult<(HandoffManifest, Ve
                     match serde_json::from_slice::<HandoffManifest>(&line[..line.len() - 1]) {
                         Ok(parsed) => {
                             if parsed.protocol != HANDOFF_PROTOCOL {
-                                break Err(OfficeError::Validation(format!(
+                                break Err(Error::Validation(format!(
                                     "handoff protocol {} (expected {HANDOFF_PROTOCOL})",
                                     parsed.protocol
                                 )));
@@ -179,9 +177,7 @@ pub fn receive_entries(stream: &UnixStream) -> OfficeResult<(HandoffManifest, Ve
                             manifest = Some(parsed);
                         }
                         Err(e) => {
-                            break Err(OfficeError::Validation(format!(
-                                "bad handoff manifest: {e}"
-                            )));
+                            break Err(Error::Validation(format!("bad handoff manifest: {e}")));
                         }
                     }
                 }
@@ -192,7 +188,7 @@ pub fn receive_entries(stream: &UnixStream) -> OfficeResult<(HandoffManifest, Ve
                 }
             }
             if n == 0 {
-                break Err(OfficeError::Validation(
+                break Err(Error::Validation(
                     "handoff stream closed before all fds arrived".into(),
                 ));
             }
@@ -214,12 +210,12 @@ pub fn receive_entries(stream: &UnixStream) -> OfficeResult<(HandoffManifest, Ve
     #[cfg(not(unix))]
     {
         let _ = stream;
-        Err(OfficeError::Validation("fd passing requires unix".into()))
+        Err(Error::Validation("fd passing requires unix".into()))
     }
 }
 
 /// Send one fd over the stream via SCM_RIGHTS.
-fn send_one_fd(stream: &UnixStream, fd: RawFd) -> OfficeResult<()> {
+fn send_one_fd(stream: &UnixStream, fd: RawFd) -> Result<()> {
     #[cfg(unix)]
     unsafe {
         use std::os::fd::AsRawFd as _;
@@ -243,14 +239,14 @@ fn send_one_fd(stream: &UnixStream, fd: RawFd) -> OfficeResult<()> {
         *data = fd;
         let sent = libc::sendmsg(stream.as_raw_fd(), &msg, 0);
         if sent < 0 {
-            return Err(OfficeError::Io(std::io::Error::last_os_error()));
+            return Err(Error::Io(std::io::Error::last_os_error()));
         }
         Ok(())
     }
     #[cfg(not(unix))]
     {
         let _ = (stream, fd);
-        Err(OfficeError::Validation("fd passing requires unix".into()))
+        Err(Error::Validation("fd passing requires unix".into()))
     }
 }
 

@@ -11,7 +11,7 @@ use std::str::FromStr as _;
 use viva::foundation::events::{self, NewEvent};
 use viva::foundation::paths::{database_path, ensure_private_dir, viva_home};
 use viva::foundation::store::{KNOWN_DOMAINS, Store};
-use viva::foundation::{OfficeError, OfficeResult};
+use viva::foundation::{Error, Result};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -24,7 +24,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(args: &[String]) -> OfficeResult<()> {
+fn run(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         // Bare `viva` IS the workbench: attach as a client of the resident
         // office server (auto-starting one when none runs). The TUI is a
@@ -45,7 +45,7 @@ fn run(args: &[String]) -> OfficeResult<()> {
             "start" | "server" | "server-restart" | "status" | "dispatch" | "terminals"
             | "stop-terminal" | "result" | "shutdown" | "pause" | "resume" | "brief"
             | "create-task" | "create-project" | "grant" | "handoff",
-        ) => cmd_office(args),
+        ) => cmd_control(args),
         Some("workspace") => cmd_workspace(args.get(1..).unwrap_or(&[])),
         Some("open") => {
             // `viva open <path>` = open the workspace, then the workbench.
@@ -54,7 +54,7 @@ fn run(args: &[String]) -> OfficeResult<()> {
             require_interactive_terminal()?;
             let path = args
                 .get(1)
-                .ok_or_else(|| OfficeError::Validation("open needs a path".into()))?;
+                .ok_or_else(|| Error::Validation("open needs a path".into()))?;
             let reply = workspace_call(&["open".into(), path.clone()])?;
             eprintln!(
                 "{}",
@@ -80,9 +80,7 @@ fn run(args: &[String]) -> OfficeResult<()> {
         }
         _ => {
             print_usage();
-            Err(OfficeError::Validation(
-                "unknown or missing subcommand".into(),
-            ))
+            Err(Error::Validation("unknown or missing subcommand".into()))
         }
     }
 }
@@ -90,13 +88,13 @@ fn run(args: &[String]) -> OfficeResult<()> {
 /// Honest gate BEFORE any server is started: a workbench without a real
 /// terminal cannot work, and auto-starting a resident server for a call
 /// that must fail would leak a runtime.
-fn require_interactive_terminal() -> OfficeResult<()> {
+fn require_interactive_terminal() -> Result<()> {
     #[cfg(unix)]
     let stdin_is_tty = unsafe { libc::isatty(0) == 1 };
     #[cfg(not(unix))]
     let stdin_is_tty = true;
     if !stdin_is_tty {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "viva workbench needs an interactive terminal (stdin is not a tty); \
              use `viva server` for the headless host and `viva terminal` for headless \
              terminals"
@@ -111,10 +109,10 @@ fn require_interactive_terminal() -> OfficeResult<()> {
 /// one is spawned detached first (its own process group, log in
 /// `server.log`). `q` detaches the client; the server keeps every terminal
 /// running until an explicit `viva shutdown` (ADR 0012, issue #43).
-fn cmd_workbench() -> OfficeResult<()> {
+fn cmd_workbench() -> Result<()> {
     require_interactive_terminal()?;
     let home = viva::foundation::paths::viva_home(None);
-    let client = viva::office::OfficeClient::ensure_server(&home)?;
+    let client = viva::server::Client::ensure_server(&home)?;
     eprintln!(
         "workbench: attached to the resident office server — `q` detaches, \
          the server keeps running (`viva shutdown` stops it); home {}",
@@ -127,10 +125,10 @@ fn cmd_workbench() -> OfficeResult<()> {
 /// orchestration primitives, reachable from the CLI envelope. Agents call
 /// these with --member/--grant so the socket gate can authorize them; a
 /// bare human caller acts as the owner.
-fn cmd_agent(args: &[String]) -> OfficeResult<()> {
+fn cmd_agent(args: &[String]) -> Result<()> {
     let home = viva::foundation::paths::viva_home(None);
     viva::foundation::paths::ensure_private_dir(&home)?;
-    let mut client = viva::office::OfficeClient::ensure_server(&home)?;
+    let mut client = viva::server::Client::ensure_server(&home)?;
     let mut named: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     // `args` arrives WITHOUT the `agent` subcommand; the subcommand word
     // itself carries no dashes and is skipped by the loop.
@@ -144,50 +142,50 @@ fn cmd_agent(args: &[String]) -> OfficeResult<()> {
         i += 1;
         let value = args
             .get(i)
-            .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+            .ok_or_else(|| Error::Validation(format!("flag {flag} needs a value")))?;
         named.insert(flag.trim_start_matches("--").to_string(), value.clone());
         i += 1;
     }
     let get = |key: &str| named.get(key).cloned();
-    let require = |key: &str| -> OfficeResult<String> {
-        get(key).ok_or_else(|| OfficeError::Validation(format!("agent needs --{key}")))
+    let require = |key: &str| -> Result<String> {
+        get(key).ok_or_else(|| Error::Validation(format!("agent needs --{key}")))
     };
     let wait_timeout = get("timeout").and_then(|t| t.parse::<u64>().ok());
     let kind = match args.first().map(String::as_str) {
-        Some("prompt") => viva::office::OfficeRequestKind::AgentPrompt {
+        Some("prompt") => viva::server::RequestKind::AgentPrompt {
             terminal_id: require("terminal")?,
             prompt: require("text")?,
         },
-        Some("wait") => viva::office::OfficeRequestKind::AgentWait {
+        Some("wait") => viva::server::RequestKind::AgentWait {
             terminal_id: require("terminal")?,
             status: require("status")?,
             timeout_secs: wait_timeout.unwrap_or(30),
         },
-        _ => return Err(OfficeError::Validation("agent needs prompt | wait".into())),
+        _ => return Err(Error::Validation("agent needs prompt | wait".into())),
     };
-    let mut request = viva::office::new_request(kind);
+    let mut request = viva::server::new_request(kind);
     request.member = get("member");
     request.grant = get("grant");
-    let response =
-        if let viva::office::OfficeRequestKind::AgentWait { timeout_secs, .. } = &request.kind {
-            // call_request_with_timeout carries --member/--grant; the old
-            // call_with_timeout rebuilt the request and dropped them.
-            let budget = std::time::Duration::from_secs(timeout_secs + 15);
-            client.call_request_with_timeout(request, budget)?
-        } else {
-            client.call_request(request)?
-        };
+    let response = if let viva::server::RequestKind::AgentWait { timeout_secs, .. } = &request.kind
+    {
+        // call_request_with_timeout carries --member/--grant; the old
+        // call_with_timeout rebuilt the request and dropped them.
+        let budget = std::time::Duration::from_secs(timeout_secs + 15);
+        client.call_request_with_timeout(request, budget)?
+    } else {
+        client.call_request(request)?
+    };
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
 }
 
 /// `viva events [--since <seq>] [--limit <n>]` — the durable event feed
 /// (S5): an orchestrator reconnects with its last seen seq.
-fn cmd_events(args: &[String]) -> OfficeResult<()> {
+fn cmd_events(args: &[String]) -> Result<()> {
     let (since, limit) = parse_events_args(args)?;
     let home = viva::foundation::paths::viva_home(None);
-    let mut client = viva::office::OfficeClient::ensure_server(&home)?;
-    let response = client.call(viva::office::OfficeRequestKind::EventsFeed {
+    let mut client = viva::server::Client::ensure_server(&home)?;
+    let response = client.call(viva::server::RequestKind::EventsFeed {
         since_seq: since,
         limit,
     })?;
@@ -198,7 +196,7 @@ fn cmd_events(args: &[String]) -> OfficeResult<()> {
 /// Pure parser for `viva events [--since <seq>] [--limit <n>]` so the
 /// off-by-one regression (QA F2: flags start at index 0 — the subcommand
 /// is already stripped) stays covered by a unit test.
-fn parse_events_args(args: &[String]) -> OfficeResult<(u64, u32)> {
+fn parse_events_args(args: &[String]) -> Result<(u64, u32)> {
     let mut since = 0u64;
     let mut limit = 100u32;
     let mut i = 0;
@@ -208,22 +206,20 @@ fn parse_events_args(args: &[String]) -> OfficeResult<(u64, u32)> {
                 i += 1;
                 since = args
                     .get(i)
-                    .ok_or_else(|| OfficeError::Validation("--since needs a value".into()))?
+                    .ok_or_else(|| Error::Validation("--since needs a value".into()))?
                     .parse()
-                    .map_err(|_| OfficeError::Validation("--since must be a number".into()))?;
+                    .map_err(|_| Error::Validation("--since must be a number".into()))?;
             }
             "--limit" => {
                 i += 1;
                 limit = args
                     .get(i)
-                    .ok_or_else(|| OfficeError::Validation("--limit needs a value".into()))?
+                    .ok_or_else(|| Error::Validation("--limit needs a value".into()))?
                     .parse()
-                    .map_err(|_| OfficeError::Validation("--limit must be a number".into()))?;
+                    .map_err(|_| Error::Validation("--limit must be a number".into()))?;
             }
             other => {
-                return Err(OfficeError::Validation(format!(
-                    "unknown events flag `{other}`"
-                )));
+                return Err(Error::Validation(format!("unknown events flag `{other}`")));
             }
         }
         i += 1;
@@ -232,16 +228,16 @@ fn parse_events_args(args: &[String]) -> OfficeResult<(u64, u32)> {
 }
 
 /// `viva sync …` (V15-4): the auto_pull switch and manual cycles.
-fn cmd_sync(args: &[String]) -> OfficeResult<()> {
+fn cmd_sync(args: &[String]) -> Result<()> {
     let home = viva::foundation::paths::viva_home(None);
-    let mut client = viva::office::OfficeClient::ensure_server(&home)?;
+    let mut client = viva::server::Client::ensure_server(&home)?;
     match args.first().map(String::as_str) {
         Some("now") | None => {
             // A cycle can run several 30s-timeout git commands; the
             // client's 10s default read timeout would report failure for
             // work that actually succeeded (QA F14).
             let response = client.call_with_timeout(
-                viva::office::OfficeRequestKind::SyncNow,
+                viva::server::RequestKind::SyncNow,
                 std::time::Duration::from_secs(150),
             )?;
             println!("{}", serde_json::to_string_pretty(&response)?);
@@ -251,17 +247,17 @@ fn cmd_sync(args: &[String]) -> OfficeResult<()> {
                 Some("on") => true,
                 Some("off") => false,
                 other => {
-                    return Err(OfficeError::Validation(format!(
+                    return Err(Error::Validation(format!(
                         "auto-pull needs on|off (got {other:?})"
                     )));
                 }
             };
-            let response = client.call(viva::office::OfficeRequestKind::SetAutoPull { on })?;
+            let response = client.call(viva::server::RequestKind::SetAutoPull { on })?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
         Some("status") => {
             let response = client.call_with_timeout(
-                viva::office::OfficeRequestKind::WorkbenchView,
+                viva::server::RequestKind::WorkbenchView,
                 std::time::Duration::from_secs(30),
             )?;
             let note = response.get("sync_note").cloned().unwrap_or_default();
@@ -274,7 +270,7 @@ fn cmd_sync(args: &[String]) -> OfficeResult<()> {
             );
         }
         _ => {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "sync needs now | auto-pull | status".into(),
             ));
         }
@@ -283,9 +279,9 @@ fn cmd_sync(args: &[String]) -> OfficeResult<()> {
 }
 
 /// `viva recovery …` (V15-5): the rate-limit recovery plans.
-fn cmd_recovery(args: &[String]) -> OfficeResult<()> {
+fn cmd_recovery(args: &[String]) -> Result<()> {
     let home = viva::foundation::paths::viva_home(None);
-    let mut client = viva::office::OfficeClient::ensure_server(&home)?;
+    let mut client = viva::server::Client::ensure_server(&home)?;
     let mut named: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut i = 1;
     while i < args.len() {
@@ -298,28 +294,28 @@ fn cmd_recovery(args: &[String]) -> OfficeResult<()> {
         let value = args
             .get(i)
             .cloned()
-            .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+            .ok_or_else(|| Error::Validation(format!("flag {flag} needs a value")))?;
         named.insert(flag.trim_start_matches("--").to_string(), value);
         i += 1;
     }
     let get = |key: &str| named.get(key).cloned();
     let kind = match args.first().map(String::as_str) {
-        Some("list") => viva::office::OfficeRequestKind::RecoveryList,
-        Some("schedule") => viva::office::OfficeRequestKind::RecoverySchedule {
+        Some("list") => viva::server::RequestKind::RecoveryList,
+        Some("schedule") => viva::server::RequestKind::RecoverySchedule {
             terminal_id: get("terminal")
-                .ok_or_else(|| OfficeError::Validation("schedule needs --terminal".into()))?,
+                .ok_or_else(|| Error::Validation("schedule needs --terminal".into()))?,
             reset_at: get("at")
-                .ok_or_else(|| OfficeError::Validation("schedule needs --at <rfc3339>".into()))?,
+                .ok_or_else(|| Error::Validation("schedule needs --at <rfc3339>".into()))?,
             task_id: get("task"),
         },
-        Some("cancel") => viva::office::OfficeRequestKind::RecoveryCancel {
+        Some("cancel") => viva::server::RequestKind::RecoveryCancel {
             plan_id: get("id")
-                .ok_or_else(|| OfficeError::Validation("cancel needs --id".into()))?
+                .ok_or_else(|| Error::Validation("cancel needs --id".into()))?
                 .parse()
-                .map_err(|_| OfficeError::Validation("--id must be a number".into()))?,
+                .map_err(|_| Error::Validation("--id must be a number".into()))?,
         },
         _ => {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "recovery needs list | schedule | cancel".into(),
             ));
         }
@@ -332,10 +328,10 @@ fn cmd_recovery(args: &[String]) -> OfficeResult<()> {
 /// `viva terminal …` — headless terminal control over the resident server:
 /// create fixed-size sessions, read snapshots, resize, stop. No UI needed;
 /// a resident server is auto-started when none runs (issue #43).
-fn cmd_terminal(args: &[String]) -> OfficeResult<()> {
+fn cmd_terminal(args: &[String]) -> Result<()> {
     let home = viva::foundation::paths::viva_home(None);
     viva::foundation::paths::ensure_private_dir(&home)?;
-    let mut client = viva::office::OfficeClient::ensure_server(&home)?;
+    let mut client = viva::server::Client::ensure_server(&home)?;
     match args.first().map(String::as_str) {
         Some("create") => {
             let mut cols: u16 = 80;
@@ -351,17 +347,17 @@ fn cmd_terminal(args: &[String]) -> OfficeResult<()> {
                         let flag = args[i].trim_start_matches('-').to_string();
                         i += 1;
                         let value = args.get(i).ok_or_else(|| {
-                            OfficeError::Validation(format!("flag --{flag} needs a value"))
+                            Error::Validation(format!("flag --{flag} needs a value"))
                         })?;
                         match flag.as_str() {
                             "cols" => {
                                 cols = value.parse().map_err(|_| {
-                                    OfficeError::Validation("--cols must be a number".into())
+                                    Error::Validation("--cols must be a number".into())
                                 })?
                             }
                             "rows" => {
                                 rows = value.parse().map_err(|_| {
-                                    OfficeError::Validation("--rows must be a number".into())
+                                    Error::Validation("--rows must be a number".into())
                                 })?
                             }
                             "cwd" => cwd = Some(value.clone()),
@@ -375,7 +371,7 @@ fn cmd_terminal(args: &[String]) -> OfficeResult<()> {
                         break;
                     }
                     other => {
-                        return Err(OfficeError::Validation(format!(
+                        return Err(Error::Validation(format!(
                             "unknown terminal create flag `{other}`"
                         )));
                     }
@@ -383,14 +379,14 @@ fn cmd_terminal(args: &[String]) -> OfficeResult<()> {
                 i += 1;
             }
             if argv.is_empty() {
-                return Err(OfficeError::Validation(
+                return Err(Error::Validation(
                     "terminal create needs an explicit argv after `--`".into(),
                 ));
             }
             let cwd = cwd
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-            let response = client.call(viva::office::OfficeRequestKind::TerminalCreate {
+            let response = client.call(viva::server::RequestKind::TerminalCreate {
                 argv,
                 cwd: cwd.display().to_string(),
                 env: vec![],
@@ -405,9 +401,9 @@ fn cmd_terminal(args: &[String]) -> OfficeResult<()> {
         }
         Some("snapshot") => {
             let terminal_id = args.get(1).ok_or_else(|| {
-                OfficeError::Validation("usage: viva terminal snapshot <terminal-id>".into())
+                Error::Validation("usage: viva terminal snapshot <terminal-id>".into())
             })?;
-            let response = client.call(viva::office::OfficeRequestKind::TerminalSnapshot {
+            let response = client.call(viva::server::RequestKind::TerminalSnapshot {
                 terminal_id: terminal_id.clone(),
             })?;
             println!("{}", serde_json::to_string_pretty(&response)?);
@@ -415,7 +411,7 @@ fn cmd_terminal(args: &[String]) -> OfficeResult<()> {
         }
         Some("resize") => {
             let terminal_id = args.get(1).ok_or_else(|| {
-                OfficeError::Validation(
+                Error::Validation(
                     "usage: viva terminal resize <terminal-id> --cols N --rows N".into(),
                 )
             })?;
@@ -426,21 +422,21 @@ fn cmd_terminal(args: &[String]) -> OfficeResult<()> {
                 i += 1;
                 let value = args
                     .get(i)
-                    .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+                    .ok_or_else(|| Error::Validation(format!("flag {flag} needs a value")))?;
                 named.insert(flag.to_string(), value.clone());
                 i += 1;
             }
             let cols: u16 = named
                 .get("--cols")
-                .ok_or_else(|| OfficeError::Validation("resize needs --cols".into()))?
+                .ok_or_else(|| Error::Validation("resize needs --cols".into()))?
                 .parse()
-                .map_err(|_| OfficeError::Validation("--cols must be a number".into()))?;
+                .map_err(|_| Error::Validation("--cols must be a number".into()))?;
             let rows: u16 = named
                 .get("--rows")
-                .ok_or_else(|| OfficeError::Validation("resize needs --rows".into()))?
+                .ok_or_else(|| Error::Validation("resize needs --rows".into()))?
                 .parse()
-                .map_err(|_| OfficeError::Validation("--rows must be a number".into()))?;
-            let response = client.call(viva::office::OfficeRequestKind::TerminalResize {
+                .map_err(|_| Error::Validation("--rows must be a number".into()))?;
+            let response = client.call(viva::server::RequestKind::TerminalResize {
                 terminal_id: terminal_id.clone(),
                 cols,
                 rows,
@@ -448,7 +444,7 @@ fn cmd_terminal(args: &[String]) -> OfficeResult<()> {
             println!("{}", serde_json::to_string_pretty(&response)?);
             Ok(())
         }
-        _ => Err(OfficeError::Validation(
+        _ => Err(Error::Validation(
             "terminal needs create | snapshot | resize (stop via `viva stop-terminal`)".into(),
         )),
     }
@@ -657,19 +653,19 @@ USAGE:
     );
 }
 
-fn open_office_store() -> OfficeResult<Store> {
+fn open_store() -> Result<Store> {
     let home = viva_home(None);
     ensure_private_dir(&home)?;
     // The product entry opens the FULL office composition (every delivered
     // domain), not just the foundation slice — `viva init` must leave a
     // store the office can actually use.
-    Store::open(&database_path(&home), viva::office::office_migrations())
+    Store::open(&database_path(&home), viva::server::migrations())
 }
 
-fn cmd_init() -> OfficeResult<()> {
+fn cmd_init() -> Result<()> {
     let home = viva_home(None);
     ensure_private_dir(&home)?;
-    let store = open_office_store()?;
+    let store = open_store()?;
     println!("viva home: {}", home.display());
     println!("database:  {}", database_path(&home).display());
     for (domain, version) in store.schema_versions() {
@@ -678,7 +674,7 @@ fn cmd_init() -> OfficeResult<()> {
     Ok(())
 }
 
-fn cmd_doctor() -> OfficeResult<()> {
+fn cmd_doctor() -> Result<()> {
     let home = viva_home(None);
     let db = database_path(&home);
     println!("home:      {}", home.display());
@@ -687,7 +683,7 @@ fn cmd_doctor() -> OfficeResult<()> {
         db.display(),
         if db.exists() { "present" } else { "missing" }
     );
-    let store = open_office_store()?;
+    let store = open_store()?;
     println!("state:     openable");
     for (domain, version) in store.schema_versions() {
         println!("schema:    {domain} v{version}");
@@ -708,28 +704,26 @@ fn cmd_doctor() -> OfficeResult<()> {
     Ok(())
 }
 
-fn cmd_event(args: &[String]) -> OfficeResult<()> {
+fn cmd_event(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("add") => cmd_event_add(args.get(1..).unwrap_or(&[])),
         Some("list") => cmd_event_list(args.get(1..).unwrap_or(&[])),
         _ => {
             print_usage();
-            Err(OfficeError::Validation(
-                "event needs `add` or `list`".into(),
-            ))
+            Err(Error::Validation("event needs `add` or `list`".into()))
         }
     }
 }
 
-fn cmd_event_add(args: &[String]) -> OfficeResult<()> {
+fn cmd_event_add(args: &[String]) -> Result<()> {
     let [domain, kind, subject_type, subject_id, rest @ ..] = args else {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "usage: viva event add <domain> <kind> <subject-type> <subject-id> [payload-json]"
                 .into(),
         ));
     };
     if rest.len() > 1 {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "usage: viva event add <domain> <kind> <subject-type> <subject-id> [payload-json]"
                 .into(),
         ));
@@ -739,7 +733,7 @@ fn cmd_event_add(args: &[String]) -> OfficeResult<()> {
         Some(text) => serde_json::from_str(text)?,
         None => serde_json::Value::Null,
     };
-    let store = open_office_store()?;
+    let store = open_store()?;
     let recorded = events::append(
         &store,
         NewEvent {
@@ -755,19 +749,17 @@ fn cmd_event_add(args: &[String]) -> OfficeResult<()> {
     Ok(())
 }
 
-fn cmd_event_list(args: &[String]) -> OfficeResult<()> {
+fn cmd_event_list(args: &[String]) -> Result<()> {
     if args.len() > 1 {
-        return Err(OfficeError::Validation(
-            "usage: viva event list [limit]".into(),
-        ));
+        return Err(Error::Validation("usage: viva event list [limit]".into()));
     }
     let limit: u32 = match args.first() {
         Some(text) => text
             .parse()
-            .map_err(|_| OfficeError::Validation(format!("`{text}` is not a valid limit")))?,
+            .map_err(|_| Error::Validation(format!("`{text}` is not a valid limit")))?,
         None => 20,
     };
-    let store = open_office_store()?;
+    let store = open_store()?;
     for event in events::list(&store, limit)? {
         println!(
             "{}\t{}\t{}\t{}\t{}\t{}",
@@ -782,13 +774,13 @@ fn cmd_event_list(args: &[String]) -> OfficeResult<()> {
     Ok(())
 }
 
-fn parse_domain(name: &str) -> OfficeResult<viva::foundation::store::Domain> {
+fn parse_domain(name: &str) -> Result<viva::foundation::store::Domain> {
     KNOWN_DOMAINS
         .iter()
         .copied()
         .find(|domain| domain.as_str() == name)
         .ok_or_else(|| {
-            OfficeError::Validation(format!(
+            Error::Validation(format!(
                 "unknown domain `{name}`; known domains: {}",
                 KNOWN_DOMAINS
                     .iter()
@@ -803,24 +795,24 @@ fn parse_domain(name: &str) -> OfficeResult<viva::foundation::store::Domain> {
 // Office control plane (V07)
 // ---------------------------------------------------------------------------
 
-fn cmd_office(args: &[String]) -> OfficeResult<()> {
+fn cmd_control(args: &[String]) -> Result<()> {
     let home = viva::foundation::paths::viva_home(None);
     match args.first().map(String::as_str) {
         Some("server" | "start") => {
             let resume = args.get(1).map(String::as_str) == Some("--resume");
-            cmd_office_start(&home, resume)
+            cmd_control_start(&home, resume)
         }
         Some("server-restart") => cmd_server_restart(&home),
-        Some("status") => cmd_office_status(&home),
-        Some("dispatch") => cmd_office_dispatch(&home, args.get(1..).unwrap_or(&[])),
-        Some("terminals") => cmd_office_query(&home, viva::office::OfficeRequestKind::TerminalList),
+        Some("status") => cmd_control_status(&home),
+        Some("dispatch") => cmd_control_dispatch(&home, args.get(1..).unwrap_or(&[])),
+        Some("terminals") => cmd_control_query(&home, viva::server::RequestKind::TerminalList),
         Some("stop-terminal") => {
             let terminal_id = args.get(1).ok_or_else(|| {
-                OfficeError::Validation("usage: viva stop-terminal <terminal-id>".into())
+                Error::Validation("usage: viva stop-terminal <terminal-id>".into())
             })?;
-            cmd_office_query(
+            cmd_control_query(
                 &home,
-                viva::office::OfficeRequestKind::TerminalStop {
+                viva::server::RequestKind::TerminalStop {
                     terminal_id: terminal_id.clone(),
                 },
             )
@@ -828,10 +820,10 @@ fn cmd_office(args: &[String]) -> OfficeResult<()> {
         Some("result") => {
             let task_id = args
                 .get(1)
-                .ok_or_else(|| OfficeError::Validation("usage: viva result <task-id>".into()))?;
-            cmd_office_query(
+                .ok_or_else(|| Error::Validation("usage: viva result <task-id>".into()))?;
+            cmd_control_query(
                 &home,
-                viva::office::OfficeRequestKind::TaskResults {
+                viva::server::RequestKind::TaskResults {
                     task_id: task_id.clone(),
                 },
             )
@@ -840,35 +832,32 @@ fn cmd_office(args: &[String]) -> OfficeResult<()> {
             let close_policy = std::env::var("VIVA_CLOSE_POLICY")
                 .ok()
                 .filter(|p| p == "pause");
-            cmd_office_query(
-                &home,
-                viva::office::OfficeRequestKind::Shutdown { close_policy },
-            )?;
+            cmd_control_query(&home, viva::server::RequestKind::Shutdown { close_policy })?;
             // Human commentary goes to stderr; stdout stays pure JSON for
             // callers that parse it (the extension envelope, tooling).
             eprintln!("office: shutdown accepted; owned terminals stopped, handoff persisted");
             Ok(())
         }
         Some("pause") => {
-            cmd_office_query(&home, viva::office::OfficeRequestKind::Pause)?;
+            cmd_control_query(&home, viva::server::RequestKind::Pause)?;
             eprintln!(
                 "office: paused - no new dispatch, no maintenance; running executions keep running"
             );
             Ok(())
         }
         Some("resume") => {
-            cmd_office_query(&home, viva::office::OfficeRequestKind::Resume)?;
+            cmd_control_query(&home, viva::server::RequestKind::Resume)?;
             eprintln!("office: resumed - dispatch and maintenance are live again");
             Ok(())
         }
-        Some("brief") => cmd_office_brief(args.get(1..).unwrap_or(&[])),
-        Some("create-task") => cmd_office_create_task(args.get(1..).unwrap_or(&[])),
-        Some("create-project") => cmd_office_create_project(args.get(1..).unwrap_or(&[])),
-        Some("grant") => cmd_office_grant(args.get(1..).unwrap_or(&[])),
-        Some("handoff") => cmd_office_handoff(&home, args.get(1..).unwrap_or(&[])),
+        Some("brief") => cmd_control_brief(args.get(1..).unwrap_or(&[])),
+        Some("create-task") => cmd_control_create_task(args.get(1..).unwrap_or(&[])),
+        Some("create-project") => cmd_control_create_project(args.get(1..).unwrap_or(&[])),
+        Some("grant") => cmd_control_grant(args.get(1..).unwrap_or(&[])),
+        Some("handoff") => cmd_control_handoff(&home, args.get(1..).unwrap_or(&[])),
         _ => {
             print_usage();
-            Err(OfficeError::Validation(
+            Err(Error::Validation(
                 "viva needs start | status | dispatch | terminals | stop-terminal | result | brief | create-task | grant | handoff | shutdown"
                     .into(),
             ))
@@ -878,21 +867,21 @@ fn cmd_office(args: &[String]) -> OfficeResult<()> {
 
 /// `viva brief <task-id>` — offline, read-only task brief from the
 /// store (the extension's context-entry endpoint).
-fn cmd_office_brief(args: &[String]) -> OfficeResult<()> {
+fn cmd_control_brief(args: &[String]) -> Result<()> {
     let task_id = args
         .first()
-        .ok_or_else(|| OfficeError::Validation("usage: viva brief <task-id>".into()))?;
+        .ok_or_else(|| Error::Validation("usage: viva brief <task-id>".into()))?;
     let task_id = viva::foundation::ids::TaskId::from_str(task_id)?;
     let home = viva::foundation::paths::viva_home(None);
     let db = viva::foundation::paths::database_path(&home);
     if !db.exists() {
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "no office store at {} (run `viva init` first); nothing was created",
             db.display()
         )));
     }
     viva::foundation::paths::ensure_private_dir(&home)?;
-    let store = viva::foundation::store::Store::open(&db, viva::office::office_migrations())?;
+    let store = viva::foundation::store::Store::open(&db, viva::server::migrations())?;
     let tasks = viva::tasks::TaskRegistry::new(&store);
     let brief = tasks.generate_brief(&task_id)?;
     println!("{}", serde_json::to_string_pretty(&brief)?);
@@ -902,7 +891,7 @@ fn cmd_office_brief(args: &[String]) -> OfficeResult<()> {
 /// `viva handoff --task <id> --member <id> --summary <text>` —
 /// records a member-reported handoff over the live channel. A member
 /// report is a fact about who said what; it never completes a task.
-fn cmd_office_handoff(home: &std::path::Path, args: &[String]) -> OfficeResult<()> {
+fn cmd_control_handoff(home: &std::path::Path, args: &[String]) -> Result<()> {
     let mut task_id = None;
     let mut member_id = None;
     let mut summary = None;
@@ -913,36 +902,34 @@ fn cmd_office_handoff(home: &std::path::Path, args: &[String]) -> OfficeResult<(
         let value = args
             .get(i)
             .cloned()
-            .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+            .ok_or_else(|| Error::Validation(format!("flag {flag} needs a value")))?;
         match flag {
             "--task" => task_id = Some(value),
             "--member" => member_id = Some(value),
             "--summary" => summary = Some(value),
             other => {
-                return Err(OfficeError::Validation(format!(
-                    "unknown handoff flag `{other}`"
-                )));
+                return Err(Error::Validation(format!("unknown handoff flag `{other}`")));
             }
         }
         i += 1;
     }
     let (Some(task_id), Some(member_id), Some(summary)) = (task_id, member_id, summary) else {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "usage: viva handoff --task <id> --member <id> --summary <text>".into(),
         ));
     };
-    let response = viva::office::send_request(
+    let response = viva::server::send_request(
         home,
-        viva::office::new_request(viva::office::OfficeRequestKind::Handoff {
+        viva::server::new_request(viva::server::RequestKind::Handoff {
             task_id,
             member_id,
             summary,
         }),
     )?;
-    print_office_response(&response)
+    print_response(&response)
 }
 
-fn cmd_office_start(home: &std::path::Path, resume: bool) -> OfficeResult<()> {
+fn cmd_control_start(home: &std::path::Path, resume: bool) -> Result<()> {
     if resume {
         // Live-handoff resume (S3): adopt the transferred terminals and
         // serve. Blocks until this host is shut down.
@@ -951,11 +938,11 @@ fn cmd_office_start(home: &std::path::Path, resume: bool) -> OfficeResult<()> {
             std::process::id(),
             home.display()
         );
-        viva::office::resume_server(home)?;
+        viva::server::resume_server(home)?;
         eprintln!("resumed host released the control channel");
         return Ok(());
     }
-    let host = viva::office::OfficeHost::open(home)?;
+    let host = viva::server::Host::open(home)?;
     eprintln!(
         "office host {} active (pid {}) — home {}",
         host.shared().host_id,
@@ -969,8 +956,8 @@ fn cmd_office_start(home: &std::path::Path, resume: bool) -> OfficeResult<()> {
 
 /// `viva server-restart` — upgrade path: the running server transfers its
 /// live terminals to a freshly spawned resumed server (S3, issue #45).
-fn cmd_server_restart(home: &std::path::Path) -> OfficeResult<()> {
-    let new_pid = viva::office::restart_server(home)?;
+fn cmd_server_restart(home: &std::path::Path) -> Result<()> {
+    let new_pid = viva::server::restart_server(home)?;
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
@@ -981,30 +968,27 @@ fn cmd_server_restart(home: &std::path::Path) -> OfficeResult<()> {
     Ok(())
 }
 
-fn cmd_office_status(home: &std::path::Path) -> OfficeResult<()> {
-    let request = viva::office::new_request(viva::office::OfficeRequestKind::Status);
-    match viva::office::send_request(home, request) {
-        Ok(response) => print_office_response(&response),
+fn cmd_control_status(home: &std::path::Path) -> Result<()> {
+    let request = viva::server::new_request(viva::server::RequestKind::Status);
+    match viva::server::send_request(home, request) {
+        Ok(response) => print_response(&response),
         Err(live_err) => {
             // Read-only status is answerable offline by design; say both
             // facts plainly.
             eprintln!("office: live channel unavailable: {live_err}");
-            let offline = viva::office::offline_status(home)?;
+            let offline = viva::server::offline_status(home)?;
             println!("{}", serde_json::to_string_pretty(&offline)?);
             Ok(())
         }
     }
 }
 
-fn cmd_office_query(
-    home: &std::path::Path,
-    kind: viva::office::OfficeRequestKind,
-) -> OfficeResult<()> {
-    let response = viva::office::send_request(home, viva::office::new_request(kind))?;
-    print_office_response(&response)
+fn cmd_control_query(home: &std::path::Path, kind: viva::server::RequestKind) -> Result<()> {
+    let response = viva::server::send_request(home, viva::server::new_request(kind))?;
+    print_response(&response)
 }
 
-fn cmd_office_dispatch(home: &std::path::Path, args: &[String]) -> OfficeResult<()> {
+fn cmd_control_dispatch(home: &std::path::Path, args: &[String]) -> Result<()> {
     let mut task_id = None;
     let mut member_id = None;
     let mut grant_id = None;
@@ -1015,11 +999,11 @@ fn cmd_office_dispatch(home: &std::path::Path, args: &[String]) -> OfficeResult<
     let mut i = 0;
     while i < args.len() {
         let flag = args[i].as_str();
-        let value = |i: &mut usize| -> OfficeResult<String> {
+        let value = |i: &mut usize| -> Result<String> {
             *i += 1;
             args.get(*i)
                 .cloned()
-                .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))
+                .ok_or_else(|| Error::Validation(format!("flag {flag} needs a value")))
         };
         match flag {
             "--task" => task_id = Some(value(&mut i)?),
@@ -1033,7 +1017,7 @@ fn cmd_office_dispatch(home: &std::path::Path, args: &[String]) -> OfficeResult<
                 break;
             }
             other => {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "unknown dispatch flag `{other}`"
                 )));
             }
@@ -1043,20 +1027,20 @@ fn cmd_office_dispatch(home: &std::path::Path, args: &[String]) -> OfficeResult<
     let (Some(task_id), Some(member_id), Some(grant_id), Some(request_key), Some(cwd)) =
         (task_id, member_id, grant_id, request_key, cwd)
     else {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "usage: viva dispatch --task <id> --member <id> --grant <id> \
              --request-key <key> --cwd <dir> [--worktree <id>] -- argv..."
                 .into(),
         ));
     };
     if argv.is_empty() {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "dispatch needs an explicit argv after `--` (no joined shell strings)".into(),
         ));
     }
-    let response = viva::office::send_request(
+    let response = viva::server::send_request(
         home,
-        viva::office::new_request(viva::office::OfficeRequestKind::Dispatch {
+        viva::server::new_request(viva::server::RequestKind::Dispatch {
             task_id,
             member_id,
             grant_id,
@@ -1066,10 +1050,10 @@ fn cmd_office_dispatch(home: &std::path::Path, args: &[String]) -> OfficeResult<
             worktree_id,
         }),
     )?;
-    print_office_response(&response)
+    print_response(&response)
 }
 
-fn print_office_response(response: &viva::office::OfficeResponse) -> OfficeResult<()> {
+fn print_response(response: &viva::server::Response) -> Result<()> {
     if response.ok {
         println!(
             "{}",
@@ -1079,7 +1063,7 @@ fn print_office_response(response: &viva::office::OfficeResponse) -> OfficeResul
         );
         Ok(())
     } else {
-        Err(OfficeError::Validation(
+        Err(Error::Validation(
             response
                 .error
                 .clone()
@@ -1093,11 +1077,11 @@ fn print_office_response(response: &viva::office::OfficeResponse) -> OfficeResul
 // and handoff records. The harness-native transcript is never copied here.
 // ---------------------------------------------------------------------------
 
-fn cmd_conversations(args: &[String]) -> OfficeResult<()> {
+fn cmd_conversations(args: &[String]) -> Result<()> {
     let home = viva::foundation::paths::viva_home(None);
     let store = viva::foundation::store::Store::open(
         &viva::foundation::paths::database_path(&home),
-        viva::office::office_migrations(),
+        viva::server::migrations(),
     )?;
     let registry = viva::conversations::ConversationRegistry::new(&store);
     let mut named = std::collections::HashMap::new();
@@ -1109,14 +1093,13 @@ fn cmd_conversations(args: &[String]) -> OfficeResult<()> {
         let value = args
             .get(i)
             .cloned()
-            .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+            .ok_or_else(|| Error::Validation(format!("flag {flag} needs a value")))?;
         named.insert(flag.to_string(), value);
         i += 1;
     }
     let get = |key: &str| named.get(key).cloned();
-    let require = |key: &str| -> OfficeResult<String> {
-        get(key)
-            .ok_or_else(|| OfficeError::Validation(format!("conversations {args:?} needs --{key}")))
+    let require = |key: &str| -> Result<String> {
+        get(key).ok_or_else(|| Error::Validation(format!("conversations {args:?} needs --{key}")))
     };
 
     match args.first().map(String::as_str) {
@@ -1197,7 +1180,7 @@ fn cmd_conversations(args: &[String]) -> OfficeResult<()> {
             println!("{}", serde_json::to_string_pretty(&value)?);
         }
         _ => {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "conversations needs create | fork | rename | set-native | attach-task | detach-task | archive | tree | handoff"
                     .into(),
             ));
@@ -1210,12 +1193,12 @@ fn cmd_conversations(args: &[String]) -> OfficeResult<()> {
 /// audit reused tools, or run two controlled smoke tasks. Lease recovery
 /// needs an explicit task grant and operator assertion; smoke only inspects
 /// real windows. Input actions are never exposed to chat through this CLI.
-fn cmd_tools(args: &[String]) -> OfficeResult<()> {
+fn cmd_tools(args: &[String]) -> Result<()> {
     use std::str::FromStr as _;
 
     // args[0] is the tool family (`computer`); args[1..] its command.
     if args.first().map(String::as_str) != Some("computer") {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "usage: viva tools computer lane | audit | smoke --task <id> \
              --member <id> --grant <id> | release-lease --task <id> --acquired-at <time> \
              --member <id> --grant <id> --reason <text> --confirm"
@@ -1225,9 +1208,9 @@ fn cmd_tools(args: &[String]) -> OfficeResult<()> {
     match args.get(1).map(String::as_str) {
         Some("lane") => {
             if args.len() != 2 {
-                return Err(OfficeError::Validation("lane accepts no flags".into()));
+                return Err(Error::Validation("lane accepts no flags".into()));
             }
-            let store = open_office_store()?;
+            let store = open_store()?;
             let rows = viva::tools::computer::ForegroundCoordinator::new(&store).leases()?;
             println!("{}", serde_json::to_string_pretty(&rows)?);
             Ok(())
@@ -1240,7 +1223,7 @@ fn cmd_tools(args: &[String]) -> OfficeResult<()> {
                 let flag = args[i].as_str();
                 if flag == "--confirm" {
                     if confirm {
-                        return Err(OfficeError::Validation("duplicate --confirm".into()));
+                        return Err(Error::Validation("duplicate --confirm".into()));
                     }
                     confirm = true;
                     i += 1;
@@ -1249,19 +1232,19 @@ fn cmd_tools(args: &[String]) -> OfficeResult<()> {
                 if !["--task", "--acquired-at", "--member", "--grant", "--reason"].contains(&flag)
                     || named.contains_key(flag)
                 {
-                    return Err(OfficeError::Validation(format!(
+                    return Err(Error::Validation(format!(
                         "unexpected or duplicate release-lease flag `{flag}`"
                     )));
                 }
                 i += 1;
                 let value = args
                     .get(i)
-                    .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+                    .ok_or_else(|| Error::Validation(format!("flag {flag} needs a value")))?;
                 named.insert(flag, value.as_str());
                 i += 1;
             }
             if !confirm {
-                return Err(OfficeError::Validation(
+                return Err(Error::Validation(
                     "release-lease requires --confirm after checking the original action stopped"
                         .into(),
                 ));
@@ -1270,12 +1253,12 @@ fn cmd_tools(args: &[String]) -> OfficeResult<()> {
                 named
                     .get(flag)
                     .copied()
-                    .ok_or_else(|| OfficeError::Validation(format!("release-lease needs {flag}")))
+                    .ok_or_else(|| Error::Validation(format!("release-lease needs {flag}")))
             };
             let task = viva::foundation::ids::TaskId::from_str(require("--task")?)?;
             let member = viva::foundation::ids::MemberId::from_str(require("--member")?)?;
             let grant = viva::foundation::ids::GrantId::from_str(require("--grant")?)?;
-            let store = open_office_store()?;
+            let store = open_store()?;
             let authority = viva::authority::AuthorityEngine::new(&store);
             let actor = viva::authority::Actor::Member {
                 member,
@@ -1292,7 +1275,7 @@ fn cmd_tools(args: &[String]) -> OfficeResult<()> {
             Ok(())
         }
         Some("audit") => {
-            let store = open_office_store()?;
+            let store = open_store()?;
             let engine = viva::tools::computer::ComputerEngine::new(&store);
             for report in engine.audit()? {
                 println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1310,22 +1293,20 @@ fn cmd_tools(args: &[String]) -> OfficeResult<()> {
                 let value = args
                     .get(i)
                     .cloned()
-                    .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+                    .ok_or_else(|| Error::Validation(format!("flag {flag} needs a value")))?;
                 match flag {
                     "--task" => task_id = Some(value),
                     "--member" => member_id = Some(value),
                     "--grant" => grant_id = Some(value),
                     other => {
-                        return Err(OfficeError::Validation(format!(
-                            "unknown smoke flag `{other}`"
-                        )));
+                        return Err(Error::Validation(format!("unknown smoke flag `{other}`")));
                     }
                 }
                 i += 1;
             }
             let (Some(task_id), Some(member_id), Some(grant_id)) = (task_id, member_id, grant_id)
             else {
-                return Err(OfficeError::Validation(
+                return Err(Error::Validation(
                     "usage: viva tools computer smoke --task <id> --member <id> --grant <id>"
                         .into(),
                 ));
@@ -1334,7 +1315,7 @@ fn cmd_tools(args: &[String]) -> OfficeResult<()> {
             let member_id = viva::foundation::ids::MemberId::from_str(&member_id)?;
             let grant_id = viva::foundation::ids::GrantId::from_str(&grant_id)?;
 
-            let store = open_office_store()?;
+            let store = open_store()?;
             // Smoke evidence binds to a real office task, not an invented one.
             viva::tasks::TaskRegistry::new(&store).require_task(&task_id)?;
             let authority = viva::authority::AuthorityEngine::new(&store);
@@ -1366,14 +1347,14 @@ fn cmd_tools(args: &[String]) -> OfficeResult<()> {
                 serde_json::to_string_pretty(&serde_json::Value::Object(results))?
             );
             if executed < 2 {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "smoke incomplete: {executed}/2 tasks executed — see the evidence \
                      above for the honest state"
                 )));
             }
             Ok(())
         }
-        other => Err(OfficeError::Validation(format!(
+        other => Err(Error::Validation(format!(
             "unknown tools computer command `{}`; expected `lane`, `release-lease`, `audit` or `smoke`",
             other.unwrap_or("<missing>")
         ))),
@@ -1382,9 +1363,7 @@ fn cmd_tools(args: &[String]) -> OfficeResult<()> {
 
 /// A shareable summary of one computer action: verdict and verification
 /// facts, with the raw tool snapshots replaced by size + fingerprint.
-fn summarize_action(
-    record: &viva::tools::computer::ActionRecord,
-) -> OfficeResult<serde_json::Value> {
+fn summarize_action(record: &viva::tools::computer::ActionRecord) -> Result<serde_json::Value> {
     let digest = |text: &Option<String>| -> serde_json::Value {
         match text {
             None => serde_json::Value::Null,
@@ -1422,7 +1401,7 @@ fn content_fingerprint(text: &str) -> String {
 /// checkout of a repository (V15-4, QA F11): without this row the
 /// auto-sync cycle has nothing to fast-forward. Read-only worktree
 /// adoption remains the worktree service's own flow.
-fn cmd_office_create_project(args: &[String]) -> OfficeResult<()> {
+fn cmd_control_create_project(args: &[String]) -> Result<()> {
     let mut name = None;
     let mut repo = None;
     let mut i = 0;
@@ -1437,7 +1416,7 @@ fn cmd_office_create_project(args: &[String]) -> OfficeResult<()> {
                 repo = args.get(i).cloned();
             }
             other => {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "unknown create-project flag `{other}`"
                 )));
             }
@@ -1445,11 +1424,11 @@ fn cmd_office_create_project(args: &[String]) -> OfficeResult<()> {
         i += 1;
     }
     let (Some(name), Some(repo)) = (name, repo) else {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "usage: viva create-project --name <name> --repo <dir>".into(),
         ));
     };
-    let store = open_office_store()?;
+    let store = open_store()?;
     let project = viva::projects::ProjectRegistry::new(&store).register(None, name, repo)?;
     println!("{}", serde_json::to_string_pretty(&project)?);
     Ok(())
@@ -1458,7 +1437,7 @@ fn cmd_office_create_project(args: &[String]) -> OfficeResult<()> {
 /// `viva create-task --goal <text>` — open one office task. This is
 /// an owner-side CLI: whoever runs the binary creates the task in their
 /// own VIVA_HOME.
-fn cmd_office_create_task(args: &[String]) -> OfficeResult<()> {
+fn cmd_control_create_task(args: &[String]) -> Result<()> {
     let mut goal = None;
     let mut i = 0;
     while i < args.len() {
@@ -1468,16 +1447,16 @@ fn cmd_office_create_task(args: &[String]) -> OfficeResult<()> {
                 goal = args.get(i).cloned();
             }
             other => {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "unknown create-task flag `{other}`"
                 )));
             }
         }
         i += 1;
     }
-    let goal = goal
-        .ok_or_else(|| OfficeError::Validation("usage: viva create-task --goal <text>".into()))?;
-    let store = open_office_store()?;
+    let goal =
+        goal.ok_or_else(|| Error::Validation("usage: viva create-task --goal <text>".into()))?;
+    let store = open_store()?;
     let task =
         viva::tasks::TaskRegistry::new(&store).create_task(goal, vec![], None, None, None)?;
     println!("{}", serde_json::to_string_pretty(&task)?);
@@ -1488,7 +1467,7 @@ fn cmd_office_create_task(args: &[String]) -> OfficeResult<()> {
 /// [--expires <rfc3339>]` — an owner-side root grant (the CLI runner IS
 /// the user; the engine records issuer=user). Protected actions are
 /// refused by the engine itself.
-fn cmd_office_grant(args: &[String]) -> OfficeResult<()> {
+fn cmd_control_grant(args: &[String]) -> Result<()> {
     use std::str::FromStr as _;
     let mut member = None;
     let mut task = None;
@@ -1502,7 +1481,7 @@ fn cmd_office_grant(args: &[String]) -> OfficeResult<()> {
         let value = args
             .get(i)
             .cloned()
-            .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+            .ok_or_else(|| Error::Validation(format!("flag {flag} needs a value")))?;
         match flag {
             "--member" => member = Some(value),
             "--task" => task = Some(value),
@@ -1510,9 +1489,7 @@ fn cmd_office_grant(args: &[String]) -> OfficeResult<()> {
             "--mode" => mode = Some(value),
             "--expires" => expires = Some(value),
             other => {
-                return Err(OfficeError::Validation(format!(
-                    "unknown grant flag `{other}`"
-                )));
+                return Err(Error::Validation(format!("unknown grant flag `{other}`")));
             }
         }
         i += 1;
@@ -1524,18 +1501,18 @@ fn cmd_office_grant(args: &[String]) -> OfficeResult<()> {
         .map(|t| viva::foundation::ids::TaskId::from_str(&t))
         .transpose()?;
     let action = action.ok_or_else(|| {
-        OfficeError::Validation(
+        Error::Validation(
             "usage: viva grant --member <id> --task <id> --action <a> --mode <m> \
              [--expires <rfc3339>]"
                 .into(),
         )
     })?;
     let mode = viva::authority::GrantMode::from_str_value(&mode.ok_or_else(|| {
-        OfficeError::Validation(
+        Error::Validation(
             "--mode is required (READ | PROPOSE | ACT_WITH_APPROVAL | ACT_AUTONOMOUSLY)".into(),
         )
     })?)?;
-    let store = open_office_store()?;
+    let store = open_store()?;
     let engine = viva::authority::AuthorityEngine::new(&store);
     let grant = engine.issue_root_grant(member, task, vec![action], mode, expires)?;
     println!("{}", serde_json::to_string_pretty(&grant)?);
@@ -1547,7 +1524,7 @@ fn cmd_office_grant(args: &[String]) -> OfficeResult<()> {
 /// office link layer: member scoping, provenance, usage evidence, and
 /// recoverable exit (no delete). The adapter subprocess always receives
 /// an explicit db path.
-fn cmd_memory(args: &[String]) -> OfficeResult<()> {
+fn cmd_memory(args: &[String]) -> Result<()> {
     use std::str::FromStr as _;
 
     let mut named: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -1558,16 +1535,16 @@ fn cmd_memory(args: &[String]) -> OfficeResult<()> {
         let value = args
             .get(i)
             .cloned()
-            .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+            .ok_or_else(|| Error::Validation(format!("flag {flag} needs a value")))?;
         named.insert(flag.to_string(), value);
         i += 1;
     }
     let get = |key: &str| named.get(key).cloned();
-    let require = |key: &str| -> OfficeResult<String> {
-        get(key).ok_or_else(|| OfficeError::Validation(format!("memory needs --{key}")))
+    let require = |key: &str| -> Result<String> {
+        get(key).ok_or_else(|| Error::Validation(format!("memory needs --{key}")))
     };
 
-    let store = open_office_store()?;
+    let store = open_store()?;
     let service = viva::memory::MemoryService::new(&store);
     match args.first().map(String::as_str) {
         Some("search") => {
@@ -1639,7 +1616,7 @@ fn cmd_memory(args: &[String]) -> OfficeResult<()> {
                 .map(|p| viva::foundation::ids::ProjectId::from_str(&p))
                 .transpose()?;
             let fact_id: i64 = require("--fact")?.parse().map_err(|_| {
-                OfficeError::Validation("--fact must be the external fact's integer id".into())
+                Error::Validation("--fact must be the external fact's integer id".into())
             })?;
             let link =
                 service.link_fact(fact_id, &member_id, project.as_ref(), &require("--source")?)?;
@@ -1664,7 +1641,7 @@ fn cmd_memory(args: &[String]) -> OfficeResult<()> {
         }
         Some(cmd @ ("archive" | "restore")) => {
             let fact_id: i64 = require("--fact")?.parse().map_err(|_| {
-                OfficeError::Validation("--fact must be the external fact's integer id".into())
+                Error::Validation("--fact must be the external fact's integer id".into())
             })?;
             let member_id = viva::foundation::ids::MemberId::from_str(&require("--member")?)?;
             let grant = get("--grant")
@@ -1709,7 +1686,7 @@ fn cmd_memory(args: &[String]) -> OfficeResult<()> {
             );
             Ok(())
         }
-        _ => Err(OfficeError::Validation(
+        _ => Err(Error::Validation(
             "memory needs search | probe | link | remember | archive | restore | status".into(),
         )),
     }
@@ -1721,7 +1698,7 @@ fn cmd_memory(args: &[String]) -> OfficeResult<()> {
 /// `status` always shows the owning task's own status beside the run's
 /// process progress: the run records process facts, the task keeps the
 /// delivery state, and completion stays an appended task outcome.
-fn cmd_workflow(args: &[String]) -> OfficeResult<()> {
+fn cmd_workflow(args: &[String]) -> Result<()> {
     use std::str::FromStr as _;
 
     let mut named: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -1737,7 +1714,7 @@ fn cmd_workflow(args: &[String]) -> OfficeResult<()> {
             let value = args
                 .get(i)
                 .cloned()
-                .ok_or_else(|| OfficeError::Validation(format!("flag {arg} needs a value")))?;
+                .ok_or_else(|| Error::Validation(format!("flag {arg} needs a value")))?;
             named.insert(flag.to_string(), value);
         } else {
             flags.push(arg.to_string());
@@ -1745,13 +1722,13 @@ fn cmd_workflow(args: &[String]) -> OfficeResult<()> {
         i += 1;
     }
     let get = |key: &str| named.get(key).cloned();
-    let require = |key: &str| -> OfficeResult<String> {
-        get(key).ok_or_else(|| OfficeError::Validation(format!("workflow needs --{key}")))
+    let require = |key: &str| -> Result<String> {
+        get(key).ok_or_else(|| Error::Validation(format!("workflow needs --{key}")))
     };
 
-    let store = open_office_store()?;
+    let store = open_store()?;
     let engine = viva::workflows::WorkflowEngine::new(&store);
-    let resolve_head = |cwd: &str| -> OfficeResult<String> {
+    let resolve_head = |cwd: &str| -> Result<String> {
         let runner = viva::git::cli::CliRunner::default();
         let path = std::path::Path::new(cwd);
         // A SHA is only an honest content anchor when tracked files match
@@ -1763,10 +1740,10 @@ fn cmd_workflow(args: &[String]) -> OfficeResult<()> {
                 &["status", "--porcelain", "--untracked-files=no"],
             )
             .map_err(|failure| {
-                OfficeError::Validation(format!("git status failed in {cwd}: {failure}"))
+                Error::Validation(format!("git status failed in {cwd}: {failure}"))
             })?;
         if !status.success() || !status.stdout.trim().is_empty() {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "refusing to anchor a run in a dirty worktree ({cwd}) — uncommitted \
                  tracked changes mean \"verified at this head\" would be a claim about \
                  content the SHA does not name; commit first"
@@ -1783,7 +1760,7 @@ fn cmd_workflow(args: &[String]) -> OfficeResult<()> {
                         viva::workflows::WorkflowConfig::read_only_review_default()
                     }
                     other => {
-                        return Err(OfficeError::Validation(format!(
+                        return Err(Error::Validation(format!(
                             "unknown builtin config `{other}` (delivery | read-only-review)"
                         )));
                     }
@@ -1818,7 +1795,7 @@ fn cmd_workflow(args: &[String]) -> OfficeResult<()> {
                 Some("--pass") => true,
                 Some("--fail") => false,
                 other => {
-                    return Err(OfficeError::Validation(format!(
+                    return Err(Error::Validation(format!(
                         "record needs --pass or --fail (got {other:?})"
                     )));
                 }
@@ -1863,7 +1840,7 @@ fn cmd_workflow(args: &[String]) -> OfficeResult<()> {
             }
             Ok(())
         }
-        _ => Err(OfficeError::Validation(
+        _ => Err(Error::Validation(
             "workflow needs register | start-run | record | resume | abort | status | history"
                 .into(),
         )),
@@ -1874,7 +1851,7 @@ fn cmd_workflow(args: &[String]) -> OfficeResult<()> {
 /// review and repository maintenance. Each review command opens one
 /// bounded session and closes it: maintenance runs only inside such a
 /// window, never as a daemon.
-fn cmd_maintenance(args: &[String]) -> OfficeResult<()> {
+fn cmd_maintenance(args: &[String]) -> Result<()> {
     use std::str::FromStr as _;
 
     let mut named: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -1885,15 +1862,15 @@ fn cmd_maintenance(args: &[String]) -> OfficeResult<()> {
         let value = args
             .get(i)
             .cloned()
-            .ok_or_else(|| OfficeError::Validation(format!("flag {flag} needs a value")))?;
+            .ok_or_else(|| Error::Validation(format!("flag {flag} needs a value")))?;
         named.insert(flag.to_string(), value);
         i += 1;
     }
     let get = |key: &str| named.get(&format!("--{key}")).cloned();
-    let require = |key: &str| -> OfficeResult<String> {
-        get(key).ok_or_else(|| OfficeError::Validation(format!("maintenance needs --{key}")))
+    let require = |key: &str| -> Result<String> {
+        get(key).ok_or_else(|| Error::Validation(format!("maintenance needs --{key}")))
     };
-    let print_report = |report: &viva::maintenance::ScanReport| -> OfficeResult<()> {
+    let print_report = |report: &viva::maintenance::ScanReport| -> Result<()> {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -1907,10 +1884,10 @@ fn cmd_maintenance(args: &[String]) -> OfficeResult<()> {
         Ok(())
     };
 
-    let store = open_office_store()?;
+    let store = open_store()?;
     // S6: an explicitly paused office runs no maintenance windows (the
     // pause persists, so this holds with no live host either).
-    viva::office::assert_maintenance_allowed(&store)?;
+    viva::server::assert_maintenance_allowed(&store)?;
     let maintenance = viva::maintenance::MaintenanceService::new(&store);
     match args.first().map(String::as_str) {
         Some("review-knowledge") => {
@@ -1918,7 +1895,7 @@ fn cmd_maintenance(args: &[String]) -> OfficeResult<()> {
                 Some(text) => text
                     .parse()
                     .map_err(|_| {
-                        OfficeError::Validation("--stale-days must be a number".to_string())
+                        Error::Validation("--stale-days must be a number".to_string())
                     })?,
                 None => 180,
             };
@@ -1974,7 +1951,7 @@ fn cmd_maintenance(args: &[String]) -> OfficeResult<()> {
             println!("{}", serde_json::to_string_pretty(&proposal)?);
             Ok(())
         }
-        _ => Err(OfficeError::Validation(
+        _ => Err(Error::Validation(
             "maintenance needs review-knowledge | review-worktrees | review-repo | proposals | execute | dismiss"
                 .into(),
         )),
@@ -1989,16 +1966,14 @@ fn cmd_maintenance(args: &[String]) -> OfficeResult<()> {
 /// touched: no worktrees, no historical Ticket Autopilot data, no other
 /// agents' homes. This is a RAW asset export, not a privacy-safe artifact;
 /// owner-only output permissions and manifest flags make that explicit.
-fn cmd_data(args: &[String]) -> OfficeResult<()> {
+fn cmd_data(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("export") => cmd_data_export(args.get(1..).unwrap_or(&[])),
-        _ => Err(OfficeError::Validation(
-            "data needs `export --out <dir>`".into(),
-        )),
+        _ => Err(Error::Validation("data needs `export --out <dir>`".into())),
     }
 }
 
-fn cmd_data_export(args: &[String]) -> OfficeResult<()> {
+fn cmd_data_export(args: &[String]) -> Result<()> {
     let mut out_dir = None;
     let mut i = 0;
     while i < args.len() {
@@ -2008,21 +1983,19 @@ fn cmd_data_export(args: &[String]) -> OfficeResult<()> {
                 out_dir = args.get(i).cloned();
             }
             other => {
-                return Err(OfficeError::Validation(format!(
-                    "unknown export flag `{other}`"
-                )));
+                return Err(Error::Validation(format!("unknown export flag `{other}`")));
             }
         }
         i += 1;
     }
     let Some(out_dir) = out_dir else {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "usage: viva data export --out <dir>".into(),
         ));
     };
     let out_path = std::path::PathBuf::from(out_dir);
     if out_path.exists() {
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "refusing to overwrite an existing export directory: {}",
             out_path.display()
         )));
@@ -2031,7 +2004,7 @@ fn cmd_data_export(args: &[String]) -> OfficeResult<()> {
     let home = viva::foundation::paths::viva_home(None);
     let db = database_path(&home);
     if !db.exists() {
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "no office store at {} (run `viva init` first); nothing was created",
             db.display()
         )));
@@ -2125,10 +2098,7 @@ fn cmd_data_export(args: &[String]) -> OfficeResult<()> {
     Ok(())
 }
 
-fn write_private_export_json(
-    path: &std::path::Path,
-    value: &serde_json::Value,
-) -> OfficeResult<()> {
+fn write_private_export_json(path: &std::path::Path, value: &serde_json::Value) -> Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -2142,9 +2112,9 @@ fn write_private_export_json(
 }
 
 /// One owner-only workspace request over the real channel.
-fn workspace_call(args: &[String]) -> OfficeResult<serde_json::Value> {
+fn workspace_call(args: &[String]) -> Result<serde_json::Value> {
     let home = viva_home(None);
-    let mut client = viva::office::OfficeClient::ensure_server(&home)?;
+    let mut client = viva::server::Client::ensure_server(&home)?;
     let action = args
         .first()
         .map(String::as_str)
@@ -2165,7 +2135,7 @@ fn workspace_call(args: &[String]) -> OfficeResult<serde_json::Value> {
     } else {
         None
     };
-    client.call(viva::office::OfficeRequestKind::Workspace {
+    client.call(viva::server::RequestKind::Workspace {
         action,
         value,
         project_id,
@@ -2173,7 +2143,7 @@ fn workspace_call(args: &[String]) -> OfficeResult<serde_json::Value> {
 }
 
 /// `viva workspace [list|open|new|select|add|remove|save|refresh] [value]`.
-fn cmd_workspace(args: &[String]) -> OfficeResult<()> {
+fn cmd_workspace(args: &[String]) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&workspace_call(args)?)?);
     Ok(())
 }

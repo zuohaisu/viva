@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::harness::HarnessSpec;
 use crate::members::{MemberBinding, MemberRecord};
 use crate::tasks::TaskRecord;
@@ -73,9 +73,9 @@ impl PiHarness {
         task: Option<&TaskRecord>,
         cwd: &Path,
         grant: Option<&crate::foundation::ids::GrantId>,
-    ) -> OfficeResult<HarnessSpec> {
+    ) -> Result<HarnessSpec> {
         if !self.extension_path.is_absolute() {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "pi extension path must be absolute: {}",
                 self.extension_path.display()
             )));
@@ -201,7 +201,7 @@ mod tests {
         let m = member();
         let task = crate::tasks::TaskRecord {
             task_id: crate::foundation::ids::TaskId::new(),
-            goal: "write the office loop".into(),
+            goal: "write the server loop".into(),
             constraints: vec![],
             assignee_member_id: Some(m.member_id.clone()),
             workspace_id: None,
