@@ -2,7 +2,7 @@
 //! (V04, issue #13).
 //!
 //! Semantics (ADR 0007 + rollout §2):
-//! - Permission vocabulary is preserved from the office charter:
+//! - Permission vocabulary is preserved from Viva's charter:
 //!   READ / PROPOSE / ACT_WITH_APPROVAL / ACT_AUTONOMOUSLY / FORBIDDEN.
 //! - Member-initiated dispatch and stopping exist only under a live grant.
 //!   A child grant may never widen its parent (actions are a subset, mode is
@@ -73,7 +73,7 @@ CREATE TABLE worker_credentials (
 // Grant model
 // ---------------------------------------------------------------------------
 
-/// Grant modes follow the office permission vocabulary. The ordering here is
+/// Grant modes follow Viva's permission vocabulary. The ordering here is
 /// the escalation order used to keep children from widening parents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -194,8 +194,8 @@ pub enum Actor {
     },
 }
 
-/// Actions the office classifies as protected: no grant, root or delegated,
-/// can ever authorize them. Vocabulary preserved from the office charter
+/// Actions Viva classifies as protected: no grant, root or delegated,
+/// can ever authorize them. Vocabulary preserved from Viva's charter
 /// (`src/viva/permissions/`, ADR 0007).
 pub const PROTECTED_ACTIONS: &[&str] = &[
     "push_protected_branch",

@@ -1,11 +1,11 @@
-//! The active Office host and its control plane (V07, issue #16), now the
+//! The active server and its control plane (V07, issue #16), now the
 //! resident-server side of the client/server split (V14 S1, issue #43;
 //! ADR 0012).
 //!
-//! One `VIVA_HOME` has at most one active Office host. The host owns the
+//! One `VIVA_HOME` has at most one active server. The host owns the
 //! private Unix-socket control channel (`office.sock` inside the 0700 home),
 //! serves CLI callbacks over it, supervises every terminal it spawned, and
-//! releases the channel on exit. A second `office start` refuses and names
+//! releases the channel on exit. A second `viva server` refuses and names
 //! the running host; a stale socket left by a crashed host is claimed with
 //! an explicit recovery record.
 //!
@@ -26,7 +26,7 @@
 //! Authorization (ADR 0012 decision 4): the socket lives in the 0700 home
 //! and accepts same-uid peers only; grant semantics extend to the wire —
 //! any presented grant is validated, member-attributed mutations need a
-//! live grant, and every denial is appended to the office event log.
+//! live grant, and every denial is appended to the event log.
 
 mod client;
 mod handoff;
@@ -61,7 +61,7 @@ use crate::terminal::{StopPolicy, TerminalRegistry};
 pub const DOMAIN_HOST: Domain = Domain::new("host");
 
 pub const HOST_V1_SQL: &str = r#"
--- One row per office-host process that ever claimed this VIVA_HOME.
+-- One row per server process that ever claimed this VIVA_HOME.
 CREATE TABLE hosts (
     host_id    TEXT PRIMARY KEY,
     pid        INTEGER NOT NULL,
@@ -117,7 +117,7 @@ pub const HANDOFF_SOCKET_NAME: &str = "handoff.sock";
 /// control socket, and how long the old host waits for the resumed one.
 const HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The full office composition: every delivered domain, registered in one
+/// The full composition: every delivered domain, registered in one
 /// frozen set. This is the lane-A composition V01 left to V07.
 pub fn migrations() -> &'static crate::foundation::store::FrozenMigrations {
     use std::sync::OnceLock;
@@ -162,7 +162,7 @@ pub fn migrations() -> &'static crate::foundation::store::FrozenMigrations {
         registry
             .register(DOMAIN_HOST, 1, "host v1", HOST_V1_SQL)
             .freeze()
-            .expect("office registry is well-formed")
+            .expect("registry is well-formed")
     })
 }
 
@@ -207,12 +207,12 @@ pub struct Shared {
     /// Exit-watchers for dispatched executions. The graceful shutdown
     /// joins them BEFORE writing its handoff record — otherwise the
     /// process exit would die with the process and the next host would
-    /// record a false "orphaned" recovery for a terminal this office
+    /// record a false "orphaned" recovery for a terminal this server
     /// stopped itself.
     watchers: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
-/// A claimed, running Office host.
+/// A claimed, running server.
 pub struct Host {
     shared: Arc<Shared>,
     listener: UnixListener,
@@ -233,7 +233,7 @@ impl Host {
             match Self::probe_socket(&socket_path) {
                 Ok(Some(pid)) => {
                     return Err(Error::Validation(format!(
-                        "an office host is already active for {} (pid {pid}); \
+                        "a server is already active for {} (pid {pid}); \
                          refusing to start a second host",
                         home.display()
                     )));
@@ -314,7 +314,7 @@ impl Host {
     }
 
     /// Crash reconciliation, before serving. Marks the previous host
-    /// `crashed`, resolves interrupted intents, and stops (in the office's
+    /// `crashed`, resolves interrupted intents, and stops (in Viva's
     /// records) executions whose supervision died with that host. Nothing
     /// is re-run; nothing is killed; completed work is never touched.
     fn reconcile(store: &Store, new_host_id: &str) -> Result<String> {
@@ -382,7 +382,7 @@ impl Host {
         }
 
         // Executions still `running`: their supervising host is gone. The
-        // office-side supervision ended — recorded as `stopped` with the
+        // Viva-side supervision ended — recorded as `stopped` with the
         // pid start marker, so a recycled pid can never be mistaken for
         // the orphan. The orphan itself is not signalled.
         let orphans: Vec<(String, Option<i64>, Option<String>)> = {
@@ -501,7 +501,7 @@ impl Host {
         let transferred = shared.transferred.load(Ordering::SeqCst);
         let mut terminal_count = 0usize;
         if !transferred {
-            let store = shared.store.lock().expect("office store");
+            let store = shared.store.lock().expect("store");
             let terminals = shared.terminals.list();
             terminal_count = terminals.len();
             for entry in terminals {
@@ -528,7 +528,7 @@ impl Host {
                 let _ = watcher.join();
             }
         }
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         store.connection().execute(
             "UPDATE hosts SET exited_at = ?2, exit_kind = 'graceful'
              WHERE host_id = ?1 AND exited_at IS NULL",
@@ -792,7 +792,7 @@ fn handle_request(shared: Arc<Shared>, request: &Request) -> Result<serde_json::
             value,
             project_id,
         } => {
-            let store = shared.store.lock().expect("office store");
+            let store = shared.store.lock().expect("store");
             let nav = crate::workspaces::navigation::Navigation { store: &store };
             let required = || {
                 value
@@ -999,7 +999,7 @@ fn authorize_socket_request(shared: &Shared, request: &Request) -> Result<()> {
     // Mutex is not reentrant — holding it across the audit deadlocks the
     // connection thread until the client's read timeout fires.
     let verdict = {
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         let authority = AuthorityEngine::new(&store);
         (|| -> Result<crate::authority::Grant> {
             let grant_id = GrantId::from_str(grant_text)?;
@@ -1086,10 +1086,10 @@ fn authorize_socket_request(shared: &Shared, request: &Request) -> Result<()> {
     Ok(())
 }
 
-/// Record one socket-grant denial as an append-only office event and return
+/// Record one socket-grant denial as an append-only event and return
 /// the matching error for the caller.
 fn audit_grant_denial(shared: &Shared, request: &Request, reason: &str) -> Error {
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let payload = serde_json::json!({
         "kind": format!("{:?}", std::mem::discriminant(&request.kind)),
         "method": serde_json::to_string(&request.kind).unwrap_or_default(),
@@ -1145,7 +1145,7 @@ fn terminal_create(
     spec.rows = rows;
     spec.validate()?;
     let worktree = worktree_id.map(WorktreeId::from_str).transpose()?;
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let (terminal_id, handle) = shared.terminals.spawn(
         spec,
         owner,
@@ -1192,7 +1192,7 @@ fn workbench_view(shared: Arc<Shared>) -> Result<serde_json::Value> {
             let _ = auto_sync_all(&background, false);
         });
     }
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let mut model = crate::tui::workbench::assemble_view(&store, &shared.terminals)?;
 
     // Process identification is independent of screen text and refreshed for
@@ -1326,7 +1326,7 @@ fn workbench_view(shared: Arc<Shared>) -> Result<serde_json::Value> {
 
     // V15-2/V15-4 row enrichment. The worktree records are collected UNDER
     // the store lock; the slow probes (gh network calls, rev-list) run
-    // AFTER it is dropped — the office keeps answering while enriching.
+    // AFTER it is dropped — Viva keeps answering while enriching.
     let mut records: Vec<(String, crate::git::worktrees::TaskWorktreeRecord)> = Vec::new();
     {
         let service = crate::git::worktrees::WorktreeService::new(
@@ -1394,9 +1394,9 @@ fn workbench_view(shared: Arc<Shared>) -> Result<serde_json::Value> {
 
 /// The pane-layout preference store (QA F5): the client persists its pane
 /// tree so a later attach rebuilds the same view. A UI preference in
-/// settings - bounded, validated as JSON, never an office fact.
+/// settings - bounded, validated as JSON, never a Viva fact.
 fn workbench_layout(shared: &Shared, layout_json: Option<&str>) -> Result<serde_json::Value> {
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     match layout_json {
         Some(json) => {
             if json.len() > 64 * 1024 {
@@ -1431,7 +1431,7 @@ fn workbench_layout(shared: &Shared, layout_json: Option<&str>) -> Result<serde_
 /// socket for the workbench `d` action).
 fn workbench_diff(shared: &Shared, worktree_id: &str) -> Result<serde_json::Value> {
     let worktree_id = WorktreeId::from_str(worktree_id)?;
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let service = crate::git::worktrees::WorktreeService::new(
         &store,
         crate::git::worktrees::ProtectedRefs::new(vec![]),
@@ -1450,7 +1450,7 @@ fn workbench_diff(shared: &Shared, worktree_id: &str) -> Result<serde_json::Valu
 /// action): a user_shell owned by the server, attached to the worktree.
 fn terminal_open_in_worktree(shared: &Shared, worktree_id: &str) -> Result<serde_json::Value> {
     if let Some(pid) = worktree_id.strip_prefix("directory:") {
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         let project = crate::projects::ProjectRegistry::new(&store)
             .require(&crate::foundation::ids::ProjectId::from_str(pid)?)?;
         let spec = crate::terminal::TerminalSpec::new(
@@ -1468,7 +1468,7 @@ fn terminal_open_in_worktree(shared: &Shared, worktree_id: &str) -> Result<serde
         return Ok(serde_json::json!({"terminal_id":id.to_string(),"pid":handle.pid()}));
     }
     let worktree_id = WorktreeId::from_str(worktree_id)?;
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let service = crate::git::worktrees::WorktreeService::new(
         &store,
         crate::git::worktrees::ProtectedRefs::new(vec![]),
@@ -1511,7 +1511,7 @@ fn worktree_create_for_task(
     base_dir: Option<&str>,
 ) -> Result<serde_json::Value> {
     let task_id = TaskId::from_str(task_id)?;
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let task = TaskRegistry::new(&store).require_task(&task_id)?;
     let project_id = task.project_id.ok_or_else(|| {
         Error::Validation(format!(
@@ -1585,7 +1585,7 @@ fn agent_report(
     if agent.trim().is_empty() {
         return Err(Error::Validation("agent name must not be empty".into()));
     }
-    // A report about a terminal this office hosts: identity checks out.
+    // A report about a terminal this server hosts: identity checks out.
     shared
         .terminals
         .handle(&terminal_id)?
@@ -1602,7 +1602,7 @@ fn agent_report(
         updated_at: utc_now(),
     };
     shared.agent_board.observe(record.clone());
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     crate::foundation::events::append(
         &store,
         crate::foundation::events::NewEvent {
@@ -1620,12 +1620,12 @@ fn agent_report(
         },
     )?;
     // V15-5: rate-limit recovery plans. rate_limited REQUIRES a reset
-    // time (the office never guesses one); any other reported status
+    // time (Viva never guesses one); any other reported status
     // cancels the open plan — the limit is over.
     if status == crate::agents::AgentStatus::RateLimited {
         let Some(reset_at) = reset_at else {
             return Err(Error::Validation(
-                "rate_limited requires reset_at (RFC3339); the office does not \
+                "rate_limited requires reset_at (RFC3339); Viva does not \
                  schedule recovery for an unknown time"
                     .into(),
             ));
@@ -1706,7 +1706,7 @@ fn agent_content_submit(
         let mut file = file.open(&path)?;
         serde_json::to_writer_pretty(&mut file, &record)?;
     }
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     crate::foundation::events::append(
         &store,
         crate::foundation::events::NewEvent {
@@ -1772,7 +1772,7 @@ fn agent_prompt(shared: &Shared, terminal_id: &str, prompt: &str) -> Result<serd
             id: terminal_id.to_string(),
         })?;
     handle.input(prompt.as_bytes())?;
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     crate::foundation::events::append(
         &store,
         crate::foundation::events::NewEvent {
@@ -1825,7 +1825,7 @@ fn agent_wait(
                     && record.status == wanted
             });
         if let Some(record) = matched {
-            let store = shared.store.lock().expect("office store");
+            let store = shared.store.lock().expect("store");
             crate::foundation::events::append(
                 &store,
                 crate::foundation::events::NewEvent {
@@ -1848,7 +1848,7 @@ fn agent_wait(
             }));
         }
         if Instant::now() >= deadline {
-            let store = shared.store.lock().expect("office store");
+            let store = shared.store.lock().expect("store");
             crate::foundation::events::append(
                 &store,
                 crate::foundation::events::NewEvent {
@@ -1870,12 +1870,12 @@ fn agent_wait(
     }
 }
 
-/// The durable event feed: office events after a sequence number. This is
+/// The durable event feed: events after a sequence number. This is
 /// how a disconnected orchestrator catches up - reconnect and ask again
 /// with the last seq you saw.
 fn events_feed(shared: &Shared, since_seq: u64, limit: u32) -> Result<serde_json::Value> {
     let limit = limit.clamp(1, 500);
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let mut stmt = store.connection().prepare(
         "SELECT seq, event_id, occurred_at, domain, kind, subject_type, subject_id, origin, payload
          FROM events WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",
@@ -1915,7 +1915,7 @@ fn events_feed(shared: &Shared, since_seq: u64, limit: u32) -> Result<serde_json
 fn pause_server(shared: &Shared, paused: bool) -> Result<serde_json::Value> {
     shared.paused.store(paused, Ordering::SeqCst);
     {
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         store.connection().execute(
             "INSERT INTO settings(key, value) VALUES ('paused', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1946,7 +1946,7 @@ fn pause_server(shared: &Shared, paused: bool) -> Result<serde_json::Value> {
 }
 
 /// The maintenance gate (S6, issue #48 QA F4): bounded maintenance windows
-/// run only when the office is not explicitly paused. Reads the PERSISTED
+/// run only when Viva is not explicitly paused. Reads the PERSISTED
 /// pause, so the gate holds even with no live host - the pause itself
 /// persists, and this keeps "pause stops new dispatch AND maintenance
 /// cycles" true end to end.
@@ -1962,7 +1962,7 @@ pub fn assert_maintenance_allowed(store: &Store) -> Result<()> {
         .unwrap_or(false);
     if paused {
         return Err(Error::Validation(
-            "office is paused: maintenance windows are gated (running executions are \
+            "Viva is paused: maintenance windows are gated (running executions are \
              unaffected; `viva resume` lifts the pause)"
                 .into(),
         ));
@@ -1973,7 +1973,7 @@ pub fn assert_maintenance_allowed(store: &Store) -> Result<()> {
 /// Apply the close-policy hook at shutdown time. `pause` persists the
 /// paused state so the NEXT server starts paused; `continue` explicitly
 /// clears any pause; `None` (an unadorned shutdown) leaves the CURRENT
-/// state untouched - an operator-paused office that is shut down comes
+/// state untouched - an operator-paused server that is shut down comes
 /// back paused, because the pause was an explicit owner decision.
 fn apply_close_policy(shared: &Shared, close_policy: Option<&str>) -> Result<()> {
     match close_policy {
@@ -2055,7 +2055,7 @@ fn perform_handoff(shared: Arc<Shared>, listener: UnixListener, handoff_path: st
     let collected = match collect {
         Ok(list) => list,
         Err(err) => {
-            let store = shared.store.lock().expect("office store");
+            let store = shared.store.lock().expect("store");
             let _ = record_recovery(
                 &store,
                 &shared.host_id,
@@ -2160,7 +2160,7 @@ fn perform_handoff(shared: Arc<Shared>, listener: UnixListener, handoff_path: st
 
     match outcome {
         Ok(count) => {
-            let store = shared.store.lock().expect("office store");
+            let store = shared.store.lock().expect("store");
             let _ = record_recovery(
                 &store,
                 &shared.host_id,
@@ -2184,7 +2184,7 @@ fn perform_handoff(shared: Arc<Shared>, listener: UnixListener, handoff_path: st
             for (entry, _, _) in &collected {
                 if let Ok(Some(handle)) = shared.terminals.handle(&entry.terminal_id) {
                     if let Err(reattach_err) = handle.reattach_reader() {
-                        let store = shared.store.lock().expect("office store");
+                        let store = shared.store.lock().expect("store");
                         let _ = record_recovery(
                             &store,
                             &shared.host_id,
@@ -2199,7 +2199,7 @@ fn perform_handoff(shared: Arc<Shared>, listener: UnixListener, handoff_path: st
                     }
                 }
             }
-            let store = shared.store.lock().expect("office store");
+            let store = shared.store.lock().expect("store");
             let _ = record_recovery(
                 &store,
                 &shared.host_id,
@@ -2269,7 +2269,7 @@ pub fn resume_server(home: &Path) -> Result<()> {
     let host = Host::open(home)?;
     {
         let shared = host.shared();
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         for (entry, fd) in manifest.entries.iter().zip(fds) {
             let adopt = (|| -> Result<()> {
                 let terminal_id = TerminalId::from_str(&entry.terminal_id)?;
@@ -2323,7 +2323,7 @@ pub fn resume_server(home: &Path) -> Result<()> {
         );
     }
     eprintln!(
-        "office: resumed with {} transferred terminal(s)",
+        "server: resumed with {} transferred terminal(s)",
         manifest.entries.len()
     );
     host.serve()
@@ -2349,7 +2349,7 @@ fn owner_from_label(text: &str) -> Result<TerminalOwner> {
 }
 
 fn status(shared: &Shared) -> Result<serde_json::Value> {
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let (row_count_executions, running, completed): (i64, i64, i64) = {
         let count = |status: &str| -> Result<i64> {
             Ok(store.connection().query_row(
@@ -2422,7 +2422,7 @@ fn dispatch(
     // separate stop.
     if shared.paused.load(Ordering::SeqCst) {
         return Err(Error::Validation(
-            "office is paused: no new dispatch (running executions are unaffected;              `viva resume` lifts the pause)"
+            "Viva is paused: no new dispatch (running executions are unaffected;              `viva resume` lifts the pause)"
                 .into(),
         ));
     }
@@ -2430,7 +2430,7 @@ fn dispatch(
     let member_id = MemberId::from_str(member_id)?;
     let grant_id = GrantId::from_str(grant_id)?;
 
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let members = MemberRegistry::new(&store);
     let _member = members.require(&member_id)?;
     let binding = members.binding(&member_id)?.ok_or_else(|| {
@@ -2494,9 +2494,9 @@ fn dispatch(
         )));
     }
 
-    // A named worktree must be a real office record, not a free-form
-    // string: the attribution should never point at a worktree this
-    // office does not know.
+    // A named worktree must be a real Viva record, not a free-form
+    // string: the attribution should never point at a worktree
+    // Viva does not know.
     if let Some(worktree) = worktree_id {
         let known: i64 = store.connection().query_row(
             "SELECT COUNT(*) FROM task_worktrees
@@ -2617,12 +2617,12 @@ fn dispatch(
             // a stopped process must always land in the ledger.
             let code = exit.code.unwrap_or(-1);
             let server_stopped = !matches!(exit.via, crate::terminal::ExitVia::ChildExit);
-            let store = watcher_shared.store.lock().expect("office store");
+            let store = watcher_shared.store.lock().expect("store");
             let tasks = TaskRegistry::new(&store);
             let _ = tasks.record_exit(&watcher_key, code);
             {
                 // The exit-code ledger sorts non-zero into `failed`; an
-                // exit the OFFICE caused (graceful stop / forced kill) is
+                // exit Viva caused (graceful stop / forced kill) is
                 // a stop, not a failure — correct the record and say why.
                 if server_stopped {
                     let _ = store.connection().execute(
@@ -2708,7 +2708,7 @@ fn terminal_input(
 
 fn terminal_stop(shared: &Shared, terminal_id: &str) -> Result<serde_json::Value> {
     let terminal_id = TerminalId::from_str(terminal_id)?;
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let exit = shared
         .terminals
         .stop(&terminal_id, StopPolicy::default(), Some(&store))?;
@@ -2717,7 +2717,7 @@ fn terminal_stop(shared: &Shared, terminal_id: &str) -> Result<serde_json::Value
 
 fn task_results(shared: &Shared, task_id: &str) -> Result<serde_json::Value> {
     let task_id = TaskId::from_str(task_id)?;
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let tasks = TaskRegistry::new(&store);
     let results = tasks.results_for_task(&task_id)?;
     Ok(serde_json::to_value(&results)?)
@@ -2740,7 +2740,7 @@ fn handoff(
             "handoff summary must not be empty".into(),
         ));
     }
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let tasks = TaskRegistry::new(&store);
     tasks.require_task(&task_id)?;
     // Attach the task's most recent launched execution when one exists; a
@@ -2797,13 +2797,13 @@ fn fnv1a(text: &str) -> u64 {
 // Client side: send a request to the active host, or fail honestly
 // ---------------------------------------------------------------------------
 
-/// Send one request to the active office host over the real channel. When
+/// Send one request to the active server over the real channel. When
 /// no host listens, this fails cleanly and never starts a daemon.
 pub fn send_request(home: &Path, request: Request) -> Result<Response> {
     let socket_path = home.join(SOCKET_NAME);
     if !socket_path.exists() {
         return Err(Error::Validation(format!(
-            "no active office in {} (mutation rejected; start one with `viva start`)",
+            "no active server in {} (mutation rejected; start one with `viva start`)",
             home.display()
         )));
     }
@@ -2881,7 +2881,7 @@ fn auto_sync_due(shared: &Shared) -> bool {
     // The fetch half runs regardless of auto_pull (QA F3): behind/ahead
     // markers stay fresh with the switch OFF; only the PULL half is
     // gated. Both halves share the same 5-min cadence.
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     drop(store);
     match *shared.last_sync.lock().expect("last sync") {
         Some(last) => last.elapsed() >= Duration::from_secs(5 * 60),
@@ -2891,7 +2891,7 @@ fn auto_sync_due(shared: &Shared) -> bool {
 
 /// V15-4: the user-facing switch (default off, persisted).
 fn set_auto_pull(shared: &Shared, on: bool) -> Result<serde_json::Value> {
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     store.connection().execute(
         "INSERT INTO settings(key, value) VALUES ('auto_pull', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -2913,7 +2913,7 @@ fn set_auto_pull(shared: &Shared, on: bool) -> Result<serde_json::Value> {
 
 // ---------------------------------------------------------------------------
 // V15 workbench deepening (issues V15-1..V15-5): files, PR cleanup,
-// handoff, auto-sync, rate-limit recovery. All handlers keep the office
+// handoff, auto-sync, rate-limit recovery. All handlers keep Viva
 // discipline: typed ids, bounded reads, audit events, honest unknowns.
 // ---------------------------------------------------------------------------
 
@@ -2986,7 +2986,7 @@ fn auto_sync_all(shared: &Shared, force: bool) -> Result<serde_json::Value> {
         return Ok(serde_json::json!({ "skipped": "cycle already in flight" }));
     }
     // QA round 6 G4: the clear is DROP-guarded — an inner panic cannot
-    // leave the office stuck "in flight" forever.
+    // leave Viva stuck "in flight" forever.
     struct InFlightGuard<'a>(&'a AtomicBool);
     impl Drop for InFlightGuard<'_> {
         fn drop(&mut self) {
@@ -3012,9 +3012,9 @@ fn auto_sync_all_inner(shared: &Shared, force: bool) -> Result<serde_json::Value
     // Phase 1 — snapshot WHAT to sync under the store lock, then DROP it
     // for the whole git phase (QA F3 round 2: the probes are network
     // operations with a 30s timeout each, and this same mutex guards every
-    // office request; holding it across them froze the workbench).
+    // server request; holding it across them froze the workbench).
     let (main_checkouts, worktrees, auto_pull) = {
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         let mains: Vec<(String, std::path::PathBuf)> =
             crate::projects::ProjectRegistry::new(&store)
                 .list(true)?
@@ -3083,7 +3083,7 @@ fn auto_sync_all_inner(shared: &Shared, force: bool) -> Result<serde_json::Value
     }
 
     // Phase 3 — re-lock ONLY for the audit writes and the cycle bookkeeping.
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     for row in &results {
         crate::foundation::events::append(
             &store,
@@ -3217,7 +3217,7 @@ fn sweep_recovery_plans(shared: &Shared) {
 fn worktree_files(shared: &Shared, worktree_id: &str) -> Result<serde_json::Value> {
     let wid = WorktreeId::from_str(worktree_id)?;
     let cwd = {
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         let service = crate::git::worktrees::WorktreeService::new(
             &store,
             crate::git::worktrees::ProtectedRefs::new(vec![]),
@@ -3227,7 +3227,7 @@ fn worktree_files(shared: &Shared, worktree_id: &str) -> Result<serde_json::Valu
             id: worktree_id.to_string(),
         })?;
         // Drop the store lock BEFORE the git probes (QA round 5 F5): a
-        // slow worktree must not freeze every office request.
+        // slow worktree must not freeze every server request.
         record.worktree_path
     };
     let runner = crate::git::cli::CliRunner::default();
@@ -3319,7 +3319,7 @@ fn worktree_file_content(
         ));
     }
     let (worktree_path, base_sha) = {
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         let service = crate::git::worktrees::WorktreeService::new(
             &store,
             crate::git::worktrees::ProtectedRefs::new(vec![]),
@@ -3383,7 +3383,7 @@ fn worktree_file_content(
 }
 
 /// V15-2: the merged-PR cleanup. The gate is real: the branch's PR must be
-/// MERGED (re-checked live, not from cache). `release` records the office
+/// MERGED (re-checked live, not from cache). `release` records Viva
 /// giving the worktree up; the directory removal then runs WITHOUT force —
 /// a dirty tree refuses and says so. The caller confirmed the exact path
 /// (two-step UI); the action is audited either way.
@@ -3397,7 +3397,7 @@ fn worktree_cleanup(
     // below is a network call (30s timeout); holding the mutex across it
     // freezes every pane for that long (QA F15 — residual F3 class).
     let (repo_root, worktree_path, branch) = {
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         let service = crate::git::worktrees::WorktreeService::new(
             &store,
             crate::git::worktrees::ProtectedRefs::new(vec![]),
@@ -3420,7 +3420,7 @@ fn worktree_cleanup(
         .unwrap_or_else(|| "unknown".into());
     if state != "merged" {
         // The refusal is a fact too (#53 boundary: every outcome audited).
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         crate::foundation::events::append(
             &store,
             crate::foundation::events::NewEvent {
@@ -3444,7 +3444,7 @@ fn worktree_cleanup(
     }
     let runner = crate::git::cli::CliRunner::default();
     let removal = {
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         let service = crate::git::worktrees::WorktreeService::new(
             &store,
             crate::git::worktrees::ProtectedRefs::new(vec![]),
@@ -3463,7 +3463,7 @@ fn worktree_cleanup(
         )
     };
     if let Err(failure) = removal {
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         crate::foundation::events::append(
             &store,
             crate::foundation::events::NewEvent {
@@ -3481,13 +3481,13 @@ fn worktree_cleanup(
             },
         )?;
         return Err(Error::Validation(format!(
-            "worktree `{}` was released in the office records but its directory could \
+            "worktree `{}` was released in Viva's records but its directory could \
              not be removed ({}); remove it by hand after checking the tree",
             worktree_path.display(),
             failure
         )));
     }
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     crate::foundation::events::append(
         &store,
         crate::foundation::events::NewEvent {
@@ -3532,7 +3532,7 @@ fn agent_handoff(
             "handoff target must be a bare command name (no spaces, no paths)".into(),
         ));
     }
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let service = crate::git::worktrees::WorktreeService::new(
         &store,
         crate::git::worktrees::ProtectedRefs::new(vec![]),
@@ -3664,7 +3664,7 @@ fn sync_now(shared: &Shared) -> Result<serde_json::Value> {
 }
 
 fn recovery_list(shared: &Shared) -> Result<serde_json::Value> {
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let mut stmt = store.connection().prepare(
         "SELECT id, terminal_id, task_id, reset_at, action, state, created_at, fired_at
          FROM recovery_plans ORDER BY id DESC LIMIT 50",
@@ -3702,7 +3702,7 @@ fn recovery_schedule(
             entity: "terminal",
             id: terminal_id.to_string(),
         })?;
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     store.connection().execute(
         "INSERT INTO recovery_plans(terminal_id, task_id, reset_at, action, state, created_at)
          VALUES (?1, ?2, ?3, 'resume_prompt', 'scheduled', ?4)",
@@ -3724,7 +3724,7 @@ fn recovery_schedule(
 }
 
 fn recovery_cancel(shared: &Shared, plan_id: i64) -> Result<serde_json::Value> {
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let changed = store.connection().execute(
         "UPDATE recovery_plans SET state = 'cancelled', fired_at = ?2
          WHERE id = ?1 AND state = 'scheduled'",
@@ -6112,7 +6112,7 @@ mod v15_tests {
     }
 
     /// V15-5 honesty: rate_limited without a reset_at is refused — the
-    /// office never guesses a recovery time.
+    /// Viva never guesses a recovery time.
     #[test]
     fn rate_limited_without_reset_at_is_refused() {
         let host = start_host();
@@ -6881,10 +6881,7 @@ mod qa_round5_tests {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        assert!(
-            answered,
-            "the office must keep answering during a slow sync"
-        );
+        assert!(answered, "Viva must keep answering during a slow sync");
 
         let sync_outcome = syncer.join().expect("sync thread ends");
         assert!(

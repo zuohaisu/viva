@@ -29,7 +29,7 @@ use crate::foundation::store::Store;
 pub struct TerminalEntry {
     pub terminal_id: TerminalId,
     pub owner: TerminalOwner,
-    /// The worktree this terminal works in, when the office allocated it
+    /// The worktree this terminal works in, when Viva allocated it
     /// against one (aux shells may float).
     pub worktree_id: Option<crate::foundation::ids::WorktreeId>,
     pub purpose: String,

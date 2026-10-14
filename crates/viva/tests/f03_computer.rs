@@ -813,7 +813,7 @@ fn actions_are_task_scoped_and_grant_gated() {
 }
 
 /// Acceptance: "全局键鼠/焦点任务不能交叉破坏；独立 API/浏览器context不
-/// 因此全串行" — two office processes (here: two connections sharing one
+/// 因此全串行" — two Viva processes (here: two connections sharing one
 /// coordinator) cannot hold the foreground lane at once; a foreground
 /// action waits its turn; an independent read context never waits.
 #[test]
@@ -823,7 +823,7 @@ fn foreground_lane_serializes_but_reads_run_free() {
     let task_a = TaskId::new();
     let task_b = TaskId::new();
 
-    // The office store exists once; grants are visible to both threads.
+    // The store exists once; grants are visible to both threads.
     {
         let store = Store::open(&db, &frozen()).expect("store");
         let authority = AuthorityEngine::new(&store);

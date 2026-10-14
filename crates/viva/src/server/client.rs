@@ -1,7 +1,7 @@
-//! The office client: the attach side of the resident-server split (V14
+//! The client: the attach side of the resident-server split (V14
 //! S1, issue #43; ADR 0012).
 //!
-//! Before this module the TUI process WAS the office host. Now the host is
+//! Before this module the TUI process WAS the server. Now the host is
 //! a resident `viva server` process that owns the store, the terminals and
 //! the socket, and the workbench / headless CLI are clients that connect to
 //! it, render projections, and may detach at any time — the terminals keep
@@ -45,7 +45,7 @@ impl Client {
         let socket_path = home.join(SOCKET_NAME);
         if !socket_path.exists() {
             return Err(Error::Validation(format!(
-                "no active office server in {} (start one with `viva server`)",
+                "no active server in {} (start one with `viva server`)",
                 home.display()
             )));
         }

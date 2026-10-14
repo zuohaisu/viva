@@ -376,7 +376,7 @@ fn stop_is_idempotent_under_races_and_never_touches_unowned_processes() {
     );
     b.stop(StopPolicy::default()).expect("stop b");
 
-    // And an unowned process is not ours to signal: the office only ever
+    // And an unowned process is not ours to signal: Viva only ever
     // signals its own recorded process groups (see signal_group guard).
     let _ = PathBuf::new();
 }
@@ -494,14 +494,14 @@ fn high_volume_output_stays_bounded_and_the_log_is_redacted() {
 }
 
 /// Acceptance: "慢磁盘…内存/队列/scrollback 有界" — a slow log sink applies
-/// backpressure to the producer while the office stays responsive, and the
+/// backpressure to the producer while Viva stays responsive, and the
 /// session remains stoppable.
 #[test]
 fn slow_consumer_backpressure_keeps_the_session_controllable() {
     let dir = tempfile::TempDir::new().expect("dir");
     let log_path = dir.path().join("slow.raw");
     // No disk log here: the slow consumer is simulated by the child reading
-    // stdin slowly while the office writes fast — the bounded pty pipe is
+    // stdin slowly while Viva writes fast — the bounded pty pipe is
     // the backpressure. We prove input() still returns (bounded queue) and
     // stop() still works under pressure.
     let reg = registry();
@@ -530,7 +530,7 @@ fn slow_consumer_backpressure_keeps_the_session_controllable() {
             .expect("input under pressure");
     }
 
-    // The office remains in control: snapshot works, stop works, and the
+    // Viva remains in control: snapshot works, stop works, and the
     // forced escalation path is reachable if the consumer ignores TERM.
     let snap = slow.snapshot().expect("snapshot under pressure");
     assert!(snap.rows > 0);

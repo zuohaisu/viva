@@ -1,9 +1,9 @@
-//! The `viva` binary: the office's executable entry point.
+//! The `viva` binary: Viva's executable entry point.
 //!
 //! V01 scope: initialize a private `VIVA_HOME`, prove the SQLite store with
 //! real events across process restarts, and report state (`doctor`). The TUI
 //! and supervision arrive with later milestones; this entry never claims
-//! more than the office currently does.
+//! more than Viva currently does.
 
 use std::process::ExitCode;
 use std::str::FromStr as _;
@@ -27,7 +27,7 @@ fn main() -> ExitCode {
 fn run(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         // Bare `viva` IS the workbench: attach as a client of the resident
-        // office server (auto-starting one when none runs). The TUI is a
+        // server (auto-starting one when none runs). The TUI is a
         // detachable view now — `q` detaches, the server keeps every
         // terminal alive (ADR 0012 / issue #43). Usage: `viva help`.
         None => cmd_workbench(),
@@ -40,7 +40,7 @@ fn run(args: &[String]) -> Result<()> {
         Some("update") => viva::update::run(args.get(1..).unwrap_or(&[])),
         Some("event") => cmd_event(args.get(1..).unwrap_or(&[])),
         // The daily control plane is top-level — `viva start`, `viva
-        // status`, ... — with no `office` namespace to type through.
+        // status`, ... — with no namespace to type through.
         Some(
             "start" | "server" | "server-restart" | "status" | "dispatch" | "terminals"
             | "stop-terminal" | "result" | "shutdown" | "pause" | "resume" | "brief"
@@ -80,7 +80,7 @@ fn run(args: &[String]) -> Result<()> {
 }
 
 /// `viva workbench` — the interactive parallel-development workbench, run
-/// as a CLIENT of the resident office server. If no healthy server answers,
+/// as a CLIENT of the resident server. If no healthy server answers,
 /// one is spawned detached first (its own process group, log in
 /// `server.log`). `q` detaches the client; the server keeps every terminal
 /// running until an explicit `viva shutdown` (ADR 0012, issue #43).
@@ -103,7 +103,7 @@ fn cmd_workbench() -> Result<()> {
     let home = viva::foundation::paths::viva_home(None);
     let client = viva::server::Client::ensure_server(&home)?;
     eprintln!(
-        "workbench: attached to the resident office server — `q` detaches, \
+        "workbench: attached to the resident server — `q` detaches, \
          the server keeps running (`viva shutdown` stops it); home {}",
         home.display()
     );
@@ -441,12 +441,12 @@ fn cmd_terminal(args: &[String]) -> Result<()> {
 
 fn print_usage() {
     println!(
-        "viva — the Personal AI Office host
+        "viva — local-first personal AI collaboration system
 
 USAGE:
     viva
         Attach the interactive parallel-development workbench to the
-        resident office server (one is spawned detached when none runs).
+        resident server (one is spawned detached when none runs).
         `q` detaches the client; the server keeps every terminal running.
 
     viva help
@@ -454,7 +454,7 @@ USAGE:
 
     viva init
         Create VIVA_HOME (default ~/.viva, override with $VIVA_HOME) and the
-        office database, applying all registered migrations.
+        database, applying all registered migrations.
 
     viva doctor
         Report state root, database, schema versions and table counts.
@@ -466,18 +466,18 @@ USAGE:
         data is untouched.
 
     viva event add <domain> <kind> <subject-type> <subject-id> [payload-json]
-        Append one office event (origin: cli).
+        Append one event (origin: cli).
 
     viva event list [limit]
-        List the most recent office events (default 20).
+        List the most recent events (default 20).
 
     viva server
-        Run the resident office server in the foreground (the same as
+        Run the resident server in the foreground (the same as
         `viva start`): owns the store, every terminal and the control
         channel until `viva shutdown` arrives. Clients may detach freely.
 
     viva status
-        Office snapshot. Uses the live channel when a host is active, and
+        Viva snapshot. Uses the live channel when a host is active, and
         falls back to offline store reads otherwise (read-only by design).
 
     viva dispatch --task <id> --member <id> --grant <id>
@@ -545,11 +545,11 @@ USAGE:
         terminal, or wait server-side for its reported status.
 
     viva events [--since <seq>] [--limit <n>]
-        The durable office event feed: reconnect with your last seen seq
+        The durable event feed: reconnect with your last seen seq
         and miss nothing.
 
     viva conversations <create|fork|rename|set-native|attach-task|detach-task|archive|tree|handoff> [flags]
-        Conversation metadata (office-owned tree; the harness owns the transcript).
+        Conversation metadata (Viva-owned tree; the harness owns the transcript).
 
     viva workbench
         Same as bare `viva`: attach the interactive workbench to the
@@ -563,7 +563,7 @@ USAGE:
 
     viva tools computer lane
         List all foreground holders without reconciliation; opening the
-        office may still apply pending schema migrations.
+        store may still apply pending schema migrations.
 
     viva tools computer release-lease --task <id> --acquired-at <timestamp> \
       --member <id> --grant <id> --reason <text> --confirm
@@ -590,10 +590,10 @@ USAGE:
         Write one fact through the real provider with mandatory provenance.
 
     viva memory archive|restore --fact <id> --reason <text>
-        Exit paths over the office link layer. Nothing here deletes.
+        Exit paths over Viva's link layer. Nothing here deletes.
 
     viva memory status
-        Report which store/checkout the office is wired to — from a real
+        Report which store/checkout Viva is wired to — from a real
         adapter round trip, not file existence.
 
     viva workflow register --builtin <delivery|read-only-review> | --file <config.json>
@@ -633,9 +633,9 @@ USAGE:
 fn open_store() -> Result<Store> {
     let home = viva_home(None);
     ensure_private_dir(&home)?;
-    // The product entry opens the FULL office composition (every delivered
+    // The product entry opens the FULL composition (every delivered
     // domain), not just the foundation slice — `viva init` must leave a
-    // store the office can actually use.
+    // store Viva can actually use.
     Store::open(&database_path(&home), viva::server::migrations())
 }
 
@@ -769,7 +769,7 @@ fn parse_domain(name: &str) -> Result<viva::foundation::store::Domain> {
 }
 
 // ---------------------------------------------------------------------------
-// Office control plane (V07)
+// Server control plane (V07)
 // ---------------------------------------------------------------------------
 
 fn cmd_control(args: &[String]) -> Result<()> {
@@ -812,19 +812,19 @@ fn cmd_control(args: &[String]) -> Result<()> {
             cmd_control_query(&home, viva::server::RequestKind::Shutdown { close_policy })?;
             // Human commentary goes to stderr; stdout stays pure JSON for
             // callers that parse it (the extension envelope, tooling).
-            eprintln!("office: shutdown accepted; owned terminals stopped, handoff persisted");
+            eprintln!("server: shutdown accepted; owned terminals stopped, handoff persisted");
             Ok(())
         }
         Some("pause") => {
             cmd_control_query(&home, viva::server::RequestKind::Pause)?;
             eprintln!(
-                "office: paused - no new dispatch, no maintenance; running executions keep running"
+                "server: paused - no new dispatch, no maintenance; running executions keep running"
             );
             Ok(())
         }
         Some("resume") => {
             cmd_control_query(&home, viva::server::RequestKind::Resume)?;
-            eprintln!("office: resumed - dispatch and maintenance are live again");
+            eprintln!("server: resumed - dispatch and maintenance are live again");
             Ok(())
         }
         Some("brief") => cmd_control_brief(args.get(1..).unwrap_or(&[])),
@@ -853,7 +853,7 @@ fn cmd_control_brief(args: &[String]) -> Result<()> {
     let db = viva::foundation::paths::database_path(&home);
     if !db.exists() {
         return Err(Error::Validation(format!(
-            "no office store at {} (run `viva init` first); nothing was created",
+            "no Viva store at {} (run `viva init` first); nothing was created",
             db.display()
         )));
     }
@@ -911,7 +911,7 @@ fn cmd_control_start(home: &std::path::Path, resume: bool) -> Result<()> {
         // Live-handoff resume (S3): adopt the transferred terminals and
         // serve. Blocks until this host is shut down.
         eprintln!(
-            "office host (pid {}) resuming from live handoff — home {}",
+            "server (pid {}) resuming from live handoff — home {}",
             std::process::id(),
             home.display()
         );
@@ -921,13 +921,13 @@ fn cmd_control_start(home: &std::path::Path, resume: bool) -> Result<()> {
     }
     let host = viva::server::Host::open(home)?;
     eprintln!(
-        "office host {} active (pid {}) — home {}",
+        "server {} active (pid {}) — home {}",
         host.shared().host_id,
         std::process::id(),
         home.display()
     );
     host.serve()?;
-    eprintln!("office host released the control channel");
+    eprintln!("server released the control channel");
     Ok(())
 }
 
@@ -952,7 +952,7 @@ fn cmd_control_status(home: &std::path::Path) -> Result<()> {
         Err(live_err) => {
             // Read-only status is answerable offline by design; say both
             // facts plainly.
-            eprintln!("office: live channel unavailable: {live_err}");
+            eprintln!("server: live channel unavailable: {live_err}");
             let offline = viva::server::offline_status(home)?;
             println!("{}", serde_json::to_string_pretty(&offline)?);
             Ok(())
@@ -1050,7 +1050,7 @@ fn print_response(response: &viva::server::Response) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Conversation metadata CLI (V10) — office-owned display names, fork trees
+// Conversation metadata CLI (V10) — Viva-owned display names, fork trees
 // and handoff records. The harness-native transcript is never copied here.
 // ---------------------------------------------------------------------------
 
@@ -1293,7 +1293,7 @@ fn cmd_tools(args: &[String]) -> Result<()> {
             let grant_id = viva::foundation::ids::GrantId::from_str(&grant_id)?;
 
             let store = open_store()?;
-            // Smoke evidence binds to a real office task, not an invented one.
+            // Smoke evidence binds to a real Viva task, not an invented one.
             viva::tasks::TaskRegistry::new(&store).require_task(&task_id)?;
             let authority = viva::authority::AuthorityEngine::new(&store);
             let actor = viva::authority::Actor::Member {
@@ -1411,7 +1411,7 @@ fn cmd_control_create_project(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// `viva create-task --goal <text>` — open one office task. This is
+/// `viva create-task --goal <text>` — open one task. This is
 /// an owner-side CLI: whoever runs the binary creates the task in their
 /// own VIVA_HOME.
 fn cmd_control_create_task(args: &[String]) -> Result<()> {
@@ -1496,9 +1496,9 @@ fn cmd_control_grant(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// `viva memory …` (F04) — the office's namespace/audit layer over the
+/// `viva memory …` (F04) — Viva's namespace/audit layer over the
 /// real external memory. Search/remember/archive all go through the
-/// office link layer: member scoping, provenance, usage evidence, and
+/// Viva link layer: member scoping, provenance, usage evidence, and
 /// recoverable exit (no delete). The adapter subprocess always receives
 /// an explicit db path.
 fn cmd_memory(args: &[String]) -> Result<()> {
@@ -1671,7 +1671,7 @@ fn cmd_memory(args: &[String]) -> Result<()> {
 
 /// `viva workflow …` (F01) — the reachable entry for delivery workflows.
 /// The run head is anchored to the REAL git head of the given directory
-/// (rev-parse through the office's git runner), never self-reported.
+/// (rev-parse through Viva's git runner), never self-reported.
 /// `status` always shows the owning task's own status beside the run's
 /// process progress: the run records process facts, the task keeps the
 /// delivery state, and completion stays an appended task outcome.
@@ -1862,7 +1862,7 @@ fn cmd_maintenance(args: &[String]) -> Result<()> {
     };
 
     let store = open_store()?;
-    // S6: an explicitly paused office runs no maintenance windows (the
+    // S6: an explicitly paused server runs no maintenance windows (the
     // pause persists, so this holds with no live host either).
     viva::server::assert_maintenance_allowed(&store)?;
     let maintenance = viva::maintenance::MaintenanceService::new(&store);
@@ -1982,7 +1982,7 @@ fn cmd_data_export(args: &[String]) -> Result<()> {
     let db = database_path(&home);
     if !db.exists() {
         return Err(Error::Validation(format!(
-            "no office store at {} (run `viva init` first); nothing was created",
+            "no Viva store at {} (run `viva init` first); nothing was created",
             db.display()
         )));
     }
@@ -2003,7 +2003,7 @@ fn cmd_data_export(args: &[String]) -> Result<()> {
     }
     #[cfg(not(unix))]
     std::fs::create_dir(&out_path)?;
-    eprintln!("warning: raw, unredacted office export; keep this private and do not publish it");
+    eprintln!("warning: raw, unredacted export; keep this private and do not publish it");
 
     let mut tables: Vec<String> = {
         let mut stmt = conn.prepare(

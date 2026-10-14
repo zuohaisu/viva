@@ -3,10 +3,10 @@
 //! Layout map (each module states its G0 semantics):
 //! - [`ids`]: typed identifiers and UTC timestamps
 //! - [`paths`]: `VIVA_HOME` resolution and private directory rules
-//! - [`error`]: the office error taxonomy
+//! - [`error`]: the error taxonomy
 //! - [`store`]: SQLite open/WAL, schema metadata, per-domain migration registry
 //! - [`legacy`]: the one-time rename of pre-removal table and value names
-//! - [`events`]: the append-only office event log
+//! - [`events`]: the append-only event log
 //! - [`envelope`]: control requests/results — caller binding, idempotency,
 //!   rejection reasons
 //! - [`records`]: session kinds, attribution snapshots, executions, launch

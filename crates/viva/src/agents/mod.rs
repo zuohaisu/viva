@@ -18,7 +18,7 @@
 //!
 //! The same controlled channel carries the **self-model container's
 //! intake**: agent content (what ran, which summaries formed, which tasks
-//! were done) is submitted through it, audited to the office event log,
+//! were done) is submitted through it, audited to the event log,
 //! and stored as a private file reference. The CONTAINER decides what to
 //! keep — Viva guarantees the channel and the audit trail; a raw event is
 //! never promoted to memory by Viva itself.
@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use crate::foundation::error::Result;
 use crate::terminal::TerminalSnapshot;
 
-/// The agent CLIs the office detects in its first version (owner ruling,
+/// The agent CLIs Viva detects in its first version (owner ruling,
 /// 2026-10-01). Everything else is displayed as an unknown agent.
 pub const DETECTABLE_AGENTS: &[&str] = &[
     "codex",
@@ -436,7 +436,7 @@ mod tests {
     fn process_tree_returns_none_for_an_unknown_tree() {
         // A pid with no children and no agent-like command line yields
         // None: identification names agents, and unknown stays unknown.
-        // (The real identification path is exercised by the office S4
+        // (The real identification path is exercised by Viva's S4
         // integration test with a fake `codex` executable.)
         let identified = identify_by_process_tree(None).expect("ps runs");
         assert_eq!(identified, None);

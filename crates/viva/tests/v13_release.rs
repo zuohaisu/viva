@@ -24,7 +24,7 @@ fn clean_home_boot_and_data_export_roundtrip() {
     let dir = TempDir::new().expect("dir");
     let home = dir.path().join("home");
 
-    // A clean environment boots: init applies the full office schema,
+    // A clean environment boots: init applies the full schema,
     // doctor reports state, and the process exits 0.
     let (code, _, err) = viva(&home, &["init"]);
     assert_eq!(code, 0, "init failed: {err}");
