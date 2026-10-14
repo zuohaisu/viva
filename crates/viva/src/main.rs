@@ -1640,11 +1640,13 @@ fn cmd_memory(args: &[String]) -> Result<()> {
             let project = get("--project")
                 .map(|p| viva::foundation::ids::ProjectId::from_str(&p))
                 .transpose()?;
-            let fact_id: i64 = require("--fact")?.parse().map_err(|_| {
-                Error::Validation("--fact must be the external fact's integer id".into())
-            })?;
-            let link =
-                service.link_fact(fact_id, &member_id, project.as_ref(), &require("--source")?)?;
+            let fact_id = require("--fact")?;
+            let link = service.link_fact(
+                &fact_id,
+                &member_id,
+                project.as_ref(),
+                &require("--source")?,
+            )?;
             println!("{}", serde_json::to_string_pretty(&link)?);
             Ok(())
         }
@@ -1665,9 +1667,7 @@ fn cmd_memory(args: &[String]) -> Result<()> {
             Ok(())
         }
         Some(cmd @ ("archive" | "restore")) => {
-            let fact_id: i64 = require("--fact")?.parse().map_err(|_| {
-                Error::Validation("--fact must be the external fact's integer id".into())
-            })?;
+            let fact_id = require("--fact")?;
             let member_id = viva::foundation::ids::MemberId::from_str(&require("--member")?)?;
             let grant = get("--grant")
                 .map(|g| viva::foundation::ids::GrantId::from_str(&g))
@@ -1678,9 +1678,9 @@ fn cmd_memory(args: &[String]) -> Result<()> {
             };
             let authority = viva::authority::AuthorityEngine::new(&store);
             let link = if cmd == "archive" {
-                service.archive(fact_id, &require("--reason")?, &actor, &authority)?
+                service.archive(&fact_id, &require("--reason")?, &actor, &authority)?
             } else {
-                service.restore(fact_id, &require("--reason")?, &actor, &authority)?
+                service.restore(&fact_id, &require("--reason")?, &actor, &authority)?
             };
             println!("{}", serde_json::to_string_pretty(&link)?);
             Ok(())

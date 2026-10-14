@@ -1,26 +1,15 @@
-//! External memory integration (F04, issue #26): Viva's namespace, audit
-//! and exit layer over the user's real Holographic memory.
+//! Native memory storage (issue #130): facts, FTS5 trigram, minimal HRR,
+//! and Viva's per-member link / usage / exit layer.
 //!
-//! What is reused and what Viva adds:
-//! - The content store is the **real, already-running** bundled
-//!   Holographic provider from the user's hermes-agent checkout (verified
-//!   on 2026-09-29: `plugins/memory/holographic`, reached through its own
-//!   `fact_store` tool interface; see `extensions/pi/memory/README.md`).
-//!   Nothing here re-implements FTS, HRR or storage; a small Python
-//!   adapter (`extensions/pi/memory/memory_adapter.py`) speaks to the real
-//!   provider as a subprocess and answers JSON.
-//! - The bundled schema has no member/project scoping, no provenance and
-//!   no recoverable exit (its `remove_fact` is a physical SQL DELETE).
-//!   Viva adds exactly those as its own layer: every Viva-written fact is
-//!   **linked** to the member (and optional project) that wrote it, with a
-//!   mandatory source; search results are filtered to the viewer's own
-//!   linked, active facts; archive/restore are status flips that keep the
-//!   fact retrievable on disk. There is no delete path in this module.
-//! - Honesty: a store that cannot be reached is `unavailable` — never an
-//!   empty-but-successful answer, and never "remembers" without the
-//!   capability. Facts written outside Viva (by Hermes itself) are not
-//!   claimable through Viva; the count of hidden unlinked hits is reported
-//!   so the boundary is visible, not silent.
+//! Legacy Hermes rows stay in `memory_links` as `legacy_hermes` and never
+//! participate in retrieval. A thin Python adapter remains for `status`
+//! only until the second migration slice (#131).
+
+mod entity;
+mod hash;
+pub mod hrr;
+pub mod migrate;
+mod retrieval;
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -34,11 +23,8 @@ use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{MemberId, ProjectId, utc_now};
 use crate::foundation::store::{DOMAIN_MEMORY, MigrationRegistry, Store};
 
-/// Register the `memory` domain migrations (F04's namespace). v2 re-scopes
-/// links to (fact_id, member): the external store dedupes content across
-/// writers, but each member's claim on a fact is its own row — the v1
-/// UNIQUE(fact_id) silently handed the first writer's link to everyone
-/// else (QA finding).
+pub use hrr::{HRR_DIM, encode_fact as encode_fact_hrr, encode_text as encode_text_hrr};
+
 pub fn register_migrations(registry: MigrationRegistry) -> MigrationRegistry {
     registry
         .register(DOMAIN_MEMORY, 1, "memory v1", MEMORY_V1_SQL)
@@ -48,13 +34,15 @@ pub fn register_migrations(registry: MigrationRegistry) -> MigrationRegistry {
             "memory v2 per-member links",
             MEMORY_V2_SQL,
         )
+        .register_fn(
+            DOMAIN_MEMORY,
+            3,
+            "memory v3 native facts fts hrr",
+            migrate::apply_memory_v3,
+        )
 }
 
 pub const MEMORY_V1_SQL: &str = r#"
--- Viva's namespace layer over the external store: which Holographic fact
--- belongs to which member/project, with its mandatory source. fact_id is
--- the external store's integer id — the same asset any later harness can
--- resolve again through the adapter.
 CREATE TABLE memory_links (
     link_id         TEXT PRIMARY KEY,
     fact_id         INTEGER NOT NULL UNIQUE,
@@ -68,8 +56,6 @@ CREATE TABLE memory_links (
     archived_reason TEXT
 );
 
--- Usage evidence: every fact a search actually returned is recorded with
--- who asked and what they asked. Reuse claims cite these rows.
 CREATE TABLE memory_usages (
     seq        INTEGER PRIMARY KEY AUTOINCREMENT,
     fact_id    INTEGER NOT NULL,
@@ -80,9 +66,6 @@ CREATE TABLE memory_usages (
 "#;
 
 pub const MEMORY_V2_SQL: &str = r#"
--- One claim per (fact, member). The provider dedupes content globally, so
--- two members writing the same text share the underlying fact row; their
--- links, sources and exit states stay separate.
 CREATE TABLE memory_links_v2 (
     link_id         TEXT PRIMARY KEY,
     fact_id         INTEGER NOT NULL,
@@ -104,13 +87,90 @@ DROP TABLE memory_links;
 ALTER TABLE memory_links_v2 RENAME TO memory_links;
 "#;
 
-// ---------------------------------------------------------------------------
-// Adapter configuration
-// ---------------------------------------------------------------------------
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageOrigin {
+    Native,
+    LegacyHermes,
+}
 
-/// Where the real implementation lives and how to call it. Defaults follow
-/// the verified layout of the user's machine; every field is overridable
-/// so tests run against a temp store and never against personal data.
+impl StorageOrigin {
+    fn as_str(self) -> &'static str {
+        match self {
+            StorageOrigin::Native => "native",
+            StorageOrigin::LegacyHermes => "legacy_hermes",
+        }
+    }
+
+    fn from_str(s: &str) -> Self {
+        match s {
+            "legacy_hermes" => StorageOrigin::LegacyHermes,
+            _ => StorageOrigin::Native,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryLink {
+    pub link_id: String,
+    pub fact_id: String,
+    pub storage_origin: StorageOrigin,
+    pub member_id: MemberId,
+    pub project_id: Option<ProjectId>,
+    pub source: String,
+    pub status: LinkStatus,
+    pub created_at: String,
+    pub archived_at: Option<String>,
+    pub archived_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkStatus {
+    Active,
+    Archived,
+}
+
+impl LinkStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LinkStatus::Active => "active",
+            LinkStatus::Archived => "archived",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecalledFact {
+    pub fact_id: String,
+    pub content: String,
+    pub score: f64,
+    pub trust: f64,
+    pub member_id: MemberId,
+    pub project_id: Option<ProjectId>,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MemorySearch {
+    Fetched {
+        facts: Vec<RecalledFact>,
+        hidden_unclaimable: usize,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageRecord {
+    pub seq: i64,
+    pub fact_id: String,
+    pub member_id: MemberId,
+    pub query: String,
+    pub used_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdapterConfig {
     pub python: PathBuf,
@@ -120,15 +180,6 @@ pub struct AdapterConfig {
 }
 
 impl AdapterConfig {
-    /// Environment-driven defaults. `VIVA_MEMORY_PYTHON`,
-    /// `VIVA_HERMES_AGENT`, `VIVA_MEMORY_DB`, `VIVA_MEMORY_ADAPTER`.
-    /// When VIVA_HOME is set, an unpinned provider DB lives inside that
-    /// isolated home; without it, keep the user's existing Hermes default.
-    ///
-    /// When the python is not pinned by env, the checkout's own venv is
-    /// preferred: the bundled plugin package imports YAML tooling that a
-    /// bare system python lacks (verified: a system python answers
-    /// `unavailable: No module named 'ruamel'`).
     pub fn from_env() -> Self {
         let home = std::env::var("HOME").unwrap_or_default();
         let env_path = |key: &str, default: &str| -> PathBuf {
@@ -165,14 +216,6 @@ impl AdapterConfig {
     }
 }
 
-/// Find the adapter script without depending on the caller's cwd (a bare
-/// relative default dies the moment `viva` runs anywhere else — QA
-/// finding N7). Resolution order: `VIVA_MEMORY_ADAPTER`, then the running
-/// binary's ancestor directories (packaged layouts put `extensions/` next
-/// to the binary or its parent), then the compile-time checkout path as a
-/// dev fallback. Returns the first existing file; if nothing exists, the
-/// env/relative default is kept so the eventual "not found" names
-/// something recognizable.
 fn resolve_adapter_script() -> PathBuf {
     let relative = PathBuf::from("extensions/pi/memory/memory_adapter.py");
     if let Ok(from_env) = std::env::var("VIVA_MEMORY_ADAPTER") {
@@ -194,116 +237,6 @@ fn resolve_adapter_script() -> PathBuf {
     relative
 }
 
-// ---------------------------------------------------------------------------
-// Records
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MemoryLink {
-    pub link_id: String,
-    pub fact_id: i64,
-    pub member_id: MemberId,
-    pub project_id: Option<ProjectId>,
-    pub source: String,
-    pub status: LinkStatus,
-    pub created_at: String,
-    pub archived_at: Option<String>,
-    pub archived_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LinkStatus {
-    Active,
-    Archived,
-}
-
-impl LinkStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            LinkStatus::Active => "active",
-            LinkStatus::Archived => "archived",
-        }
-    }
-}
-
-/// One fact returned by a real search, with its Viva-side context.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RecalledFact {
-    pub fact_id: i64,
-    pub content: String,
-    pub score: f64,
-    pub trust: f64,
-    pub member_id: MemberId,
-    pub project_id: Option<ProjectId>,
-    pub source: String,
-}
-
-/// The honest outcome of a search.
-#[derive(Debug, Clone, PartialEq)]
-pub enum MemorySearch {
-    /// The store really answered; these are the viewer's own active,
-    /// linked facts within budget.
-    Fetched {
-        facts: Vec<RecalledFact>,
-        /// Hits the store returned that Viva hid: no Viva link (written
-        /// outside Viva), another member's fact, another project's fact,
-        /// or archived. Hidden, and counted so the boundary is visible.
-        hidden_unclaimable: usize,
-    },
-    /// The store could not be reached. Never a fake empty success.
-    Unavailable { reason: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct UsageRecord {
-    pub seq: i64,
-    pub fact_id: i64,
-    pub member_id: MemberId,
-    pub query: String,
-    pub used_at: String,
-}
-
-// ---------------------------------------------------------------------------
-// Adapter subprocess answers
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-struct AdapterAnswer {
-    ok: bool,
-    state: String,
-    #[serde(default)]
-    error: Option<String>,
-    #[serde(default)]
-    facts: Vec<AdapterFact>,
-    #[serde(default)]
-    fact: Option<AdapterAddedFact>,
-    #[serde(default)]
-    hrr: Option<String>,
-    #[serde(default)]
-    facts_total: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AdapterFact {
-    fact_id: i64,
-    #[serde(default)]
-    content: String,
-    #[serde(default)]
-    score: f64,
-    #[serde(rename = "trust_score", default)]
-    trust: f64,
-}
-
-#[derive(Debug, Deserialize)]
-struct AdapterAddedFact {
-    fact_id: i64,
-}
-
-// ---------------------------------------------------------------------------
-// Service
-// ---------------------------------------------------------------------------
-
 pub struct MemoryService<'a> {
     store: &'a Store,
     adapter: AdapterConfig,
@@ -321,14 +254,10 @@ impl<'a> MemoryService<'a> {
         Self { store, adapter }
     }
 
-    /// The adapter wiring in use (for status views and tests).
     pub fn adapter_config(&self) -> &AdapterConfig {
         &self.adapter
     }
 
-    /// Run the adapter's real status command (a read-only `list` through
-    /// the provider) so readiness is reported from an actual round trip —
-    /// never from file existence alone.
     pub fn probe_adapter_status(&self) -> Result<serde_json::Value> {
         let answer = self.run_adapter(json!({ "command": "status" }))?;
         Ok(json!({
@@ -340,13 +269,6 @@ impl<'a> MemoryService<'a> {
         }))
     }
 
-    // -- Writing ---------------------------------------------------------------
-
-    /// Write one fact through the real provider and link it to its writer.
-    /// The source is mandatory provenance. The provider dedupes identical
-    /// content to one underlying fact row; each writer still gets their
-    /// OWN link (claim + source + exit state), so a second member writing
-    /// the same text never inherits the first member's link.
     pub fn remember(
         &self,
         member: &MemberId,
@@ -365,34 +287,29 @@ impl<'a> MemoryService<'a> {
                     .into(),
             ));
         }
-        let answer = self.run_adapter(json!({
-            "command": "add",
-            "content": content,
-            "category": category,
-            "tags": tags,
-        }))?;
-        if !answer.ok || answer.state != "fetched" {
-            return Err(Error::Validation(format!(
-                "memory write unavailable: {}",
-                answer
-                    .error
-                    .unwrap_or_else(|| "adapter answered without a reason".to_string())
-            )));
+        let hash = hash::content_hash(content);
+        if let Some(existing_id) = self.fact_id_for_hash(&hash)? {
+            return self.ensure_native_link(existing_id, member, project, source);
         }
-        let Some(fact) = answer.fact else {
-            return Err(Error::Validation(
-                "adapter answered ok without a fact id".into(),
-            ));
-        };
-        self.link_fact(fact.fact_id, member, project, source)
+        let fact_id = format!("nf-{}", uuid::Uuid::new_v4().simple());
+        let entities = entity::extract_entities(content);
+        let vector = hrr::encode_fact(content, &entities, HRR_DIM);
+        let blob = hrr::phases_to_bytes(&vector, HRR_DIM);
+        let now = utc_now();
+        let conn = self.store.connection();
+        conn.execute(
+            "INSERT INTO memory_facts(fact_id, content, content_hash, category, tags,
+                                      trust_score, created_at, updated_at, hrr_vector)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1.0, ?6, ?6, ?7)",
+            rusqlite::params![fact_id, content, hash, category, tags, now, blob],
+        )?;
+        self.attach_entities(&fact_id, &entities, &now)?;
+        self.insert_native_link(&fact_id, member, project, source)
     }
 
-    /// Link an existing external fact id (e.g. re-adopting a fact after a
-    /// harness switch, resolved through the same asset reference). Idempotent
-    /// per member: re-linking one's own fact returns the existing link.
     pub fn link_fact(
         &self,
-        fact_id: i64,
+        fact_id: &str,
         member: &MemberId,
         project: Option<&ProjectId>,
         source: &str,
@@ -400,42 +317,33 @@ impl<'a> MemoryService<'a> {
         if source.trim().is_empty() {
             return Err(Error::Validation("memory links require a source".into()));
         }
+        if self.is_legacy_hermes_ref(fact_id)? {
+            return Err(Error::Validation(
+                "cannot link legacy Hermes fact ids; native fact ids only".into(),
+            ));
+        }
+        if !self.native_fact_exists(fact_id)? {
+            return Err(Error::NotFound {
+                entity: "native memory fact",
+                id: fact_id.to_string(),
+            });
+        }
         if let Some(existing) = self.link_for(fact_id, member)? {
+            if existing.storage_origin == StorageOrigin::LegacyHermes {
+                return Err(Error::Validation(
+                    "cannot link legacy Hermes fact ids; native fact ids only".into(),
+                ));
+            }
+            if existing.project_id != project.cloned() {
+                return Err(Error::Validation(
+                    "memory link project does not match the existing association".into(),
+                ));
+            }
             return Ok(existing);
         }
-        let link = MemoryLink {
-            link_id: format!("mlink-{}", uuid::Uuid::new_v4().simple()),
-            fact_id,
-            member_id: member.clone(),
-            project_id: project.cloned(),
-            source: source.to_string(),
-            status: LinkStatus::Active,
-            created_at: utc_now(),
-            archived_at: None,
-            archived_reason: None,
-        };
-        self.store.connection().execute(
-            "INSERT INTO memory_links(link_id, fact_id, member_id, project_id, source,
-                                       status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![
-                link.link_id,
-                link.fact_id,
-                link.member_id.as_str(),
-                link.project_id.as_ref().map(|p| p.as_str()),
-                link.source,
-                link.status.as_str(),
-                link.created_at,
-            ],
-        )?;
-        Ok(link)
+        self.insert_native_link(fact_id, member, project, source)
     }
 
-    // -- Reading ---------------------------------------------------------------
-
-    /// Search the real store and answer with the viewer's own, active,
-    /// in-budget facts. Every returned fact leaves a usage row (the reuse
-    /// evidence). Unavailable stores stay unavailable.
     pub fn search(
         &self,
         viewer: &MemberId,
@@ -448,61 +356,12 @@ impl<'a> MemoryService<'a> {
                 "memory search query must not be empty".into(),
             ));
         }
-        let answer = self.run_adapter(json!({
-            "command": "search",
-            "query": query,
-            "limit": 25,
-        }))?;
-        if !answer.ok || answer.state != "fetched" {
-            return Ok(MemorySearch::Unavailable {
-                reason: answer
-                    .error
-                    .unwrap_or_else(|| "adapter answered without an error reason".to_string()),
-            });
-        }
-
-        let mut facts = Vec::new();
-        let mut hidden_unclaimable = 0usize;
-        let mut used_bytes = 0usize;
-        for hit in answer.facts {
-            // The claim filter is per-viewer: a hit is claimable only
-            // through the viewer's OWN active link (no link, another
-            // member's link, another project's link, or archived → hidden
-            // and counted, never mixed in).
-            let Some(link) = self.link_for(hit.fact_id, viewer)? else {
-                hidden_unclaimable += 1;
-                continue;
-            };
-            let in_scope = link.status == LinkStatus::Active && link.project_id == project.cloned();
-            if !in_scope {
-                hidden_unclaimable += 1;
-                continue;
-            }
-            let size = hit.content.len();
-            if used_bytes + size > max_total_bytes {
-                hidden_unclaimable += 1;
-                continue;
-            }
-            used_bytes += size;
-            self.record_usage(hit.fact_id, viewer, query)?;
-            facts.push(RecalledFact {
-                fact_id: hit.fact_id,
-                content: hit.content,
-                score: hit.score,
-                trust: hit.trust,
-                member_id: link.member_id,
-                project_id: link.project_id,
-                source: link.source,
-            });
-        }
-        Ok(MemorySearch::Fetched {
-            facts,
-            hidden_unclaimable,
-        })
+        let limit = 25usize;
+        let candidates = self.scoped_candidates(viewer, project, query, limit * 3)?;
+        let ranked = retrieval::rerank(query, candidates, limit);
+        self.pack_recall(viewer, project, query, ranked, max_total_bytes)
     }
 
-    /// Entity-based recall through the provider's real `probe` interface,
-    /// filtered by the same per-viewer claim rules as `search`.
     pub fn probe(
         &self,
         viewer: &MemberId,
@@ -515,74 +374,29 @@ impl<'a> MemoryService<'a> {
                 "memory probe entity must not be empty".into(),
             ));
         }
-        let answer = self.run_adapter(json!({
-            "command": "probe",
-            "entity": entity,
-            "limit": 25,
-        }))?;
-        if !answer.ok || answer.state != "fetched" {
-            return Ok(MemorySearch::Unavailable {
-                reason: answer
-                    .error
-                    .unwrap_or_else(|| "adapter answered without an error reason".to_string()),
-            });
+        let scoped = self.scoped_fact_rows(viewer, project)?;
+        let mut scored: Vec<(retrieval::CandidateFact, f64)> = Vec::new();
+        for row in scoped {
+            if let Some(sim) = retrieval::probe_score(entity, &row) {
+                let score = retrieval::shift_similarity(sim) * row.trust_score;
+                scored.push((row, score));
+            }
         }
-        self.claim_hits(viewer, project, answer.facts, entity, max_total_bytes)
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(25);
+        let ranked = scored
+            .into_iter()
+            .map(|(mut c, score)| {
+                c.fts_rank = score;
+                (c, score)
+            })
+            .collect();
+        self.pack_recall(viewer, project, entity, ranked, max_total_bytes)
     }
 
-    fn claim_hits(
-        &self,
-        viewer: &MemberId,
-        project: Option<&ProjectId>,
-        hits: Vec<AdapterFact>,
-        query: &str,
-        max_total_bytes: usize,
-    ) -> Result<MemorySearch> {
-        let mut facts = Vec::new();
-        let mut hidden_unclaimable = 0usize;
-        let mut used_bytes = 0usize;
-        for hit in hits {
-            let Some(link) = self.link_for(hit.fact_id, viewer)? else {
-                hidden_unclaimable += 1;
-                continue;
-            };
-            let in_scope = link.status == LinkStatus::Active && link.project_id == project.cloned();
-            if !in_scope {
-                hidden_unclaimable += 1;
-                continue;
-            }
-            let size = hit.content.len();
-            if used_bytes + size > max_total_bytes {
-                hidden_unclaimable += 1;
-                continue;
-            }
-            used_bytes += size;
-            self.record_usage(hit.fact_id, viewer, query)?;
-            facts.push(RecalledFact {
-                fact_id: hit.fact_id,
-                content: hit.content,
-                score: hit.score,
-                trust: hit.trust,
-                member_id: link.member_id,
-                project_id: link.project_id,
-                source: link.source,
-            });
-        }
-        Ok(MemorySearch::Fetched {
-            facts,
-            hidden_unclaimable,
-        })
-    }
-
-    // -- Exit paths (no delete) --------------------------------------------------
-
-    /// Archive a linked fact: hidden from selection, still on disk, still
-    /// resolvable by explicit request. Only the link's OWN member may exit
-    /// it, and only under a live `maintain_knowledge` grant. The bundled
-    /// `remove_fact` (physical DELETE) is deliberately not exposed here.
     pub fn archive(
         &self,
-        fact_id: i64,
+        fact_id: &str,
         reason: &str,
         actor: &Actor,
         authority: &AuthorityEngine<'_>,
@@ -592,7 +406,7 @@ impl<'a> MemoryService<'a> {
 
     pub fn restore(
         &self,
-        fact_id: i64,
+        fact_id: &str,
         reason: &str,
         actor: &Actor,
         authority: &AuthorityEngine<'_>,
@@ -602,7 +416,7 @@ impl<'a> MemoryService<'a> {
 
     fn exit_flip(
         &self,
-        fact_id: i64,
+        fact_id: &str,
         status: LinkStatus,
         reason: &str,
         actor: &Actor,
@@ -613,18 +427,20 @@ impl<'a> MemoryService<'a> {
                 "workers do not exit memories; member grants only".into(),
             ));
         };
-        // Exit is a Viva-state mutation: a live grant is required, and
-        // the authority engine appends its own denial record.
         authority
             .check(actor, "maintain_knowledge", None)?
             .map_err(|reason| Error::Validation(format!("memory exit not authorized: {reason}")))?;
-        // Owner condition: a member exits only their OWN claim on a fact.
-        let Some(_link) = self.link_for(fact_id, member)? else {
+        let Some(link) = self.link_for(fact_id, member)? else {
             return Err(Error::NotFound {
                 entity: "own memory link",
                 id: fact_id.to_string(),
             });
         };
+        if link.storage_origin == StorageOrigin::LegacyHermes {
+            return Err(Error::Validation(
+                "legacy Hermes links are not mutable through native exit paths".into(),
+            ));
+        }
         if reason.trim().is_empty() {
             return Err(Error::Validation(
                 "a memory exit action requires a reason".into(),
@@ -636,7 +452,7 @@ impl<'a> MemoryService<'a> {
                 self.store.connection().execute(
                     "UPDATE memory_links SET status = 'archived', archived_at = ?3,
                             archived_reason = ?4
-                     WHERE fact_id = ?1 AND member_id = ?2",
+                     WHERE fact_ref = ?1 AND member_id = ?2 AND storage_origin = 'native'",
                     rusqlite::params![
                         fact_id,
                         member.as_str(),
@@ -649,7 +465,7 @@ impl<'a> MemoryService<'a> {
                 self.store.connection().execute(
                     "UPDATE memory_links SET status = 'active', archived_at = NULL,
                             archived_reason = NULL
-                     WHERE fact_id = ?1 AND member_id = ?2",
+                     WHERE fact_ref = ?1 AND member_id = ?2 AND storage_origin = 'native'",
                     rusqlite::params![fact_id, member.as_str()],
                 )?;
             }
@@ -661,60 +477,25 @@ impl<'a> MemoryService<'a> {
             })
     }
 
-    // -- Records -----------------------------------------------------------------
-
-    /// The viewer's own link on a fact, if any.
-    pub fn link_for(&self, fact_id: i64, member: &MemberId) -> Result<Option<MemoryLink>> {
+    pub fn link_for(&self, fact_id: &str, member: &MemberId) -> Result<Option<MemoryLink>> {
         let mut stmt = self.store.connection().prepare(
-            "SELECT link_id, fact_id, member_id, project_id, source, status, created_at,
-                    archived_at, archived_reason
-             FROM memory_links WHERE fact_id = ?1 AND member_id = ?2",
+            "SELECT link_id, fact_ref, storage_origin, member_id, project_id, source, status,
+                    created_at, archived_at, archived_reason
+             FROM memory_links WHERE fact_ref = ?1 AND member_id = ?2
+             ORDER BY CASE storage_origin WHEN 'native' THEN 0 ELSE 1 END LIMIT 1",
         )?;
         let row = stmt
             .query_row(rusqlite::params![fact_id, member.as_str()], |row| {
-                let member: String = row.get(2)?;
-                let project: Option<String> = row.get(3)?;
-                let status: String = row.get(5)?;
-                Ok(MemoryLink {
-                    link_id: row.get(0)?,
-                    fact_id: row.get(1)?,
-                    member_id: MemberId::from_str(&member).map_err(|e| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            2,
-                            rusqlite::types::Type::Text,
-                            Box::new(e),
-                        )
-                    })?,
-                    project_id: project
-                        .as_deref()
-                        .map(ProjectId::from_str)
-                        .transpose()
-                        .map_err(|e| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                3,
-                                rusqlite::types::Type::Text,
-                                Box::new(e),
-                            )
-                        })?,
-                    source: row.get(4)?,
-                    status: match status.as_str() {
-                        "active" => LinkStatus::Active,
-                        "archived" => LinkStatus::Archived,
-                        other => panic!("memory_links.status holds `{other}`"),
-                    },
-                    created_at: row.get(6)?,
-                    archived_at: row.get(7)?,
-                    archived_reason: row.get(8)?,
-                })
+                parse_link_row(row)
             })
             .optional()?;
         Ok(row)
     }
 
-    pub fn usage_of(&self, fact_id: i64) -> Result<Vec<UsageRecord>> {
+    pub fn usage_of(&self, fact_id: &str) -> Result<Vec<UsageRecord>> {
         let mut stmt = self.store.connection().prepare(
-            "SELECT seq, fact_id, member_id, query, used_at
-             FROM memory_usages WHERE fact_id = ?1 ORDER BY seq",
+            "SELECT seq, fact_ref, member_id, query, used_at
+             FROM memory_usages WHERE fact_ref = ?1 ORDER BY seq",
         )?;
         let rows = stmt.query_map([fact_id], |row| {
             let member: String = row.get(2)?;
@@ -732,28 +513,293 @@ impl<'a> MemoryService<'a> {
                 used_at: row.get(4)?,
             })
         })?;
-        let mut records = Vec::new();
-        for row in rows {
-            records.push(row?);
-        }
-        Ok(records)
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    fn record_usage(&self, fact_id: i64, member: &MemberId, query: &str) -> Result<()> {
+    fn pack_recall(
+        &self,
+        viewer: &MemberId,
+        project: Option<&ProjectId>,
+        query: &str,
+        ranked: Vec<(retrieval::CandidateFact, f64)>,
+        max_total_bytes: usize,
+    ) -> Result<MemorySearch> {
+        let mut facts = Vec::new();
+        let mut used_bytes = 0usize;
+        for (hit, score) in ranked {
+            let Some(link) = self.link_for(&hit.fact_id, viewer)? else {
+                continue;
+            };
+            if link.status != LinkStatus::Active || link.project_id != project.cloned() {
+                continue;
+            }
+            if link.storage_origin != StorageOrigin::Native {
+                continue;
+            }
+            let size = hit.content.len();
+            if used_bytes + size > max_total_bytes {
+                continue;
+            }
+            used_bytes += size;
+            self.record_usage(&hit.fact_id, viewer, query)?;
+            facts.push(RecalledFact {
+                fact_id: hit.fact_id,
+                content: hit.content,
+                score,
+                trust: hit.trust_score,
+                member_id: link.member_id,
+                project_id: link.project_id,
+                source: link.source,
+            });
+        }
+        Ok(MemorySearch::Fetched {
+            facts,
+            hidden_unclaimable: 0,
+        })
+    }
+
+    fn scoped_candidates(
+        &self,
+        viewer: &MemberId,
+        project: Option<&ProjectId>,
+        query: &str,
+        candidate_limit: usize,
+    ) -> Result<Vec<retrieval::CandidateFact>> {
+        let scoped = self.scoped_fact_rows(viewer, project)?;
+        if scoped.is_empty() {
+            return Ok(Vec::new());
+        }
+        if query.chars().count() < 3 {
+            let q = query.to_lowercase();
+            let mut hits: Vec<retrieval::CandidateFact> = scoped
+                .into_iter()
+                .filter(|f| f.content.to_lowercase().contains(&q))
+                .collect();
+            for h in &mut hits {
+                h.fts_rank = 1.0;
+            }
+            hits.truncate(candidate_limit);
+            return Ok(hits);
+        }
+        let allowed: Vec<String> = scoped.iter().map(|f| f.fact_id.clone()).collect();
+        let fts_query = retrieval::sanitize_fts_query(query);
+        let placeholders = allowed.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            "SELECT f.fact_id, f.content, f.category, f.tags, f.trust_score, f.hrr_vector,
+                    fts.rank AS fts_rank_raw
+             FROM memory_facts_fts fts
+             JOIN memory_facts f ON f.rowid = fts.rowid
+             WHERE memory_facts_fts MATCH ? AND f.fact_id IN ({placeholders})
+               AND f.trust_score >= 0.3
+             ORDER BY fts.rank LIMIT ?"
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(fts_query)];
+        for id in &allowed {
+            params.push(Box::new(id.clone()));
+        }
+        params.push(Box::new(candidate_limit as i64));
+        let stmt = self.store.connection().prepare(&sql);
+        let mut out = Vec::new();
+        if let Ok(mut stmt) = stmt {
+            let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+            if let Ok(rows) = stmt.query_map(param_refs.as_slice(), |row| {
+                let rank: f64 = row.get(6)?;
+                Ok((
+                    retrieval::CandidateFact {
+                        fact_id: row.get(0)?,
+                        content: row.get(1)?,
+                        category: row.get(2)?,
+                        tags: row.get(3)?,
+                        trust_score: row.get(4)?,
+                        hrr_vector: row.get(5)?,
+                        fts_rank: 0.0,
+                    },
+                    rank.abs(),
+                ))
+            }) {
+                let mut raw_ranks = Vec::new();
+                for (c, rank) in rows.flatten() {
+                    raw_ranks.push(rank);
+                    out.push(c);
+                }
+                if !out.is_empty() {
+                    let max_rank = raw_ranks.iter().copied().fold(1e-6f64, f64::max);
+                    for (c, r) in out.iter_mut().zip(raw_ranks.iter()) {
+                        c.fts_rank = r / max_rank;
+                    }
+                    out.truncate(candidate_limit);
+                    return Ok(out);
+                }
+            }
+        }
+        // FTS miss or malformed MATCH: deterministic substring fallback within scope.
+        let q = query.to_lowercase();
+        let mut hits: Vec<retrieval::CandidateFact> = scoped
+            .into_iter()
+            .filter(|f| f.content.to_lowercase().contains(&q))
+            .collect();
+        for h in &mut hits {
+            h.fts_rank = 1.0;
+        }
+        hits.truncate(candidate_limit);
+        Ok(hits)
+    }
+
+    fn scoped_fact_rows(
+        &self,
+        viewer: &MemberId,
+        project: Option<&ProjectId>,
+    ) -> Result<Vec<retrieval::CandidateFact>> {
+        let project_clause = if project.is_some() {
+            " AND l.project_id = ?2 "
+        } else {
+            " AND l.project_id IS NULL "
+        };
+        let sql = format!(
+            "SELECT f.fact_id, f.content, f.category, f.tags, f.trust_score, f.hrr_vector
+             FROM memory_links l
+             JOIN memory_facts f ON f.fact_id = l.fact_ref
+             WHERE l.member_id = ?1 AND l.status = 'active' AND l.storage_origin = 'native'
+             {project_clause}"
+        );
+        let mut stmt = self.store.connection().prepare(&sql)?;
+        let rows = if let Some(p) = project {
+            stmt.query_map(rusqlite::params![viewer.as_str(), p.as_str()], map_fact_row)?
+        } else {
+            stmt.query_map([viewer.as_str()], map_fact_row)?
+        };
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    fn fact_id_for_hash(&self, hash: &str) -> Result<Option<String>> {
+        self.store
+            .connection()
+            .query_row(
+                "SELECT fact_id FROM memory_facts WHERE content_hash = ?1",
+                [hash],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn native_fact_exists(&self, fact_id: &str) -> Result<bool> {
+        let n: i64 = self.store.connection().query_row(
+            "SELECT COUNT(*) FROM memory_facts WHERE fact_id = ?1",
+            [fact_id],
+            |row| row.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    fn is_legacy_hermes_ref(&self, fact_ref: &str) -> Result<bool> {
+        if fact_ref.starts_with("nf-") {
+            return Ok(false);
+        }
+        if fact_ref.chars().all(|c| c.is_ascii_digit()) {
+            let n: i64 = self.store.connection().query_row(
+                "SELECT COUNT(*) FROM memory_links WHERE fact_ref = ?1 AND storage_origin = 'legacy_hermes'",
+                [fact_ref],
+                |row| row.get(0),
+            )?;
+            return Ok(n > 0);
+        }
+        Ok(false)
+    }
+
+    fn ensure_native_link(
+        &self,
+        fact_id: String,
+        member: &MemberId,
+        project: Option<&ProjectId>,
+        source: &str,
+    ) -> Result<MemoryLink> {
+        if let Some(existing) = self.link_for(&fact_id, member)? {
+            if existing.storage_origin == StorageOrigin::Native {
+                if existing.project_id != project.cloned() {
+                    return Err(Error::Validation(
+                        "memory link project does not match the existing association".into(),
+                    ));
+                }
+                return Ok(existing);
+            }
+        }
+        self.insert_native_link(&fact_id, member, project, source)
+    }
+
+    fn insert_native_link(
+        &self,
+        fact_id: &str,
+        member: &MemberId,
+        project: Option<&ProjectId>,
+        source: &str,
+    ) -> Result<MemoryLink> {
+        let link = MemoryLink {
+            link_id: format!("mlink-{}", uuid::Uuid::new_v4().simple()),
+            fact_id: fact_id.to_string(),
+            storage_origin: StorageOrigin::Native,
+            member_id: member.clone(),
+            project_id: project.cloned(),
+            source: source.to_string(),
+            status: LinkStatus::Active,
+            created_at: utc_now(),
+            archived_at: None,
+            archived_reason: None,
+        };
         self.store.connection().execute(
-            "INSERT INTO memory_usages(fact_id, member_id, query, used_at)
+            "INSERT INTO memory_links(link_id, fact_ref, storage_origin, member_id, project_id,
+                                       source, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                link.link_id,
+                link.fact_id,
+                link.storage_origin.as_str(),
+                link.member_id.as_str(),
+                link.project_id.as_ref().map(|p| p.as_str()),
+                link.source,
+                link.status.as_str(),
+                link.created_at,
+            ],
+        )?;
+        Ok(link)
+    }
+
+    fn attach_entities(&self, fact_id: &str, entities: &[String], now: &str) -> Result<()> {
+        let conn = self.store.connection();
+        for name in entities {
+            let entity_id: i64 = if let Some(id) = conn
+                .query_row(
+                    "SELECT entity_id FROM memory_entities WHERE name = ?1",
+                    [name],
+                    |row| row.get(0),
+                )
+                .optional()?
+            {
+                id
+            } else {
+                conn.execute(
+                    "INSERT INTO memory_entities(name, created_at) VALUES (?1, ?2)",
+                    rusqlite::params![name, now],
+                )?;
+                conn.last_insert_rowid()
+            };
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_fact_entities(fact_id, entity_id) VALUES (?1, ?2)",
+                rusqlite::params![fact_id, entity_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn record_usage(&self, fact_id: &str, member: &MemberId, query: &str) -> Result<()> {
+        self.store.connection().execute(
+            "INSERT INTO memory_usages(fact_ref, member_id, query, used_at)
              VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![fact_id, member.as_str(), query, utc_now()],
         )?;
         Ok(())
     }
 
-    // -- Adapter subprocess --------------------------------------------------------
-
-    /// Run the Python adapter as a subprocess. Uses an explicit temp env:
-    /// no HERMES_* leakage beyond the documented checkout path, and the
-    /// db path is ALWAYS explicit (the adapter refuses without one — the
-    /// user's real store can never be a silent default).
     fn run_adapter(&self, request: serde_json::Value) -> Result<AdapterAnswer> {
         let script = &self.adapter.adapter_script;
         if !script.is_file() {
@@ -767,7 +813,7 @@ impl<'a> MemoryService<'a> {
             .and_then(|c| c.as_str())
             .unwrap_or_default()
             .to_string();
-        let mut args: Vec<String> = vec![
+        let args: Vec<String> = vec![
             script.display().to_string(),
             command.clone(),
             "--agent-dir".into(),
@@ -775,63 +821,13 @@ impl<'a> MemoryService<'a> {
             "--db".into(),
             self.adapter.db_path.display().to_string(),
         ];
-        match command.as_str() {
-            "search" => {
-                args.push("--query".into());
-                args.push(
-                    request
-                        .get("query")
-                        .and_then(|q| q.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                );
-                args.push("--limit".into());
-                args.push(
-                    request
-                        .get("limit")
-                        .and_then(|l| l.as_i64())
-                        .unwrap_or(10)
-                        .to_string(),
-                );
-            }
-            "probe" => {
-                args.push("--entity".into());
-                args.push(
-                    request
-                        .get("entity")
-                        .and_then(|e| e.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                );
-                args.push("--limit".into());
-                args.push(
-                    request
-                        .get("limit")
-                        .and_then(|l| l.as_i64())
-                        .unwrap_or(10)
-                        .to_string(),
-                );
-            }
-            "add" => {
-                for (flag, key) in [
-                    ("--content", "content"),
-                    ("--category", "category"),
-                    ("--tags", "tags"),
-                ] {
-                    if let Some(value) = request.get(key).and_then(|v| v.as_str()) {
-                        args.push(flag.into());
-                        args.push(value.to_string());
-                    }
-                }
-            }
-            "status" => {} // no extra flags
-            other => {
-                return Err(Error::Validation(format!(
-                    "unknown adapter command `{other}`"
-                )));
-            }
+        if command == "status" {
+            // status only
+        } else {
+            return Err(Error::Validation(format!(
+                "native memory no longer invokes adapter command `{command}`"
+            )));
         }
-
         let output = match Command::new(&self.adapter.python).args(&args).output() {
             Ok(output) => output,
             Err(err) => {
@@ -852,12 +848,71 @@ impl<'a> MemoryService<'a> {
     }
 }
 
+fn map_fact_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<retrieval::CandidateFact> {
+    Ok(retrieval::CandidateFact {
+        fact_id: row.get(0)?,
+        content: row.get(1)?,
+        category: row.get(2)?,
+        tags: row.get(3)?,
+        trust_score: row.get(4)?,
+        hrr_vector: row.get(5)?,
+        fts_rank: 0.0,
+    })
+}
+
+fn parse_link_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryLink> {
+    use std::str::FromStr as _;
+    let member: String = row.get(3)?;
+    let project: Option<String> = row.get(4)?;
+    let status: String = row.get(6)?;
+    let origin: String = row.get(2)?;
+    Ok(MemoryLink {
+        link_id: row.get(0)?,
+        fact_id: row.get(1)?,
+        storage_origin: StorageOrigin::from_str(&origin),
+        member_id: MemberId::from_str(&member).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
+        })?,
+        project_id: project
+            .as_deref()
+            .map(ProjectId::from_str)
+            .transpose()
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    4,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?,
+        source: row.get(5)?,
+        status: match status.as_str() {
+            "active" => LinkStatus::Active,
+            "archived" => LinkStatus::Archived,
+            other => panic!("memory_links.status holds `{other}`"),
+        },
+        created_at: row.get(7)?,
+        archived_at: row.get(8)?,
+        archived_reason: row.get(9)?,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct AdapterAnswer {
+    ok: bool,
+    state: String,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    hrr: Option<String>,
+    #[serde(default)]
+    facts_total: Option<i64>,
+}
+
 fn unavailable_answer(reason: String) -> AdapterAnswer {
     serde_json::from_value(json!({
         "ok": false,
         "state": "unavailable",
         "error": reason,
-        "facts": [],
     }))
     .expect("static unavailable shape")
 }
@@ -867,18 +922,70 @@ use std::str::FromStr as _;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::foundation::store::{DOMAIN_AUTHORITY, DOMAIN_FOUNDATION, FOUNDATION_V1_SQL};
+
+    fn mem_store() -> Store {
+        let registry = MigrationRegistry::new()
+            .register(DOMAIN_FOUNDATION, 1, "foundation v1", FOUNDATION_V1_SQL)
+            .register(DOMAIN_MEMORY, 1, "memory v1", MEMORY_V1_SQL)
+            .register(DOMAIN_MEMORY, 2, "memory v2", MEMORY_V2_SQL)
+            .register_fn(DOMAIN_MEMORY, 3, "memory v3", migrate::apply_memory_v3)
+            .register(
+                DOMAIN_AUTHORITY,
+                1,
+                "authority v1",
+                crate::authority::AUTHORITY_V1_SQL,
+            )
+            .freeze()
+            .expect("registry");
+        Store::open_in_memory(&registry).expect("store")
+    }
 
     #[test]
-    fn adapter_config_defaults_are_explicit_paths() {
-        // The db default is the verified real store; the adapter refuses
-        // to run without an explicit --db regardless, so the default only
-        // names WHERE Viva looks, never silently writes elsewhere.
-        let config = AdapterConfig {
-            python: PathBuf::from("python3"),
-            adapter_script: PathBuf::from("extensions/pi/memory/memory_adapter.py"),
-            agent_dir: PathBuf::from("/tmp/agent"),
-            db_path: PathBuf::from("/tmp/mem.db"),
+    fn legacy_links_survive_marked_hermes() {
+        let store = mem_store();
+        store
+            .connection()
+            .execute(
+                "INSERT INTO memory_links(link_id, fact_ref, storage_origin, member_id, source, status, created_at)
+                 VALUES ('l1', '99', 'legacy_hermes', 'm1', 's', 'active', 't')",
+                [],
+            )
+            .unwrap();
+        let n: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM memory_links WHERE storage_origin = 'legacy_hermes'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn filter_before_limit_does_not_drop_scoped_facts() {
+        let store = mem_store();
+        let service = MemoryService::new(&store);
+        let member = MemberId::new();
+        for i in 0..5 {
+            service
+                .remember(
+                    &member,
+                    None,
+                    &format!("needle marker fact number {i} for scope test"),
+                    "src",
+                    "general",
+                    "",
+                )
+                .unwrap();
+        }
+        let result = service
+            .search(&member, None, "needle marker", 64 * 1024)
+            .unwrap();
+        let MemorySearch::Fetched { facts, .. } = result else {
+            panic!("fetched");
         };
-        assert!(config.db_path.is_absolute());
+        assert_eq!(facts.len(), 5, "scoped filter must not drop member facts");
     }
 }

@@ -67,9 +67,12 @@ fn user_tables(conn: &Connection) -> Vec<String> {
 }
 
 fn dump_table(conn: &Connection, table: &str) -> Vec<String> {
+    let sql_rowid = format!("SELECT * FROM \"{table}\" ORDER BY rowid");
+    let sql_plain = format!("SELECT * FROM \"{table}\"");
     let mut stmt = conn
-        .prepare(&format!("SELECT * FROM \"{table}\" ORDER BY rowid"))
-        .expect("prepare dump");
+        .prepare(&sql_rowid)
+        .or_else(|_| conn.prepare(&sql_plain))
+        .unwrap_or_else(|err| panic!("prepare dump for `{table}`: {err}"));
     let columns = stmt.column_count();
     stmt.query_map([], |row| {
         let mut cells = Vec::new();
@@ -272,7 +275,18 @@ fn upgrade_renames_everything_and_keeps_every_row() {
             table.as_str(),
             "schema_migrations" | "control_requests" | "github_evidence"
         ) {
-            assert_eq!(after[table].len(), rows.len(), "row count of {table}");
+            if table == "schema_migrations" {
+                assert!(
+                    after[table].len() >= rows.len(),
+                    "schema_migrations must not shrink"
+                );
+                assert!(
+                    after[table].len() - rows.len() <= 1,
+                    "only expected pending domain migrations (memory v3) may append rows"
+                );
+            } else {
+                assert_eq!(after[table].len(), rows.len(), "row count of {table}");
+            }
             continue;
         }
         assert_eq!(&after[new_name(table)], rows, "rows of {table}");
@@ -419,7 +433,16 @@ fn append_only_triggers_survive_with_their_new_names() {
             .map(|row| row.expect("row"))
             .collect()
     };
-    assert_eq!(triggers, ["events_no_delete", "events_no_update"]);
+    assert_eq!(
+        triggers,
+        [
+            "events_no_delete",
+            "events_no_update",
+            "memory_facts_ad",
+            "memory_facts_ai",
+            "memory_facts_au",
+        ]
+    );
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
         .expect("count");
