@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""V12/V14 peak-workload scenario against the REAL office control plane.
+"""V12/V14 peak-workload scenario against the REAL server control plane.
 
 What this script actually does (all real, no mocks):
-- creates an isolated VIVA_HOME and initializes the office store;
+- creates an isolated VIVA_HOME and initializes the Viva store;
 - seeds one member, three tasks and three live dispatch grants (the same
   shape the owner would create interactively);
 - starts the real `viva server` host process;
@@ -19,7 +19,7 @@ peak performance stays pending; this record must never be presented as the
 16-agent product workload budget result.
 
 Usage:
-    python tools/acceptance/office_workload.py \
+    python tools/acceptance/peak_workload.py \
         --binary ./target/debug/viva --out docs/validation/evidence/v12-final/peak.json
 """
 
@@ -53,7 +53,7 @@ def utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z"
 
 
-def seed_office(home: Path) -> dict:
+def seed_home(home: Path) -> dict:
     """Seed one member + three tasks + three grants via the migrated store."""
     db = home / "viva.db"
     conn = sqlite3.connect(db)
@@ -114,7 +114,7 @@ def wait_for_socket(
     host: subprocess.Popen | None = None,
     stderr_log: Path | None = None,
 ) -> None:
-    """Wait until the office socket accepts connections.
+    """Wait until the server control socket accepts connections.
 
     Pass `host` to stop early when the host process exits. Every failure
     reports the host's state (exit code, or still running) and the tail of its
@@ -132,7 +132,7 @@ def wait_for_socket(
             pass
         if host is not None and host.poll() is not None:
             raise HostStartupError(
-                f"office host exited with exit code {host.returncode} before the "
+                f"server host exited with exit code {host.returncode} before the "
                 f"socket became reachable: {sock_path}\n"
                 f"host stderr (tail):\n{stderr_tail(stderr_log)}"
             )
@@ -141,7 +141,7 @@ def wait_for_socket(
     if host is not None:
         state = "still running" if host.poll() is None else f"exit code {host.returncode}"
     raise HostStartupError(
-        f"office socket never became reachable within {timeout:g}s: {sock_path}\n"
+        f"server socket never became reachable within {timeout:g}s: {sock_path}\n"
         f"host: {state}\n"
         f"host stderr (tail):\n{stderr_tail(stderr_log)}"
     )
@@ -187,7 +187,7 @@ def _run(binary: Path, home: Path, window: Path, out: Path) -> int:
         "schema_version": 1,
         "created_at": utc_now(),
         "machine": machine_profile(),
-        "scenario": "office-peak-16",
+        "scenario": "peak-16",
         "kind": "simulated_agents",
         "honesty_notes": [
             "16 REAL supervised PTY processes through the REAL control plane; "
@@ -200,7 +200,7 @@ def _run(binary: Path, home: Path, window: Path, out: Path) -> int:
     with ExclusiveWindow(window):
         # 1. Init + seed.
         viva(binary, home, "init")
-        seeded = seed_office(home)
+        seeded = seed_home(home)
 
         # 2. Start the real host. Unix sockets cannot exceed ~104 bytes on
         #    macOS; refuse early with the real reason instead of a mystery
@@ -301,7 +301,7 @@ def _run(binary: Path, home: Path, window: Path, out: Path) -> int:
                 "owned_sleeps_still_alive": len(still_alive),
                 "note": (
                     "owned_sleeps_still_alive counts the pids observed at "
-                    "peak that are still running after shutdown; the office "
+                    "peak that are still running after shutdown; the server "
                     "must have reaped every one of them"
                 ),
             }

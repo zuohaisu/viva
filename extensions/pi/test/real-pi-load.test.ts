@@ -74,7 +74,7 @@ interface RealPiLoad {
 }
 
 /** The environment a Viva-launched Pi session has (harness/pi/mod.rs contract). */
-function officeEnvironment(home: string): Record<string, string> {
+function harnessEnvironment(home: string): Record<string, string> {
   return {
     VIVA_HOME: home,
     VIVA_MEMBER_ID: "mem-00000000000000000000000000000001",
@@ -86,9 +86,9 @@ function officeEnvironment(home: string): Record<string, string> {
 
 /**
  * Load one extension entry in real Pi and report what Pi recorded.
- * `office` is the harness-injected environment, or null for a bare `pi` run.
+ * `withHarness` is true when the harness-injected environment is set, false for a bare `pi` run.
  */
-async function loadInRealPi(entry: string, office: boolean): Promise<RealPiLoad> {
+async function loadInRealPi(entry: string, withHarness: boolean): Promise<RealPiLoad> {
   const sandbox = mkdtempSync(join(tmpdir(), "viva-real-pi-"));
   const agentDir = join(sandbox, "agent");
   const cwd = join(sandbox, "cwd");
@@ -104,7 +104,7 @@ async function loadInRealPi(entry: string, office: boolean): Promise<RealPiLoad>
     HOME: sandbox,
     PI_OFFLINE: "1",
     PI_CODING_AGENT_DIR: agentDir,
-    ...(office ? officeEnvironment(vivaHome) : {}),
+    ...(withHarness ? harnessEnvironment(vivaHome) : {}),
   });
 
   const saved = process.env;

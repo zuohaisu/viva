@@ -83,7 +83,7 @@ if not home or len(home) > 80:
     home = tempfile.mkdtemp(prefix="vs2.", dir="/tmp")
     os.environ["VIVA_HOME"] = home
     sh(a.viva, "init")
-elif not os.path.isfile(os.path.join(home, "office.db")):
+elif not os.path.isfile(os.path.join(home, "viva.db")):
     sh(a.viva, "init")
 
 raw = a.raw_out or tempfile.mktemp(prefix="s2raw.", dir="/tmp")
