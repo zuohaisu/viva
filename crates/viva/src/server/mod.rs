@@ -1225,52 +1225,19 @@ fn workbench_view(shared: Arc<Shared>) -> Result<serde_json::Value> {
             }
         }
         row.agent_status = shared.agent_board.project(&row.terminal_id);
-        if !row.agent_status.is_empty() {
-            let stale = row.agent_status.iter().any(|r| {
-                r.source == crate::agents::StatusSource::ControlledReport
-                    && crate::agents::report_stale(r)
-            });
-            let worktree = row
-                .worktree_id
-                .as_ref()
-                .and_then(|id| model.worktrees.iter().find(|w| &w.worktree_id == id));
-            let in_workspace = model.workspace_id.is_none() || worktree.is_some();
-            let location = worktree
-                .map(|w| {
-                    let project = model
-                        .projects
-                        .iter()
-                        .find(|p| p.project_id == w.project_id)
-                        .map(|p| p.name.as_str())
-                        .unwrap_or("project");
-                    format!("{project} / {}", w.branch)
-                })
-                .unwrap_or_else(|| {
-                    row.worktree_id
-                        .clone()
-                        .unwrap_or_else(|| "floating / directory".into())
-                });
-            model.agents.push(crate::agents::AgentSessionRow {
-                terminal_id: row.terminal_id.clone(),
-                tool: row.agent_status[0].agent.clone(),
-                name: row.purpose.clone(),
-                worktree_id: row.worktree_id.clone(),
-                location,
-                live: row.live,
-                records: row.agent_status.clone(),
-                stale,
-                in_workspace,
-            });
-        }
     }
     drop(incarnations);
-    model.agents.sort_by_key(|a| {
-        (
-            !a.needs_attention(),
-            a.location.clone(),
-            a.terminal_id.clone(),
-        )
-    });
+    let session_ctx = crate::agents::SessionContext {
+        worktrees: &model.worktrees,
+        projects: &model.projects,
+        workspace_id: model.workspace_id.as_deref(),
+    };
+    for row in &model.terminals {
+        if let Some(session) = crate::agents::build_session_row(row, &session_ctx) {
+            model.agents.push(session);
+        }
+    }
+    crate::agents::sort_sessions(&mut model.agents);
 
     // V15-4 switch + note surface on the model. The note falls back to
     // the persisted one after a restart (QA F17).
@@ -5114,6 +5081,16 @@ mod s4_agent_status_tests {
             .expect("the row exists")
     }
 
+    fn agents_from(client: &mut Client) -> Vec<serde_json::Value> {
+        client
+            .call(RequestKind::WorkbenchView)
+            .expect("view")
+            .get("agents")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// The three-layer story on one terminal: detected (process/argv) +
     /// authoritative (controlled report) + auxiliary (screen) sit side by
     /// side, clearly labeled, and the report is audited.
@@ -5167,6 +5144,77 @@ mod s4_agent_status_tests {
             )
             .expect("audit");
         assert!(audited >= 1);
+        host.shutdown();
+    }
+
+    /// Agent-only list: shells stay out; detectable agent sessions use the
+    /// stable terminal id; test runs never appear (#76).
+    #[test]
+    fn workbench_agents_list_is_agent_only() {
+        let host = start_host();
+        let mut client = host.client();
+        let shell = client
+            .call(RequestKind::TerminalCreate {
+                argv: vec!["/bin/sh".into()],
+                cwd: host.home.display().to_string(),
+                env: vec![],
+                cols: 80,
+                rows: 24,
+                purpose: "plain shell".into(),
+                worktree_id: None,
+                owner: "user_shell".into(),
+            })
+            .expect("shell");
+        let shell_id = shell
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .expect("id")
+            .to_string();
+        let agent_id = create_codex_like_terminal(&mut client, &host.home);
+        let fake_dir = host.home.join("fake-agents");
+        let fake = fake_dir.join("codex-test");
+        std::fs::write(&fake, "#!/bin/sh\ncat\n").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let test_run = client
+            .call(RequestKind::TerminalCreate {
+                argv: vec![fake.display().to_string()],
+                cwd: host.home.display().to_string(),
+                env: vec![],
+                cols: 80,
+                rows: 24,
+                purpose: "pytest".into(),
+                worktree_id: None,
+                owner: "test_run".into(),
+            })
+            .expect("test");
+        let test_id = test_run
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .expect("id")
+            .to_string();
+
+        let agents = agents_from(&mut client);
+        let ids: Vec<&str> = agents
+            .iter()
+            .filter_map(|row| row.get("terminal_id").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(ids, vec![agent_id.as_str()], "only the agent session");
+        assert!(
+            !ids.contains(&shell_id.as_str()) && !ids.contains(&test_id.as_str()),
+            "shell and test_run excluded: {ids:?}"
+        );
+        let agent_row = agents
+            .iter()
+            .find(|row| row.get("terminal_id").and_then(|v| v.as_str()) == Some(agent_id.as_str()))
+            .expect("agent row");
+        assert_eq!(
+            agent_row.get("report_capability").and_then(|v| v.as_str()),
+            Some("report:unverified")
+        );
         host.shutdown();
     }
 
