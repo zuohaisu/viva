@@ -3,7 +3,7 @@
 //! ADR 0012).
 //!
 //! One `VIVA_HOME` has at most one active server. The host owns the
-//! private Unix-socket control channel (`office.sock` inside the 0700 home),
+//! private Unix-socket control channel (`server.sock` inside the 0700 home),
 //! serves CLI callbacks over it, supervises every terminal it spawned, and
 //! releases the channel on exit. A second `viva server` refuses and names
 //! the running host; a stale socket left by a crashed host is claimed with
