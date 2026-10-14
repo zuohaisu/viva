@@ -52,7 +52,10 @@ fn update_with_context(key: &str) -> (std::process::Output, std::path::PathBuf, 
     let output = Command::new(env!("CARGO_BIN_EXE_viva"))
         .arg("update")
         .env("VIVA_HOME", &home)
-        .env("VIVA_NPM_PACKAGE_ROOT", dir.path().join("no-such-package-root"))
+        .env(
+            "VIVA_NPM_PACKAGE_ROOT",
+            dir.path().join("no-such-package-root"),
+        )
         .env_remove("VIVA_MEMBER_ID")
         .env_remove("VIVA_GRANT_ID")
         .env(key, "context-test")

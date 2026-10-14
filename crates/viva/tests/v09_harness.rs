@@ -153,7 +153,7 @@ fn pi_launch_combination_injects_identity_and_task_context() {
     assert!(
         spec.argv
             .iter()
-            .any(|a| a.ends_with("extensions/pi/viva-office.ts")),
+            .any(|a| a.ends_with("extensions/pi/viva.ts")),
         "the shipped extension is loaded explicitly: {:?}",
         spec.argv
     );
@@ -244,7 +244,7 @@ fn launch_context_uses_the_viva_names_and_nothing_else() {
 fn pi_availability_is_honest_when_missing() {
     let harness = PiHarness {
         pi_binary: "/nonexistent/viva-fake-pi".into(),
-        extension_path: std::env::temp_dir().join("extensions/pi/viva-office.ts"),
+        extension_path: std::env::temp_dir().join("extensions/pi/viva.ts"),
     };
     match harness.availability() {
         Availability::Unavailable { reason } => {

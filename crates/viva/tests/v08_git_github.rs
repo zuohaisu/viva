@@ -309,7 +309,7 @@ fn discovery_marks_dirty_worktrees_without_modifying_them() {
     // QA round additions: the discovery shows the claim's source,
     // and the diff API returns a bounded, real diff against HEAD.
     assert_eq!(
-        mine.office_source,
+        mine.claim_source,
         Some(viva::git::worktrees::WorktreeSource::Created)
     );
     // Issue #96: the claim source is serialized as `claim_source`; the

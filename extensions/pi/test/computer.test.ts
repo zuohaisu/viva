@@ -13,17 +13,17 @@ import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { officeEnv } from "../lib.ts";
+import { readEnv } from "../lib.ts";
 import { COMPUTER_INPUT_REFUSAL, registerComputerTools } from "../computer/computer.ts";
-import vivaOffice from "../viva-office.ts";
+import viva from "../viva.ts";
 import { callTool, createFakePi, textOf, toolNamed } from "./fake-pi.ts";
 
 const BASE_ENV: NodeJS.ProcessEnv = {
-  VIVA_OFFICE_MEMBER_ID: "mem-1",
-  VIVA_OFFICE_MEMBER_NAME: "Samuel",
+  VIVA_MEMBER_ID: "mem-1",
+  VIVA_MEMBER_NAME: "Samuel",
   VIVA_HOME: "/tmp/viva-home",
-  VIVA_OFFICE_TASK_ID: "task-1",
-  VIVA_OFFICE_GRANT_ID: "grant-1",
+  VIVA_TASK_ID: "task-1",
+  VIVA_GRANT_ID: "grant-1",
 };
 
 function withEnv(
@@ -57,10 +57,10 @@ function fakeViva(script: string): string {
 
 test("the main entry registers the read-only computer audit tool", () => {
   withEnv(BASE_ENV, () => {
-    const env = officeEnv(process.env);
+    const env = readEnv(process.env);
     assert.ok(env, "Viva context must parse");
     const fake = createFakePi();
-    vivaOffice(fake.host);
+    viva(fake.host);
     assert.ok(
       fake.tools.has("viva_computer_audit"),
       "the audit tool is registered alongside Viva tools",
@@ -74,7 +74,7 @@ test("the main entry registers the read-only computer audit tool", () => {
 
 test("the audit tool runs the viva CLI and reports its payload", () =>
   withEnv(BASE_ENV, async () => {
-    const env = officeEnv(process.env)!;
+    const env = readEnv(process.env)!;
     env.vivaBin = fakeViva('#!/bin/sh\necho \'{ "audited": ["orca-computer"] }\'\n');
     const fake = createFakePi();
     registerComputerTools(fake.host, env);
@@ -87,7 +87,7 @@ test("the audit tool runs the viva CLI and reports its payload", () =>
 
 test("an unavailable audit is an honest error, never a fake pass", () =>
   withEnv(BASE_ENV, async () => {
-    const env = officeEnv(process.env)!;
+    const env = readEnv(process.env)!;
     env.vivaBin = fakeViva('#!/bin/sh\necho "viva: store missing" >&2\nexit 1\n');
     const fake = createFakePi();
     registerComputerTools(fake.host, env);

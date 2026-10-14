@@ -17,11 +17,11 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
-  officeEnv,
+  readEnv,
   runEnvelope,
   toolFailure,
   toolSuccess,
-  type OfficeEnv,
+  type VivaEnv,
   type PiHost,
 } from "../lib.ts";
 
@@ -62,7 +62,7 @@ export async function tryNativeFork(ctx?: ExtensionContext): Promise<NativeForkR
 }
 
 export default function vivaConversations(pi: PiHost): void {
-  const env: OfficeEnv | null = officeEnv(process.env);
+  const env: VivaEnv | null = readEnv(process.env);
   if (!env) return;
 
   pi.registerTool({

@@ -20,9 +20,9 @@
  */
 
 import { Type } from "typebox";
-import { runEnvelope, toolFailure, toolSuccess, type OfficeEnv, type PiHost } from "../lib.ts";
+import { runEnvelope, toolFailure, toolSuccess, type VivaEnv, type PiHost } from "../lib.ts";
 
-export function registerMemoryTools(pi: PiHost, env: OfficeEnv): void {
+export function registerMemoryTools(pi: PiHost, env: VivaEnv): void {
   pi.registerTool({
     name: "viva_memory_search",
     label: "Viva memory search",

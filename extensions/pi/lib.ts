@@ -5,13 +5,13 @@
  * top-level control commands — `status`, `brief`, `dispatch`, `handoff`
  * (JSON on stdout, non-zero exit on rejection) — and never speaks for
  * Viva itself. There is no separate namespace to type through, and
- * `test/viva-office.contract.test.ts` runs these commands against the real
+ * `test/viva.contract.test.ts` runs these commands against the real
  * binary. Everything here is deliberately boring and side-effect-free
  * unless it is actually spawning that CLI.
  *
  * Authority rules this module enforces structurally:
  * - Without a member identity in the environment the extension has no
- *   Viva context and stays inert (`officeEnv` returns null).
+ *   Viva context and stays inert (`readEnv` returns null).
  * - Without a live grant reference there is no dispatch: `planDispatch`
  *   returns a refusal that proposes asking the user for authorization.
  *   A chat session never receives Viva-wide authority.
@@ -29,7 +29,7 @@ import type { AgentToolResult, ExtensionAPI } from "@earendil-works/pi-coding-ag
  */
 export type PiHost = Pick<ExtensionAPI, "on" | "registerTool">;
 
-export interface OfficeEnv {
+export interface VivaEnv {
   home: string;
   memberId: string;
   memberName: string;
@@ -44,16 +44,16 @@ export interface OfficeEnv {
  * when the session was not launched by Viva — the extension must
  * then claim nothing about membership or tasks.
  */
-export function officeEnv(raw: NodeJS.ProcessEnv): OfficeEnv | null {
-  const memberId = raw.VIVA_OFFICE_MEMBER_ID;
-  const memberName = raw.VIVA_OFFICE_MEMBER_NAME;
+export function readEnv(raw: NodeJS.ProcessEnv): VivaEnv | null {
+  const memberId = raw.VIVA_MEMBER_ID;
+  const memberName = raw.VIVA_MEMBER_NAME;
   if (!memberId || !memberName) return null;
   return {
     home: raw.VIVA_HOME ?? "",
     memberId,
     memberName,
-    taskId: raw.VIVA_OFFICE_TASK_ID || undefined,
-    grantId: raw.VIVA_OFFICE_GRANT_ID || undefined,
+    taskId: raw.VIVA_TASK_ID || undefined,
+    grantId: raw.VIVA_GRANT_ID || undefined,
     vivaBin: raw.VIVA_BIN || "viva",
   };
 }
@@ -79,7 +79,7 @@ export interface DispatchRequest {
  * enforces the grant again server-side; this refusal is the extension-side
  * guarantee that a chat without authorization cannot even attempt it.
  */
-export function planDispatch(env: OfficeEnv, req: DispatchRequest): DispatchPlan {
+export function planDispatch(env: VivaEnv, req: DispatchRequest): DispatchPlan {
   const taskId = req.taskId ?? env.taskId;
   const grantId = req.grantId ?? env.grantId;
   if (!taskId) {
@@ -138,9 +138,9 @@ export interface EnvelopeOutcome {
  * non-zero exit meaning rejection. Network/host problems surface as thrown
  * errors with the CLI's own words — the extension never invents an outcome.
  */
-export function runEnvelope(env: OfficeEnv, officeArgs: string[]): Promise<unknown> {
+export function runEnvelope(env: VivaEnv, args: string[]): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    const result = spawnSync(env.vivaBin, officeArgs, {
+    const result = spawnSync(env.vivaBin, args, {
       env: { ...process.env, VIVA_HOME: env.home },
       encoding: "utf8",
       timeout: 30_000,
