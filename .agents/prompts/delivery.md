@@ -88,30 +88,7 @@ Wiki 修改不走 PR，规则和什么时候该改 Wiki 都见 `AGENTS.md` 的 "
 
 ## 7. PR 描述模板
 
-`.github/PULL_REQUEST_TEMPLATE.md` 里还是 Plane 时代的字段，不适用；用下面的结构，同时覆盖 `AGENTS.md` 对 PR 正文的四项要求（Summary、Validation、Risk/Safety Boundaries、Known Limitations）。
-
-````markdown
-## Summary
-<改了什么、为什么>
-
-Closes #<issue>
-
-## 验收标准
-- [ ] <逐条抄自 GitHub issue，勾选的要有证据>
-
-## 证据（Validation）
-<!-- 命令和输出，不要只写“已通过”。有 CI 链接时注明对应的 commit。 -->
-```text
-$ <命令>
-<输出>
-```
-
-## 风险与安全边界（Risk/Safety Boundaries）
-<影响范围；没有碰权限、版本、发布、数据时也要明说>
-
-## 未验证项（Known Limitations）
-<没跑的检查、没覆盖的平台、已知缺口；没有就写“无”>
-````
+PR 正文用 [`.github/PULL_REQUEST_TEMPLATE.md`](../../.github/PULL_REQUEST_TEMPLATE.md)：开 PR 时 GitHub 会自动填入。它覆盖 `AGENTS.md` 对 PR 正文的四项要求（Summary、Validation、Risk/Safety Boundaries、Known Limitations），并要求写 `Closes #<issue>` 或 `Refs #<issue>`。用 `gh pr create --body-file` 时，按这个模板的结构写正文。
 
 ## 8. 踩坑记录
 

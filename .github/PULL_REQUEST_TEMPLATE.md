@@ -1,40 +1,27 @@
-## Associated ticket
+## Summary
 
-- Plane key: `AIO-<number>`
-- Plane issue URL: 
+<!-- 改了什么、为什么。 -->
 
-## Goal
+Closes #<issue>
+<!-- PR 只完成 GitHub issue 的一部分时，写 Refs #<issue>。每个 PR 都必须对应一个 GitHub issue（见 AGENTS.md）。 -->
 
-<!-- State the ticket outcome and why it matters. -->
+## 验收标准
 
-## Scope
+- [ ] <!-- 逐条抄自 GitHub issue，勾选的要有证据 -->
 
-### In scope
+## 证据（Validation）
 
-- [ ] 
-
-### Out of scope
-
-- [ ] 
-
-## Acceptance criteria
-
-- [ ] 
-- [ ] 
-
-## Verification evidence
-
-<!-- List exact commands or inspections and their results. Link logs, CI runs, or QA evidence where available. -->
+<!-- 命令和输出，不要只写“已通过”。有 CI 链接时注明对应的 commit。 -->
 
 ```text
-Command/result:
+$ <命令>
+<输出>
 ```
 
-## Risk and rollback
+## 风险与安全边界（Risk/Safety Boundaries）
 
-- Risk:
-- Rollback:
+<!-- 影响范围；没有碰权限、版本、发布、数据时也要明说。PR 不改任何版本号。 -->
 
-## Reviewer notes
+## 未验证项（Known Limitations）
 
-<!-- Identify decisions or human touchpoints requiring review. A human reviewer must approve and merge. -->
+<!-- 没跑的检查、没覆盖的平台、已知缺口；没有就写“无”。 -->
