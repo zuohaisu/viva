@@ -25,6 +25,7 @@
 4. 分支命名遵循 `AGENTS.md` 的 `agent/<type>-<short-kebab-case-description>`。检出命令自动建的分支名不符合该规则，所以在检出的基础上新开一个：`git switch -c agent/docs-xxx`。任务已有开放 PR 时，继续那个分支，不要另开。
 5. 提交身份用机器上已配置的，不改全局 git 配置。
 6. PR 标题以 Multica issue 编号开头，格式 `TFHS-xx: <简述>`，这样 PR 会自动关联到 issue。提交信息按 `CONTRIBUTING.md` 的 Commit convention 写，不需要带编号。
+7. 任务颗粒度（owner 于 2026-10-13 定的规则）：拆分开发任务时，每个任务大约对应一次 500–1000 行改动的提交，不要切成只改一两个文件的小任务。
 
 ## 2. GitHub issue 是唯一的事实来源
 
