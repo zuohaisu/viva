@@ -24,7 +24,7 @@
 
 4. 分支命名遵循 `AGENTS.md` 的 `agent/<type>-<short-kebab-case-description>`。检出命令自动建的分支名不符合该规则，所以在检出的基础上新开一个：`git switch -c agent/docs-xxx`。任务已有开放 PR 时，继续那个分支，不要另开。
 5. 提交身份用机器上已配置的，不改全局 git 配置。
-6. PR 标题以 Multica issue 编号开头，格式 `TFHS-xx: <简述>`，这样 PR 会自动关联到 issue。提交信息按 `CONTRIBUTING.md` 的 Commit convention 写，不需要带编号。
+6. 编号只用一套：GitHub issue 编号（owner 于 2026-10-14 定的规则）。PR 标题、PR 正文、提交信息和 GitHub 评论里都不写其他平台的任务编号（比如 Multica 的 `TFHS-xx`）。PR 标题直接写简述；PR 和 issue 的关联靠正文里的 `Closes #<N>` 或 `Refs #<N>`。提交信息按 `CONTRIBUTING.md` 的 Commit convention 来写。其他平台上的任务标题，要以对应的 GitHub issue 编号开头。
 7. 任务颗粒度（owner 于 2026-10-13 定的规则）：拆分开发任务时，每个任务大约对应一次 500–1000 行改动的提交，不要切成只改一两个文件的小任务。
 
 ## 2. GitHub issue 是唯一的事实来源
@@ -97,4 +97,4 @@ PR 正文用 [`.github/PULL_REQUEST_TEMPLATE.md`](../../.github/PULL_REQUEST_TEM
 
 | 日期 | 现象 | 以后怎么做 | 出处 |
 | --- | --- | --- | --- |
-| 2026-10-13 | 用假 `viva` 二进制的测试抓不到 CLI 命令已经改名：Pi 扩展仍在调用已退役的 `viva office ...`，测试却是绿的。 | 凡涉及 CLI 调用的改动，加一个用真实二进制的契约测试，并在改代码前确认它会失败。 | TFHS-6 计划（N2） |
+| 2026-10-13 | 用假 `viva` 二进制的测试抓不到 CLI 命令已经改名：Pi 扩展仍在调用已退役的 `viva office ...`，测试却是绿的。 | 凡涉及 CLI 调用的改动，加一个用真实二进制的契约测试，并在改代码前确认它会失败。 | #86 |
