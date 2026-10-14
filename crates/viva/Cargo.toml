@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Viva Personal AI Office — local office host foundation (V01/G0)"
+description = "Viva — local-first personal AI collaboration system (V01/G0 foundation)"
 
 [lib]
 name = "viva"
@@ -30,7 +30,7 @@ uuid = { version = "1.26.1", features = ["v4", "serde"] }
 # escape/UTF-8 sequence a handoff must replay into the adopted parser.
 vt100 = "0.16.2"
 vte = "0.15"
-# V06 (issue #15): the office TUI shell (the only physical-terminal
+# V06 (issue #15): the TUI shell (the only physical-terminal
 # renderer). crossterm comes through ratatui's re-export to keep the
 # versions locked together.
 ratatui = "0.30.2"

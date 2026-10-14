@@ -1,4 +1,4 @@
-//! V07 acceptance tests (issue #16): the active Office control plane over a
+//! V07 acceptance tests (issue #16): the active control plane over a
 //! real Unix-socket channel — CLI dispatch/observe/stop, single active host
 //! per VIVA_HOME, honest rejection without a daemon, graceful shutdown, and
 //! crash-restart reconciliation that never re-runs finished work.
@@ -123,7 +123,7 @@ fn count_executions(home: &std::path::Path) -> i64 {
         server::migrations(),
     )
     .expect("count store");
-    store.row_count("office_executions").expect("count")
+    store.row_count("executions").expect("count")
 }
 
 // ---------------------------------------------------------------------------
@@ -333,7 +333,7 @@ fn mutation_without_active_server_is_rejected_and_starts_no_daemon() {
         dispatch_request(&seed, "req-no-host", vec!["/bin/sleep".into(), "1".into()]),
     )
     .expect_err("no host listening");
-    assert!(err.contains("no active office"), "got: {err}");
+    assert!(err.contains("no active server"), "got: {err}");
     assert!(
         !home.join(server::SOCKET_NAME).exists(),
         "the client must not have conjured a socket/daemon into existence"
@@ -507,7 +507,7 @@ fn crash_restart_reconciles_without_rerunning_finished_work() {
     let kinds: Vec<String> = {
         let mut stmt = store
             .connection()
-            .prepare("SELECT kind FROM office_recovery_events ORDER BY seq")
+            .prepare("SELECT kind FROM recovery_events ORDER BY seq")
             .expect("prepare");
         let rows = stmt
             .query_map([], |row| row.get::<_, String>(0))
@@ -529,7 +529,7 @@ fn crash_restart_reconciles_without_rerunning_finished_work() {
         let status: String = store
             .connection()
             .query_row(
-                "SELECT status FROM office_executions WHERE execution_id = ?1",
+                "SELECT status FROM executions WHERE execution_id = ?1",
                 [live["execution_id"].as_str().unwrap_or("")],
                 |row| row.get(0),
             )
@@ -579,7 +579,7 @@ use std::str::FromStr as _;
 fn graceful_shutdown_records_every_exit_before_the_handoff() {
     // D1: after a graceful shutdown, every dispatched execution has its
     // exit recorded (intent exited), and the NEXT host must NOT write a
-    // false "execution_orphaned" recovery for anything this office
+    // false "execution_orphaned" recovery for anything this server
     // stopped itself.
     let dir = TempDir::new().expect("dir");
     let home = dir.path().to_path_buf();
@@ -634,7 +634,7 @@ fn graceful_shutdown_records_every_exit_before_the_handoff() {
         let mut stmt = store
             .connection()
             .prepare(
-                "SELECT detail FROM office_recovery_events
+                "SELECT detail FROM recovery_events
                  WHERE kind = 'execution_orphaned'",
             )
             .expect("prepare");
@@ -674,7 +674,7 @@ fn host_home_and_channel_are_private_and_authenticated() {
         assert_eq!(
             mode & 0o777,
             0o700,
-            "the office home must be private even when the host created it"
+            "the Viva home must be private even when the host created it"
         );
     }
 

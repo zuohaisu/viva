@@ -7,7 +7,7 @@
 //!   restarts.
 //! - A configured binding is a *wish*, not a verified capability: tool
 //!   probing runs an explicit argv with a timeout and bounded output, and the
-//!   probe result — not the config string — is what the office treats as a
+//!   probe result — not the config string — is what Viva treats as a
 //!   capability. Missing tools / unsupported models fail with actionable
 //!   errors; nothing silently substitutes a fallback.
 
@@ -58,7 +58,7 @@ CREATE TABLE tool_probe_cache (
 // Records
 // ---------------------------------------------------------------------------
 
-/// A member of the office: an identity reference plus display configuration.
+/// A member of Viva: an identity reference plus display configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemberRecord {
     pub member_id: MemberId,
@@ -86,7 +86,7 @@ pub struct ToolProbeResult {
     pub probed_at: String,
 }
 
-/// Which models this office accepts. A binding outside the list is an
+/// Which models Viva accepts. A binding outside the list is an
 /// actionable configuration error, never a silent substitution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelPolicy {
@@ -103,7 +103,7 @@ impl ModelPolicy {
             return Ok(());
         }
         Err(Error::Validation(format!(
-            "model `{model_binding}` is not supported by this office; supported models: {}. \
+            "model `{model_binding}` is not supported by Viva; supported models: {}. \
              Update the member binding to one of these.",
             self.supported_models.join(", ")
         )))
@@ -266,7 +266,7 @@ impl<'a> MemberRegistry<'a> {
         }))
     }
 
-    /// Validate a binding against the office model policy before use.
+    /// Validate a binding against Viva's model policy before use.
     pub fn ensure_model_supported(&self, member_id: &MemberId, policy: &ModelPolicy) -> Result<()> {
         let binding = self.binding(member_id)?.ok_or_else(|| Error::NotFound {
             entity: "member binding",
@@ -402,7 +402,7 @@ fn run_probe(
     // Bounded memory: stderr is drained and discarded in a background
     // thread; stdout is read incrementally and only the first
     // `max_output_bytes` are retained — a loud probe never balloons the
-    // office's memory (QA round small item).
+    // Viva's memory (QA round small item).
     let stderr_pipe = child.stderr.take();
     let stderr_drain = std::thread::spawn(move || {
         if let Some(mut pipe) = stderr_pipe {

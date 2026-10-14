@@ -35,8 +35,8 @@ pub struct HarnessSpec {
     pub cwd: PathBuf,
     /// The member whose session this is, when launched for a member.
     pub member_id: Option<MemberId>,
-    /// Extra environment (office context: member identity, task id, and —
-    /// only when the office holds a live grant — the grant reference).
+    /// Extra environment (Viva context: member identity, task id, and —
+    /// only when Viva holds a live grant — the grant reference).
     pub env: Vec<(String, String)>,
 }
 

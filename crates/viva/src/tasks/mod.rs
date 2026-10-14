@@ -11,7 +11,7 @@
 //! - Task results (process / QA / PR+CI / user) are separate sources with
 //!   dedup keys. A duplicate or stale result can never re-close a task,
 //!   because results never close tasks at all.
-//! - Attribution is captured once at creation; switching the office's current
+//! - Attribution is captured once at creation; switching Viva's current
 //!   member/workspace never rewrites historical ownership.
 
 use std::str::FromStr as _;
@@ -26,7 +26,7 @@ use crate::foundation::records::{AttributionSnapshot, ExecutionRecord, Execution
 use crate::foundation::store::{DOMAIN_TASKS_EXECUTIONS, MigrationRegistry, Store};
 
 /// Register the `tasks_executions` domain migrations (V03's namespace; the
-/// tables reference the foundation `office_executions` slice without
+/// tables reference the foundation `executions` slice without
 /// altering it).
 pub fn register_migrations(registry: MigrationRegistry) -> MigrationRegistry {
     registry.register(
@@ -70,7 +70,7 @@ CREATE TABLE launch_intents (
     request_key     TEXT NOT NULL UNIQUE,
     member_id       TEXT NOT NULL,
     state           TEXT NOT NULL CHECK (state IN ('intended', 'confirmed', 'exited', 'unresolved')),
-    execution_id    TEXT REFERENCES office_executions(execution_id),
+    execution_id    TEXT REFERENCES executions(execution_id),
     pid             INTEGER,
     pid_start_marker TEXT,
     intended_at     TEXT NOT NULL,
@@ -557,7 +557,7 @@ impl<'a> TaskRegistry<'a> {
             rusqlite::params![request_key, pid, pid_start_marker, now],
         )?;
         tx.execute(
-            "UPDATE office_executions SET status = 'running', updated_at = ?2
+            "UPDATE executions SET status = 'running', updated_at = ?2
              WHERE execution_id = ?1 AND status = 'requested'",
             rusqlite::params![execution_id.as_str(), now],
         )?;
@@ -617,7 +617,7 @@ impl<'a> TaskRegistry<'a> {
                 ExecutionStatus::Failed
             };
             tx.execute(
-                "UPDATE office_executions
+                "UPDATE executions
                  SET status = ?2, process_exit = ?3, updated_at = ?4
                  WHERE execution_id = ?1 AND status <> 'completed'",
                 rusqlite::params![execution_id.as_str(), new_status.as_str(), exit_code, now],
@@ -1016,7 +1016,7 @@ fn map_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<LaunchIntent> {
 /// Insert an execution inside a caller-owned transaction.
 fn insert_execution_in(tx: &rusqlite::Transaction<'_>, execution: &ExecutionRecord) -> Result<()> {
     tx.execute(
-        "INSERT INTO office_executions(
+        "INSERT INTO executions(
             execution_id, task_id, session_id, member_id, attribution, status,
             process_exit, completion_evidence, created_at, updated_at
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",

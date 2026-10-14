@@ -1,6 +1,6 @@
-//! The append-only office event log.
+//! The append-only event log.
 //!
-//! G0 semantics: office events are audit facts. Rows are never updated or
+//! G0 semantics: events are audit facts. Rows are never updated or
 //! deleted (enforced by trigger), payloads are bounded, and the log is the
 //! raw-history substrate that experiences and memories must cite — writing an
 //! event never claims a memory was formed.
@@ -15,11 +15,11 @@ use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{EventId, utc_now};
 use crate::foundation::store::{Domain, Store};
 
-/// Hard payload bound in bytes, matching the `office_events` CHECK (which is
+/// Hard payload bound in bytes, matching the `events` CHECK (which is
 /// enforced on the cast BLOB, i.e. bytes, not characters).
 pub const MAX_EVENT_PAYLOAD_BYTES: usize = 65_536;
 
-/// A new office event to record.
+/// A new event to record.
 #[derive(Debug, Clone)]
 pub struct NewEvent {
     pub domain: Domain,
@@ -80,7 +80,7 @@ fn append_within(conn: &rusqlite::Connection, event: NewEvent) -> Result<Recorde
     let event_id = EventId::new();
     let occurred_at = utc_now();
     conn.execute(
-        "INSERT INTO office_events(event_id, occurred_at, domain, kind, subject_type, subject_id, origin, payload)
+        "INSERT INTO events(event_id, occurred_at, domain, kind, subject_type, subject_id, origin, payload)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         rusqlite::params![
             event_id.as_str(),
@@ -111,7 +111,7 @@ pub fn list(store: &Store, limit: u32) -> Result<Vec<RecordedEvent>> {
     let conn = store.connection();
     let mut stmt = conn.prepare(
         "SELECT seq, event_id, occurred_at, domain, kind, subject_type, subject_id, origin, payload
-         FROM office_events ORDER BY seq DESC LIMIT ?1",
+         FROM events ORDER BY seq DESC LIMIT ?1",
     )?;
     let rows = stmt.query_map([limit], |row| {
         Ok(RecordedEvent {
@@ -150,7 +150,7 @@ pub fn get(store: &Store, event_id: &EventId) -> Result<Option<RecordedEvent>> {
     let conn = store.connection();
     let mut stmt = conn.prepare(
         "SELECT seq, event_id, occurred_at, domain, kind, subject_type, subject_id, origin, payload
-         FROM office_events WHERE event_id = ?1",
+         FROM events WHERE event_id = ?1",
     )?;
     let row = stmt
         .query_row([event_id.as_str()], |row| {
@@ -232,7 +232,7 @@ mod tests {
         event.payload = serde_json::json!({ "blob": "x".repeat(MAX_EVENT_PAYLOAD_BYTES + 1) });
         let err = append(&store, event).expect_err("oversized payload must fail");
         assert!(err.to_string().contains("bound"), "got: {err}");
-        assert_eq!(store.row_count("office_events").expect("count"), 0);
+        assert_eq!(store.row_count("events").expect("count"), 0);
     }
 
     #[test]
@@ -253,7 +253,7 @@ mod tests {
         let tx = store.transaction().expect("tx");
         let recorded = append_in(&tx, demo("atomic_note")).expect("append in tx");
         // Simulate a related fact write failing after the event was added.
-        let broken = tx.execute("INSERT INTO office_sessions(session_id, kind, title, task_id, member_id, harness, harness_native_session_id, created_at) VALUES ('x', 'nonsense', 't', NULL, NULL, NULL, NULL, 'now')", []);
+        let broken = tx.execute("INSERT INTO sessions(session_id, kind, title, task_id, member_id, harness, harness_native_session_id, created_at) VALUES ('x', 'nonsense', 't', NULL, NULL, NULL, NULL, 'now')", []);
         assert!(broken.is_err(), "invalid session insert must fail");
         drop(tx); // rollback: event and session both gone
 

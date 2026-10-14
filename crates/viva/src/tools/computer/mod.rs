@@ -143,7 +143,7 @@ fn repair_lease_shape(tx: &rusqlite::Transaction<'_>) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Tool runner (the only seam between the office and the real tools)
+// Tool runner (the only seam between Viva and the real tools)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,13 +160,13 @@ impl std::fmt::Display for ToolFailure {
 
 /// Runs one existing host tool. The real implementation spawns the
 /// process; tests substitute a scripted runner. This is the only place
-/// the office touches a computer-use tool.
+/// Viva touches a computer-use tool.
 pub trait ToolRunner: Send + Sync {
     fn run(&self, program: &str, argv: &[String]) -> Result<String, ToolFailure>;
 }
 
 /// The real runner: bounded-output process execution with a timeout,
-/// using the host's own environment (the office copies no credentials).
+/// using the host's own environment (Viva copies no credentials).
 pub struct ProcessRunner {
     pub timeout: std::time::Duration,
 }
@@ -213,7 +213,7 @@ impl ToolRunner for ProcessRunner {
 // reads don't
 // ---------------------------------------------------------------------------
 
-/// Coordinates global keyboard/mouse/focus work through the office store:
+/// Coordinates global keyboard/mouse/focus work through the store:
 /// the lease is a row in `foreground_leases`, so the exclusion holds
 /// between separate `viva` processes sharing the same VIVA_HOME file, not
 /// only between threads. A foreground action must hold the single lease;
@@ -832,7 +832,7 @@ impl<'a> ComputerEngine<'a> {
         };
 
         // Task-scoped authorization. A grant for another task is refused
-        // here (cross-task); no grant is refused too — the office records
+        // here (cross-task); no grant is refused too — Viva records
         // the refusal as evidence either way.
         let grant_id = match actor {
             Actor::Member { grant, .. } => grant.clone(),
@@ -865,7 +865,7 @@ impl<'a> ComputerEngine<'a> {
         // only cross-checks grants that carry a scope, so an unscoped
         // (task_id = NULL) grant would otherwise serve ANY task — a
         // whole-machine license in disguise (QA finding N4). Unlike
-        // office-wide maintenance actions, nothing depends on unscoped
+        // Viva-wide maintenance actions, nothing depends on unscoped
         // computer_input, so the narrower rule is enforced here.
         if let Some(gid) = &grant_id {
             let grant = authority.require_grant(gid)?;

@@ -24,7 +24,7 @@ fn clean_home_boot_and_data_export_roundtrip() {
     let dir = TempDir::new().expect("dir");
     let home = dir.path().join("home");
 
-    // A clean environment boots: init applies the full office schema,
+    // A clean environment boots: init applies the full schema,
     // doctor reports state, and the process exits 0.
     let (code, _, err) = viva(&home, &["init"]);
     assert_eq!(code, 0, "init failed: {err}");
@@ -67,12 +67,12 @@ fn clean_home_boot_and_data_export_roundtrip() {
     assert_eq!(manifest["contains_sensitive_data"], true);
     let tables = manifest["tables"].as_object().expect("table map");
     assert!(
-        tables.contains_key("office_events") && tables.contains_key("members"),
+        tables.contains_key("events") && tables.contains_key("members"),
         "core tables inventoried: {:?}",
         tables.keys().collect::<Vec<_>>()
     );
     let events: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(export.join("office_events.json")).expect("events file"),
+        &std::fs::read_to_string(export.join("events.json")).expect("events file"),
     )
     .expect("events json");
     assert_eq!(

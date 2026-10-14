@@ -261,7 +261,7 @@ fn knowledge_review_is_repeatable_without_duplicates() {
     session.end(&store).expect("session ends");
 }
 
-/// An office-wide ACT grant covering maintenance (the shape an owner
+/// A Viva-wide ACT grant covering maintenance (the shape an owner
 /// issues through `viva grant`).
 fn granted_actor(authority: &AuthorityEngine<'_>) -> Actor {
     let member = MemberId::new();
@@ -315,7 +315,7 @@ fn executed_exits_stay_traceable_and_recoverable() {
         )
         .expect("skill");
 
-    // The office-wide grant that authorizes maintenance execution.
+    // The Viva-wide grant that authorizes maintenance execution.
     let maintainer = MemberId::new();
     let grant = authority
         .issue_root_grant(
@@ -371,7 +371,7 @@ fn executed_exits_stay_traceable_and_recoverable() {
     let restored = registry.get_item(&item).expect("item").expect("exists");
     assert_eq!(restored.status, viva::knowledge::KnowledgeStatus::Active);
 
-    // Skill exit: office state only, SKILL.md untouched, re-enableable.
+    // Skill exit: Viva state only, SKILL.md untouched, re-enableable.
     let skill_after = registry
         .skill(&skill.skill_id)
         .expect("skill")
@@ -434,7 +434,7 @@ fn execution_is_grant_gated_and_human_review_stays_human() {
         "the denial is in the audit log"
     );
 
-    // A task-scoped grant does not cover office-wide maintenance.
+    // A task-scoped grant does not cover Viva-wide maintenance.
     let scoped = authority
         .issue_root_grant(
             None,
@@ -456,7 +456,7 @@ fn execution_is_grant_gated_and_human_review_stays_human() {
             &registry,
             "task grant",
         )
-        .expect_err("task-scoped grants do not maintain the office");
+        .expect_err("task-scoped grants do not maintain Viva");
     assert!(err.to_string().contains("not authorized"), "got: {err}");
 
     // The item is still active — nothing happened unauthorized.
@@ -574,7 +574,7 @@ fn restart_restores_records_and_replays_nothing() {
         )
         .expect("age item");
 
-    // First office window.
+    // First maintenance window.
     let session = MaintenanceSession::open(&store).expect("session");
     maintenance
         .review_knowledge(&session, &registry, 100)
@@ -709,7 +709,7 @@ fn executed_cycle_reproposes_but_dismissal_stays_silent() {
 }
 
 /// A disabled skill is actually retired from task-context selection —
-/// office state gates injection (QA finding: `enabled` had no readers).
+/// Viva state gates injection (QA finding: `enabled` had no readers).
 #[test]
 fn disabled_skills_leave_task_context_selection() {
     let store = store();

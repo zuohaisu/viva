@@ -1,10 +1,10 @@
 //! The conversation tree panel (V10, issue #19): a read-only projection of
-//! the office conversation tree with its display names, harness references
+//! the conversation tree with its display names, harness references
 //! and task associations. Like the V06 shell, this view never mutates what
 //! it shows — rename/attach/archive are actions the run loop executes via
 //! the conversations domain, fed back through [`ConversationTreeApp::set_rows`].
 //!
-//! Ownership is visible by design: display names and task links are office
+//! Ownership is visible by design: display names and task links are Viva
 //! facts; native session/node pointers are labeled as the harness's.
 
 use ratatui::Frame;
@@ -49,7 +49,7 @@ impl ConversationTreeApp {
         Self {
             rows: Vec::new(),
             selected: 0,
-            status_line: "j/k select · r rename · display names and task links are office-owned; native refs belong to the harness".into(),
+            status_line: "j/k select · r rename · display names and task links are Viva-owned; native refs belong to the harness".into(),
         }
     }
 

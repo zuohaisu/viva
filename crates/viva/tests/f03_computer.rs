@@ -277,7 +277,7 @@ fn cli_lists_and_conditionally_releases_only_authorized_unknown_leases() {
     assert_eq!(rows, 1, "healthy lease still held");
     let events: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM office_events WHERE kind='foreground_lease_released'",
+            "SELECT COUNT(*) FROM events WHERE kind='foreground_lease_released'",
             [],
             |r| r.get(0),
         )
@@ -285,7 +285,7 @@ fn cli_lists_and_conditionally_releases_only_authorized_unknown_leases() {
     assert_eq!(events, 1, "exactly one appended audit event");
     let (origin, payload): (String, String) = conn
         .query_row(
-            "SELECT origin, payload FROM office_events WHERE kind='foreground_lease_released'",
+            "SELECT origin, payload FROM events WHERE kind='foreground_lease_released'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -344,7 +344,7 @@ fn delegated_release_grant_cannot_clear_an_unknown_holder() {
         .unwrap_err();
     assert!(err.to_string().contains("owner-issued"), "{err}");
     assert_eq!(store.row_count("foreground_leases").unwrap(), 1);
-    assert_eq!(store.row_count("office_events").unwrap(), 0);
+    assert_eq!(store.row_count("events").unwrap(), 0);
 }
 
 #[test]
@@ -813,7 +813,7 @@ fn actions_are_task_scoped_and_grant_gated() {
 }
 
 /// Acceptance: "全局键鼠/焦点任务不能交叉破坏；独立 API/浏览器context不
-/// 因此全串行" — two office processes (here: two connections sharing one
+/// 因此全串行" — two Viva processes (here: two connections sharing one
 /// coordinator) cannot hold the foreground lane at once; a foreground
 /// action waits its turn; an independent read context never waits.
 #[test]
@@ -823,7 +823,7 @@ fn foreground_lane_serializes_but_reads_run_free() {
     let task_a = TaskId::new();
     let task_b = TaskId::new();
 
-    // The office store exists once; grants are visible to both threads.
+    // The store exists once; grants are visible to both threads.
     {
         let store = Store::open(&db, &frozen()).expect("store");
         let authority = AuthorityEngine::new(&store);

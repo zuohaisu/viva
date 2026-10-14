@@ -4,7 +4,7 @@
  *
  * Why this exists: `viva-office.test.ts` drives the extension against a fake
  * `viva` script that returns fixed JSON for ANY arguments. It stayed green
- * while the extension kept calling the retired `viva office ...` namespace,
+ * while the extension kept calling a retired command namespace,
  * which the real binary rejects with "unknown or missing subcommand". A fake
  * cannot catch a renamed command; only the real binary can.
  *
@@ -12,8 +12,8 @@
  * would execute it, against the real binary and a throwaway VIVA_HOME. The
  * argv under test is therefore whatever the extension really emits, never a
  * copy of it written into this file. No `viva server` is started, so
- * `handoff` and `dispatch` are expected to be refused by the office
- * ("no active office") — which proves the CLI recognised them. Their
+ * `handoff` and `dispatch` are expected to be refused by Viva
+ * ("no active server") — which proves the CLI recognised them. Their
  * success paths are deliberately not exercised here.
  *
  * The binary comes from VIVA_BIN, else `target/debug/viva`:
@@ -30,17 +30,20 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import vivaOffice from "../viva-office.ts";
+import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 
-type ToolResult = { content: string; isError?: boolean };
-type Tool = { execute: (args: Record<string, unknown>) => Promise<ToolResult> | ToolResult };
+import vivaOffice from "../viva-office.ts";
+import { callTool, createFakePi, textOf, type RegisteredTool } from "./fake-pi.ts";
+
+type ToolResult = AgentToolResult<unknown>;
+type Tool = RegisteredTool;
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 /** What the real binary says when it does not recognise a command. */
 const UNRECOGNISED = /unknown or missing subcommand/;
-/** What the office says when no resident server is running: a business-layer refusal. */
-const NO_ACTIVE_OFFICE = /no active office/;
+/** What Viva says when no resident server is running: a business-layer refusal. */
+const NO_ACTIVE_SERVER = /no active server/;
 
 const GOAL = "contract test goal";
 
@@ -93,24 +96,15 @@ function runVivaJson(bin: string, home: string, args: string[]): Record<string, 
 
 /** Load the extension the way Pi does: factory call with the harness env. */
 function loadExtensionTools(raw: NodeJS.ProcessEnv): Map<string, Tool> {
-  const tools = new Map<string, Tool>();
-  const fakePi = {
-    on() {
-      return () => {};
-    },
-    registerTool(name: string, tool: Tool) {
-      tools.set(name, tool);
-    },
-    registerCommand() {},
-  };
+  const fake = createFakePi();
   const saved = process.env;
   process.env = raw;
   try {
-    vivaOffice(fakePi as never);
+    vivaOffice(fake.host);
   } finally {
     process.env = saved;
   }
-  return tools;
+  return fake.tools;
 }
 
 before(() => {
@@ -149,19 +143,19 @@ function tool(name: string): Tool {
 }
 
 /**
- * The command was understood by the CLI and refused by the office, not by
+ * The command was understood by the CLI and refused by Viva, not by
  * the argument parser. (No resident server runs in this test.)
  */
 function assertRecognisedButRefused(result: ToolResult, what: string): void {
-  assert.equal(result.isError, true, `${what}: with no office running the call must be refused`);
-  assert.doesNotMatch(result.content, UNRECOGNISED, `${what}: the real CLI did not recognise the command`);
-  assert.match(result.content, NO_ACTIVE_OFFICE, `${what}: expected the office's own refusal`);
+  assert.equal(result.isError, true, `${what}: with no server running the call must be refused`);
+  assert.doesNotMatch(textOf(result), UNRECOGNISED, `${what}: the real CLI did not recognise the command`);
+  assert.match(textOf(result), NO_ACTIVE_SERVER, `${what}: expected Viva's own refusal`);
 }
 
-test("control: the real binary rejects the retired `office` namespace", () => {
+test("control: the real binary rejects an unknown command namespace", () => {
   assert.ok(fx);
-  const out = runViva(fx.bin, fx.home, ["office", "status"]);
-  assert.notEqual(out.status, 0, "`viva office status` must stay retired");
+  const out = runViva(fx.bin, fx.home, ["no-such-namespace", "status"]);
+  assert.notEqual(out.status, 0, "`viva no-such-namespace status` must be rejected");
   // Also proves UNRECOGNISED matches a real rejection, so the negative
   // assertions below are not vacuous.
   assert.match(out.stderr, UNRECOGNISED);
@@ -170,28 +164,29 @@ test("control: the real binary rejects the retired `office` namespace", () => {
 
 test("viva_office_status is accepted and returns the real status", async () => {
   assert.ok(fx);
-  const result = await tool("viva_office_status").execute({});
-  assert.notEqual(result.isError, true, `status failed: ${result.content}`);
-  const payload = JSON.parse(result.content) as { home?: string };
+  const result = await callTool(tool("viva_office_status"), {});
+  assert.notEqual(result.isError, true, `status failed: ${textOf(result)}`);
+  const payload = JSON.parse(textOf(result)) as { home?: string };
   assert.equal(typeof payload.home, "string", "status payload names its home");
   assert.equal(realpathSync(payload.home as string), realpathSync(fx.home));
 });
 
 test("viva_office_task_brief is accepted and returns the real task brief", async () => {
-  const result = await tool("viva_office_task_brief").execute({});
-  assert.notEqual(result.isError, true, `brief failed: ${result.content}`);
-  const payload = JSON.parse(result.content) as { goal?: string };
+  const result = await callTool(tool("viva_office_task_brief"), {});
+  assert.notEqual(result.isError, true, `brief failed: ${textOf(result)}`);
+  const payload = JSON.parse(textOf(result)) as { goal?: string };
   assert.equal(payload.goal, GOAL);
+  assert.deepEqual(result.details, payload, "the real CLI payload is kept as details");
 });
 
 test("viva_office_handoff is recognised by the real CLI", async () => {
-  const result = await tool("viva_office_handoff").execute({ summary: "contract test handoff" });
+  const result = await callTool(tool("viva_office_handoff"), { summary: "contract test handoff" });
   assertRecognisedButRefused(result, "handoff");
 });
 
 test("viva_office_dispatch is recognised by the real CLI", async () => {
   assert.ok(fx);
-  const result = await tool("viva_office_dispatch").execute({
+  const result = await callTool(tool("viva_office_dispatch"), {
     argv: ["/bin/true"],
     cwd: fx.root,
     request_key: "contract-test-request-key",

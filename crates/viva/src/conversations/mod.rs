@@ -2,15 +2,15 @@
 //! handoffs (V10, issue #19).
 //!
 //! What this domain owns — and deliberately does not:
-//! - The office stores the conversation **tree** (parent/child), display
+//! - Viva stores the conversation **tree** (parent/child), display
 //!   names, optional task associations, and *pointers* to harness-native
 //!   session/node records. The harness (Pi) owns the transcript and its
 //!   internal context; there is no second copy of chat facts here and no
 //!   chat engine.
 //! - A native fork is registered only AFTER the harness confirmed it (the
 //!   extension forks natively first, then records). A native id is written
-//!   once per node: the office never edits a harness-native fact, and the
-//!   harness never edits office display names — one fact, one owner.
+//!   once per node: Viva never edits a harness-native fact, and the
+//!   harness never edits display names — one fact, one owner.
 //! - Forking never creates a task. Task association is an explicit,
 //!   reversible attach. Archiving a node hides nothing's history and never
 //!   removes its children; closing a task never silently deletes sessions.
@@ -25,11 +25,11 @@ use crate::foundation::ids::{MemberId, SessionId, TaskId, utc_now};
 use crate::foundation::store::Store;
 
 pub const CONVERSATIONS_V1_SQL: &str = r#"
--- The office conversation tree. Points at harness-native records; the
--- harness owns the transcript, this table owns only office facts.
+-- The conversation tree. Points at harness-native records; the
+-- harness owns the transcript, this table owns only Viva facts.
 CREATE TABLE conversation_nodes (
     node_id            TEXT PRIMARY KEY,
-    session_id         TEXT NOT NULL REFERENCES office_sessions(session_id),
+    session_id         TEXT NOT NULL REFERENCES sessions(session_id),
     parent_node_id     TEXT REFERENCES conversation_nodes(node_id),
     display_name       TEXT NOT NULL CHECK (length(trim(display_name)) > 0),
     harness            TEXT NOT NULL,
@@ -99,13 +99,13 @@ impl ForkCapability {
     }
 }
 
-/// One node of the office conversation tree.
+/// One node of the conversation tree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationNode {
     pub node_id: String,
     pub session_id: SessionId,
     pub parent_node_id: Option<String>,
-    /// The office display name. Owned by the office; the harness's own
+    /// The display name. Owned by Viva; the harness's own
     /// title stays the harness's.
     pub display_name: String,
     pub harness: String,
@@ -130,7 +130,7 @@ pub struct ConversationHandoff {
     pub identity_member_id: Option<MemberId>,
     pub task_id: Option<TaskId>,
     /// The brief text carried over: a copy kept as a record, traceable to
-    /// its source, not live office facts.
+    /// its source, not live Viva facts.
     pub brief_snapshot: Option<String>,
     /// A reference to the source history (record id), not a transcript.
     pub history_ref: Option<String>,
@@ -168,7 +168,7 @@ impl<'a> ConversationRegistry<'a> {
     }
 
     /// Record a fork: a child node under `parent`. Called only after the
-    /// harness's native fork succeeded — the office never records a fork
+    /// harness's native fork succeeded — Viva never records a fork
     /// the harness did not confirm. A fork never creates a task.
     pub fn record_fork(
         &self,
@@ -199,8 +199,8 @@ impl<'a> ConversationRegistry<'a> {
         self.insert_node(child)
     }
 
-    /// Rename in the office. This never touches the harness's own title —
-    /// the display name is office-owned metadata.
+    /// Rename in Viva. This never touches the harness's own title —
+    /// the display name is Viva-owned metadata.
     pub fn rename(&self, node_id: &str, display_name: impl Into<String>) -> Result<()> {
         let display_name = validate_name(display_name)?;
         let n = self.store.connection().execute(
@@ -231,7 +231,7 @@ impl<'a> ConversationRegistry<'a> {
             if existing != &native_session_id {
                 return Err(Error::Validation(format!(
                     "node `{}` already points at native session `{existing}`; \
-                     the office never rewrites a harness-native reference",
+                     Viva never rewrites a harness-native reference",
                     node.display_name
                 )));
             }
@@ -326,9 +326,9 @@ impl<'a> ConversationRegistry<'a> {
     }
 
     fn insert_node(&self, node: ConversationNode) -> Result<ConversationNode> {
-        // The session must exist: nodes hang off real office sessions.
+        // The session must exist: nodes hang off real sessions.
         let exists: i64 = self.store.connection().query_row(
-            "SELECT COUNT(*) FROM office_sessions WHERE session_id = ?1",
+            "SELECT COUNT(*) FROM sessions WHERE session_id = ?1",
             [node.session_id.as_str()],
             |row| row.get(0),
         )?;

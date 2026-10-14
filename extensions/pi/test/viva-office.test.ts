@@ -1,15 +1,19 @@
 /**
- * Tests for the Viva office extension (V09). Run with:
+ * Tests for the Viva Pi extension (V09). Run with:
  *   npm test   (node --experimental-strip-types --test test/)
  *
  * The subprocess envelope is tested against a fake `viva` binary so the
  * whole chain (plan -> spawn -> parse -> refusal) is exercised for real,
- * without a live office.
+ * without a live server. Pi itself is `fake-pi.ts`, typed against the real
+ * SDK.
  *
- * A fake accepts ANY arguments, so nothing in this file proves the real CLI
- * understands the commands the extension emits. That is the job of
- * `viva-office.contract.test.ts`, which runs them against the real `viva`
- * binary (build it first: `cargo build -p viva`).
+ * Two fakes, two blind spots, each covered by a real-environment test:
+ * - A fake `viva` accepts ANY arguments, so nothing in this file proves the
+ *   real CLI understands the commands the extension emits:
+ *   `viva-office.contract.test.ts` runs them against the real `viva` binary
+ *   (build it first: `cargo build -p viva`).
+ * - A fake Pi proves only the extension's own logic: `real-pi-load.test.ts`
+ *   loads the extension in the real Pi.
  */
 
 import { test } from "node:test";
@@ -18,8 +22,9 @@ import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { officeEnv, planDispatch, runEnvelope, type OfficeEnv } from "../lib.ts";
+import { officeEnv, planDispatch, runEnvelope } from "../lib.ts";
 import vivaOffice from "../viva-office.ts";
+import { callTool, createFakePi, emit, textOf, toolNamed } from "./fake-pi.ts";
 
 function withEnv(raw: NodeJS.ProcessEnv, fn: () => void | Promise<void>): Promise<void> | void {
   const saved = { ...process.env };
@@ -58,7 +63,7 @@ const BASE_ENV: NodeJS.ProcessEnv = {
 test("officeEnv parses the harness context and stays inert without identity", () => {
   withEnv(BASE_ENV, () => {
     const env = officeEnv(process.env);
-    assert.ok(env, "office launch must produce context");
+    assert.ok(env, "Viva launch must produce context");
     assert.equal(env.memberId, "mem-1");
     assert.equal(env.taskId, "task-1");
     assert.equal(env.grantId, "grant-1");
@@ -66,11 +71,11 @@ test("officeEnv parses the harness context and stays inert without identity", ()
   });
 
   withEnv({ VIVA_OFFICE_MEMBER_NAME: "Samuel" }, () => {
-    assert.equal(officeEnv(process.env), null, "no member id -> no office context");
+    assert.equal(officeEnv(process.env), null, "no member id -> no Viva context");
   });
 
   withEnv({ VIVA_OFFICE_MEMBER_ID: "mem-1" }, () => {
-    assert.equal(officeEnv(process.env), null, "no member name -> no office context");
+    assert.equal(officeEnv(process.env), null, "no member name -> no Viva context");
   });
 });
 
@@ -155,10 +160,10 @@ test("runEnvelope parses real CLI JSON and surfaces real failures", async () => 
     const payload = await runEnvelope({ ...env, vivaBin: good }, ["status"]);
     assert.ok((payload as { ok: boolean }).ok);
 
-    const failing = fakeViva('#!/bin/sh\necho "no active office" >&2\nexit 3\n');
+    const failing = fakeViva('#!/bin/sh\necho "no active server" >&2\nexit 3\n');
     await assert.rejects(
       runEnvelope({ ...env, vivaBin: failing }, ["dispatch"]),
-      /exit 3[\s\S]*no active office/,
+      /exit 3[\s\S]*no active server/,
     );
 
     const malformed = fakeViva('#!/bin/sh\necho "not json"\n');
@@ -174,27 +179,15 @@ test("runEnvelope parses real CLI JSON and surfaces real failures", async () => 
   });
 });
 
-test("the extension registers office tools and refuses unauthorized dispatch", async () => {
+test("the extension registers its tools and refuses unauthorized dispatch", async () => {
   // No grant in the environment from the start: the factory captures the
-  // office context at load time, so the authorization must already be
+  // Viva context at load time, so the authorization must already be
   // absent when it runs.
   await withEnv({ ...BASE_ENV, VIVA_OFFICE_GRANT_ID: "" }, async () => {
-    const registered: Map<string, { execute: (args: Record<string, unknown>) => Promise<{ content: string; isError?: boolean }> }> =
-      new Map();
-    const notified: string[] = [];
-    const fakePi = {
-      on(_event: string, _handler: unknown) {
-        return () => {};
-      },
-      registerTool(name: string, tool: { execute: (args: Record<string, unknown>) => Promise<{ content: string; isError?: boolean }> }) {
-        registered.set(name, tool);
-      },
-      registerCommand(_name: string, _command: unknown) {},
-    };
-
-    vivaOffice(fakePi as never);
+    const fake = createFakePi();
+    vivaOffice(fake.host);
     assert.deepEqual(
-      [...registered.keys()].sort(),
+      [...fake.tools.keys()].sort(),
       [
         "viva_computer_audit",
         "viva_memory_remember",
@@ -206,30 +199,65 @@ test("the extension registers office tools and refuses unauthorized dispatch", a
       ],
     );
 
-    const refusalResult = await registered.get("viva_office_dispatch")!.execute({
+    const refusalResult = await callTool(toolNamed(fake, "viva_office_dispatch"), {
       argv: ["/bin/true"],
       cwd: "/tmp",
       request_key: "rk-1",
     });
     assert.equal(refusalResult.isError, true);
-    assert.match(refusalResult.content, /grant/);
-    assert.match(refusalResult.content, /ask the user/);
+    assert.match(textOf(refusalResult), /grant/);
+    assert.match(textOf(refusalResult), /ask the user/);
   });
 });
 
-test("the extension stays inert without office context", () => {
+test("tools answer in Pi's result shape: text content, structured details, isError on failure", async () => {
+  // The factory captures VIVA_BIN at load time, so set it before loading.
+  const load = (vivaBin: string) => {
+    process.env.VIVA_BIN = vivaBin;
+    const fake = createFakePi();
+    vivaOffice(fake.host);
+    return fake;
+  };
+  await withEnv(BASE_ENV, async () => {
+    const good = load(fakeViva('#!/bin/sh\necho \'{"home": "/h", "terminals": []}\'\n'));
+    const okResult = await callTool(toolNamed(good, "viva_office_status"), {});
+    assert.equal(okResult.isError, undefined);
+    assert.deepEqual(JSON.parse(textOf(okResult)), { home: "/h", terminals: [] });
+    assert.deepEqual(okResult.details, { home: "/h", terminals: [] }, "the CLI payload is kept as details");
+
+    const bad = load(fakeViva('#!/bin/sh\necho "no active server" >&2\nexit 3\n'));
+    const badResult = await callTool(toolNamed(bad, "viva_office_status"), {});
+    assert.equal(badResult.isError, true);
+    assert.match(textOf(badResult), /office status unavailable/);
+    assert.match(textOf(badResult), /no active server/);
+    assert.deepEqual(badResult.details, {});
+  });
+});
+
+test("the session_start handler tells the user who the member is, at the real 'info' level", async () => {
+  await withEnv(BASE_ENV, async () => {
+    const fake = createFakePi();
+    vivaOffice(fake.host);
+    const notices: { message: string; level?: string }[] = [];
+    await emit(fake, "session_start", { type: "session_start", reason: "startup" }, {
+      ui: {
+        notify(message: string, level?: string) {
+          notices.push({ message, level });
+        },
+      },
+    });
+    assert.equal(notices.length, 1);
+    assert.equal(notices[0]?.level, "info");
+    assert.match(notices[0]?.message ?? "", /you are Samuel \(member mem-1\)/);
+    assert.match(notices[0]?.message ?? "", /Current task: task-1/);
+  });
+});
+
+test("the extension stays inert without Viva context", () => {
   withEnv({ VIVA_OFFICE_MEMBER_NAME: "Samuel" }, () => {
-    let tools = 0;
-    const fakePi = {
-      on() {
-        return () => {};
-      },
-      registerTool() {
-        tools += 1;
-      },
-      registerCommand() {},
-    };
-    vivaOffice(fakePi as never);
-    assert.equal(tools, 0, "no office context -> no tools, no claims");
+    const fake = createFakePi();
+    vivaOffice(fake.host);
+    assert.equal(fake.tools.size, 0, "no Viva context -> no tools, no claims");
+    assert.equal(fake.handlers.size, 0, "no Viva context -> no event handlers either");
   });
 });
