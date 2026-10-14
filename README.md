@@ -58,9 +58,12 @@ are configuration, and every completion claim carries recorded evidence.
   inside a Viva terminal (`crates/viva/src/harness/pi/` +
   [extensions/pi/](extensions/pi/)). The extension injects the member's
   task context and offers status queries, grant-controlled dispatch and
-  explicit handoff. Its memory tools reach the F04 Holographic link layer
-  (`viva memory`; pending independent re-verification), and an unreachable
-  store is reported as unavailable.
+  explicit handoff. External memory (F04) is an explicit, optional
+  integration: `viva memory …` adds member/project scope, provenance and
+  recoverable archive over the Holographic provider in the user's local
+  Hermes checkout (`unavailable` without it). There is no automatic recall
+  or write-back, the Pi memory tools wait on #101, and real-provider tests
+  are pending independent re-verification.
 - **Data preservation** — `viva data export --out <dir>` dumps every fact
   table read-only to JSON with a manifest. Historical Ticket Autopilot data
   is never read, written or migrated.

@@ -20,9 +20,13 @@ brief, and offers controlled actions through the `viva` CLI.
   (read-only recall scoped to this session's member) and
   `viva_memory_remember` (an explicit write that always records provenance)
   go through `viva memory`, Viva's link layer over the real Holographic
-  store (see [memory/README.md](memory/README.md)). An unreachable store is
-  reported as unavailable. F04 is pending independent re-verification, and
-  no memory backend has been chosen as the default.
+  store (see [memory/README.md](memory/README.md)). The store is the
+  user's local Hermes checkout, which Viva does not ship; without it every
+  call returns `unavailable`. Recall and writes happen only when a tool is
+  called; nothing is recalled or written automatically. These tools cannot
+  be used in real Pi until #101 is fixed. Real-provider tests are pending
+  independent re-verification, and no memory backend has been chosen as the
+  default.
 - **Explicit handoff**: `viva_office_handoff` records a member-reported
   summary for the current task. It is stored as a fact ("member X reported
   this"), never as a completion verdict and never as acceptance PASS.
