@@ -2556,8 +2556,9 @@ impl WorkbenchApp {
                 None => "unknown",
             };
             let mut detail = format!(
-                "{} · {live_word}{}",
+                "{} · {live_word} · {}{}",
                 terminal.location,
+                terminal.report_capability,
                 if terminal.stale {
                     " · stale report"
                 } else {
@@ -4205,6 +4206,7 @@ mod tests {
             records: vec![record(StatusSource::ScreenInference)],
             stale: false,
             in_workspace: true,
+            report_capability: "report:unverified".into(),
         }];
         let mut app = WorkbenchApp::new();
         app.set_model(model);
@@ -4226,6 +4228,7 @@ mod tests {
             records: vec![record(StatusSource::ControlledReport)],
             stale: false,
             in_workspace: true,
+            report_capability: "report:live".into(),
         }];
         let mut app = WorkbenchApp::new();
         app.set_model(model);

@@ -1,5 +1,6 @@
 use viva::agents::{
-    AgentStatus, AgentStatusRecord, ProcessTable, StatusSource, agent_from_command, report_stale,
+    AgentStatus, AgentStatusRecord, CapabilityLevel, ProcessTable, StatusSource,
+    agent_from_command, capability_matrix, profile_for, report_stale,
 };
 #[test]
 fn detection_matches_executables_and_scripts_not_shell_text_or_tests() {
@@ -36,6 +37,17 @@ fn process_instances_and_exits_are_separate_even_for_the_same_tool() {
         None
     );
 }
+#[test]
+fn capability_matrix_marks_unknown_and_unverified_honestly() {
+    assert_eq!(capability_matrix().len(), 7);
+    let pi = profile_for("pi").expect("pi");
+    assert_eq!(pi.controlled_report, CapabilityLevel::Verified);
+    let cline = profile_for("cline").expect("cline");
+    assert_eq!(cline.controlled_report, CapabilityLevel::Unknown);
+    let codex = profile_for("codex").expect("codex");
+    assert_eq!(codex.controlled_report, CapabilityLevel::Unverified);
+}
+
 #[test]
 fn stale_report_keeps_source_and_cannot_become_completion() {
     let r = AgentStatusRecord {

@@ -31,6 +31,12 @@ use serde::{Deserialize, Serialize};
 use crate::foundation::error::Result;
 use crate::terminal::TerminalSnapshot;
 
+pub mod capabilities;
+pub mod session;
+
+pub use capabilities::{AgentCliProfile, CapabilityLevel, capability_matrix, profile_for};
+pub use session::{SessionContext, build_session_row, qualifies_for_agent_list, sort_sessions};
+
 /// The agent CLIs Viva detects in its first version (owner ruling,
 /// 2026-10-01). Everything else is displayed as an unknown agent.
 pub const DETECTABLE_AGENTS: &[&str] = &[
@@ -349,6 +355,9 @@ pub struct AgentSessionRow {
     pub records: Vec<AgentStatusRecord>,
     pub stale: bool,
     pub in_workspace: bool,
+    /// Honest controlled-report capability for this CLI (#76).
+    #[serde(default)]
+    pub report_capability: String,
 }
 impl AgentSessionRow {
     pub fn needs_attention(&self) -> bool {
