@@ -28,7 +28,7 @@ fn frozen() -> viva::foundation::store::FrozenMigrations {
 
 fn store() -> Store {
     let dir = tempfile::TempDir::new().expect("dir");
-    let db = dir.path().join("office.db");
+    let db = dir.path().join("viva.db");
     let store = Store::open(&db, &frozen()).expect("store");
     std::mem::forget(dir); // paths live in rows; keep the dir for the test
     store

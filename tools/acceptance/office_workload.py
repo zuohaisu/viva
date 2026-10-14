@@ -55,7 +55,7 @@ def utc_now() -> str:
 
 def seed_office(home: Path) -> dict:
     """Seed one member + three tasks + three grants via the migrated store."""
-    db = home / "office.db"
+    db = home / "viva.db"
     conn = sqlite3.connect(db)
     now = utc_now()
     member_id = f"mem-{uuid.uuid4().hex}"
@@ -205,7 +205,7 @@ def _run(binary: Path, home: Path, window: Path, out: Path) -> int:
         # 2. Start the real host. Unix sockets cannot exceed ~104 bytes on
         #    macOS; refuse early with the real reason instead of a mystery
         #    timeout.
-        socket_path = home / "office.sock"
+        socket_path = home / "server.sock"
         if len(str(socket_path)) >= 104:
             raise SystemExit(
                 f"VIVA_HOME path too long for a unix socket ({len(str(socket_path))} bytes): "

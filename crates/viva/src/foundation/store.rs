@@ -337,6 +337,7 @@ impl Store {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)?;
+                legacy::ensure_current_database_file(parent, path)?;
             }
         }
         let mut conn = Connection::open(path)?;
@@ -569,7 +570,7 @@ mod tests {
     #[test]
     fn migrations_apply_once_and_survive_reopen() {
         let dir = TempDir::new().expect("tempdir");
-        let db = dir.path().join("office.db");
+        let db = dir.path().join("viva.db");
         let frozen = foundation_only();
 
         {
@@ -589,7 +590,7 @@ mod tests {
     #[test]
     fn late_merged_domain_still_applies_after_reopen() {
         let dir = TempDir::new().expect("tempdir");
-        let db = dir.path().join("office.db");
+        let db = dir.path().join("viva.db");
 
         // First integration: only foundation + git existed.
         let early = MigrationRegistry::new()
@@ -641,7 +642,7 @@ mod tests {
     #[test]
     fn failed_migration_leaves_no_half_state() {
         let dir = TempDir::new().expect("tempdir");
-        let db = dir.path().join("office.db");
+        let db = dir.path().join("viva.db");
         let early = MigrationRegistry::new()
             .register(DOMAIN_FOUNDATION, 1, "foundation v1", FOUNDATION_V1_SQL)
             .freeze()
@@ -673,7 +674,7 @@ mod tests {
     #[test]
     fn failed_transaction_leaves_no_half_state() {
         let dir = TempDir::new().expect("tempdir");
-        let db = dir.path().join("office.db");
+        let db = dir.path().join("viva.db");
         let store = Store::open(&db, &foundation_only()).expect("open");
 
         let tx = store.transaction().expect("tx");

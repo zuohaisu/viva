@@ -59,7 +59,7 @@ fn cli_lists_and_conditionally_releases_only_authorized_unknown_leases() {
     let task = TaskId::new();
     let other = TaskId::new();
     let acquired = "2020-01-01T00:00:00Z";
-    let conn = rusqlite::Connection::open(home.join("office.db")).unwrap();
+    let conn = rusqlite::Connection::open(home.join("viva.db")).unwrap();
     conn.execute(
         "INSERT INTO foreground_leases(task_id, acquired_at) VALUES (?1, ?2)",
         rusqlite::params![task.as_str(), acquired],
@@ -270,7 +270,7 @@ fn cli_lists_and_conditionally_releases_only_authorized_unknown_leases() {
             .success(),
         "no replay"
     );
-    let conn = rusqlite::Connection::open(home.join("office.db")).unwrap();
+    let conn = rusqlite::Connection::open(home.join("viva.db")).unwrap();
     let rows: i64 = conn
         .query_row("SELECT COUNT(*) FROM foreground_leases", [], |r| r.get(0))
         .unwrap();
@@ -390,7 +390,7 @@ fn revoked_release_grant_records_denial_and_keeps_the_holder() {
 #[test]
 fn disk_upgrade_repairs_registered_v2_two_column_lease_without_losing_holder() {
     let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("office.db");
+    let path = dir.path().join("viva.db");
     let old = MigrationRegistry::new()
         .register(
             DOMAIN_TOOLS_COMPUTER,
@@ -440,7 +440,7 @@ fn disk_upgrade_repairs_registered_v2_two_column_lease_without_losing_holder() {
 #[test]
 fn disk_upgrade_keeps_healthy_live_holder_marker() {
     let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("office.db");
+    let path = dir.path().join("viva.db");
     let old = MigrationRegistry::new()
         .register(
             DOMAIN_TOOLS_COMPUTER,
@@ -819,7 +819,7 @@ fn actions_are_task_scoped_and_grant_gated() {
 #[test]
 fn foreground_lane_serializes_but_reads_run_free() {
     let dir = tempfile::TempDir::new().expect("dir");
-    let db = dir.path().join("office.db");
+    let db = dir.path().join("viva.db");
     let task_a = TaskId::new();
     let task_b = TaskId::new();
 

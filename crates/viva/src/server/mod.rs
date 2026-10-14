@@ -3,7 +3,7 @@
 //! ADR 0012).
 //!
 //! One `VIVA_HOME` has at most one active server. The host owns the
-//! private Unix-socket control channel (`office.sock` inside the 0700 home),
+//! private Unix-socket control channel (`server.sock` inside the 0700 home),
 //! serves CLI callbacks over it, supervises every terminal it spawned, and
 //! releases the channel on exit. A second `viva server` refuses and names
 //! the running host; a stale socket left by a crashed host is claimed with
@@ -109,7 +109,7 @@ CREATE TABLE recovery_plans (
 "#;
 
 /// Socket file name inside `VIVA_HOME`.
-pub const SOCKET_NAME: &str = "office.sock";
+pub const SOCKET_NAME: &str = "server.sock";
 /// Rendezvous socket for a live handoff (created by the restarting host,
 /// connected by the resumed host) — also inside `VIVA_HOME`.
 pub const HANDOFF_SOCKET_NAME: &str = "handoff.sock";
@@ -2776,6 +2776,7 @@ pub fn send_request(home: &Path, request: Request) -> Result<Response> {
 pub fn offline_status(home: &Path) -> Result<serde_json::Value> {
     use rusqlite::OptionalExtension;
 
+    crate::foundation::legacy::refuse_unmigrated_home_layout(home)?;
     let socket_path = home.join(SOCKET_NAME);
     let db = crate::foundation::paths::database_path(home);
     if !db.exists() {

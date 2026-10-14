@@ -37,7 +37,7 @@ fn frozen() -> viva::foundation::store::FrozenMigrations {
 #[test]
 fn rebinding_across_restart_keeps_member_identity_stable() {
     let dir = TempDir::new().expect("dir");
-    let db = dir.path().join("office.db");
+    let db = dir.path().join("viva.db");
     let migrations = frozen();
 
     let (member_id, created_at) = {
@@ -84,7 +84,7 @@ fn rebinding_across_restart_keeps_member_identity_stable() {
 #[test]
 fn multi_project_context_with_references_and_plain_directories() {
     let dir = TempDir::new().expect("dir");
-    let db = dir.path().join("office.db");
+    let db = dir.path().join("viva.db");
     let store = Store::open(&db, &frozen()).expect("open");
     let workspaces = WorkspaceRegistry::new(&store);
     let projects = ProjectRegistry::new(&store);
@@ -157,7 +157,7 @@ fn multi_project_context_with_references_and_plain_directories() {
 #[test]
 fn tool_probes_are_real_cached_and_refreshable() {
     let dir = TempDir::new().expect("dir");
-    let db = dir.path().join("office.db");
+    let db = dir.path().join("viva.db");
     let store = Store::open(&db, &frozen()).expect("open");
     let registry = MemberRegistry::new(&store);
     let member = registry.register("Samuel").expect("register");
@@ -226,7 +226,7 @@ fn tool_probes_are_real_cached_and_refreshable() {
 #[test]
 fn domain_data_exports_and_reloads_from_disk() {
     let dir = TempDir::new().expect("dir");
-    let db = dir.path().join("office.db");
+    let db = dir.path().join("viva.db");
     let exported_json = {
         let store = Store::open(&db, &frozen()).expect("open");
         let projects = ProjectRegistry::new(&store);

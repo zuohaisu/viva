@@ -493,8 +493,8 @@ fn backup_is_a_private_openable_copy_of_the_pre_migration_state() {
     let files = backups(dir.path());
     assert_eq!(files.len(), 1, "{files:?}");
     let name = files[0].file_name().unwrap().to_str().unwrap().to_string();
-    assert!(name.starts_with("office.db.pre-office-removal."), "{name}");
-    let stamp = name.trim_start_matches("office.db.pre-office-removal.");
+    assert!(name.starts_with("viva.db.pre-office-removal."), "{name}");
+    let stamp = name.trim_start_matches("viva.db.pre-office-removal.");
     assert!(
         stamp.len() == 16 && stamp.ends_with('Z') && stamp.as_bytes()[8] == b'T',
         "UTC stamp, got `{stamp}`"
@@ -773,18 +773,18 @@ fn live_handoff_from_an_old_server_is_refused_before_it_is_asked() {
 
     let err = viva::foundation::legacy::refuse_live_handoff(&db).expect_err("refused");
     assert!(is_validation(&err, "viva shutdown"), "{err}");
-    assert!(is_validation(&err, "live handoff"), "{err}");
+    assert!(is_validation(&err, "previous table names"), "{err}");
 
     // `viva server --resume` takes the same path and must not wait for a
     // handoff socket (30 seconds) or open the database.
     let started = std::time::Instant::now();
     let err = server::resume_server(dir.path()).expect_err("resume refused");
-    assert!(is_validation(&err, "live handoff"), "{err}");
+    assert!(is_validation(&err, "viva shutdown"), "{err}");
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
     // So does the restart that would have asked the old server to hand over.
     let err = server::restart_server_with(dir.path(), Path::new("/nonexistent/viva"))
         .expect_err("restart refused");
-    assert!(is_validation(&err, "live handoff"), "{err}");
+    assert!(is_validation(&err, "viva shutdown"), "{err}");
     assert_eq!(
         logical_dump(&db),
         before,

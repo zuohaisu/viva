@@ -101,7 +101,7 @@ fn task_worktrees_branch_from_latest_remote_and_refuse_protected_refs() {
         &tempfile::TempDir::new()
             .expect("dir")
             .keep()
-            .join("office.db"),
+            .join("viva.db"),
         &frozen,
     )
     .expect("store");
@@ -184,7 +184,7 @@ fn shared_writable_checkouts_are_refused_and_adoption_records_ownership() {
         &tempfile::TempDir::new()
             .expect("dir")
             .keep()
-            .join("office.db"),
+            .join("viva.db"),
         &frozen,
     )
     .expect("store");
@@ -272,7 +272,7 @@ fn discovery_marks_dirty_worktrees_without_modifying_them() {
         &tempfile::TempDir::new()
             .expect("dir")
             .keep()
-            .join("office.db"),
+            .join("viva.db"),
         &frozen,
     )
     .expect("store");
@@ -339,7 +339,7 @@ fn evidence_binds_to_head_sha_marks_stale_and_never_fakes_pass() {
         &tempfile::TempDir::new()
             .expect("dir")
             .keep()
-            .join("office.db"),
+            .join("viva.db"),
         &frozen,
     )
     .expect("store");

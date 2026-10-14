@@ -104,7 +104,7 @@ def test_host_that_never_listens_times_out_with_its_stderr() -> None:
             )
         with pytest.raises(Exception) as failure:
             office_workload.wait_for_socket(
-                base / "office.sock", timeout=0.5, host=host, stderr_log=log
+                base / "server.sock", timeout=0.5, host=host, stderr_log=log
             )
     finally:
         if host is not None:

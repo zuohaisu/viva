@@ -14,7 +14,7 @@ pub const VIVA_HOME_ENV: &str = "VIVA_HOME";
 /// Default state root name under the user home directory.
 pub const DEFAULT_HOME_NAME: &str = ".viva";
 /// The SQLite database file inside [`viva_home`].
-pub const DATABASE_FILE: &str = "office.db";
+pub const DATABASE_FILE: &str = "viva.db";
 
 /// Resolve the Viva state root: explicit override > `VIVA_HOME` > `~/.viva`.
 pub fn viva_home(override_dir: Option<&Path>) -> PathBuf {
@@ -63,6 +63,6 @@ mod tests {
     #[test]
     fn database_lives_inside_home() {
         let db = database_path(Path::new("/tmp/viva-home"));
-        assert_eq!(db, PathBuf::from("/tmp/viva-home/office.db"));
+        assert_eq!(db, PathBuf::from("/tmp/viva-home/viva.db"));
     }
 }

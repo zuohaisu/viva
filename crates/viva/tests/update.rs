@@ -399,7 +399,7 @@ fn update_with_a_dead_socket_installs_and_does_not_restart() {
     // The wedge: a socket path with no listener behind it.
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    let socket = home.join("office.sock");
+    let socket = home.join(viva::server::SOCKET_NAME);
     std::fs::write(&socket, b"").unwrap();
 
     let path = std::env::join_paths(

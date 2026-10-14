@@ -29,7 +29,7 @@ fn frozen() -> FrozenMigrations {
 #[test]
 fn every_forbidden_path_is_denied_with_recorded_reason() {
     let dir = tempfile::TempDir::new().expect("dir");
-    let db = dir.path().join("office.db");
+    let db = dir.path().join("viva.db");
     let store = Store::open(&db, &frozen()).expect("open");
     let engine = AuthorityEngine::new(&store);
     let task = TaskId::new();
@@ -115,7 +115,7 @@ fn every_forbidden_path_is_denied_with_recorded_reason() {
 #[test]
 fn revoke_racing_dispatch_is_caught_at_the_launch_time_check() {
     let dir = tempfile::TempDir::new().expect("dir");
-    let db = dir.path().join("office.db");
+    let db = dir.path().join("viva.db");
     let store = Store::open(&db, &frozen()).expect("open");
     let engine = AuthorityEngine::new(&store);
     let task = TaskId::new();
@@ -178,7 +178,7 @@ fn revoke_racing_dispatch_is_caught_at_the_launch_time_check() {
 #[test]
 fn chat_identity_gets_read_only_and_never_viva_wide_power() {
     let dir = tempfile::TempDir::new().expect("dir");
-    let db = dir.path().join("office.db");
+    let db = dir.path().join("viva.db");
     let store = Store::open(&db, &frozen()).expect("open");
     let engine = AuthorityEngine::new(&store);
     let chatter = Actor::Member {
@@ -215,7 +215,7 @@ fn chat_identity_gets_read_only_and_never_viva_wide_power() {
 #[test]
 fn streaming_secrets_never_reach_persisted_output() {
     let dir = tempfile::TempDir::new().expect("dir");
-    let db_path = dir.path().join("office.db");
+    let db_path = dir.path().join("viva.db");
     let store = Store::open(&db_path, &frozen()).expect("open");
     let token = "glp_9f8e7d6c5b4a3210";
     let mut redactor = Redactor::new(vec![token, "hunter2"]);
@@ -278,7 +278,7 @@ fn read_only_restriction_requires_adapter_evidence() {
 #[test]
 fn expired_parent_cannot_delegate_and_child_expiry_is_capped() {
     let dir = tempfile::TempDir::new().expect("dir");
-    let db = dir.path().join("office.db");
+    let db = dir.path().join("viva.db");
     let store = Store::open(&db, &frozen()).expect("open");
     let engine = AuthorityEngine::new(&store);
     let task = TaskId::new();
