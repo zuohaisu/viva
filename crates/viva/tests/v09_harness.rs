@@ -16,7 +16,7 @@ use viva::harness::pi::{
     Availability, ENV_GRANT_ID, ENV_MEMBER_ID, ENV_MEMBER_NAME, ENV_TASK_ID, PiHarness,
 };
 use viva::members::{MemberBinding, MemberRegistry};
-use viva::office::{self, OfficeHost, OfficeRequestKind};
+use viva::server::{self, Host, RequestKind};
 use viva::tasks::TaskRegistry;
 
 fn wait_until(what: &str, timeout: Duration, mut probe: impl FnMut() -> bool) {
@@ -31,12 +31,12 @@ fn wait_until(what: &str, timeout: Duration, mut probe: impl FnMut() -> bool) {
 }
 
 fn socket_ready(home: &std::path::Path) -> bool {
-    std::os::unix::net::UnixStream::connect(home.join(office::OFFICE_SOCKET_NAME)).is_ok()
+    std::os::unix::net::UnixStream::connect(home.join(server::SOCKET_NAME)).is_ok()
 }
 
-fn send(home: &std::path::Path, kind: OfficeRequestKind) -> Result<Value, String> {
+fn send(home: &std::path::Path, kind: RequestKind) -> Result<Value, String> {
     let response =
-        office::send_request(home, office::new_request(kind)).map_err(|e| e.to_string())?;
+        server::send_request(home, server::new_request(kind)).map_err(|e| e.to_string())?;
     if response.ok {
         Ok(response.result.unwrap_or(Value::Null))
     } else {
@@ -53,7 +53,7 @@ struct Seed {
 fn seed(home: &std::path::Path, goal: &str) -> Seed {
     let store = viva::foundation::store::Store::open(
         &viva::foundation::paths::database_path(home),
-        office::office_migrations(),
+        server::migrations(),
     )
     .expect("seed store");
     let members = MemberRegistry::new(&store);
@@ -89,7 +89,7 @@ fn seed(home: &std::path::Path, goal: &str) -> Seed {
 
 fn spawn_host(home: std::path::PathBuf) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        OfficeHost::open(&home)
+        Host::open(&home)
             .expect("host opens")
             .serve()
             .expect("serve");
@@ -115,7 +115,7 @@ fn pi_launch_combination_injects_identity_and_task_context() {
     // The launch context is built from real office records.
     let store = viva::foundation::store::Store::open(
         &viva::foundation::paths::database_path(&home),
-        office::office_migrations(),
+        server::migrations(),
     )
     .expect("store");
     let members = MemberRegistry::new(&store);
@@ -194,7 +194,7 @@ fn handoff_records_member_report_and_never_completes_the_task() {
     let handoff = |summary: &str| {
         send(
             &home,
-            OfficeRequestKind::Handoff {
+            RequestKind::Handoff {
                 task_id: seed.task_id.clone(),
                 member_id: seed.member_id.to_string(),
                 summary: summary.into(),
@@ -214,7 +214,7 @@ fn handoff_records_member_report_and_never_completes_the_task() {
     // The task is NOT completed by handoffs: status stays as created.
     let store = viva::foundation::store::Store::open(
         &viva::foundation::paths::database_path(&home),
-        office::office_migrations(),
+        server::migrations(),
     )
     .expect("store");
     let tasks = TaskRegistry::new(&store);
@@ -240,9 +240,9 @@ fn handoff_records_member_report_and_never_completes_the_task() {
     // An empty summary is rejected, not stored.
     assert!(handoff("   ").is_err());
 
-    office::send_request(
+    server::send_request(
         &home,
-        office::new_request(OfficeRequestKind::Shutdown { close_policy: None }),
+        server::new_request(RequestKind::Shutdown { close_policy: None }),
     )
     .ok();
     host.join().ok();

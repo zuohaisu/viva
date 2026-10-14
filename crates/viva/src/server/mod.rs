@@ -32,11 +32,11 @@ mod client;
 mod handoff;
 mod protocol;
 
-pub use client::{OfficeClient, restart_server, restart_server_with};
+pub use client::{Client, restart_server, restart_server_with};
 pub use handoff::{HandoffEntry, HandoffManifest};
 pub use protocol::{
-    MAX_MESSAGE_BYTES, OfficeRequest, OfficeRequestKind, OfficeResponse, PROTOCOL_VERSION,
-    new_request, read_message, round_trip, with_grant, write_message,
+    MAX_MESSAGE_BYTES, PROTOCOL_VERSION, Request, RequestKind, Response, new_request, read_message,
+    round_trip, with_grant, write_message,
 };
 
 use std::os::fd::RawFd;
@@ -48,7 +48,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::authority::{Actor, AuthorityEngine};
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{GrantId, MemberId, TaskId, TerminalId, WorktreeId, utc_now};
 use crate::foundation::records::{AttributionSnapshot, LaunchSpec, RequestOrigin, TerminalOwner};
 use crate::foundation::store::{Domain, MigrationRegistry, Store};
@@ -58,9 +58,9 @@ use crate::terminal::{StopPolicy, TerminalRegistry};
 
 /// The `office_host` migration domain: host registry, recovery records and
 /// a tiny settings table (S6 close-policy / pause persistence).
-pub const DOMAIN_OFFICE_HOST: Domain = Domain::new("office_host");
+pub const DOMAIN_HOST: Domain = Domain::new("office_host");
 
-pub const OFFICE_HOST_V1_SQL: &str = r#"
+pub const HOST_V1_SQL: &str = r#"
 -- One row per office-host process that ever claimed this VIVA_HOME.
 CREATE TABLE office_hosts (
     host_id    TEXT PRIMARY KEY,
@@ -83,7 +83,7 @@ CREATE TABLE office_recovery_events (
 /// The office_host v2 slice: key/value settings for owner-controlled
 /// semantics that must survive a restart (close-policy pause, and the
 /// pause itself).
-pub const OFFICE_HOST_V2_SQL: &str = r#"
+pub const HOST_V2_SQL: &str = r#"
 CREATE TABLE office_settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -94,7 +94,7 @@ CREATE TABLE office_settings (
 /// created by a `rate_limited` report WITH a reset time (or the owner via
 /// the CLI); it fires by prompting the terminal to continue, and every
 /// outcome is audited.
-pub const OFFICE_HOST_V3_SQL: &str = r#"
+pub const HOST_V3_SQL: &str = r#"
 CREATE TABLE recovery_plans (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     terminal_id TEXT NOT NULL,
@@ -109,7 +109,7 @@ CREATE TABLE recovery_plans (
 "#;
 
 /// Socket file name inside `VIVA_HOME`.
-pub const OFFICE_SOCKET_NAME: &str = "office.sock";
+pub const SOCKET_NAME: &str = "office.sock";
 /// Rendezvous socket for a live handoff (created by the restarting host,
 /// connected by the resumed host) — also inside `VIVA_HOME`.
 pub const HANDOFF_SOCKET_NAME: &str = "handoff.sock";
@@ -119,7 +119,7 @@ const HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The full office composition: every delivered domain, registered in one
 /// frozen set. This is the lane-A composition V01 left to V07.
-pub fn office_migrations() -> &'static crate::foundation::store::FrozenMigrations {
+pub fn migrations() -> &'static crate::foundation::store::FrozenMigrations {
     use std::sync::OnceLock;
     static FROZEN: OnceLock<crate::foundation::store::FrozenMigrations> = OnceLock::new();
     FROZEN.get_or_init(|| {
@@ -157,27 +157,22 @@ pub fn office_migrations() -> &'static crate::foundation::store::FrozenMigration
         let registry = crate::maintenance::register_migrations(registry);
         let registry = crate::tools::computer::register_migrations(registry);
         let registry = crate::memory::register_migrations(registry);
+        let registry = registry.register(DOMAIN_HOST, 2, "office host v2 (settings)", HOST_V2_SQL);
         let registry = registry.register(
-            DOMAIN_OFFICE_HOST,
-            2,
-            "office host v2 (settings)",
-            OFFICE_HOST_V2_SQL,
-        );
-        let registry = registry.register(
-            DOMAIN_OFFICE_HOST,
+            DOMAIN_HOST,
             3,
             "office host v3 (recovery plans)",
-            OFFICE_HOST_V3_SQL,
+            HOST_V3_SQL,
         );
         registry
-            .register(DOMAIN_OFFICE_HOST, 1, "office host v1", OFFICE_HOST_V1_SQL)
+            .register(DOMAIN_HOST, 1, "office host v1", HOST_V1_SQL)
             .freeze()
             .expect("office registry is well-formed")
     })
 }
 
 /// Shared host state, handed to per-connection threads.
-pub struct OfficeShared {
+pub struct Shared {
     pub home: PathBuf,
     pub socket_path: PathBuf,
     pub host_id: String,
@@ -223,33 +218,33 @@ pub struct OfficeShared {
 }
 
 /// A claimed, running Office host.
-pub struct OfficeHost {
-    shared: Arc<OfficeShared>,
+pub struct Host {
+    shared: Arc<Shared>,
     listener: UnixListener,
 }
 
-impl OfficeHost {
+impl Host {
     /// Open the store and claim the single active-host slot for this
     /// `VIVA_HOME`. Refuses when a healthy host already listens on the
     /// socket; claims a stale socket only with a recovery record. The home
     /// is forced to private 0700 permissions first — the socket is the
     /// control plane, and its directory is part of its access control.
-    pub fn open(home: &Path) -> OfficeResult<Self> {
+    pub fn open(home: &Path) -> Result<Self> {
         crate::foundation::paths::ensure_private_dir(home)?;
-        let socket_path = home.join(OFFICE_SOCKET_NAME);
+        let socket_path = home.join(SOCKET_NAME);
         let host_id = format!("host-{}", uuid::Uuid::new_v4().simple());
 
         if socket_path.exists() {
             match Self::probe_socket(&socket_path) {
                 Ok(Some(pid)) => {
-                    return Err(OfficeError::Validation(format!(
+                    return Err(Error::Validation(format!(
                         "an office host is already active for {} (pid {pid}); \
                          refusing to start a second host",
                         home.display()
                     )));
                 }
                 Ok(None) => {
-                    return Err(OfficeError::Validation(format!(
+                    return Err(Error::Validation(format!(
                         "socket {} exists but no healthy host answered the probe; \
                          refusing to claim it blindly — inspect the wedged host first",
                         socket_path.display()
@@ -263,10 +258,7 @@ impl OfficeHost {
             }
         }
 
-        let store = Store::open(
-            &crate::foundation::paths::database_path(home),
-            office_migrations(),
-        )?;
+        let store = Store::open(&crate::foundation::paths::database_path(home), migrations())?;
         let host_id = Self::reconcile(&store, &host_id)?;
         let persisted_pause: bool = store
             .connection()
@@ -283,7 +275,7 @@ impl OfficeHost {
         )?;
 
         let listener = UnixListener::bind(&socket_path)?;
-        let shared = Arc::new(OfficeShared {
+        let shared = Arc::new(Shared {
             home: home.to_path_buf(),
             socket_path,
             host_id,
@@ -309,16 +301,16 @@ impl OfficeHost {
 
     /// Probe a socket: `Ok(Some(pid))` = healthy host; `Ok(None)` = socket
     /// answers but the handshake failed (wedged); `Err` = nobody listening.
-    fn probe_socket(socket_path: &Path) -> OfficeResult<Option<u32>> {
+    fn probe_socket(socket_path: &Path) -> Result<Option<u32>> {
         let mut stream = UnixStream::connect(socket_path)?;
         stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-        let request = new_request(OfficeRequestKind::Ping);
+        let request = new_request(RequestKind::Ping);
         write_message(&mut stream, &request)?;
         let line = read_message(&mut stream)?;
-        let response: OfficeResponse = serde_json::from_str(&line)
-            .map_err(|e| OfficeError::Validation(format!("bad probe response: {e}")))?;
+        let response: Response = serde_json::from_str(&line)
+            .map_err(|e| Error::Validation(format!("bad probe response: {e}")))?;
         if !response.ok {
-            return Err(OfficeError::Validation("probe rejected".into()));
+            return Err(Error::Validation("probe rejected".into()));
         }
         Ok(response
             .result
@@ -330,7 +322,7 @@ impl OfficeHost {
     /// `crashed`, resolves interrupted intents, and stops (in the office's
     /// records) executions whose supervision died with that host. Nothing
     /// is re-run; nothing is killed; completed work is never touched.
-    fn reconcile(store: &Store, new_host_id: &str) -> OfficeResult<String> {
+    fn reconcile(store: &Store, new_host_id: &str) -> Result<String> {
         let now = utc_now();
         let previous: Vec<(String, i64)> = {
             let mut stmt = store
@@ -457,7 +449,7 @@ impl OfficeHost {
 
     /// Serve until a shutdown request (or a fatal accept error). Blocks the
     /// calling thread; each connection gets its own thread.
-    pub fn serve(self) -> OfficeResult<()> {
+    pub fn serve(self) -> Result<()> {
         let shared = self.shared;
         let listener = self.listener;
         listener.set_nonblocking(true)?;
@@ -493,7 +485,7 @@ impl OfficeHost {
                     std::thread::sleep(Duration::from_millis(25));
                 }
                 Err(e) => {
-                    let err = OfficeError::Io(e);
+                    let err = Error::Io(e);
                     let _ = Self::shutdown_shared(&shared);
                     return Err(err);
                 }
@@ -507,7 +499,7 @@ impl OfficeHost {
     /// every stop lands in the ledger BEFORE the handoff is written, then
     /// persist the handoff and release the channel. Also the workbench
     /// quit path (D6: QuitRequested is really consumed).
-    pub fn shutdown_shared(shared: &OfficeShared) -> OfficeResult<()> {
+    pub fn shutdown_shared(shared: &Shared) -> Result<()> {
         // Live-handoff exit: the terminals were transferred to the resumed
         // server and are NOT ours to stop — record the handoff and leave
         // every process running.
@@ -578,12 +570,12 @@ impl OfficeHost {
         })
     }
 
-    pub fn shared(&self) -> Arc<OfficeShared> {
+    pub fn shared(&self) -> Arc<Shared> {
         Arc::clone(&self.shared)
     }
 }
 
-fn record_recovery(store: &Store, host_id: &str, kind: &str, detail: &str) -> OfficeResult<()> {
+fn record_recovery(store: &Store, host_id: &str, kind: &str, detail: &str) -> Result<()> {
     store.connection().execute(
         "INSERT INTO office_recovery_events(host_id, kind, detail, recorded_at)
          VALUES (?1, ?2, ?3, ?4)",
@@ -679,7 +671,7 @@ mod peer_tests {
 // Connection handling
 // ---------------------------------------------------------------------------
 
-fn handle_connection(shared: Arc<OfficeShared>, mut stream: UnixStream) -> OfficeResult<()> {
+fn handle_connection(shared: Arc<Shared>, mut stream: UnixStream) -> Result<()> {
     // Caller binding is issued by the host on accept (never self-declared).
     // Interactive CLI callers are the user; the role exists only because
     // this host issued it.
@@ -692,18 +684,18 @@ fn handle_connection(shared: Arc<OfficeShared>, mut stream: UnixStream) -> Offic
         let line = protocol::read_message(&mut stream)?;
         // A malformed or unknown request is an error RESPONSE, not a
         // dropped connection: the caller learns why and may retry.
-        let request: OfficeRequest = match serde_json::from_str(&line) {
+        let request: Request = match serde_json::from_str(&line) {
             Ok(request) => request,
             Err(err) => {
                 protocol::write_message(
                     &mut stream,
-                    &OfficeResponse::err("unknown", format!("malformed control request: {err}")),
+                    &Response::err("unknown", format!("malformed control request: {err}")),
                 )?;
                 continue;
             }
         };
         if request.version != PROTOCOL_VERSION {
-            let response = OfficeResponse::err(
+            let response = Response::err(
                 &request.request_id,
                 format!(
                     "unsupported protocol version {} (expected {PROTOCOL_VERSION})",
@@ -713,10 +705,10 @@ fn handle_connection(shared: Arc<OfficeShared>, mut stream: UnixStream) -> Offic
             protocol::write_message(&mut stream, &response)?;
             continue;
         }
-        let is_shutdown = matches!(request.kind, OfficeRequestKind::Shutdown { .. });
+        let is_shutdown = matches!(request.kind, RequestKind::Shutdown { .. });
         let response = match handle_request(Arc::clone(&shared), &request) {
-            Ok(result) => OfficeResponse::ok(&request.request_id, result),
-            Err(err) => OfficeResponse::err(&request.request_id, err.to_string()),
+            Ok(result) => Response::ok(&request.request_id, result),
+            Err(err) => Response::err(&request.request_id, err.to_string()),
         };
         protocol::write_message(&mut stream, &response)?;
         if is_shutdown {
@@ -726,20 +718,17 @@ fn handle_connection(shared: Arc<OfficeShared>, mut stream: UnixStream) -> Offic
     }
 }
 
-fn handle_request(
-    shared: Arc<OfficeShared>,
-    request: &OfficeRequest,
-) -> OfficeResult<serde_json::Value> {
+fn handle_request(shared: Arc<Shared>, request: &Request) -> Result<serde_json::Value> {
     // The socket authorization gate (ADR 0012 decision 4, issue #43):
     // grant semantics extend to every request before any handler runs.
     authorize_socket_request(&shared, request)?;
     match &request.kind {
-        OfficeRequestKind::Ping => Ok(serde_json::json!({
+        RequestKind::Ping => Ok(serde_json::json!({
             "pid": std::process::id(),
             "host_id": shared.host_id,
         })),
-        OfficeRequestKind::Status => status(&shared),
-        OfficeRequestKind::Dispatch {
+        RequestKind::Status => status(&shared),
+        RequestKind::Dispatch {
             task_id,
             member_id,
             grant_id,
@@ -757,8 +746,8 @@ fn handle_request(
             Path::new(cwd),
             worktree_id.as_deref(),
         ),
-        OfficeRequestKind::TerminalList => terminal_list(&shared),
-        OfficeRequestKind::TerminalViewport {
+        RequestKind::TerminalList => terminal_list(&shared),
+        RequestKind::TerminalViewport {
             terminal_id,
             scrollback,
         } => {
@@ -766,21 +755,19 @@ fn handle_request(
             let handle = shared
                 .terminals
                 .handle(&id)?
-                .ok_or_else(|| OfficeError::NotFound {
+                .ok_or_else(|| Error::NotFound {
                     entity: "terminal",
                     id: terminal_id.clone(),
                 })?;
             Ok(serde_json::to_value(handle.snapshot_at(*scrollback)?)?)
         }
-        OfficeRequestKind::TerminalSnapshot { terminal_id } => {
-            terminal_snapshot(&shared, terminal_id)
-        }
-        OfficeRequestKind::TerminalInput {
+        RequestKind::TerminalSnapshot { terminal_id } => terminal_snapshot(&shared, terminal_id),
+        RequestKind::TerminalInput {
             terminal_id,
             bytes_hex,
         } => terminal_input(&shared, terminal_id, bytes_hex),
-        OfficeRequestKind::TerminalStop { terminal_id } => terminal_stop(&shared, terminal_id),
-        OfficeRequestKind::TerminalCreate {
+        RequestKind::TerminalStop { terminal_id } => terminal_stop(&shared, terminal_id),
+        RequestKind::TerminalCreate {
             argv,
             cwd,
             env,
@@ -800,12 +787,12 @@ fn handle_request(
             worktree_id.as_deref(),
             owner,
         ),
-        OfficeRequestKind::TerminalResize {
+        RequestKind::TerminalResize {
             terminal_id,
             cols,
             rows,
         } => terminal_resize(&shared, terminal_id, *cols, *rows),
-        OfficeRequestKind::Workspace {
+        RequestKind::Workspace {
             action,
             value,
             project_id,
@@ -815,7 +802,7 @@ fn handle_request(
             let required = || {
                 value
                     .as_deref()
-                    .ok_or_else(|| OfficeError::Validation("workspace action needs value".into()))
+                    .ok_or_else(|| Error::Validation("workspace action needs value".into()))
             };
             let id = match action.as_str() {
                 "open" => Some(nav.open(Path::new(required()?))?),
@@ -825,76 +812,76 @@ fn handle_request(
                     nav.selected()?
                 }
                 "add" => {
-                    let id = nav.selected()?.ok_or_else(|| {
-                        OfficeError::Validation("select a workspace first".into())
-                    })?;
+                    let id = nav
+                        .selected()?
+                        .ok_or_else(|| Error::Validation("select a workspace first".into()))?;
                     nav.add(&id, serde_json::json!({"path":required()?}), Path::new("/"))?;
                     Some(id)
                 }
                 "remove" => {
-                    let id = nav.selected()?.ok_or_else(|| {
-                        OfficeError::Validation("select a workspace first".into())
-                    })?;
+                    let id = nav
+                        .selected()?
+                        .ok_or_else(|| Error::Validation("select a workspace first".into()))?;
                     nav.remove(
                         &id,
-                        project_id.as_deref().ok_or_else(|| {
-                            OfficeError::Validation("remove needs project_id".into())
-                        })?,
+                        project_id
+                            .as_deref()
+                            .ok_or_else(|| Error::Validation("remove needs project_id".into()))?,
                     )?;
                     Some(id)
                 }
                 "save" => {
-                    let id = nav.selected()?.ok_or_else(|| {
-                        OfficeError::Validation("select a workspace first".into())
-                    })?;
+                    let id = nav
+                        .selected()?
+                        .ok_or_else(|| Error::Validation("select a workspace first".into()))?;
                     nav.save_as(&id, Path::new(required()?))?;
                     Some(id)
                 }
                 "list" => nav.selected()?,
                 _ => {
-                    return Err(OfficeError::Validation(
+                    return Err(Error::Validation(
                         "workspace action: open | new | select | add | remove | save | list".into(),
                     ));
                 }
             };
             Ok(serde_json::json!({"workspace_id":id,"workspaces":nav.list()?}))
         }
-        OfficeRequestKind::WorkbenchView => workbench_view(Arc::clone(&shared)),
-        OfficeRequestKind::WorkbenchDiff { worktree_id } => workbench_diff(&shared, worktree_id),
-        OfficeRequestKind::WorkbenchLayout { layout_json } => {
+        RequestKind::WorkbenchView => workbench_view(Arc::clone(&shared)),
+        RequestKind::WorkbenchDiff { worktree_id } => workbench_diff(&shared, worktree_id),
+        RequestKind::WorkbenchLayout { layout_json } => {
             workbench_layout(&shared, layout_json.as_deref())
         }
-        OfficeRequestKind::TerminalOpenInWorktree { worktree_id } => {
+        RequestKind::TerminalOpenInWorktree { worktree_id } => {
             terminal_open_in_worktree(&shared, worktree_id)
         }
-        OfficeRequestKind::WorktreeCreateForTask {
+        RequestKind::WorktreeCreateForTask {
             task_id,
             branch,
             base_dir,
         } => worktree_create_for_task(&shared, task_id, branch.as_deref(), base_dir.as_deref()),
-        OfficeRequestKind::TaskResults { task_id } => task_results(&shared, task_id),
-        OfficeRequestKind::Handoff {
+        RequestKind::TaskResults { task_id } => task_results(&shared, task_id),
+        RequestKind::Handoff {
             task_id,
             member_id,
             summary,
         } => handoff(&shared, task_id, member_id, summary),
-        OfficeRequestKind::Shutdown { close_policy } => {
+        RequestKind::Shutdown { close_policy } => {
             apply_close_policy(&shared, close_policy.as_deref())?;
             Ok(serde_json::json!({"shutting_down": true}))
         }
-        OfficeRequestKind::Pause => pause_server(&shared, true),
-        OfficeRequestKind::Resume => pause_server(&shared, false),
-        OfficeRequestKind::ServerRestart => begin_server_restart(&shared),
-        OfficeRequestKind::WorktreeFiles { worktree_id } => worktree_files(&shared, worktree_id),
-        OfficeRequestKind::WorktreeFileContent { worktree_id, path } => {
+        RequestKind::Pause => pause_server(&shared, true),
+        RequestKind::Resume => pause_server(&shared, false),
+        RequestKind::ServerRestart => begin_server_restart(&shared),
+        RequestKind::WorktreeFiles { worktree_id } => worktree_files(&shared, worktree_id),
+        RequestKind::WorktreeFileContent { worktree_id, path } => {
             worktree_file_content(&shared, worktree_id, path)
         }
-        OfficeRequestKind::WorktreeCleanup { worktree_id } => worktree_cleanup(
+        RequestKind::WorktreeCleanup { worktree_id } => worktree_cleanup(
             &shared,
             worktree_id,
             request.member.as_deref().unwrap_or("owner"),
         ),
-        OfficeRequestKind::AgentHandoff {
+        RequestKind::AgentHandoff {
             worktree_id,
             to_agent,
         } => agent_handoff(
@@ -903,16 +890,16 @@ fn handle_request(
             to_agent,
             request.member.as_deref().unwrap_or("owner"),
         ),
-        OfficeRequestKind::SyncNow => sync_now(&shared),
-        OfficeRequestKind::SetAutoPull { on } => set_auto_pull(&shared, *on),
-        OfficeRequestKind::RecoveryList => recovery_list(&shared),
-        OfficeRequestKind::RecoverySchedule {
+        RequestKind::SyncNow => sync_now(&shared),
+        RequestKind::SetAutoPull { on } => set_auto_pull(&shared, *on),
+        RequestKind::RecoveryList => recovery_list(&shared),
+        RequestKind::RecoverySchedule {
             terminal_id,
             reset_at,
             task_id,
         } => recovery_schedule(&shared, terminal_id, reset_at, task_id.as_deref()),
-        OfficeRequestKind::RecoveryCancel { plan_id } => recovery_cancel(&shared, *plan_id),
-        OfficeRequestKind::AgentReport {
+        RequestKind::RecoveryCancel { plan_id } => recovery_cancel(&shared, *plan_id),
+        RequestKind::AgentReport {
             terminal_id,
             agent,
             status,
@@ -926,7 +913,7 @@ fn handle_request(
             detail,
             reset_at.as_deref(),
         ),
-        OfficeRequestKind::AgentContentSubmit {
+        RequestKind::AgentContentSubmit {
             terminal_id,
             kind,
             content,
@@ -938,18 +925,16 @@ fn handle_request(
             content,
             source_ref.as_deref(),
         ),
-        OfficeRequestKind::AgentPrompt {
+        RequestKind::AgentPrompt {
             terminal_id,
             prompt,
         } => agent_prompt(&shared, terminal_id, prompt),
-        OfficeRequestKind::AgentWait {
+        RequestKind::AgentWait {
             terminal_id,
             status,
             timeout_secs,
         } => agent_wait(&shared, terminal_id, status, *timeout_secs),
-        OfficeRequestKind::EventsFeed { since_seq, limit } => {
-            events_feed(&shared, *since_seq, *limit)
-        }
+        RequestKind::EventsFeed { since_seq, limit } => events_feed(&shared, *since_seq, *limit),
     }
 }
 
@@ -962,31 +947,31 @@ const SOCKET_CONTROL_ACTION: &str = "terminal_control";
 /// Kinds that change state and therefore need authorization when they are
 /// member-attributed. Read-only kinds and the OS-authenticated owner path
 /// (no member attribution) are not gated beyond grant validation below.
-fn is_member_gated_kind(kind: &OfficeRequestKind) -> bool {
+fn is_member_gated_kind(kind: &RequestKind) -> bool {
     matches!(
         kind,
-        OfficeRequestKind::Dispatch { .. }
-            | OfficeRequestKind::Workspace { .. }
-            | OfficeRequestKind::WorkbenchLayout { .. }
-            | OfficeRequestKind::TerminalOpenInWorktree { .. }
-            | OfficeRequestKind::TerminalCreate { .. }
-            | OfficeRequestKind::TerminalInput { .. }
-            | OfficeRequestKind::TerminalResize { .. }
-            | OfficeRequestKind::TerminalStop { .. }
-            | OfficeRequestKind::Handoff { .. }
-            | OfficeRequestKind::AgentReport { .. }
-            | OfficeRequestKind::AgentContentSubmit { .. }
-            | OfficeRequestKind::AgentPrompt { .. }
-            | OfficeRequestKind::AgentWait { .. }
-            | OfficeRequestKind::Shutdown { .. }
-            | OfficeRequestKind::Pause
-            | OfficeRequestKind::Resume
-            | OfficeRequestKind::WorktreeCleanup { .. }
-            | OfficeRequestKind::AgentHandoff { .. }
-            | OfficeRequestKind::SyncNow
-            | OfficeRequestKind::SetAutoPull { .. }
-            | OfficeRequestKind::RecoverySchedule { .. }
-            | OfficeRequestKind::RecoveryCancel { .. }
+        RequestKind::Dispatch { .. }
+            | RequestKind::Workspace { .. }
+            | RequestKind::WorkbenchLayout { .. }
+            | RequestKind::TerminalOpenInWorktree { .. }
+            | RequestKind::TerminalCreate { .. }
+            | RequestKind::TerminalInput { .. }
+            | RequestKind::TerminalResize { .. }
+            | RequestKind::TerminalStop { .. }
+            | RequestKind::Handoff { .. }
+            | RequestKind::AgentReport { .. }
+            | RequestKind::AgentContentSubmit { .. }
+            | RequestKind::AgentPrompt { .. }
+            | RequestKind::AgentWait { .. }
+            | RequestKind::Shutdown { .. }
+            | RequestKind::Pause
+            | RequestKind::Resume
+            | RequestKind::WorktreeCleanup { .. }
+            | RequestKind::AgentHandoff { .. }
+            | RequestKind::SyncNow
+            | RequestKind::SetAutoPull { .. }
+            | RequestKind::RecoverySchedule { .. }
+            | RequestKind::RecoveryCancel { .. }
     )
 }
 
@@ -1000,7 +985,7 @@ fn is_member_gated_kind(kind: &OfficeRequestKind) -> bool {
 ///    delegated-dispatch checks in its handler.
 /// 3. With no member attribution, the peer is the OS-authenticated owner
 ///    (same-uid, enforced at accept time) acting as the user.
-fn authorize_socket_request(shared: &OfficeShared, request: &OfficeRequest) -> OfficeResult<()> {
+fn authorize_socket_request(shared: &Shared, request: &Request) -> Result<()> {
     let Some(grant_text) = &request.grant else {
         // No grant presented. Owner path is fine; a member-attributed
         // mutating request without any grant is exactly the "未携带有效
@@ -1021,18 +1006,18 @@ fn authorize_socket_request(shared: &OfficeShared, request: &OfficeRequest) -> O
     let verdict = {
         let store = shared.store.lock().expect("office store");
         let authority = AuthorityEngine::new(&store);
-        (|| -> OfficeResult<crate::authority::Grant> {
+        (|| -> Result<crate::authority::Grant> {
             let grant_id = GrantId::from_str(grant_text)?;
             let grant = authority.require_grant(&grant_id)?;
             if grant.status != crate::authority::GrantStatus::Live {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "grant `{grant_text}` is not live (status: {:?})",
                     grant.status
                 )));
             }
             if let Some(expires_at) = &grant.expires_at {
                 if expires_at.as_str() <= utc_now().as_str() {
-                    return Err(OfficeError::Validation(format!(
+                    return Err(Error::Validation(format!(
                         "grant `{grant_text}` expired at {expires_at}"
                     )));
                 }
@@ -1040,7 +1025,7 @@ fn authorize_socket_request(shared: &OfficeShared, request: &OfficeRequest) -> O
             if let Some(member_text) = &request.member {
                 if let Some(principal) = &grant.principal_member_id {
                     if principal.to_string() != *member_text {
-                        return Err(OfficeError::Validation(format!(
+                        return Err(Error::Validation(format!(
                             "grant `{grant_text}` belongs to member `{principal}`, not `{member_text}`; \
                              grants are not transferable between members"
                         )));
@@ -1064,14 +1049,14 @@ fn authorize_socket_request(shared: &OfficeShared, request: &OfficeRequest) -> O
     if request.member.is_some() && is_member_gated_kind(&request.kind) {
         if matches!(
             request.kind,
-            OfficeRequestKind::Shutdown { .. }
-                | OfficeRequestKind::Workspace { .. }
-                | OfficeRequestKind::WorkbenchLayout { .. }
-                | OfficeRequestKind::Pause
-                | OfficeRequestKind::Resume
-                | OfficeRequestKind::SetAutoPull { .. }
-                | OfficeRequestKind::RecoverySchedule { .. }
-                | OfficeRequestKind::RecoveryCancel { .. }
+            RequestKind::Shutdown { .. }
+                | RequestKind::Workspace { .. }
+                | RequestKind::WorkbenchLayout { .. }
+                | RequestKind::Pause
+                | RequestKind::Resume
+                | RequestKind::SetAutoPull { .. }
+                | RequestKind::RecoverySchedule { .. }
+                | RequestKind::RecoveryCancel { .. }
         ) {
             return Err(audit_grant_denial(
                 shared,
@@ -1081,15 +1066,15 @@ fn authorize_socket_request(shared: &OfficeShared, request: &OfficeRequest) -> O
             ));
         }
         let action_needed = match request.kind {
-            OfficeRequestKind::Dispatch { .. } => "dispatch_delegated",
-            OfficeRequestKind::AgentReport { .. } => "agent_report",
-            OfficeRequestKind::AgentContentSubmit { .. } => "agent_content",
-            OfficeRequestKind::WorktreeCleanup { .. } => SOCKET_CONTROL_ACTION,
-            OfficeRequestKind::AgentHandoff { .. } => SOCKET_CONTROL_ACTION,
-            OfficeRequestKind::SyncNow => SOCKET_CONTROL_ACTION,
+            RequestKind::Dispatch { .. } => "dispatch_delegated",
+            RequestKind::AgentReport { .. } => "agent_report",
+            RequestKind::AgentContentSubmit { .. } => "agent_content",
+            RequestKind::WorktreeCleanup { .. } => SOCKET_CONTROL_ACTION,
+            RequestKind::AgentHandoff { .. } => SOCKET_CONTROL_ACTION,
+            RequestKind::SyncNow => SOCKET_CONTROL_ACTION,
 
-            OfficeRequestKind::AgentPrompt { .. } => "agent_prompt",
-            OfficeRequestKind::AgentWait { .. } => SOCKET_CONTROL_ACTION,
+            RequestKind::AgentPrompt { .. } => "agent_prompt",
+            RequestKind::AgentWait { .. } => SOCKET_CONTROL_ACTION,
             _ => SOCKET_CONTROL_ACTION,
         };
         if !grant.actions.iter().any(|a| a == action_needed) {
@@ -1108,7 +1093,7 @@ fn authorize_socket_request(shared: &OfficeShared, request: &OfficeRequest) -> O
 
 /// Record one socket-grant denial as an append-only office event and return
 /// the matching error for the caller.
-fn audit_grant_denial(shared: &OfficeShared, request: &OfficeRequest, reason: &str) -> OfficeError {
+fn audit_grant_denial(shared: &Shared, request: &Request, reason: &str) -> Error {
     let store = shared.store.lock().expect("office store");
     let payload = serde_json::json!({
         "kind": format!("{:?}", std::mem::discriminant(&request.kind)),
@@ -1120,7 +1105,7 @@ fn audit_grant_denial(shared: &OfficeShared, request: &OfficeRequest, reason: &s
     let _ = crate::foundation::events::append(
         &store,
         crate::foundation::events::NewEvent {
-            domain: DOMAIN_OFFICE_HOST,
+            domain: DOMAIN_HOST,
             kind: "socket_grant_denied".into(),
             subject_type: "socket_request".into(),
             subject_id: request.request_id.clone(),
@@ -1128,7 +1113,7 @@ fn audit_grant_denial(shared: &OfficeShared, request: &OfficeRequest, reason: &s
             payload,
         },
     );
-    OfficeError::Validation(format!("socket request denied: {reason}"))
+    Error::Validation(format!("socket request denied: {reason}"))
 }
 
 /// Spawn one terminal in the resident server: the headless path (fixed
@@ -1137,7 +1122,7 @@ fn audit_grant_denial(shared: &OfficeShared, request: &OfficeRequest, reason: &s
 /// terminal, so a socket client can never fake member attribution.
 #[allow(clippy::too_many_arguments)]
 fn terminal_create(
-    shared: &OfficeShared,
+    shared: &Shared,
     argv: &[String],
     cwd: &Path,
     env: &[(String, String)],
@@ -1146,13 +1131,13 @@ fn terminal_create(
     purpose: &str,
     worktree_id: Option<&str>,
     owner_text: &str,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     let owner = match owner_text {
         "user_shell" => TerminalOwner::UserShell,
         "agent_cli" => TerminalOwner::AgentCli,
         "test_run" => TerminalOwner::TestRun,
         other => {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "terminal owner `{other}` is not spawnable over the socket; \
                  use user_shell | agent_cli | test_run (execution-owned terminals \
                  come only from dispatch)"
@@ -1184,16 +1169,16 @@ fn terminal_create(
 }
 
 fn terminal_resize(
-    shared: &OfficeShared,
+    shared: &Shared,
     terminal_id: &str,
     cols: u16,
     rows: u16,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     let terminal_id = TerminalId::from_str(terminal_id)?;
     let handle = shared
         .terminals
         .handle(&terminal_id)?
-        .ok_or_else(|| OfficeError::NotFound {
+        .ok_or_else(|| Error::NotFound {
             entity: "terminal",
             id: terminal_id.to_string(),
         })?;
@@ -1203,7 +1188,7 @@ fn terminal_resize(
 
 /// The workbench projection over the real registries — the same assembly
 /// the in-process workbench used, now served to attach clients.
-fn workbench_view(shared: Arc<OfficeShared>) -> OfficeResult<serde_json::Value> {
+fn workbench_view(shared: Arc<Shared>) -> Result<serde_json::Value> {
     // V15-4: the automatic sync cycle runs off-thread (network git must
     // never block the view); the TTL/pause checks happen before spawning.
     if auto_sync_due(&shared) {
@@ -1409,27 +1394,22 @@ fn workbench_view(shared: Arc<OfficeShared>) -> OfficeResult<serde_json::Value> 
         }
     }
 
-    serde_json::to_value(&model).map_err(|e| OfficeError::Validation(format!("view: {e}")))
+    serde_json::to_value(&model).map_err(|e| Error::Validation(format!("view: {e}")))
 }
 
 /// The pane-layout preference store (QA F5): the client persists its pane
 /// tree so a later attach rebuilds the same view. A UI preference in
 /// office_settings - bounded, validated as JSON, never an office fact.
-fn workbench_layout(
-    shared: &OfficeShared,
-    layout_json: Option<&str>,
-) -> OfficeResult<serde_json::Value> {
+fn workbench_layout(shared: &Shared, layout_json: Option<&str>) -> Result<serde_json::Value> {
     let store = shared.store.lock().expect("office store");
     match layout_json {
         Some(json) => {
             if json.len() > 64 * 1024 {
-                return Err(OfficeError::Validation(
-                    "layout exceeds the 64 KiB bound".into(),
-                ));
+                return Err(Error::Validation("layout exceeds the 64 KiB bound".into()));
             }
             // Must parse: a layout the client cannot restore is junk.
             serde_json::from_str::<serde_json::Value>(json)
-                .map_err(|e| OfficeError::Validation(format!("layout is not valid JSON: {e}")))?;
+                .map_err(|e| Error::Validation(format!("layout is not valid JSON: {e}")))?;
             store.connection().execute("INSERT OR IGNORE INTO office_settings(key,value) SELECT 'workbench_layout_legacy',value FROM office_settings WHERE key='workbench_layout' AND json_extract(value,'$.version') IS NULL",[])?;
             store.connection().execute(
                 "INSERT INTO office_settings(key, value) VALUES ('workbench_layout', ?1)
@@ -1454,7 +1434,7 @@ fn workbench_layout(
 
 /// The real bounded diff of one worktree against HEAD (served over the
 /// socket for the workbench `d` action).
-fn workbench_diff(shared: &OfficeShared, worktree_id: &str) -> OfficeResult<serde_json::Value> {
+fn workbench_diff(shared: &Shared, worktree_id: &str) -> Result<serde_json::Value> {
     let worktree_id = WorktreeId::from_str(worktree_id)?;
     let store = shared.store.lock().expect("office store");
     let service = crate::git::worktrees::WorktreeService::new(
@@ -1463,7 +1443,7 @@ fn workbench_diff(shared: &OfficeShared, worktree_id: &str) -> OfficeResult<serd
     );
     let record = service
         .record(&worktree_id)?
-        .ok_or_else(|| OfficeError::NotFound {
+        .ok_or_else(|| Error::NotFound {
             entity: "worktree",
             id: worktree_id.to_string(),
         })?;
@@ -1473,10 +1453,7 @@ fn workbench_diff(shared: &OfficeShared, worktree_id: &str) -> OfficeResult<serd
 
 /// Open an interactive shell at a worktree's path (the workbench `o`
 /// action): a user_shell owned by the server, attached to the worktree.
-fn terminal_open_in_worktree(
-    shared: &OfficeShared,
-    worktree_id: &str,
-) -> OfficeResult<serde_json::Value> {
+fn terminal_open_in_worktree(shared: &Shared, worktree_id: &str) -> Result<serde_json::Value> {
     if let Some(pid) = worktree_id.strip_prefix("directory:") {
         let store = shared.store.lock().expect("office store");
         let project = crate::projects::ProjectRegistry::new(&store)
@@ -1505,7 +1482,7 @@ fn terminal_open_in_worktree(
         Some(r) => (r.worktree_path, r.branch),
         None => crate::workspaces::navigation::Navigation { store: &store }
             .checkout(worktree_id.as_str())?
-            .ok_or_else(|| OfficeError::NotFound {
+            .ok_or_else(|| Error::NotFound {
                 entity: "worktree",
                 id: worktree_id.to_string(),
             })?,
@@ -1533,16 +1510,16 @@ fn terminal_open_in_worktree(
 /// never from the client; branch and base dir have honest defaults. The
 /// V08 policy (protected refs, one checkout per branch) is the service's.
 fn worktree_create_for_task(
-    shared: &OfficeShared,
+    shared: &Shared,
     task_id: &str,
     branch: Option<&str>,
     base_dir: Option<&str>,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     let task_id = TaskId::from_str(task_id)?;
     let store = shared.store.lock().expect("office store");
     let task = TaskRegistry::new(&store).require_task(&task_id)?;
     let project_id = task.project_id.ok_or_else(|| {
-        OfficeError::Validation(format!(
+        Error::Validation(format!(
             "task `{task_id}` has no project; a worktree needs the project's repo root"
         ))
     })?;
@@ -1559,7 +1536,7 @@ fn worktree_create_for_task(
         crate::git::worktrees::ProtectedRefs::new(vec![]),
     );
     let record = service.create_task_worktree(&repo_root, &base, &task_id, &branch)?;
-    serde_json::to_value(&record).map_err(|e| OfficeError::Validation(format!("record: {e}")))
+    serde_json::to_value(&record).map_err(|e| Error::Validation(format!("record: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -1569,7 +1546,7 @@ fn worktree_create_for_task(
 /// Seed the process-tree identification slot from the spawned argv: the
 /// dominant case is that the session IS the agent CLI. Identification
 /// names the agent only - the state stays unknown until a source speaks.
-fn seed_agent_identification(shared: &OfficeShared, terminal_id: &TerminalId, argv: &[String]) {
+fn seed_agent_identification(shared: &Shared, terminal_id: &TerminalId, argv: &[String]) {
     let Some(program) = argv.first() else {
         return;
     };
@@ -1601,25 +1578,23 @@ fn seed_agent_identification(shared: &OfficeShared, terminal_id: &TerminalId, ar
 /// gate enforces that before this handler runs). The report is audited;
 /// it describes the agent's state and never completes a task.
 fn agent_report(
-    shared: &OfficeShared,
+    shared: &Shared,
     terminal_id: &str,
     agent: &str,
     status: &str,
     detail: &str,
     reset_at: Option<&str>,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     let terminal_id = TerminalId::from_str(terminal_id)?;
     let status = crate::agents::AgentStatus::parse(status)?;
     if agent.trim().is_empty() {
-        return Err(OfficeError::Validation(
-            "agent name must not be empty".into(),
-        ));
+        return Err(Error::Validation("agent name must not be empty".into()));
     }
     // A report about a terminal this office hosts: identity checks out.
     shared
         .terminals
         .handle(&terminal_id)?
-        .ok_or_else(|| OfficeError::NotFound {
+        .ok_or_else(|| Error::NotFound {
             entity: "terminal",
             id: terminal_id.to_string(),
         })?;
@@ -1636,7 +1611,7 @@ fn agent_report(
     crate::foundation::events::append(
         &store,
         crate::foundation::events::NewEvent {
-            domain: DOMAIN_OFFICE_HOST,
+            domain: DOMAIN_HOST,
             kind: "agent_status_reported".into(),
             subject_type: "terminal".into(),
             subject_id: terminal_id.to_string(),
@@ -1654,7 +1629,7 @@ fn agent_report(
     // cancels the open plan — the limit is over.
     if status == crate::agents::AgentStatus::RateLimited {
         let Some(reset_at) = reset_at else {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "rate_limited requires reset_at (RFC3339); the office does not \
                  schedule recovery for an unknown time"
                     .into(),
@@ -1682,7 +1657,7 @@ fn agent_report(
         )?;
     }
 
-    serde_json::to_value(&record).map_err(|e| OfficeError::Validation(format!("record: {e}")))
+    serde_json::to_value(&record).map_err(|e| Error::Validation(format!("record: {e}")))
 }
 
 /// Submit agent content for the self-model container's intake. The content
@@ -1691,24 +1666,22 @@ fn agent_report(
 /// does NOT decide whether the content becomes memory - that is the
 /// container's curation, outside this channel.
 fn agent_content_submit(
-    shared: &OfficeShared,
+    shared: &Shared,
     terminal_id: Option<&str>,
     kind: &str,
     content: &str,
     source_ref: Option<&str>,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     if kind.trim().is_empty() {
-        return Err(OfficeError::Validation(
-            "content kind must not be empty".into(),
-        ));
+        return Err(Error::Validation("content kind must not be empty".into()));
     }
     if content.is_empty() {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "content must not be empty; the channel moves real material, not placeholders".into(),
         ));
     }
     if content.len() > 1024 * 1024 {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "content exceeds the 1 MiB channel bound; split the submission".into(),
         ));
     }
@@ -1742,7 +1715,7 @@ fn agent_content_submit(
     crate::foundation::events::append(
         &store,
         crate::foundation::events::NewEvent {
-            domain: DOMAIN_OFFICE_HOST,
+            domain: DOMAIN_HOST,
             kind: "agent_content_submitted".into(),
             subject_type: "agent_content".into(),
             subject_id: content_id.clone(),
@@ -1784,26 +1757,22 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
 /// keystroke-level act - reaching the child's stdin proves nothing about
 /// the agent's understanding (that is what the status reports and the
 /// content intake are for).
-fn agent_prompt(
-    shared: &OfficeShared,
-    terminal_id: &str,
-    prompt: &str,
-) -> OfficeResult<serde_json::Value> {
+fn agent_prompt(shared: &Shared, terminal_id: &str, prompt: &str) -> Result<serde_json::Value> {
     let terminal_id = TerminalId::from_str(terminal_id)?;
     if prompt.is_empty() {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "an empty prompt is not a prompt; the channel moves real material".into(),
         ));
     }
     if prompt.len() > 256 * 1024 {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "prompt exceeds the 256 KiB bound; split it".into(),
         ));
     }
     let handle = shared
         .terminals
         .handle(&terminal_id)?
-        .ok_or_else(|| OfficeError::NotFound {
+        .ok_or_else(|| Error::NotFound {
             entity: "terminal",
             id: terminal_id.to_string(),
         })?;
@@ -1812,7 +1781,7 @@ fn agent_prompt(
     crate::foundation::events::append(
         &store,
         crate::foundation::events::NewEvent {
-            domain: DOMAIN_OFFICE_HOST,
+            domain: DOMAIN_HOST,
             kind: "agent_prompt_sent".into(),
             subject_type: "terminal".into(),
             subject_id: terminal_id.to_string(),
@@ -1835,18 +1804,18 @@ fn agent_prompt(
 /// runs on this host (the orchestrator may disconnect; the outcome is
 /// audited either way and reachable through the events feed).
 fn agent_wait(
-    shared: &OfficeShared,
+    shared: &Shared,
     terminal_id: &str,
     status: &str,
     timeout_secs: u64,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     let terminal_id = TerminalId::from_str(terminal_id)?;
     let wanted = crate::agents::AgentStatus::parse(status)?;
     let timeout = Duration::from_secs(timeout_secs.min(300));
     shared
         .terminals
         .handle(&terminal_id)?
-        .ok_or_else(|| OfficeError::NotFound {
+        .ok_or_else(|| Error::NotFound {
             entity: "terminal",
             id: terminal_id.to_string(),
         })?;
@@ -1865,7 +1834,7 @@ fn agent_wait(
             crate::foundation::events::append(
                 &store,
                 crate::foundation::events::NewEvent {
-                    domain: DOMAIN_OFFICE_HOST,
+                    domain: DOMAIN_HOST,
                     kind: "agent_wait_matched".into(),
                     subject_type: "terminal".into(),
                     subject_id: terminal_id.to_string(),
@@ -1888,7 +1857,7 @@ fn agent_wait(
             crate::foundation::events::append(
                 &store,
                 crate::foundation::events::NewEvent {
-                    domain: DOMAIN_OFFICE_HOST,
+                    domain: DOMAIN_HOST,
                     kind: "agent_wait_timeout".into(),
                     subject_type: "terminal".into(),
                     subject_id: terminal_id.to_string(),
@@ -1909,11 +1878,7 @@ fn agent_wait(
 /// The durable event feed: office events after a sequence number. This is
 /// how a disconnected orchestrator catches up - reconnect and ask again
 /// with the last seq you saw.
-fn events_feed(
-    shared: &OfficeShared,
-    since_seq: u64,
-    limit: u32,
-) -> OfficeResult<serde_json::Value> {
+fn events_feed(shared: &Shared, since_seq: u64, limit: u32) -> Result<serde_json::Value> {
     let limit = limit.clamp(1, 500);
     let store = shared.store.lock().expect("office store");
     let mut stmt = store.connection().prepare(
@@ -1952,7 +1917,7 @@ fn events_feed(
 
 /// Owner pause/resume: flip the gate, persist it (the semantics survive a
 /// restart), and audit. Running executions are untouched by design.
-fn pause_server(shared: &OfficeShared, paused: bool) -> OfficeResult<serde_json::Value> {
+fn pause_server(shared: &Shared, paused: bool) -> Result<serde_json::Value> {
     shared.paused.store(paused, Ordering::SeqCst);
     {
         let store = shared.store.lock().expect("office store");
@@ -1964,7 +1929,7 @@ fn pause_server(shared: &OfficeShared, paused: bool) -> OfficeResult<serde_json:
         crate::foundation::events::append(
             &store,
             crate::foundation::events::NewEvent {
-                domain: DOMAIN_OFFICE_HOST,
+                domain: DOMAIN_HOST,
                 kind: if paused {
                     "office_paused"
                 } else {
@@ -1995,7 +1960,7 @@ fn pause_server(shared: &OfficeShared, paused: bool) -> OfficeResult<serde_json:
 /// pause, so the gate holds even with no live host - the pause itself
 /// persists, and this keeps "pause stops new dispatch AND maintenance
 /// cycles" true end to end.
-pub fn assert_maintenance_allowed(store: &Store) -> OfficeResult<()> {
+pub fn assert_maintenance_allowed(store: &Store) -> Result<()> {
     let paused: bool = store
         .connection()
         .query_row(
@@ -2006,7 +1971,7 @@ pub fn assert_maintenance_allowed(store: &Store) -> OfficeResult<()> {
         .map(|value| value == "true")
         .unwrap_or(false);
     if paused {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "office is paused: maintenance windows are gated (running executions are \
              unaffected; `viva resume` lifts the pause)"
                 .into(),
@@ -2020,12 +1985,12 @@ pub fn assert_maintenance_allowed(store: &Store) -> OfficeResult<()> {
 /// clears any pause; `None` (an unadorned shutdown) leaves the CURRENT
 /// state untouched - an operator-paused office that is shut down comes
 /// back paused, because the pause was an explicit owner decision.
-fn apply_close_policy(shared: &OfficeShared, close_policy: Option<&str>) -> OfficeResult<()> {
+fn apply_close_policy(shared: &Shared, close_policy: Option<&str>) -> Result<()> {
     match close_policy {
         Some("pause") => pause_server(shared, true).map(|_| ()),
         Some("continue") => pause_server(shared, false).map(|_| ()),
         None => Ok(()),
-        Some(other) => Err(OfficeError::Validation(format!(
+        Some(other) => Err(Error::Validation(format!(
             "unknown close policy `{other}` (continue | pause)"
         ))),
     }
@@ -2040,12 +2005,12 @@ fn apply_close_policy(shared: &OfficeShared, close_policy: Option<&str>) -> Offi
 /// response goes out immediately — the CLI then starts the resumed server,
 /// which connects to the rendezvous socket. On any transfer failure the
 /// host keeps serving (nothing was given away: fd passing duplicates).
-fn begin_server_restart(shared: &Arc<OfficeShared>) -> OfficeResult<serde_json::Value> {
+fn begin_server_restart(shared: &Arc<Shared>) -> Result<serde_json::Value> {
     let handoff_path = shared.home.join(HANDOFF_SOCKET_NAME);
     {
         let mut slot = shared.handoff_listener.lock().expect("handoff slot");
         if slot.is_some() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "a server restart is already in progress; connect to its handoff socket                  or wait for the timeout"
                     .into(),
             ));
@@ -2074,16 +2039,12 @@ fn begin_server_restart(shared: &Arc<OfficeShared>) -> OfficeResult<serde_json::
 /// duplicate), sends them to the resumed server, and on the ack marks this
 /// host `transferred` so its exit keeps every process running. Any failure
 /// cleans the rendezvous socket up and leaves the host fully serving.
-fn perform_handoff(
-    shared: Arc<OfficeShared>,
-    listener: UnixListener,
-    handoff_path: std::path::PathBuf,
-) {
+fn perform_handoff(shared: Arc<Shared>, listener: UnixListener, handoff_path: std::path::PathBuf) {
     // Pass 1 (readers still live): liveness + one master-fd duplicate per
     // terminal — nothing is read or frozen yet, so a failure here leaves
     // the host byte-for-byte as it was. `collected` stays alive for the
     // failure branch, which needs every id to put the readers back.
-    let collect = (|| -> OfficeResult<Vec<(crate::terminal::TerminalEntry, RawFd, std::sync::Arc<crate::terminal::TerminalHandle>)>> {
+    let collect = (|| -> Result<Vec<(crate::terminal::TerminalEntry, RawFd, std::sync::Arc<crate::terminal::TerminalHandle>)>> {
         let mut collected = Vec::new();
         for entry in shared.terminals.list() {
             let handle = match shared.terminals.handle(&entry.terminal_id).ok().flatten() {
@@ -2118,7 +2079,7 @@ fn perform_handoff(
             return;
         }
     };
-    let outcome = (|| -> OfficeResult<usize> {
+    let outcome = (|| -> Result<usize> {
         // Stop OUR readers FIRST, before any screen is taken — not only
         // because two readers on one master would split the child's bytes
         // between the old and the new server, but because the manifest's
@@ -2176,13 +2137,13 @@ fn perform_handoff(
                                 libc::close(*fd);
                             }
                         }
-                        return Err(OfficeError::Validation(
+                        return Err(Error::Validation(
                             "no resumed server connected within the handoff timeout".into(),
                         ));
                     }
                     std::thread::sleep(Duration::from_millis(100));
                 }
-                Err(e) => return Err(OfficeError::Io(e)),
+                Err(e) => return Err(Error::Io(e)),
             }
         };
         let mut stream = stream;
@@ -2268,7 +2229,7 @@ fn perform_handoff(
 /// rendezvous socket, adopt every transferred session under its ORIGINAL
 /// terminal identity, wait for the old host to release the control socket,
 /// then claim and serve as usual.
-pub fn resume_server(home: &Path) -> OfficeResult<()> {
+pub fn resume_server(home: &Path) -> Result<()> {
     crate::foundation::paths::ensure_private_dir(home)?;
     let handoff_path = home.join(HANDOFF_SOCKET_NAME);
     // The old host creates the rendezvous in its ServerRestart handler;
@@ -2281,7 +2242,7 @@ pub fn resume_server(home: &Path) -> OfficeResult<()> {
             }
         }
         if Instant::now() >= deadline {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "no handoff socket appeared at {} within {HANDOFF_TIMEOUT:?}",
                 handoff_path.display()
             )));
@@ -2294,29 +2255,29 @@ pub fn resume_server(home: &Path) -> OfficeResult<()> {
     // Wait for the old host to release the control socket, then claim it.
     // (The transferred fds stay open the whole time — the kernel buffers
     // the children's output in the meantime.)
-    let office_sock = home.join(OFFICE_SOCKET_NAME);
+    let server_sock = home.join(SOCKET_NAME);
     let deadline = Instant::now() + HANDOFF_TIMEOUT;
-    while office_sock.exists() && Instant::now() < deadline {
+    while server_sock.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
     }
-    if office_sock.exists() {
+    if server_sock.exists() {
         for fd in fds {
             #[cfg(unix)]
             unsafe {
                 libc::close(fd);
             }
         }
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "the old host never released the control socket; the handoff was abandoned              (the old host's recovery records name what happened)"
                 .into(),
         ));
     }
-    let host = OfficeHost::open(home)?;
+    let host = Host::open(home)?;
     {
         let shared = host.shared();
         let store = shared.store.lock().expect("office store");
         for (entry, fd) in manifest.entries.iter().zip(fds) {
-            let adopt = (|| -> OfficeResult<()> {
+            let adopt = (|| -> Result<()> {
                 let terminal_id = TerminalId::from_str(&entry.terminal_id)?;
                 let owner = owner_from_label(&entry.owner)?;
                 let worktree = entry
@@ -2376,7 +2337,7 @@ pub fn resume_server(home: &Path) -> OfficeResult<()> {
 
 /// Parse an owner label back into its typed value (the inverse of
 /// [`owner_label`]; labels are host-issued, never client-declared).
-fn owner_from_label(text: &str) -> OfficeResult<TerminalOwner> {
+fn owner_from_label(text: &str) -> Result<TerminalOwner> {
     use std::str::FromStr as _;
     if let Some(execution) = text.strip_prefix("member_execution:") {
         return Ok(TerminalOwner::MemberExecution(
@@ -2387,16 +2348,16 @@ fn owner_from_label(text: &str) -> OfficeResult<TerminalOwner> {
         "user_shell" => Ok(TerminalOwner::UserShell),
         "agent_cli" => Ok(TerminalOwner::AgentCli),
         "test_run" => Ok(TerminalOwner::TestRun),
-        other => Err(OfficeError::Validation(format!(
+        other => Err(Error::Validation(format!(
             "unknown terminal owner label `{other}`"
         ))),
     }
 }
 
-fn status(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
+fn status(shared: &Shared) -> Result<serde_json::Value> {
     let store = shared.store.lock().expect("office store");
     let (row_count_executions, running, completed): (i64, i64, i64) = {
-        let count = |status: &str| -> OfficeResult<i64> {
+        let count = |status: &str| -> Result<i64> {
             Ok(store.connection().query_row(
                 "SELECT COUNT(*) FROM office_executions WHERE status = ?1",
                 [status],
@@ -2453,7 +2414,7 @@ fn owner_label(owner: &TerminalOwner) -> String {
 /// the recorded intent instead of spawning a second execution.
 #[allow(clippy::too_many_arguments)]
 fn dispatch(
-    shared: &Arc<OfficeShared>,
+    shared: &Arc<Shared>,
     task_id: &str,
     member_id: &str,
     grant_id: &str,
@@ -2461,12 +2422,12 @@ fn dispatch(
     argv: &[String],
     cwd: &Path,
     worktree_id: Option<&str>,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     // The pause gate (S6): no NEW dispatch while paused. Running
     // executions are never touched here - stopping one is the explicit,
     // separate stop.
     if shared.paused.load(Ordering::SeqCst) {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "office is paused: no new dispatch (running executions are unaffected;              `viva resume` lifts the pause)"
                 .into(),
         ));
@@ -2479,7 +2440,7 @@ fn dispatch(
     let members = MemberRegistry::new(&store);
     let _member = members.require(&member_id)?;
     let binding = members.binding(&member_id)?.ok_or_else(|| {
-        OfficeError::Validation(format!(
+        Error::Validation(format!(
             "member `{member_id}` has no model/tool binding; dispatch needs one"
         ))
     })?;
@@ -2491,7 +2452,7 @@ fn dispatch(
     let authority = AuthorityEngine::new(&store);
     let grant = authority.require_grant(&grant_id)?;
     if grant.principal_member_id.as_ref() != Some(&member_id) {
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "dispatch denied: grant `{grant_id}` was not issued to member `{member_id}` \
              (principal: {:?}) — grants are not transferable between members",
             grant
@@ -2517,9 +2478,7 @@ fn dispatch(
     ) {
         Ok(Ok(())) => {}
         Ok(Err(denial)) => {
-            return Err(OfficeError::Validation(format!(
-                "dispatch denied: {denial}"
-            )));
+            return Err(Error::Validation(format!("dispatch denied: {denial}")));
         }
         Err(err) => return Err(err),
     }
@@ -2527,7 +2486,7 @@ fn dispatch(
     let tasks = TaskRegistry::new(&store);
     let task = tasks.require_task(&task_id)?;
     if matches!(task.status, TaskStatus::Done | TaskStatus::Cancelled) {
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "task `{}` is {}; a finished task is never executed again",
             task.task_id,
             task.status.as_str()
@@ -2535,7 +2494,7 @@ fn dispatch(
     }
 
     if !cwd.is_absolute() {
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "dispatch cwd must be absolute: {}",
             cwd.display()
         )));
@@ -2552,7 +2511,7 @@ fn dispatch(
             |row| row.get(0),
         )?;
         if known == 0 {
-            return Err(OfficeError::NotFound {
+            return Err(Error::NotFound {
                 entity: "worktree",
                 id: worktree.to_string(),
             });
@@ -2581,14 +2540,14 @@ fn dispatch(
             // returning the other caller's execution would make it look
             // started when it never ran.
             if intent.task_id != task_id {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "request key `{request_key}` already belongs to task `{}`; \
                      keys are replayed per task — use a different key for task `{task_id}`",
                     intent.task_id
                 )));
             }
             if intent.member_id != member_id {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "request key `{request_key}` was already used by member `{}`; \
                      keys are replayed per (task, member) — use a different key",
                     intent.member_id
@@ -2663,7 +2622,7 @@ fn dispatch(
             // integer field records it as -1 rather than staying silent —
             // a stopped process must always land in the ledger.
             let code = exit.code.unwrap_or(-1);
-            let office_stopped = !matches!(exit.via, crate::terminal::ExitVia::ChildExit);
+            let server_stopped = !matches!(exit.via, crate::terminal::ExitVia::ChildExit);
             let store = watcher_shared.store.lock().expect("office store");
             let tasks = TaskRegistry::new(&store);
             let _ = tasks.record_exit(&watcher_key, code);
@@ -2671,7 +2630,7 @@ fn dispatch(
                 // The exit-code ledger sorts non-zero into `failed`; an
                 // exit the OFFICE caused (graceful stop / forced kill) is
                 // a stop, not a failure — correct the record and say why.
-                if office_stopped {
+                if server_stopped {
                     let _ = store.connection().execute(
                         "UPDATE office_executions SET status = 'stopped', updated_at = ?2
                          WHERE execution_id = ?1 AND status = 'failed'",
@@ -2705,7 +2664,7 @@ fn dispatch(
     }))
 }
 
-fn terminal_list(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
+fn terminal_list(shared: &Shared) -> Result<serde_json::Value> {
     let terminals = shared
         .terminals
         .list()
@@ -2722,12 +2681,12 @@ fn terminal_list(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
     Ok(serde_json::json!({ "terminals": terminals }))
 }
 
-fn terminal_snapshot(shared: &OfficeShared, terminal_id: &str) -> OfficeResult<serde_json::Value> {
+fn terminal_snapshot(shared: &Shared, terminal_id: &str) -> Result<serde_json::Value> {
     let terminal_id = TerminalId::from_str(terminal_id)?;
     let handle = shared
         .terminals
         .handle(&terminal_id)?
-        .ok_or_else(|| OfficeError::NotFound {
+        .ok_or_else(|| Error::NotFound {
             entity: "terminal",
             id: terminal_id.to_string(),
         })?;
@@ -2736,15 +2695,15 @@ fn terminal_snapshot(shared: &OfficeShared, terminal_id: &str) -> OfficeResult<s
 }
 
 fn terminal_input(
-    shared: &OfficeShared,
+    shared: &Shared,
     terminal_id: &str,
     bytes_hex: &str,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     let terminal_id = TerminalId::from_str(terminal_id)?;
     let handle = shared
         .terminals
         .handle(&terminal_id)?
-        .ok_or_else(|| OfficeError::NotFound {
+        .ok_or_else(|| Error::NotFound {
             entity: "terminal",
             id: terminal_id.to_string(),
         })?;
@@ -2753,7 +2712,7 @@ fn terminal_input(
     Ok(serde_json::json!({"written": bytes.len()}))
 }
 
-fn terminal_stop(shared: &OfficeShared, terminal_id: &str) -> OfficeResult<serde_json::Value> {
+fn terminal_stop(shared: &Shared, terminal_id: &str) -> Result<serde_json::Value> {
     let terminal_id = TerminalId::from_str(terminal_id)?;
     let store = shared.store.lock().expect("office store");
     let exit = shared
@@ -2762,7 +2721,7 @@ fn terminal_stop(shared: &OfficeShared, terminal_id: &str) -> OfficeResult<serde
     Ok(serde_json::to_value(&exit)?)
 }
 
-fn task_results(shared: &OfficeShared, task_id: &str) -> OfficeResult<serde_json::Value> {
+fn task_results(shared: &Shared, task_id: &str) -> Result<serde_json::Value> {
     let task_id = TaskId::from_str(task_id)?;
     let store = shared.store.lock().expect("office store");
     let tasks = TaskRegistry::new(&store);
@@ -2775,15 +2734,15 @@ fn task_results(shared: &OfficeShared, task_id: &str) -> OfficeResult<serde_json
 /// moves through the outcome ledger (V03). An identical repeat is reported
 /// as a duplicate and changes nothing (故障/重复事件不会把任务错误标为通过).
 fn handoff(
-    shared: &OfficeShared,
+    shared: &Shared,
     task_id: &str,
     member_id: &str,
     summary: &str,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     let task_id = TaskId::from_str(task_id)?;
     let member_id = MemberId::from_str(member_id)?;
     if summary.trim().is_empty() {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "handoff summary must not be empty".into(),
         ));
     }
@@ -2846,10 +2805,10 @@ fn fnv1a(text: &str) -> u64 {
 
 /// Send one request to the active office host over the real channel. When
 /// no host listens, this fails cleanly and never starts a daemon.
-pub fn send_request(home: &Path, request: OfficeRequest) -> OfficeResult<OfficeResponse> {
-    let socket_path = home.join(OFFICE_SOCKET_NAME);
+pub fn send_request(home: &Path, request: Request) -> Result<Response> {
+    let socket_path = home.join(SOCKET_NAME);
     if !socket_path.exists() {
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "no active office in {} (mutation rejected; start one with `viva start`)",
             home.display()
         )));
@@ -2860,10 +2819,10 @@ pub fn send_request(home: &Path, request: OfficeRequest) -> OfficeResult<OfficeR
 
 /// Offline status: read the store directly (no host required). Reports the
 /// last host row and whether the socket is alive; never claims a live host.
-pub fn offline_status(home: &Path) -> OfficeResult<serde_json::Value> {
+pub fn offline_status(home: &Path) -> Result<serde_json::Value> {
     use rusqlite::OptionalExtension;
 
-    let socket_path = home.join(OFFICE_SOCKET_NAME);
+    let socket_path = home.join(SOCKET_NAME);
     let db = crate::foundation::paths::database_path(home);
     if !db.exists() {
         // Read-only by design: a missing store is reported, not created.
@@ -2876,7 +2835,7 @@ pub fn offline_status(home: &Path) -> OfficeResult<serde_json::Value> {
             "store": "absent",
         }));
     }
-    let store = Store::open(&db, office_migrations())?;
+    let store = Store::open(&db, migrations())?;
     let last_host: Option<(String, i64, Option<String>, Option<String>)> = {
         let mut stmt = store.connection().prepare(
             "SELECT host_id, pid, exited_at, exit_kind FROM office_hosts
@@ -2906,7 +2865,7 @@ pub fn offline_status(home: &Path) -> OfficeResult<serde_json::Value> {
         // The socket exists; a live host would answer a ping. Report what
         // the probe actually saw — a present-but-unreachable socket stays
         // visibly not-reachable instead of being silently claimed alive.
-        match OfficeHost::probe_socket(&socket_path) {
+        match Host::probe_socket(&socket_path) {
             Ok(Some(pid)) => {
                 value["active_host"] = serde_json::json!({"pid": pid, "reachable": true});
             }
@@ -2920,7 +2879,7 @@ pub fn offline_status(home: &Path) -> OfficeResult<serde_json::Value> {
 
 /// V15-4: cheap due check for the background sync (no locks held past the
 /// settings read; the heavy git work happens off-thread).
-fn auto_sync_due(shared: &OfficeShared) -> bool {
+fn auto_sync_due(shared: &Shared) -> bool {
     if shared.sync_in_flight.load(Ordering::SeqCst) {
         return false;
     }
@@ -2939,7 +2898,7 @@ fn auto_sync_due(shared: &OfficeShared) -> bool {
 }
 
 /// V15-4: the user-facing switch (default off, persisted).
-fn set_auto_pull(shared: &OfficeShared, on: bool) -> OfficeResult<serde_json::Value> {
+fn set_auto_pull(shared: &Shared, on: bool) -> Result<serde_json::Value> {
     let store = shared.store.lock().expect("office store");
     store.connection().execute(
         "INSERT INTO office_settings(key, value) VALUES ('auto_pull', ?1)
@@ -2949,7 +2908,7 @@ fn set_auto_pull(shared: &OfficeShared, on: bool) -> OfficeResult<serde_json::Va
     crate::foundation::events::append(
         &store,
         crate::foundation::events::NewEvent {
-            domain: DOMAIN_OFFICE_HOST,
+            domain: DOMAIN_HOST,
             kind: "auto_pull_toggled".into(),
             subject_type: "office".into(),
             subject_id: shared.host_id.clone(),
@@ -2973,9 +2932,9 @@ fn set_auto_pull(shared: &OfficeShared, on: bool) -> OfficeResult<serde_json::Va
 /// every stored value is normalized to the same offset. A local offset
 /// like `+08:00` must NEVER be stored verbatim: it would make a due plan
 /// look und Due and an undu one due under string ordering.
-fn normalize_rfc3339_utc(text: &str) -> OfficeResult<String> {
+fn normalize_rfc3339_utc(text: &str) -> Result<String> {
     let parsed = time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
-        .map_err(|e| OfficeError::Validation(format!("`{text}` is not RFC3339: {e}")))?;
+        .map_err(|e| Error::Validation(format!("`{text}` is not RFC3339: {e}")))?;
     // to_offset (NOT replace_offset): it CONVERTS the instant so the
     // wall clock reads the same moment in UTC. replace_offset only
     // relabels the zone and keeps the wall clock — the exact bug QA F1
@@ -2989,12 +2948,12 @@ fn normalize_rfc3339_utc(text: &str) -> OfficeResult<String> {
         Err(_) => utc,
     };
     utc.format(&time::format_description::well_known::Rfc3339)
-        .map_err(|e| OfficeError::Validation(format!("recovery time formatting failed: {e}")))
+        .map_err(|e| Error::Validation(format!("recovery time formatting failed: {e}")))
 }
 
 /// The gh program to invoke for PR probes: the shared override (tests)
 /// or plain `gh` from PATH (production).
-fn gh_program_for(shared: &OfficeShared) -> String {
+fn gh_program_for(shared: &Shared) -> String {
     shared
         .gh_bin
         .lock()
@@ -3022,7 +2981,7 @@ fn read_auto_pull(store: &Store) -> bool {
 /// checkout and fetch every task worktree. Pause gates the automatic path;
 /// `force = true` (explicit `viva sync now`) bypasses both the TTL and the
 /// pause, because a human asked. Task worktrees are fetched, NEVER pulled.
-fn auto_sync_all(shared: &OfficeShared, force: bool) -> OfficeResult<serde_json::Value> {
+fn auto_sync_all(shared: &Shared, force: bool) -> Result<serde_json::Value> {
     // Single-flight guard (QA F2): one cycle at a time, across threads.
     // Set BEFORE any early-return probe, cleared on EVERY exit path — the
     // 3-5 Hz workbench view must never spawn concurrent cycles that
@@ -3046,7 +3005,7 @@ fn auto_sync_all(shared: &OfficeShared, force: bool) -> OfficeResult<serde_json:
     auto_sync_all_inner(shared, force)
 }
 
-fn auto_sync_all_inner(shared: &OfficeShared, force: bool) -> OfficeResult<serde_json::Value> {
+fn auto_sync_all_inner(shared: &Shared, force: bool) -> Result<serde_json::Value> {
     if !force {
         if shared.paused.load(Ordering::SeqCst) {
             return Ok(serde_json::json!({ "skipped": "paused" }));
@@ -3137,7 +3096,7 @@ fn auto_sync_all_inner(shared: &OfficeShared, force: bool) -> OfficeResult<serde
         crate::foundation::events::append(
             &store,
             crate::foundation::events::NewEvent {
-                domain: DOMAIN_OFFICE_HOST,
+                domain: DOMAIN_HOST,
                 kind: "git_auto_sync".into(),
                 subject_type: if row["kind"] == "main_checkout" {
                     "project"
@@ -3179,7 +3138,7 @@ fn auto_sync_all_inner(shared: &OfficeShared, force: bool) -> OfficeResult<serde
 /// the serve loop. Every DUE plan gets an honest outcome — the prompt is
 /// delivered to a live terminal, or the plan is closed with a note when
 /// the terminal is gone. Nothing is ever executed blindly twice.
-fn sweep_recovery_plans(shared: &OfficeShared) {
+fn sweep_recovery_plans(shared: &Shared) {
     // Pause gates the sweep too (V15-5 acceptance: "pause 下不触发、resume
     // 后按计划继续") — due plans stay `scheduled` and fire after resume.
     if shared.paused.load(Ordering::SeqCst) {
@@ -3245,7 +3204,7 @@ fn sweep_recovery_plans(shared: &OfficeShared) {
         let _ = crate::foundation::events::append(
             &store,
             crate::foundation::events::NewEvent {
-                domain: DOMAIN_OFFICE_HOST,
+                domain: DOMAIN_HOST,
                 kind: "recovery_plan_fired".into(),
                 subject_type: "recovery_plan".into(),
                 subject_id: id.to_string(),
@@ -3263,7 +3222,7 @@ fn sweep_recovery_plans(shared: &OfficeShared) {
 /// V15-1: the file inventory of one worktree — every tracked file plus
 /// untracked entries, each with its porcelain status. Clean files are
 /// marked `clean`; there is no second guessing of git's verdicts.
-fn worktree_files(shared: &OfficeShared, worktree_id: &str) -> OfficeResult<serde_json::Value> {
+fn worktree_files(shared: &Shared, worktree_id: &str) -> Result<serde_json::Value> {
     let wid = WorktreeId::from_str(worktree_id)?;
     let cwd = {
         let store = shared.store.lock().expect("office store");
@@ -3271,7 +3230,7 @@ fn worktree_files(shared: &OfficeShared, worktree_id: &str) -> OfficeResult<serd
             &store,
             crate::git::worktrees::ProtectedRefs::new(vec![]),
         );
-        let record = service.record(&wid)?.ok_or_else(|| OfficeError::NotFound {
+        let record = service.record(&wid)?.ok_or_else(|| Error::NotFound {
             entity: "worktree",
             id: worktree_id.to_string(),
         })?;
@@ -3356,14 +3315,14 @@ fn worktree_files(shared: &OfficeShared, worktree_id: &str) -> OfficeResult<serd
 /// recorded base for modified files, bounded content otherwise, and an
 /// honest `binary` verdict for non-text files.
 fn worktree_file_content(
-    shared: &OfficeShared,
+    shared: &Shared,
     worktree_id: &str,
     path: &str,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     let wid = WorktreeId::from_str(worktree_id)?;
     // Path safety: the client names a RELATIVE path inside the worktree.
     if path.starts_with('/') || path.split('/').any(|part| part == "..") {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "file paths must be relative to the worktree and may not contain `..`".into(),
         ));
     }
@@ -3373,7 +3332,7 @@ fn worktree_file_content(
             &store,
             crate::git::worktrees::ProtectedRefs::new(vec![]),
         );
-        let record = service.record(&wid)?.ok_or_else(|| OfficeError::NotFound {
+        let record = service.record(&wid)?.ok_or_else(|| Error::NotFound {
             entity: "worktree",
             id: worktree_id.to_string(),
         })?;
@@ -3412,7 +3371,7 @@ fn worktree_file_content(
     }
 
     // Otherwise: bounded content, honest binary verdict.
-    let bytes = std::fs::read(&full_path).map_err(OfficeError::Io)?;
+    let bytes = std::fs::read(&full_path).map_err(Error::Io)?;
     let probe = &bytes[..bytes.len().min(8192)];
     if probe.contains(&0u8) {
         return Ok(serde_json::json!({
@@ -3437,10 +3396,10 @@ fn worktree_file_content(
 /// a dirty tree refuses and says so. The caller confirmed the exact path
 /// (two-step UI); the action is audited either way.
 fn worktree_cleanup(
-    shared: &OfficeShared,
+    shared: &Shared,
     worktree_id: &str,
     requested_by: &str,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     let wid = WorktreeId::from_str(worktree_id)?;
     // Phase A — record lookup under the lock, then DROP it: the gh probe
     // below is a network call (30s timeout); holding the mutex across it
@@ -3451,7 +3410,7 @@ fn worktree_cleanup(
             &store,
             crate::git::worktrees::ProtectedRefs::new(vec![]),
         );
-        let record = service.record(&wid)?.ok_or_else(|| OfficeError::NotFound {
+        let record = service.record(&wid)?.ok_or_else(|| Error::NotFound {
             entity: "worktree",
             id: worktree_id.to_string(),
         })?;
@@ -3473,7 +3432,7 @@ fn worktree_cleanup(
         crate::foundation::events::append(
             &store,
             crate::foundation::events::NewEvent {
-                domain: DOMAIN_OFFICE_HOST,
+                domain: DOMAIN_HOST,
                 kind: "worktree_cleanup_refused".into(),
                 subject_type: "worktree".into(),
                 subject_id: worktree_id.to_string(),
@@ -3486,7 +3445,7 @@ fn worktree_cleanup(
                 }),
             },
         )?;
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "cleanup requires a MERGED PR for branch `{branch}` (current: {state}); \
              deleting work is a human decision",
         )));
@@ -3516,7 +3475,7 @@ fn worktree_cleanup(
         crate::foundation::events::append(
             &store,
             crate::foundation::events::NewEvent {
-                domain: DOMAIN_OFFICE_HOST,
+                domain: DOMAIN_HOST,
                 kind: "worktree_cleanup_failed".into(),
                 subject_type: "worktree".into(),
                 subject_id: worktree_id.to_string(),
@@ -3529,7 +3488,7 @@ fn worktree_cleanup(
                 }),
             },
         )?;
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "worktree `{}` was released in the office records but its directory could \
              not be removed ({}); remove it by hand after checking the tree",
             worktree_path.display(),
@@ -3540,7 +3499,7 @@ fn worktree_cleanup(
     crate::foundation::events::append(
         &store,
         crate::foundation::events::NewEvent {
-            domain: DOMAIN_OFFICE_HOST,
+            domain: DOMAIN_HOST,
             kind: "worktree_cleaned".into(),
             subject_type: "worktree".into(),
             subject_id: worktree_id.to_string(),
@@ -3569,15 +3528,15 @@ fn worktree_cleanup(
 /// lossless context. The departing terminal is left running: stopping it
 /// is the human's call.
 fn agent_handoff(
-    shared: &OfficeShared,
+    shared: &Shared,
     worktree_id: &str,
     to_agent: &str,
     requested_by: &str,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     let wid = WorktreeId::from_str(worktree_id)?;
     let to_agent = to_agent.trim().to_string();
     if to_agent.is_empty() || to_agent.contains(char::is_whitespace) || to_agent.contains('/') {
-        return Err(OfficeError::Validation(
+        return Err(Error::Validation(
             "handoff target must be a bare command name (no spaces, no paths)".into(),
         ));
     }
@@ -3586,7 +3545,7 @@ fn agent_handoff(
         &store,
         crate::git::worktrees::ProtectedRefs::new(vec![]),
     );
-    let record = service.record(&wid)?.ok_or_else(|| OfficeError::NotFound {
+    let record = service.record(&wid)?.ok_or_else(|| Error::NotFound {
         entity: "worktree",
         id: worktree_id.to_string(),
     })?;
@@ -3684,7 +3643,7 @@ fn agent_handoff(
     crate::foundation::events::append(
         &store,
         crate::foundation::events::NewEvent {
-            domain: DOMAIN_OFFICE_HOST,
+            domain: DOMAIN_HOST,
             kind: "agent_handoff".into(),
             subject_type: "worktree".into(),
             subject_id: worktree_id.to_string(),
@@ -3706,13 +3665,13 @@ fn agent_handoff(
 }
 
 /// V15-4 manual trigger + the read-only listing.
-fn sync_now(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
+fn sync_now(shared: &Shared) -> Result<serde_json::Value> {
     // Through the guarded wrapper (QA round 6 G2): a manual cycle must
     // also honor the single-flight guard, not stampede a running one.
     auto_sync_all(shared, true)
 }
 
-fn recovery_list(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
+fn recovery_list(shared: &Shared) -> Result<serde_json::Value> {
     let store = shared.store.lock().expect("office store");
     let mut stmt = store.connection().prepare(
         "SELECT id, terminal_id, task_id, reset_at, action, state, created_at, fired_at
@@ -3735,11 +3694,11 @@ fn recovery_list(shared: &OfficeShared) -> OfficeResult<serde_json::Value> {
 }
 
 fn recovery_schedule(
-    shared: &OfficeShared,
+    shared: &Shared,
     terminal_id: &str,
     reset_at: &str,
     task_id: Option<&str>,
-) -> OfficeResult<serde_json::Value> {
+) -> Result<serde_json::Value> {
     // Normalize to UTC before storing (QA F1): sweeps compare reset times
     // as UTC text.
     let reset_at = normalize_rfc3339_utc(reset_at)?;
@@ -3747,7 +3706,7 @@ fn recovery_schedule(
     shared
         .terminals
         .handle(&terminal)?
-        .ok_or_else(|| OfficeError::NotFound {
+        .ok_or_else(|| Error::NotFound {
             entity: "terminal",
             id: terminal_id.to_string(),
         })?;
@@ -3761,7 +3720,7 @@ fn recovery_schedule(
     crate::foundation::events::append(
         &store,
         crate::foundation::events::NewEvent {
-            domain: DOMAIN_OFFICE_HOST,
+            domain: DOMAIN_HOST,
             kind: "recovery_plan_scheduled".into(),
             subject_type: "recovery_plan".into(),
             subject_id: id.to_string(),
@@ -3772,7 +3731,7 @@ fn recovery_schedule(
     Ok(serde_json::json!({ "id": id, "reset_at": reset_at, "state": "scheduled" }))
 }
 
-fn recovery_cancel(shared: &OfficeShared, plan_id: i64) -> OfficeResult<serde_json::Value> {
+fn recovery_cancel(shared: &Shared, plan_id: i64) -> Result<serde_json::Value> {
     let store = shared.store.lock().expect("office store");
     let changed = store.connection().execute(
         "UPDATE recovery_plans SET state = 'cancelled', fired_at = ?2
@@ -3780,7 +3739,7 @@ fn recovery_cancel(shared: &OfficeShared, plan_id: i64) -> OfficeResult<serde_js
         rusqlite::params![plan_id, utc_now()],
     )?;
     if changed == 0 {
-        return Err(OfficeError::NotFound {
+        return Err(Error::NotFound {
             entity: "scheduled recovery plan",
             id: plan_id.to_string(),
         });
@@ -3792,21 +3751,19 @@ fn recovery_cancel(shared: &OfficeShared, plan_id: i64) -> OfficeResult<serde_js
 // Small helpers
 // ---------------------------------------------------------------------------
 
-fn hex_decode(text: &str) -> OfficeResult<Vec<u8>> {
+fn hex_decode(text: &str) -> Result<Vec<u8>> {
     let text = text.as_bytes();
     if text.len() % 2 != 0 {
-        return Err(OfficeError::Validation(
-            "hex input must be even-length".into(),
-        ));
+        return Err(Error::Validation("hex input must be even-length".into()));
     }
     (0..text.len() / 2)
         .map(|i| {
             u8::from_str_radix(
                 std::str::from_utf8(&text[i * 2..i * 2 + 2])
-                    .map_err(|_| OfficeError::Validation("hex input must be ASCII".into()))?,
+                    .map_err(|_| Error::Validation("hex input must be ASCII".into()))?,
                 16,
             )
-            .map_err(|_| OfficeError::Validation(format!("invalid hex byte at {i}")))
+            .map_err(|_| Error::Validation(format!("invalid hex byte at {i}")))
         })
         .collect()
 }
@@ -3822,7 +3779,7 @@ pub fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod server_split_tests {
     use super::*;
-    use crate::office::OfficeClient;
+    use crate::server::Client;
     use std::time::{Duration, Instant};
 
     pub(crate) struct RunningHost {
@@ -3835,9 +3792,9 @@ mod server_split_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).expect("home dir");
-        let host = OfficeHost::open(&home).expect("host claims the slot");
+        let host = Host::open(&home).expect("host claims the slot");
         let server = host.serve_background();
-        let socket = home.join(OFFICE_SOCKET_NAME);
+        let socket = home.join(SOCKET_NAME);
         let deadline = Instant::now() + Duration::from_secs(5);
         while !socket.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
@@ -3847,15 +3804,15 @@ mod server_split_tests {
     }
 
     impl RunningHost {
-        fn client(&self) -> OfficeClient {
-            OfficeClient::connect(&self.home).expect("client connects")
+        fn client(&self) -> Client {
+            Client::connect(&self.home).expect("client connects")
         }
 
         /// Real teardown: explicit shutdown stops owned terminals and ends
         /// the serve loop BEFORE the temp home disappears.
         fn shutdown(self) {
-            if let Ok(mut client) = OfficeClient::connect(&self.home) {
-                let _ = client.call(OfficeRequestKind::Shutdown { close_policy: None });
+            if let Ok(mut client) = Client::connect(&self.home) {
+                let _ = client.call(RequestKind::Shutdown { close_policy: None });
             }
             let _ = self.server.join();
             drop(self.dir);
@@ -3863,13 +3820,13 @@ mod server_split_tests {
     }
 
     fn create_terminal(
-        client: &mut OfficeClient,
+        client: &mut Client,
         home: &std::path::Path,
         argv: &[&str],
         purpose: &str,
     ) -> String {
         let response = client
-            .call(OfficeRequestKind::TerminalCreate {
+            .call(RequestKind::TerminalCreate {
                 argv: argv.iter().map(|s| s.to_string()).collect(),
                 cwd: home.display().to_string(),
                 env: vec![],
@@ -3887,14 +3844,10 @@ mod server_split_tests {
             .to_string()
     }
 
-    pub(crate) fn wait_for_output(
-        client: &mut OfficeClient,
-        terminal_id: &str,
-        needle: &str,
-    ) -> bool {
+    pub(crate) fn wait_for_output(client: &mut Client, terminal_id: &str, needle: &str) -> bool {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
-            if let Ok(view) = client.call(OfficeRequestKind::TerminalSnapshot {
+            if let Ok(view) = client.call(RequestKind::TerminalSnapshot {
                 terminal_id: terminal_id.to_string(),
             }) {
                 if format!("{view}").contains(needle) {
@@ -3921,7 +3874,7 @@ mod server_split_tests {
         assert!(wait_for_output(&mut client, &terminal_id, "ready-marker"));
 
         let view = client
-            .call(OfficeRequestKind::TerminalSnapshot {
+            .call(RequestKind::TerminalSnapshot {
                 terminal_id: terminal_id.clone(),
             })
             .expect("snapshot");
@@ -3929,7 +3882,7 @@ mod server_split_tests {
         assert_eq!(view.get("rows").and_then(|v| v.as_u64()), Some(30));
 
         client
-            .call(OfficeRequestKind::TerminalInput {
+            .call(RequestKind::TerminalInput {
                 terminal_id: terminal_id.clone(),
                 bytes_hex: hex_encode(b"echo typed-marker\n"),
             })
@@ -3937,7 +3890,7 @@ mod server_split_tests {
         assert!(wait_for_output(&mut client, &terminal_id, "typed-marker"));
 
         client
-            .call(OfficeRequestKind::TerminalStop {
+            .call(RequestKind::TerminalStop {
                 terminal_id: terminal_id.clone(),
             })
             .expect("stop");
@@ -3963,7 +3916,7 @@ mod server_split_tests {
 
         let mut reattached = host.client();
         let list = reattached
-            .call(OfficeRequestKind::TerminalList)
+            .call(RequestKind::TerminalList)
             .expect("list after detach");
         assert!(
             format!("{list}").contains(&terminal_id),
@@ -3995,13 +3948,13 @@ mod server_split_tests {
             "neighbor b",
         );
         client
-            .call(OfficeRequestKind::TerminalStop {
+            .call(RequestKind::TerminalStop {
                 terminal_id: a.clone(),
             })
             .expect("stop a");
         // b still answers a snapshot (its handle is alive server-side).
         let view = client
-            .call(OfficeRequestKind::TerminalSnapshot {
+            .call(RequestKind::TerminalSnapshot {
                 terminal_id: b.clone(),
             })
             .expect("neighbor survives");
@@ -4017,7 +3970,7 @@ mod server_split_tests {
     fn invalid_grant_is_rejected_and_audited() {
         let host = start_host();
         let mut client = host.client();
-        let mut request = new_request(OfficeRequestKind::TerminalCreate {
+        let mut request = new_request(RequestKind::TerminalCreate {
             argv: vec!["/bin/sh".into()],
             cwd: host.home.display().to_string(),
             env: vec![],
@@ -4035,7 +3988,7 @@ mod server_split_tests {
 
         let store = Store::open(
             &crate::foundation::paths::database_path(&host.home),
-            office_migrations(),
+            migrations(),
         )
         .expect("audit store");
         let denials: i64 = store
@@ -4056,7 +4009,7 @@ mod server_split_tests {
     fn member_attributed_mutation_without_grant_is_denied() {
         let host = start_host();
         let mut client = host.client();
-        let mut request = new_request(OfficeRequestKind::TerminalCreate {
+        let mut request = new_request(RequestKind::TerminalCreate {
             argv: vec!["/bin/sh".into()],
             cwd: host.home.display().to_string(),
             env: vec![],
@@ -4072,15 +4025,15 @@ mod server_split_tests {
             .expect_err("member mutation without grant must be denied");
         assert!(err.to_string().contains("denied"), "got: {err}");
         for kind in [
-            OfficeRequestKind::Workspace {
+            RequestKind::Workspace {
                 action: "new".into(),
                 value: Some("must not exist".into()),
                 project_id: None,
             },
-            OfficeRequestKind::WorkbenchLayout {
+            RequestKind::WorkbenchLayout {
                 layout_json: Some("{}".into()),
             },
-            OfficeRequestKind::TerminalOpenInWorktree {
+            RequestKind::TerminalOpenInWorktree {
                 worktree_id: "wt-00000000000000000000000000000000".into(),
             },
         ] {
@@ -4091,11 +4044,11 @@ mod server_split_tests {
                 .expect_err("new navigation controls require owner/grant authority");
             assert!(err.to_string().contains("denied"), "{err}");
         }
-        let model = client.call(OfficeRequestKind::WorkbenchView).unwrap();
+        let model = client.call(RequestKind::WorkbenchView).unwrap();
         assert!(model["workspaces"].as_array().unwrap().is_empty());
         assert!(
             client
-                .call(OfficeRequestKind::WorkbenchLayout { layout_json: None })
+                .call(RequestKind::WorkbenchLayout { layout_json: None })
                 .unwrap()["layout"]
                 .is_null()
         );
@@ -4107,7 +4060,7 @@ mod server_split_tests {
     fn workbench_view_serves_the_projection() {
         let host = start_host();
         let mut client = host.client();
-        let view = client.call(OfficeRequestKind::WorkbenchView).expect("view");
+        let view = client.call(RequestKind::WorkbenchView).expect("view");
         for key in ["projects", "worktrees", "tasks", "terminals", "attention"] {
             assert!(view.get(key).is_some(), "view misses `{key}`: {view}");
         }
@@ -4123,7 +4076,7 @@ mod server_split_tests {
 #[cfg(test)]
 mod s2_workbench_tests {
     use super::*;
-    use crate::office::OfficeClient;
+    use crate::server::Client;
     use std::process::Command;
     use std::time::{Duration, Instant};
 
@@ -4137,9 +4090,9 @@ mod s2_workbench_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).expect("home dir");
-        let host = OfficeHost::open(&home).expect("host claims the slot");
+        let host = Host::open(&home).expect("host claims the slot");
         let server = host.serve_background();
-        let socket = home.join(OFFICE_SOCKET_NAME);
+        let socket = home.join(SOCKET_NAME);
         let deadline = Instant::now() + Duration::from_secs(5);
         while !socket.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
@@ -4148,13 +4101,13 @@ mod s2_workbench_tests {
     }
 
     impl RunningHost {
-        fn client(&self) -> OfficeClient {
-            OfficeClient::connect(&self.home).expect("client connects")
+        fn client(&self) -> Client {
+            Client::connect(&self.home).expect("client connects")
         }
 
         fn shutdown(self) {
-            if let Ok(mut client) = OfficeClient::connect(&self.home) {
-                let _ = client.call(OfficeRequestKind::Shutdown { close_policy: None });
+            if let Ok(mut client) = Client::connect(&self.home) {
+                let _ = client.call(RequestKind::Shutdown { close_policy: None });
             }
             let _ = self.server.join();
             drop(self.dir);
@@ -4196,7 +4149,7 @@ mod s2_workbench_tests {
 
         let store = Store::open(
             &crate::foundation::paths::database_path(&host.home),
-            office_migrations(),
+            migrations(),
         )
         .expect("store");
         let project = crate::projects::ProjectRegistry::new(&store)
@@ -4234,10 +4187,10 @@ mod s2_workbench_tests {
         task.task_id.to_string()
     }
 
-    fn wait_for_output(client: &mut OfficeClient, terminal_id: &str, needle: &str) -> bool {
+    fn wait_for_output(client: &mut Client, terminal_id: &str, needle: &str) -> bool {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
-            if let Ok(view) = client.call(OfficeRequestKind::TerminalSnapshot {
+            if let Ok(view) = client.call(RequestKind::TerminalSnapshot {
                 terminal_id: terminal_id.to_string(),
             }) {
                 if format!("{view}").contains(needle) {
@@ -4258,7 +4211,7 @@ mod s2_workbench_tests {
         let mut client = host.client();
 
         // ≥3 worktrees, each carrying its project for the group headers.
-        let view = client.call(OfficeRequestKind::WorkbenchView).expect("view");
+        let view = client.call(RequestKind::WorkbenchView).expect("view");
         let model: crate::tui::workbench::WorkbenchModel =
             serde_json::from_value(view).expect("decode");
         assert!(model.worktrees.len() >= 3, "{}", model.worktrees.len());
@@ -4279,7 +4232,7 @@ mod s2_workbench_tests {
             .find(|w| w.path.ends_with("wt-a"))
             .expect("wt-a row");
         let opened = client
-            .call(OfficeRequestKind::TerminalOpenInWorktree {
+            .call(RequestKind::TerminalOpenInWorktree {
                 worktree_id: wt_a.worktree_id.clone(),
             })
             .expect("open");
@@ -4289,7 +4242,7 @@ mod s2_workbench_tests {
             .expect("terminal id")
             .to_string();
         client
-            .call(OfficeRequestKind::TerminalInput {
+            .call(RequestKind::TerminalInput {
                 terminal_id: terminal_id.clone(),
                 bytes_hex: hex_encode(b"pwd\n"),
             })
@@ -4301,7 +4254,7 @@ mod s2_workbench_tests {
 
         // `w`: create a 4th worktree for the task through the socket.
         let created = client
-            .call(OfficeRequestKind::WorktreeCreateForTask {
+            .call(RequestKind::WorktreeCreateForTask {
                 task_id: task_id.clone(),
                 branch: Some("agent/s2-created".into()),
                 base_dir: None,
@@ -4317,15 +4270,13 @@ mod s2_workbench_tests {
                 || std::path::Path::new(&path).exists(),
             "the created worktree exists on disk at {path}"
         );
-        let view = client
-            .call(OfficeRequestKind::WorkbenchView)
-            .expect("view2");
+        let view = client.call(RequestKind::WorkbenchView).expect("view2");
         let model: crate::tui::workbench::WorkbenchModel =
             serde_json::from_value(view).expect("decode2");
         assert!(model.worktrees.iter().any(|w| w.path == path));
 
         client
-            .call(OfficeRequestKind::TerminalStop {
+            .call(RequestKind::TerminalStop {
                 terminal_id: terminal_id.clone(),
             })
             .expect("stop shell");
@@ -4336,17 +4287,13 @@ mod s2_workbench_tests {
 #[cfg(test)]
 mod s3_handoff_tests {
     use super::*;
-    use crate::office::OfficeClient;
+    use crate::server::Client;
     use std::time::{Duration, Instant};
 
-    pub(crate) fn wait_for_output(
-        client: &mut OfficeClient,
-        terminal_id: &str,
-        needle: &str,
-    ) -> bool {
+    pub(crate) fn wait_for_output(client: &mut Client, terminal_id: &str, needle: &str) -> bool {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
-            if let Ok(view) = client.call(OfficeRequestKind::TerminalSnapshot {
+            if let Ok(view) = client.call(RequestKind::TerminalSnapshot {
                 terminal_id: terminal_id.to_string(),
             }) {
                 if format!("{view}").contains(needle) {
@@ -4367,18 +4314,18 @@ mod s3_handoff_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).expect("home");
-        let host = OfficeHost::open(&home).expect("host");
+        let host = Host::open(&home).expect("host");
         let server = host.serve_background();
-        let socket = home.join(OFFICE_SOCKET_NAME);
+        let socket = home.join(SOCKET_NAME);
         let deadline = Instant::now() + Duration::from_secs(5);
         while !socket.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
 
         // One live terminal: output marker, then stay alive.
-        let mut client = OfficeClient::connect(&home).expect("first client");
+        let mut client = Client::connect(&home).expect("first client");
         let created = client
-            .call(OfficeRequestKind::TerminalCreate {
+            .call(RequestKind::TerminalCreate {
                 argv: vec![
                     "/bin/sh".into(),
                     "-c".into(),
@@ -4401,9 +4348,7 @@ mod s3_handoff_tests {
         assert!(wait_for_output(&mut client, &terminal_id, "handoff-marker"));
 
         // Begin the restart: the response names the rendezvous socket.
-        let response = client
-            .call(OfficeRequestKind::ServerRestart)
-            .expect("restart");
+        let response = client.call(RequestKind::ServerRestart).expect("restart");
         assert_eq!(
             response.get("state").and_then(|v| v.as_str()),
             Some("handoff_ready")
@@ -4434,7 +4379,7 @@ mod s3_handoff_tests {
         // The resumed host answers on the same control socket.
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut client2 = loop {
-            if let Ok(client) = OfficeClient::connect(&home) {
+            if let Ok(client) = Client::connect(&home) {
                 break client;
             }
             assert!(Instant::now() < deadline, "the resumed host never answered");
@@ -4443,7 +4388,7 @@ mod s3_handoff_tests {
 
         // Same terminal identity, preserved history, live input.
         let list = client2
-            .call(OfficeRequestKind::TerminalList)
+            .call(RequestKind::TerminalList)
             .expect("list after restart");
         assert!(
             format!("{list}").contains(&terminal_id),
@@ -4454,7 +4399,7 @@ mod s3_handoff_tests {
             "history is preserved across the handoff"
         );
         client2
-            .call(OfficeRequestKind::TerminalInput {
+            .call(RequestKind::TerminalInput {
                 terminal_id: terminal_id.clone(),
                 bytes_hex: hex_encode(b"echo post-restart-marker\n"),
             })
@@ -4468,7 +4413,7 @@ mod s3_handoff_tests {
         {
             let store = Store::open(
                 &crate::foundation::paths::database_path(&home),
-                office_migrations(),
+                migrations(),
             )
             .expect("store");
             let out: i64 = store
@@ -4492,7 +4437,7 @@ mod s3_handoff_tests {
 
         // Clean teardown: the resumed host shuts down like any other.
         client2
-            .call(OfficeRequestKind::Shutdown { close_policy: None })
+            .call(RequestKind::Shutdown { close_policy: None })
             .expect("shutdown");
         drop(client2);
         {
@@ -4520,9 +4465,9 @@ mod s3_handoff_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).expect("home");
-        let host = OfficeHost::open(&home).expect("host");
+        let host = Host::open(&home).expect("host");
         let server = host.serve_background();
-        let socket = home.join(OFFICE_SOCKET_NAME);
+        let socket = home.join(SOCKET_NAME);
         let deadline = Instant::now() + Duration::from_secs(5);
         while !socket.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
@@ -4530,9 +4475,9 @@ mod s3_handoff_tests {
 
         // The child prints text, then HALF of an SGR, then goes quiet:
         // any handoff during the quiet window is guaranteed mid-sequence.
-        let mut client = OfficeClient::connect(&home).expect("first client");
+        let mut client = Client::connect(&home).expect("first client");
         let created = client
-            .call(OfficeRequestKind::TerminalCreate {
+            .call(RequestKind::TerminalCreate {
                 argv: vec![
                     "/bin/sh".into(),
                     "-c".into(),
@@ -4558,7 +4503,7 @@ mod s3_handoff_tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             let view = client
-                .call(OfficeRequestKind::TerminalSnapshot {
+                .call(RequestKind::TerminalSnapshot {
                     terminal_id: terminal_id.clone(),
                 })
                 .expect("snapshot");
@@ -4569,9 +4514,7 @@ mod s3_handoff_tests {
         }
 
         // Restart during the quiet window — the transfer splits the SGR.
-        let response = client
-            .call(OfficeRequestKind::ServerRestart)
-            .expect("restart");
+        let response = client.call(RequestKind::ServerRestart).expect("restart");
         assert_eq!(
             response.get("state").and_then(|v| v.as_str()),
             Some("handoff_ready")
@@ -4592,7 +4535,7 @@ mod s3_handoff_tests {
         server.join().expect("old host exits cleanly");
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut client2 = loop {
-            if let Ok(client) = OfficeClient::connect(&home) {
+            if let Ok(client) = Client::connect(&home) {
                 break client;
             }
             assert!(Instant::now() < deadline, "the resumed host never answered");
@@ -4606,7 +4549,7 @@ mod s3_handoff_tests {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let view = client2
-                .call(OfficeRequestKind::TerminalSnapshot {
+                .call(RequestKind::TerminalSnapshot {
                     terminal_id: terminal_id.clone(),
                 })
                 .expect("snapshot after restart");
@@ -4646,7 +4589,7 @@ mod s3_handoff_tests {
         }
 
         client2
-            .call(OfficeRequestKind::Shutdown { close_policy: None })
+            .call(RequestKind::Shutdown { close_policy: None })
             .expect("shutdown");
         drop(client2);
         {
@@ -4671,17 +4614,17 @@ mod s3_handoff_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).expect("home");
-        let host = OfficeHost::open(&home).expect("host");
+        let host = Host::open(&home).expect("host");
         let server = host.serve_background();
-        let socket = home.join(OFFICE_SOCKET_NAME);
+        let socket = home.join(SOCKET_NAME);
         let deadline = Instant::now() + Duration::from_secs(5);
         while !socket.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
 
-        let mut client = OfficeClient::connect(&home).expect("client");
+        let mut client = Client::connect(&home).expect("client");
         let created = client
-            .call(OfficeRequestKind::TerminalCreate {
+            .call(RequestKind::TerminalCreate {
                 argv: vec!["/bin/sh".into(), "-c".into(), "echo pre-marker; cat".into()],
                 cwd: home.display().to_string(),
                 env: vec![],
@@ -4701,9 +4644,7 @@ mod s3_handoff_tests {
 
         // Begin the restart and NEVER start the resumed server: the
         // handoff times out after HANDOFF_TIMEOUT.
-        let response = client
-            .call(OfficeRequestKind::ServerRestart)
-            .expect("restart");
+        let response = client.call(RequestKind::ServerRestart).expect("restart");
         assert_eq!(
             response.get("state").and_then(|v| v.as_str()),
             Some("handoff_ready")
@@ -4714,7 +4655,7 @@ mod s3_handoff_tests {
         loop {
             let store = Store::open(
                 &crate::foundation::paths::database_path(&home),
-                office_migrations(),
+                migrations(),
             )
             .expect("store");
             let failed: i64 = store
@@ -4739,18 +4680,18 @@ mod s3_handoff_tests {
         // The host still answers... (reconnect: the control connection
         // drops after its idle timeout, exactly what a real orchestrator
         // recovers from)
-        let mut client = OfficeClient::connect(&home).expect("reconnect");
-        let ping = client.call(OfficeRequestKind::Ping).expect("ping");
+        let mut client = Client::connect(&home).expect("reconnect");
+        let ping = client.call(RequestKind::Ping).expect("ping");
         assert!(ping.get("pid").is_some(), "the host must keep serving");
 
         // ...the terminal is still listed and live...
-        let list = client.call(OfficeRequestKind::TerminalList).expect("list");
+        let list = client.call(RequestKind::TerminalList).expect("list");
         assert!(format!("{list}").contains(&terminal_id));
 
         // ...input still reaches the child, and the reattached readers make
         // the NEW output visible (the QA "alive but blind" regression).
         client
-            .call(OfficeRequestKind::TerminalInput {
+            .call(RequestKind::TerminalInput {
                 terminal_id: terminal_id.clone(),
                 bytes_hex: hex_encode(b"echo post-failure-marker\n"),
             })
@@ -4765,7 +4706,7 @@ mod s3_handoff_tests {
         {
             let store = Store::open(
                 &crate::foundation::paths::database_path(&home),
-                office_migrations(),
+                migrations(),
             )
             .expect("store");
             let detail: String = store
@@ -4784,7 +4725,7 @@ mod s3_handoff_tests {
         }
 
         client
-            .call(OfficeRequestKind::Shutdown { close_policy: None })
+            .call(RequestKind::Shutdown { close_policy: None })
             .expect("shutdown");
         drop(client);
         {
@@ -4801,7 +4742,7 @@ mod s3_handoff_tests {
 #[cfg(test)]
 mod s4_agent_status_tests {
     use super::*;
-    use crate::office::OfficeClient;
+    use crate::server::Client;
     use std::time::{Duration, Instant};
 
     pub(crate) struct RunningHost {
@@ -4814,9 +4755,9 @@ mod s4_agent_status_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).expect("home");
-        let host = OfficeHost::open(&home).expect("host");
+        let host = Host::open(&home).expect("host");
         let server = host.serve_background();
-        let socket = home.join(OFFICE_SOCKET_NAME);
+        let socket = home.join(SOCKET_NAME);
         let deadline = Instant::now() + Duration::from_secs(5);
         while !socket.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
@@ -4825,12 +4766,12 @@ mod s4_agent_status_tests {
     }
 
     impl RunningHost {
-        fn client(&self) -> OfficeClient {
-            OfficeClient::connect(&self.home).expect("client")
+        fn client(&self) -> Client {
+            Client::connect(&self.home).expect("client")
         }
         fn shutdown(self) {
-            if let Ok(mut client) = OfficeClient::connect(&self.home) {
-                let _ = client.call(OfficeRequestKind::Shutdown { close_policy: None });
+            if let Ok(mut client) = Client::connect(&self.home) {
+                let _ = client.call(RequestKind::Shutdown { close_policy: None });
             }
             let _ = self.server.join();
             drop(self.dir);
@@ -4840,11 +4781,8 @@ mod s4_agent_status_tests {
     /// An owner-issued grant carrying one action (shared authority: no
     /// principal, usable by any member - documented in the authority).
     fn grant_for(home: &std::path::Path, actions: &[&str]) -> String {
-        let store = Store::open(
-            &crate::foundation::paths::database_path(home),
-            office_migrations(),
-        )
-        .expect("store");
+        let store = Store::open(&crate::foundation::paths::database_path(home), migrations())
+            .expect("store");
         let grant = crate::authority::AuthorityEngine::new(&store)
             .issue_root_grant(
                 None,
@@ -4857,7 +4795,7 @@ mod s4_agent_status_tests {
         grant.grant_id.to_string()
     }
 
-    fn create_codex_like_terminal(client: &mut OfficeClient, home: &std::path::Path) -> String {
+    fn create_codex_like_terminal(client: &mut Client, home: &std::path::Path) -> String {
         // A real executable named after a detectable agent: identification
         // comes from the spawned argv.
         let fake_dir = home.join("fake-agents");
@@ -4870,7 +4808,7 @@ mod s4_agent_status_tests {
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         }
         let created = client
-            .call(OfficeRequestKind::TerminalCreate {
+            .call(RequestKind::TerminalCreate {
                 argv: vec![fake.display().to_string()],
                 cwd: home.display().to_string(),
                 env: vec![],
@@ -4888,8 +4826,8 @@ mod s4_agent_status_tests {
             .to_string()
     }
 
-    fn view_for(client: &mut OfficeClient, terminal_id: &str) -> serde_json::Value {
-        let view = client.call(OfficeRequestKind::WorkbenchView).expect("view");
+    fn view_for(client: &mut Client, terminal_id: &str) -> serde_json::Value {
+        let view = client.call(RequestKind::WorkbenchView).expect("view");
         let rows = view
             .get("terminals")
             .and_then(|v| v.as_array())
@@ -4910,7 +4848,7 @@ mod s4_agent_status_tests {
         let terminal_id = create_codex_like_terminal(&mut client, &host.home);
         let grant = grant_for(&host.home, &["agent_report"]);
 
-        let mut request = new_request(OfficeRequestKind::AgentReport {
+        let mut request = new_request(RequestKind::AgentReport {
             terminal_id: terminal_id.clone(),
             agent: "codex".into(),
             status: "blocked".into(),
@@ -4941,7 +4879,7 @@ mod s4_agent_status_tests {
         // The report is audited.
         let store = Store::open(
             &crate::foundation::paths::database_path(&host.home),
-            office_migrations(),
+            migrations(),
         )
         .expect("store");
         let audited: i64 = store
@@ -4963,7 +4901,7 @@ mod s4_agent_status_tests {
         let host = start_host();
         let mut client = host.client();
         let terminal_id = create_codex_like_terminal(&mut client, &host.home);
-        let mut request = new_request(OfficeRequestKind::AgentReport {
+        let mut request = new_request(RequestKind::AgentReport {
             terminal_id: terminal_id.clone(),
             agent: "codex".into(),
             status: "done".into(),
@@ -4984,7 +4922,7 @@ mod s4_agent_status_tests {
         let mut client = host.client();
         // A child that leaves a blocking-looking screen behind.
         let created = client
-            .call(OfficeRequestKind::TerminalCreate {
+            .call(RequestKind::TerminalCreate {
                 argv: vec![
                     "/bin/sh".into(),
                     "-c".into(),
@@ -5006,7 +4944,7 @@ mod s4_agent_status_tests {
             .to_string();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let view = client.call(OfficeRequestKind::WorkbenchView).expect("view");
+            let view = client.call(RequestKind::WorkbenchView).expect("view");
             let statuses = view
                 .get("terminals")
                 .and_then(|v| v.as_array())
@@ -5034,7 +4972,7 @@ mod s4_agent_status_tests {
         // The fact layer is untouched: no task results exist for the probe.
         let store = Store::open(
             &crate::foundation::paths::database_path(&host.home),
-            office_migrations(),
+            migrations(),
         )
         .expect("store");
         let results: i64 = store
@@ -5054,7 +4992,7 @@ mod s4_agent_status_tests {
         let mut client = host.client();
         let grant = grant_for(&host.home, &["agent_content"]);
 
-        let mut request = new_request(OfficeRequestKind::AgentContentSubmit {
+        let mut request = new_request(RequestKind::AgentContentSubmit {
             terminal_id: None,
             kind: "task_summary".into(),
             content: "ran the test suite; 3 failures traced to flaky timing".into(),
@@ -5087,7 +5025,7 @@ mod s4_agent_status_tests {
 
         let store = Store::open(
             &crate::foundation::paths::database_path(&host.home),
-            office_migrations(),
+            migrations(),
         )
         .expect("store");
         let audited: i64 = store
@@ -5106,7 +5044,7 @@ mod s4_agent_status_tests {
 #[cfg(test)]
 mod s5_orchestration_tests {
     use super::*;
-    use crate::office::OfficeClient;
+    use crate::server::Client;
     use std::time::{Duration, Instant};
 
     pub(crate) struct RunningHost {
@@ -5119,9 +5057,9 @@ mod s5_orchestration_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).expect("home");
-        let host = OfficeHost::open(&home).expect("host");
+        let host = Host::open(&home).expect("host");
         let server = host.serve_background();
-        let socket = home.join(OFFICE_SOCKET_NAME);
+        let socket = home.join(SOCKET_NAME);
         let deadline = Instant::now() + Duration::from_secs(5);
         while !socket.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
@@ -5130,12 +5068,12 @@ mod s5_orchestration_tests {
     }
 
     impl RunningHost {
-        fn client(&self) -> OfficeClient {
-            OfficeClient::connect(&self.home).expect("client")
+        fn client(&self) -> Client {
+            Client::connect(&self.home).expect("client")
         }
         fn shutdown(self) {
-            if let Ok(mut client) = OfficeClient::connect(&self.home) {
-                let _ = client.call(OfficeRequestKind::Shutdown { close_policy: None });
+            if let Ok(mut client) = Client::connect(&self.home) {
+                let _ = client.call(RequestKind::Shutdown { close_policy: None });
             }
             let _ = self.server.join();
             drop(self.dir);
@@ -5143,11 +5081,8 @@ mod s5_orchestration_tests {
     }
 
     fn grant_for(home: &std::path::Path, actions: &[&str]) -> String {
-        let store = Store::open(
-            &crate::foundation::paths::database_path(home),
-            office_migrations(),
-        )
-        .expect("store");
+        let store = Store::open(&crate::foundation::paths::database_path(home), migrations())
+            .expect("store");
         crate::authority::AuthorityEngine::new(&store)
             .issue_root_grant(
                 None,
@@ -5173,7 +5108,7 @@ mod s5_orchestration_tests {
 
         // 1. create a pane running cat (echoes everything).
         let created = client
-            .call(OfficeRequestKind::TerminalCreate {
+            .call(RequestKind::TerminalCreate {
                 argv: vec![
                     "/bin/sh".into(),
                     "-c".into(),
@@ -5195,7 +5130,7 @@ mod s5_orchestration_tests {
             .to_string();
 
         // 2. report a state (as the agent itself would), then prompt.
-        let mut report = new_request(OfficeRequestKind::AgentReport {
+        let mut report = new_request(RequestKind::AgentReport {
             terminal_id: terminal_id.clone(),
             agent: "codex".into(),
             status: "blocked".into(),
@@ -5205,7 +5140,7 @@ mod s5_orchestration_tests {
         report.grant = Some(report_grant.clone());
         client.call_request(report).expect("report");
 
-        let mut prompt = new_request(OfficeRequestKind::AgentPrompt {
+        let mut prompt = new_request(RequestKind::AgentPrompt {
             terminal_id: terminal_id.clone(),
             prompt: "echo orchestrated-prompt\n".into(),
         });
@@ -5217,7 +5152,7 @@ mod s5_orchestration_tests {
         );
 
         // 3. wait for the blocked status: already matched, returns fast.
-        let mut wait = new_request(OfficeRequestKind::AgentWait {
+        let mut wait = new_request(RequestKind::AgentWait {
             terminal_id: terminal_id.clone(),
             status: "blocked".into(),
             timeout_secs: 2,
@@ -5234,7 +5169,7 @@ mod s5_orchestration_tests {
 
         // 4. the durable event feed names every step of the flow.
         let feed = client
-            .call(OfficeRequestKind::EventsFeed {
+            .call(RequestKind::EventsFeed {
                 since_seq: 0,
                 limit: 200,
             })
@@ -5269,7 +5204,7 @@ mod s5_orchestration_tests {
             .and_then(|v| v.as_u64())
             .expect("last seq");
         let fresh = client
-            .call(OfficeRequestKind::EventsFeed {
+            .call(RequestKind::EventsFeed {
                 since_seq: last_seq,
                 limit: 100,
             })
@@ -5298,7 +5233,7 @@ mod s5_orchestration_tests {
         let host = start_host();
         let mut client = host.client();
         let created = client
-            .call(OfficeRequestKind::TerminalCreate {
+            .call(RequestKind::TerminalCreate {
                 argv: vec!["/bin/sh".into(), "-c".into(), "cat".into()],
                 cwd: host.home.display().to_string(),
                 env: vec![],
@@ -5316,7 +5251,7 @@ mod s5_orchestration_tests {
             .to_string();
 
         // Nothing ever reports `done`: the wait times out, audited.
-        let mut wait = new_request(OfficeRequestKind::AgentWait {
+        let mut wait = new_request(RequestKind::AgentWait {
             terminal_id: terminal_id.clone(),
             status: "done".into(),
             timeout_secs: 1,
@@ -5328,7 +5263,7 @@ mod s5_orchestration_tests {
         assert_eq!(waited.get("matched").and_then(|v| v.as_bool()), Some(false));
 
         // A member-attributed prompt without a grant: refused.
-        let mut prompt = new_request(OfficeRequestKind::AgentPrompt {
+        let mut prompt = new_request(RequestKind::AgentPrompt {
             terminal_id: terminal_id.clone(),
             prompt: "you there?".into(),
         });
@@ -5338,7 +5273,7 @@ mod s5_orchestration_tests {
 
         let store = Store::open(
             &crate::foundation::paths::database_path(&host.home),
-            office_migrations(),
+            migrations(),
         )
         .expect("store");
         let timeouts: i64 = store
@@ -5358,7 +5293,7 @@ mod s5_orchestration_tests {
 mod qa_round2_tests {
     use super::s3_handoff_tests::wait_for_output;
     use super::*;
-    use crate::office::OfficeClient;
+    use crate::server::Client;
     use std::time::{Duration, Instant};
 
     /// QA F1 (issue #58): reset_at expressed in a NON-UTC offset must fire
@@ -5369,17 +5304,17 @@ mod qa_round2_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).expect("home");
-        let host = OfficeHost::open(&home).expect("host");
+        let host = Host::open(&home).expect("host");
         let server = host.serve_background();
-        let socket = home.join(OFFICE_SOCKET_NAME);
+        let socket = home.join(SOCKET_NAME);
         let deadline = Instant::now() + Duration::from_secs(5);
         while !socket.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
 
-        let mut client = OfficeClient::connect(&home).expect("client");
+        let mut client = Client::connect(&home).expect("client");
         let created = client
-            .call(OfficeRequestKind::TerminalCreate {
+            .call(RequestKind::TerminalCreate {
                 argv: vec![
                     "/bin/sh".into(),
                     "-c".into(),
@@ -5410,7 +5345,7 @@ mod qa_round2_tests {
         assert!(reset_at.contains("+08:00"), "{reset_at}");
 
         let scheduled = client
-            .call(OfficeRequestKind::RecoverySchedule {
+            .call(RequestKind::RecoverySchedule {
                 terminal_id: terminal_id.clone(),
                 reset_at: reset_at.clone(),
                 task_id: None,
@@ -5442,8 +5377,8 @@ mod qa_round2_tests {
             assert!(
                 seen,
                 "the recovery prompt must reach the terminal; plans={:?}; terminal={:?}",
-                client.call(OfficeRequestKind::RecoveryList),
-                client.call(OfficeRequestKind::TerminalSnapshot {
+                client.call(RequestKind::RecoveryList),
+                client.call(RequestKind::TerminalSnapshot {
                     terminal_id: terminal_id.clone(),
                 }),
             );
@@ -5453,7 +5388,7 @@ mod qa_round2_tests {
         {
             let store = Store::open(
                 &crate::foundation::paths::database_path(&home),
-                office_migrations(),
+                migrations(),
             )
             .expect("store");
             let fired: i64 = store
@@ -5468,7 +5403,7 @@ mod qa_round2_tests {
         }
 
         client
-            .call(OfficeRequestKind::Shutdown { close_policy: None })
+            .call(RequestKind::Shutdown { close_policy: None })
             .expect("shutdown");
         server.join().expect("old host joins");
         drop(dir);
@@ -5481,7 +5416,7 @@ mod qa_round2_tests {
         let host = s6_pause_tests::start_host();
         let mut client = host.client();
         let created = client
-            .call(OfficeRequestKind::TerminalCreate {
+            .call(RequestKind::TerminalCreate {
                 argv: vec!["/bin/sh".into(), "-c".into(), "cat".into()],
                 cwd: host.home.display().to_string(),
                 env: vec![],
@@ -5503,7 +5438,7 @@ mod qa_round2_tests {
         // does NOT silently vanish either — it errors loudly.
         let fresh_id = crate::foundation::ids::WorktreeId::new().to_string();
         let err = client
-            .call(OfficeRequestKind::WorktreeCleanup {
+            .call(RequestKind::WorktreeCleanup {
                 worktree_id: fresh_id.clone(),
             })
             .expect_err("unknown worktree must fail");
@@ -5514,14 +5449,14 @@ mod qa_round2_tests {
 #[cfg(test)]
 mod v15_tests {
     use super::*;
-    use crate::office::OfficeClient;
+    use crate::server::Client;
     use std::process::Command;
     use std::time::{Duration, Instant};
 
     pub(crate) struct RunningHost {
         dir: tempfile::TempDir,
         home: std::path::PathBuf,
-        pub(crate) shared: Option<Arc<OfficeShared>>,
+        pub(crate) shared: Option<Arc<Shared>>,
         server: std::thread::JoinHandle<()>,
     }
 
@@ -5529,10 +5464,10 @@ mod v15_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).expect("home");
-        let host = OfficeHost::open(&home).expect("host");
+        let host = Host::open(&home).expect("host");
         let shared = host.shared();
         let server = host.serve_background();
-        let socket = home.join(OFFICE_SOCKET_NAME);
+        let socket = home.join(SOCKET_NAME);
         let deadline = Instant::now() + Duration::from_secs(5);
         while !socket.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
@@ -5546,12 +5481,12 @@ mod v15_tests {
     }
 
     impl RunningHost {
-        fn client(&self) -> OfficeClient {
-            OfficeClient::connect(&self.home).expect("client")
+        fn client(&self) -> Client {
+            Client::connect(&self.home).expect("client")
         }
         fn shutdown(self) {
-            if let Ok(mut client) = OfficeClient::connect(&self.home) {
-                let _ = client.call(OfficeRequestKind::Shutdown { close_policy: None });
+            if let Ok(mut client) = Client::connect(&self.home) {
+                let _ = client.call(RequestKind::Shutdown { close_policy: None });
             }
             let _ = self.server.join();
             drop(self.dir);
@@ -5592,7 +5527,7 @@ mod v15_tests {
 
         let store = Store::open(
             &crate::foundation::paths::database_path(&host.home),
-            office_migrations(),
+            migrations(),
         )
         .expect("store");
         let project = crate::projects::ProjectRegistry::new(&store)
@@ -5622,8 +5557,8 @@ mod v15_tests {
         (task.task_id.to_string(), wt_path)
     }
 
-    fn worktree_id_for(client: &mut OfficeClient, path_suffix: &str) -> String {
-        let view = client.call(OfficeRequestKind::WorkbenchView).expect("view");
+    fn worktree_id_for(client: &mut Client, path_suffix: &str) -> String {
+        let view = client.call(RequestKind::WorkbenchView).expect("view");
         let rows = view
             .get("worktrees")
             .and_then(|v| v.as_array())
@@ -5640,10 +5575,10 @@ mod v15_tests {
             .to_string()
     }
 
-    fn wait_for_output(client: &mut OfficeClient, terminal_id: &str, needle: &str) -> bool {
+    fn wait_for_output(client: &mut Client, terminal_id: &str, needle: &str) -> bool {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
-            if let Ok(view) = client.call(OfficeRequestKind::TerminalSnapshot {
+            if let Ok(view) = client.call(RequestKind::TerminalSnapshot {
                 terminal_id: terminal_id.to_string(),
             }) {
                 if format!("{view}").contains(needle) {
@@ -5669,7 +5604,7 @@ mod v15_tests {
         std::fs::write(wt_path.join("notes.txt"), "fresh notes\n").expect("untracked");
 
         let files = client
-            .call(OfficeRequestKind::WorktreeFiles {
+            .call(RequestKind::WorktreeFiles {
                 worktree_id: worktree_id.clone(),
             })
             .expect("files");
@@ -5678,7 +5613,7 @@ mod v15_tests {
         assert!(text.contains("notes.txt"), "{text}");
 
         let diff = client
-            .call(OfficeRequestKind::WorktreeFileContent {
+            .call(RequestKind::WorktreeFileContent {
                 worktree_id: worktree_id.clone(),
                 path: "README.md".into(),
             })
@@ -5693,7 +5628,7 @@ mod v15_tests {
         );
 
         let content = client
-            .call(OfficeRequestKind::WorktreeFileContent {
+            .call(RequestKind::WorktreeFileContent {
                 worktree_id: worktree_id.clone(),
                 path: "notes.txt".into(),
             })
@@ -5712,7 +5647,7 @@ mod v15_tests {
 
         // Path safety: traversal is refused, not resolved.
         let err = client
-            .call(OfficeRequestKind::WorktreeFileContent {
+            .call(RequestKind::WorktreeFileContent {
                 worktree_id,
                 path: "../escape".into(),
             })
@@ -5758,7 +5693,7 @@ mod v15_tests {
         // The PR state lands in the view.
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            let view = client.call(OfficeRequestKind::WorkbenchView).expect("view");
+            let view = client.call(RequestKind::WorkbenchView).expect("view");
             let merged = view
                 .get("worktrees")
                 .and_then(|v| v.as_array())
@@ -5783,7 +5718,7 @@ mod v15_tests {
 
         // Cleanup: released + directory actually removed + audited.
         let cleaned = client
-            .call(OfficeRequestKind::WorktreeCleanup {
+            .call(RequestKind::WorktreeCleanup {
                 worktree_id: worktree_id.clone(),
             })
             .expect("cleanup");
@@ -5792,7 +5727,7 @@ mod v15_tests {
 
         let store = Store::open(
             &crate::foundation::paths::database_path(&host.home),
-            office_migrations(),
+            migrations(),
         )
         .expect("store");
         let audited: i64 = store
@@ -5836,7 +5771,7 @@ mod v15_tests {
         .expect("adopt 2");
         let wt2 = worktree_id_for(&mut client, "wt2");
         let err = client
-            .call(OfficeRequestKind::WorktreeCleanup { worktree_id: wt2 })
+            .call(RequestKind::WorktreeCleanup { worktree_id: wt2 })
             .expect_err("unknown PR state must refuse cleanup");
         assert!(err.to_string().contains("MERGED"), "{err}");
 
@@ -5875,7 +5810,7 @@ mod v15_tests {
 
         // Agent A's terminal reports the departing summary.
         let created = client
-            .call(OfficeRequestKind::TerminalCreate {
+            .call(RequestKind::TerminalCreate {
                 argv: vec![bin.join("fake-a").display().to_string()],
                 cwd: home.display().to_string(),
                 env: vec![],
@@ -5895,7 +5830,7 @@ mod v15_tests {
         let grant = {
             let store = Store::open(
                 &crate::foundation::paths::database_path(&home),
-                office_migrations(),
+                migrations(),
             )
             .expect("store");
             crate::authority::AuthorityEngine::new(&store)
@@ -5910,7 +5845,7 @@ mod v15_tests {
                 .grant_id
                 .to_string()
         };
-        let mut report = new_request(OfficeRequestKind::AgentReport {
+        let mut report = new_request(RequestKind::AgentReport {
             terminal_id: terminal_a.clone(),
             agent: "fake-a".into(),
             status: "blocked".into(),
@@ -5922,7 +5857,7 @@ mod v15_tests {
 
         // The handoff: worktree → fake-b.
         let handed = client
-            .call(OfficeRequestKind::AgentHandoff {
+            .call(RequestKind::AgentHandoff {
                 worktree_id: worktree_id.clone(),
                 to_agent: "fake-b".into(),
             })
@@ -5942,13 +5877,13 @@ mod v15_tests {
         );
 
         // The departing terminal is still there.
-        let list = client.call(OfficeRequestKind::TerminalList).expect("list");
+        let list = client.call(RequestKind::TerminalList).expect("list");
         assert!(format!("{list}").contains(&terminal_a));
 
         // The task history carries the handoff.
         let store = Store::open(
             &crate::foundation::paths::database_path(&home),
-            office_migrations(),
+            migrations(),
         )
         .expect("store");
         let handoffs: i64 = store
@@ -5962,12 +5897,12 @@ mod v15_tests {
         assert!(handoffs >= 1, "the handoff is in the task history");
 
         client
-            .call(OfficeRequestKind::TerminalStop {
+            .call(RequestKind::TerminalStop {
                 terminal_id: terminal_a,
             })
             .expect("stop a");
         client
-            .call(OfficeRequestKind::TerminalStop {
+            .call(RequestKind::TerminalStop {
                 terminal_id: terminal_b,
             })
             .expect("stop b");
@@ -6018,7 +5953,7 @@ mod v15_tests {
 
         // auto_pull defaults OFF: a manual sync now must NOT move main.
         let before = git_head(&host.home, &repo);
-        client.call(OfficeRequestKind::SyncNow).expect("sync now");
+        client.call(RequestKind::SyncNow).expect("sync now");
         assert_eq!(
             before,
             git_head(&host.home, &repo),
@@ -6027,11 +5962,11 @@ mod v15_tests {
 
         // Turn it on via the socket (the same surface the workbench uses).
         client
-            .call(OfficeRequestKind::SetAutoPull { on: true })
+            .call(RequestKind::SetAutoPull { on: true })
             .expect("enable");
 
         // Still off→on boundary: the explicit sync now fast-forwards main.
-        client.call(OfficeRequestKind::SyncNow).expect("sync now 2");
+        client.call(RequestKind::SyncNow).expect("sync now 2");
         let after = git_head(&host.home, &repo);
         assert_ne!(before, after, "auto_pull on: main fast-forwarded");
 
@@ -6048,7 +5983,7 @@ mod v15_tests {
         )
         .trim()
         .to_string();
-        let view = client.call(OfficeRequestKind::WorkbenchView).expect("view");
+        let view = client.call(RequestKind::WorkbenchView).expect("view");
         let text = format!("{view}");
         assert!(
             text.contains("\"behind\":1") || text.contains("\"behind\": 1"),
@@ -6071,11 +6006,8 @@ mod v15_tests {
     }
 
     fn git_head(home: &std::path::Path, repo: &std::path::Path) -> String {
-        let store = Store::open(
-            &crate::foundation::paths::database_path(home),
-            office_migrations(),
-        )
-        .expect("store");
+        let store = Store::open(&crate::foundation::paths::database_path(home), migrations())
+            .expect("store");
         drop(store);
         let out = Command::new("git")
             .arg("-C")
@@ -6094,7 +6026,7 @@ mod v15_tests {
         let home = host.home.clone();
         let mut client = host.client();
         let created = client
-            .call(OfficeRequestKind::TerminalCreate {
+            .call(RequestKind::TerminalCreate {
                 argv: vec![
                     "/bin/sh".into(),
                     "-c".into(),
@@ -6118,7 +6050,7 @@ mod v15_tests {
 
         // Schedule via the socket (the same path the CLI uses).
         client
-            .call(OfficeRequestKind::RecoverySchedule {
+            .call(RequestKind::RecoverySchedule {
                 terminal_id: terminal_id.clone(),
                 reset_at: rfc3339_in(2),
                 task_id: None,
@@ -6127,7 +6059,7 @@ mod v15_tests {
 
         // The sweep fires within a couple of seconds of the reset.
         let plans = client
-            .call(OfficeRequestKind::RecoveryList)
+            .call(RequestKind::RecoveryList)
             .expect("recovery list");
         let state = plans
             .get("plans")
@@ -6150,7 +6082,7 @@ mod v15_tests {
         // Audit + plan state.
         let store = Store::open(
             &crate::foundation::paths::database_path(&home),
-            office_migrations(),
+            migrations(),
         )
         .expect("store");
         let fired: i64 = store
@@ -6175,7 +6107,7 @@ mod v15_tests {
         // Cancel on a non-existent plan is an honest 404.
         assert!(
             client
-                .call(OfficeRequestKind::RecoveryCancel { plan_id: 999_999 })
+                .call(RequestKind::RecoveryCancel { plan_id: 999_999 })
                 .is_err()
         );
         host.shutdown();
@@ -6196,7 +6128,7 @@ mod v15_tests {
         let grant = {
             let store = Store::open(
                 &crate::foundation::paths::database_path(&host.home),
-                office_migrations(),
+                migrations(),
             )
             .expect("store");
             crate::authority::AuthorityEngine::new(&store)
@@ -6212,7 +6144,7 @@ mod v15_tests {
                 .to_string()
         };
         let created = client
-            .call(OfficeRequestKind::TerminalCreate {
+            .call(RequestKind::TerminalCreate {
                 argv: vec!["/bin/sh".into(), "-c".into(), "cat".into()],
                 cwd: host.home.display().to_string(),
                 env: vec![],
@@ -6228,7 +6160,7 @@ mod v15_tests {
             .and_then(|v| v.as_str())
             .expect("terminal id")
             .to_string();
-        let mut report = new_request(OfficeRequestKind::AgentReport {
+        let mut report = new_request(RequestKind::AgentReport {
             terminal_id,
             agent: "codex".into(),
             status: "rate_limited".into(),
@@ -6251,7 +6183,7 @@ mod v15_tests {
         {
             let store = Store::open(
                 &crate::foundation::paths::database_path(&home),
-                office_migrations(),
+                migrations(),
             )
             .expect("store");
             store
@@ -6263,7 +6195,7 @@ mod v15_tests {
                 )
                 .expect("seed overdue plan");
         }
-        let host = OfficeHost::open(&home).expect("host");
+        let host = Host::open(&home).expect("host");
         {
             let shared = host.shared();
             let store = shared.store.lock().expect("store");
@@ -6295,7 +6227,7 @@ mod v15_tests {
 #[cfg(test)]
 mod s6_pause_tests {
     use super::*;
-    use crate::office::OfficeClient;
+    use crate::server::Client;
     use std::time::{Duration, Instant};
 
     pub(crate) struct RunningHost {
@@ -6309,9 +6241,9 @@ mod s6_pause_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).expect("home");
-        let host = OfficeHost::open(&home).expect("host");
+        let host = Host::open(&home).expect("host");
         let server = host.serve_background();
-        let socket = home.join(OFFICE_SOCKET_NAME);
+        let socket = home.join(SOCKET_NAME);
         let deadline = Instant::now() + Duration::from_secs(5);
         while !socket.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
@@ -6324,12 +6256,12 @@ mod s6_pause_tests {
     }
 
     impl RunningHost {
-        pub(crate) fn client(&self) -> OfficeClient {
-            OfficeClient::connect(&self.home).expect("client")
+        pub(crate) fn client(&self) -> Client {
+            Client::connect(&self.home).expect("client")
         }
         pub(crate) fn shutdown(self) {
-            if let Ok(mut client) = OfficeClient::connect(&self.home) {
-                let _ = client.call(OfficeRequestKind::Shutdown { close_policy: None });
+            if let Ok(mut client) = Client::connect(&self.home) {
+                let _ = client.call(RequestKind::Shutdown { close_policy: None });
             }
             let _ = self.server.join();
         }
@@ -6338,11 +6270,8 @@ mod s6_pause_tests {
     /// A REAL dispatch chain (member + binding + task + live grant) so the
     /// pause gate is tested against the full authorization path.
     fn seed_dispatch_chain(home: &std::path::Path) -> (String, String, String) {
-        let store = Store::open(
-            &crate::foundation::paths::database_path(home),
-            office_migrations(),
-        )
-        .expect("store");
+        let store = Store::open(&crate::foundation::paths::database_path(home), migrations())
+            .expect("store");
         let member = crate::members::MemberRegistry::new(&store)
             .register("operator")
             .expect("member");
@@ -6382,7 +6311,7 @@ mod s6_pause_tests {
         let host = start_host();
         let mut client = host.client();
         let (member, task, grant) = seed_dispatch_chain(&host.home);
-        let dispatch_with_cwd = |cwd: &str| OfficeRequestKind::Dispatch {
+        let dispatch_with_cwd = |cwd: &str| RequestKind::Dispatch {
             task_id: task.clone(),
             member_id: member.clone(),
             grant_id: grant.clone(),
@@ -6407,21 +6336,21 @@ mod s6_pause_tests {
         );
 
         // Pause: the same fully-authorized dispatch is now refused.
-        client.call(OfficeRequestKind::Pause).expect("pause");
+        client.call(RequestKind::Pause).expect("pause");
         let err = client
             .call(dispatch_with_cwd("/definitely/not/here"))
             .expect_err("paused dispatch must be refused");
         assert!(err.to_string().contains("paused"), "{err}");
 
         // Member grants cannot carry pause/resume: owner-only.
-        let mut owner_attempt = new_request(OfficeRequestKind::Pause);
+        let mut owner_attempt = new_request(RequestKind::Pause);
         owner_attempt.member = Some(member.clone());
         owner_attempt.grant = Some(grant.clone());
         let err = client.call_request(owner_attempt).expect_err("must deny");
         assert!(err.to_string().contains("owner action"), "{err}");
 
         // Resume lifts the gate (cwd check again proves the path).
-        client.call(OfficeRequestKind::Resume).expect("resume");
+        client.call(RequestKind::Resume).expect("resume");
         let err = client
             .call(dispatch_with_cwd("/definitely/not/here"))
             .expect_err("the dispatch must fail again");
@@ -6431,11 +6360,11 @@ mod s6_pause_tests {
         );
 
         // A paused server persists the pause: the next host starts paused.
-        client.call(OfficeRequestKind::Pause).expect("pause 2");
+        client.call(RequestKind::Pause).expect("pause 2");
         {
             let store = Store::open(
                 &crate::foundation::paths::database_path(&host.home),
-                office_migrations(),
+                migrations(),
             )
             .expect("store");
             let value: String = store
@@ -6450,10 +6379,10 @@ mod s6_pause_tests {
         }
         // Close with the pause in place, then reopen: paused comes back.
         client
-            .call(OfficeRequestKind::Shutdown { close_policy: None })
+            .call(RequestKind::Shutdown { close_policy: None })
             .expect("shutdown");
         let _ = host.server.join();
-        let reopened = OfficeHost::open(&host.home).expect("reopen");
+        let reopened = Host::open(&host.home).expect("reopen");
         assert!(
             reopened
                 .shared()
@@ -6482,13 +6411,13 @@ mod s6_pause_tests {
         let host = start_host();
         let mut client = host.client();
         client
-            .call(OfficeRequestKind::Shutdown {
+            .call(RequestKind::Shutdown {
                 close_policy: Some("pause".into()),
             })
             .expect("shutdown with pause policy");
         let _ = host.server.join();
 
-        let reopened = OfficeHost::open(&host.home).expect("reopen");
+        let reopened = Host::open(&host.home).expect("reopen");
         assert!(
             reopened
                 .shared()
@@ -6517,7 +6446,7 @@ mod s6_pause_tests {
 #[cfg(test)]
 mod qa_round4_tests {
     use super::*;
-    use crate::office::OfficeClient;
+    use crate::server::Client;
     use std::process::Command;
     use std::time::{Duration, Instant};
 
@@ -6525,7 +6454,7 @@ mod qa_round4_tests {
         /// Holds the temp home alive for the whole test; never read.
         _dir: tempfile::TempDir,
         home: std::path::PathBuf,
-        shared: Option<Arc<OfficeShared>>,
+        shared: Option<Arc<Shared>>,
         server: std::thread::JoinHandle<()>,
     }
 
@@ -6533,10 +6462,10 @@ mod qa_round4_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).expect("home");
-        let host = OfficeHost::open(&home).expect("host");
+        let host = Host::open(&home).expect("host");
         let shared = host.shared();
         let server = host.serve_background();
-        let socket = home.join(OFFICE_SOCKET_NAME);
+        let socket = home.join(SOCKET_NAME);
         let deadline = Instant::now() + Duration::from_secs(5);
         while !socket.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
@@ -6550,12 +6479,12 @@ mod qa_round4_tests {
     }
 
     impl RunningHost {
-        fn client(&self) -> OfficeClient {
-            OfficeClient::connect(&self.home).expect("client")
+        fn client(&self) -> Client {
+            Client::connect(&self.home).expect("client")
         }
         fn shutdown(self) {
-            if let Ok(mut client) = OfficeClient::connect(&self.home) {
-                let _ = client.call(OfficeRequestKind::Shutdown { close_policy: None });
+            if let Ok(mut client) = Client::connect(&self.home) {
+                let _ = client.call(RequestKind::Shutdown { close_policy: None });
             }
             let _ = self.server.join();
         }
@@ -6627,10 +6556,10 @@ mod qa_round4_tests {
 
         let mut client = host.client();
         client
-            .call(OfficeRequestKind::SetAutoPull { on: true })
+            .call(RequestKind::SetAutoPull { on: true })
             .expect("auto_pull on");
         let response = client
-            .call_with_timeout(OfficeRequestKind::SyncNow, Duration::from_secs(60))
+            .call_with_timeout(RequestKind::SyncNow, Duration::from_secs(60))
             .expect("the cycle must not abort on a failing project");
         let results = response
             .get("results")
@@ -6656,7 +6585,7 @@ mod qa_round4_tests {
         {
             let store = Store::open(
                 &crate::foundation::paths::database_path(&host.home),
-                office_migrations(),
+                migrations(),
             )
             .expect("store");
             let audited: i64 = store
@@ -6671,7 +6600,7 @@ mod qa_round4_tests {
         }
 
         client
-            .call(OfficeRequestKind::Shutdown { close_policy: None })
+            .call(RequestKind::Shutdown { close_policy: None })
             .expect("shutdown");
         drop(work);
         host.shutdown();
@@ -6681,7 +6610,7 @@ mod qa_round4_tests {
 #[cfg(test)]
 mod qa_round5_tests {
     use super::*;
-    use crate::office::OfficeClient;
+    use crate::server::Client;
     use std::process::Command;
     use std::time::{Duration, Instant};
 
@@ -6695,9 +6624,9 @@ mod qa_round5_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).expect("home");
-        let host = OfficeHost::open(&home).expect("host");
+        let host = Host::open(&home).expect("host");
         let server = host.serve_background();
-        let socket = home.join(OFFICE_SOCKET_NAME);
+        let socket = home.join(SOCKET_NAME);
         let deadline = Instant::now() + Duration::from_secs(5);
         while !socket.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
@@ -6706,12 +6635,12 @@ mod qa_round5_tests {
     }
 
     impl RunningHost {
-        fn client(&self) -> OfficeClient {
-            OfficeClient::connect(&self.home).expect("client")
+        fn client(&self) -> Client {
+            Client::connect(&self.home).expect("client")
         }
         fn shutdown(self) {
-            if let Ok(mut client) = OfficeClient::connect(&self.home) {
-                let _ = client.call(OfficeRequestKind::Shutdown { close_policy: None });
+            if let Ok(mut client) = Client::connect(&self.home) {
+                let _ = client.call(RequestKind::Shutdown { close_policy: None });
             }
             let _ = self.server.join();
             drop(self.dir);
@@ -6762,7 +6691,7 @@ mod qa_round5_tests {
         {
             let store = Store::open(
                 &crate::foundation::paths::database_path(&host.home),
-                office_migrations(),
+                migrations(),
             )
             .expect("store");
             let registry = crate::projects::ProjectRegistry::new(&store);
@@ -6772,10 +6701,10 @@ mod qa_round5_tests {
 
         let mut client = host.client();
         client
-            .call(OfficeRequestKind::SetAutoPull { on: true })
+            .call(RequestKind::SetAutoPull { on: true })
             .expect("auto_pull on");
         let response = client
-            .call_with_timeout(OfficeRequestKind::SyncNow, Duration::from_secs(60))
+            .call_with_timeout(RequestKind::SyncNow, Duration::from_secs(60))
             .expect("the cycle must not abort on a failing project");
         let results = response
             .get("results")
@@ -6800,7 +6729,7 @@ mod qa_round5_tests {
         {
             let store = Store::open(
                 &crate::foundation::paths::database_path(&host.home),
-                office_migrations(),
+                migrations(),
             )
             .expect("store");
             let audited: i64 = store
@@ -6815,7 +6744,7 @@ mod qa_round5_tests {
         }
 
         client
-            .call(OfficeRequestKind::Shutdown { close_policy: None })
+            .call(RequestKind::Shutdown { close_policy: None })
             .expect("shutdown");
         drop(work);
         host.shutdown();
@@ -6826,7 +6755,7 @@ mod qa_round5_tests {
     /// must answer within 2s — Ping never takes the store mutex so it
     /// could pass even with the lock held for 30s.
     #[test]
-    fn office_stays_responsive_around_slow_sync() {
+    fn server_stays_responsive_around_slow_sync() {
         let host = start_host();
         let repo = host.dir.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
@@ -6888,7 +6817,7 @@ mod qa_round5_tests {
         {
             let store = Store::open(
                 &crate::foundation::paths::database_path(&host.home),
-                office_migrations(),
+                migrations(),
             )
             .expect("store");
             crate::projects::ProjectRegistry::new(&store)
@@ -6937,17 +6866,16 @@ mod qa_round5_tests {
 
         let sync_home = host.home.clone();
         let syncer = std::thread::spawn(move || {
-            let mut c = OfficeClient::connect(&sync_home).expect("sync client");
-            c.call_with_timeout(OfficeRequestKind::SyncNow, Duration::from_secs(120))
+            let mut c = Client::connect(&sync_home).expect("sync client");
+            c.call_with_timeout(RequestKind::SyncNow, Duration::from_secs(120))
         });
 
         let deadline = Instant::now() + Duration::from_secs(12);
         let mut answered = false;
         while Instant::now() < deadline {
-            if let Ok(mut c) = OfficeClient::connect(&host.home) {
+            if let Ok(mut c) = Client::connect(&host.home) {
                 let started = Instant::now();
-                let result =
-                    c.call_with_timeout(OfficeRequestKind::RecoveryList, Duration::from_secs(2));
+                let result = c.call_with_timeout(RequestKind::RecoveryList, Duration::from_secs(2));
                 let elapsed = started.elapsed();
                 if result.is_ok() {
                     assert!(
@@ -6976,9 +6904,9 @@ mod qa_round5_tests {
         unsafe {
             std::env::set_var("PATH", saved_path);
         }
-        let mut client = OfficeClient::connect(&host.home).expect("client after");
+        let mut client = Client::connect(&host.home).expect("client after");
         client
-            .call(OfficeRequestKind::Shutdown { close_policy: None })
+            .call(RequestKind::Shutdown { close_policy: None })
             .expect("shutdown");
         host.shutdown();
     }

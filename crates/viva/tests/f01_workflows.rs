@@ -141,7 +141,7 @@ fn unscoped_grant_cannot_authorize_a_task_workflow() {
 fn cli_resume_rejects_dirty_checkout_and_missing_cwd() {
     use std::process::Command;
     let dir = tempfile::TempDir::new().unwrap();
-    let home = dir.path().join("office");
+    let home = dir.path().join("viva-home");
     let repo = dir.path().join("repo");
     std::fs::create_dir(&repo).unwrap();
     let git = |args: &[&str]| {

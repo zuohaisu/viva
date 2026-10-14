@@ -18,11 +18,9 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crate::foundation::error::{OfficeError, OfficeResult};
-use crate::office::OFFICE_SOCKET_NAME;
-use crate::office::protocol::{
-    OfficeRequest, OfficeRequestKind, OfficeResponse, new_request, round_trip_within,
-};
+use crate::foundation::error::{Error, Result};
+use crate::server::SOCKET_NAME;
+use crate::server::protocol::{Request, RequestKind, Response, new_request, round_trip_within};
 
 /// How long `ensure_server` waits for a freshly spawned server to bind its
 /// socket before declaring the start failed.
@@ -32,21 +30,21 @@ const START_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// One connected client session. Requests are synchronous round trips; the
 /// server handles each connection on its own thread.
-pub struct OfficeClient {
+pub struct Client {
     stream: UnixStream,
     home: std::path::PathBuf,
     last_activity: Instant,
     reconnect: bool,
 }
 
-impl OfficeClient {
+impl Client {
     /// Connect to the healthy host at `home`. Fails honestly when the
     /// socket is absent or wedged — use [`ensure_server`] for the
     /// spawn-and-wait behavior.
-    pub fn connect(home: &Path) -> OfficeResult<Self> {
-        let socket_path = home.join(OFFICE_SOCKET_NAME);
+    pub fn connect(home: &Path) -> Result<Self> {
+        let socket_path = home.join(SOCKET_NAME);
         if !socket_path.exists() {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "no active office server in {} (start one with `viva server`)",
                 home.display()
             )));
@@ -59,9 +57,9 @@ impl OfficeClient {
             reconnect: false,
         };
         // Prove the peer is a healthy host before handing out the session.
-        let response = client.call(OfficeRequestKind::Ping)?;
+        let response = client.call(RequestKind::Ping)?;
         if response.get("pid").is_none() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "socket answered but the host handshake failed; refusing to attach".into(),
             ));
         }
@@ -71,13 +69,13 @@ impl OfficeClient {
     /// Connect, spawning a detached resident server first when none is
     /// running. The spawned server outlives this process by construction:
     /// its own process group, its output in `server.log`.
-    pub fn ensure_server(home: &Path) -> OfficeResult<Self> {
-        let socket_path = home.join(OFFICE_SOCKET_NAME);
+    pub fn ensure_server(home: &Path) -> Result<Self> {
+        let socket_path = home.join(SOCKET_NAME);
         if socket_path.exists() {
-            match OfficeClient::connect(home) {
+            match Client::connect(home) {
                 Ok(client) => return Ok(client),
                 Err(err) => {
-                    return Err(OfficeError::Validation(format!(
+                    return Err(Error::Validation(format!(
                         "socket {} exists but no healthy host answered ({}); \
                          inspect the wedged server first — it will not be killed blindly",
                         socket_path.display(),
@@ -90,12 +88,12 @@ impl OfficeClient {
         let deadline = Instant::now() + SERVER_START_TIMEOUT;
         loop {
             if socket_path.exists() {
-                if let Ok(client) = OfficeClient::connect(home) {
+                if let Ok(client) = Client::connect(home) {
                     return Ok(client);
                 }
             }
             if Instant::now() >= deadline {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "the spawned server did not bind {} within {SERVER_START_TIMEOUT:?}; \
                      check {}/server.log",
                     socket_path.display(),
@@ -108,17 +106,13 @@ impl OfficeClient {
 
     /// A separate socket for background view/input work; never clone a stream
     /// whose request/response correlation belongs to another thread.
-    pub fn independent(&self) -> OfficeResult<Self> {
+    pub fn independent(&self) -> Result<Self> {
         Self::connect(&self.home)
     }
     /// The host bounds an idle connection at 10s. Reconnect BEFORE sending
     /// after 8s idle. A transport failure marks the socket for the NEXT call;
     /// it never retries an already sent, possibly applied mutation.
-    fn exchange(
-        &mut self,
-        request: &OfficeRequest,
-        timeout: Duration,
-    ) -> OfficeResult<OfficeResponse> {
+    fn exchange(&mut self, request: &Request, timeout: Duration) -> Result<Response> {
         if self.reconnect || self.last_activity.elapsed() >= Duration::from_secs(8) {
             *self = Self::connect(&self.home)?;
         }
@@ -129,27 +123,27 @@ impl OfficeClient {
     }
     /// One request → result value, or the server's error text as a
     /// validation error.
-    pub fn call(&mut self, kind: OfficeRequestKind) -> OfficeResult<serde_json::Value> {
+    pub fn call(&mut self, kind: RequestKind) -> Result<serde_json::Value> {
         self.call_request(new_request(kind))
     }
 
     /// [`Self::call`] with a pre-built request (grant fields set).
-    pub fn call_request(&mut self, request: OfficeRequest) -> OfficeResult<serde_json::Value> {
-        let OfficeResponse {
+    pub fn call_request(&mut self, request: Request) -> Result<serde_json::Value> {
+        let Response {
             ok, result, error, ..
-        } = self.exchange(&request, crate::office::protocol::IO_TIMEOUT)?;
+        } = self.exchange(&request, crate::server::protocol::IO_TIMEOUT)?;
         if ok {
             Ok(result.unwrap_or(serde_json::Value::Null))
         } else {
-            Err(OfficeError::Validation(
+            Err(Error::Validation(
                 error.unwrap_or_else(|| "rejected without a reason".into()),
             ))
         }
     }
 
     /// Raw access for callers that need the response envelope (rare).
-    pub fn round_trip_raw(&mut self, request: &OfficeRequest) -> OfficeResult<OfficeResponse> {
-        self.exchange(request, crate::office::protocol::IO_TIMEOUT)
+    pub fn round_trip_raw(&mut self, request: &Request) -> Result<Response> {
+        self.exchange(request, crate::server::protocol::IO_TIMEOUT)
     }
 
     /// One request with an explicit read budget. The budget is carried
@@ -158,9 +152,9 @@ impl OfficeClient {
     /// sync errored at the client at 10.03s while the server succeeded).
     pub fn call_with_timeout(
         &mut self,
-        kind: OfficeRequestKind,
+        kind: RequestKind,
         read_timeout: std::time::Duration,
-    ) -> OfficeResult<serde_json::Value> {
+    ) -> Result<serde_json::Value> {
         self.call_request_with_timeout(new_request(kind), read_timeout)
     }
 
@@ -168,16 +162,16 @@ impl OfficeClient {
     /// intact).
     pub fn call_request_with_timeout(
         &mut self,
-        request: OfficeRequest,
+        request: Request,
         read_timeout: std::time::Duration,
-    ) -> OfficeResult<serde_json::Value> {
-        let OfficeResponse {
+    ) -> Result<serde_json::Value> {
+        let Response {
             ok, result, error, ..
         } = self.exchange(&request, read_timeout)?;
         if ok {
             Ok(result.unwrap_or(serde_json::Value::Null))
         } else {
-            Err(OfficeError::Validation(
+            Err(Error::Validation(
                 error.unwrap_or_else(|| "rejected without a reason".into()),
             ))
         }
@@ -188,14 +182,14 @@ impl OfficeClient {
 /// death signals nothing), stdin dropped, stdout+stderr appended to
 /// `server.log` in the 0700 home. Returns once the spawn is handed to the
 /// OS — readiness is the caller's polling job.
-fn spawn_detached_server(home: &Path, extra_args: &[&str]) -> OfficeResult<()> {
+fn spawn_detached_server(home: &Path, extra_args: &[&str]) -> Result<()> {
     spawn_detached_server_from(home, &std::env::current_exe()?, extra_args)
 }
 
 /// [`spawn_detached_server`] with an explicit entry point. The update flow
 /// passes the freshly installed wrapper/binary: the updating process itself
 /// is the OLD generation, and its on-disk executable has just been replaced.
-fn spawn_detached_server_from(home: &Path, entry: &Path, extra_args: &[&str]) -> OfficeResult<()> {
+fn spawn_detached_server_from(home: &Path, entry: &Path, extra_args: &[&str]) -> Result<()> {
     let log_path = home.join("server.log");
     let log = std::fs::OpenOptions::new()
         .create(true)
@@ -217,16 +211,16 @@ fn spawn_detached_server_from(home: &Path, entry: &Path, extra_args: &[&str]) ->
         // that dies with the attaching client (ADR 0012 decision 1).
         command.process_group(0);
     }
-    command.spawn().map_err(|e| {
-        OfficeError::Validation(format!("failed to spawn the resident server: {e}"))
-    })?;
+    command
+        .spawn()
+        .map_err(|e| Error::Validation(format!("failed to spawn the resident server: {e}")))?;
     Ok(())
 }
 
 /// A live-handoff restart (S3, issue #45): ask the running server to begin
 /// the handoff, spawn the resumed server detached, and wait until a new
 /// host answers on the control socket. Returns the new host's pid.
-pub fn restart_server(home: &Path) -> OfficeResult<u32> {
+pub fn restart_server(home: &Path) -> Result<u32> {
     restart_server_with(home, &std::env::current_exe()?)
 }
 
@@ -234,23 +228,21 @@ pub fn restart_server(home: &Path) -> OfficeResult<u32> {
 /// host. The update flow passes the entry it just installed and verified —
 /// the handover then IS the upgrade: the old generation hands its live
 /// terminals to the new version.
-pub fn restart_server_with(home: &Path, server_entry: &Path) -> OfficeResult<u32> {
+pub fn restart_server_with(home: &Path, server_entry: &Path) -> Result<u32> {
     crate::foundation::paths::ensure_private_dir(home)?;
     // The OLD server must be running; a restart never spawns anything.
     // Record its identity: during the handoff window the old host keeps
     // answering, and the resumed host REBINDS the same socket path within
     // milliseconds of the old one leaving - so "socket gone" is not a
     // usable phase boundary. The identity change is.
-    let mut client = OfficeClient::connect(home)?;
-    let before = client.call(OfficeRequestKind::Ping)?;
+    let mut client = Client::connect(home)?;
+    let before = client.call(RequestKind::Ping)?;
     let old_pid = before.get("pid").and_then(|p| p.as_u64());
-    let response = client.call(OfficeRequestKind::ServerRestart)?;
+    let response = client.call(RequestKind::ServerRestart)?;
     let handoff_socket = response
         .get("handoff_socket")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            OfficeError::Validation("restart response carried no handoff socket".into())
-        })?
+        .ok_or_else(|| Error::Validation("restart response carried no handoff socket".into()))?
         .to_string();
     let _ = handoff_socket; // the resumed server finds it under the home
     drop(client);
@@ -263,8 +255,8 @@ pub fn restart_server_with(home: &Path, server_entry: &Path) -> OfficeResult<u32
     // old host answering forever and times out honestly here.
     let deadline = Instant::now() + Duration::from_secs(45);
     loop {
-        if let Ok(mut client) = OfficeClient::connect(home) {
-            if let Ok(status) = client.call(OfficeRequestKind::Ping) {
+        if let Ok(mut client) = Client::connect(home) {
+            if let Ok(status) = client.call(RequestKind::Ping) {
                 if let Some(pid) = status.get("pid").and_then(|p| p.as_u64()) {
                     if Some(pid) != old_pid {
                         return Ok(pid as u32);
@@ -273,7 +265,7 @@ pub fn restart_server_with(home: &Path, server_entry: &Path) -> OfficeResult<u32
             }
         }
         if Instant::now() >= deadline {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "45s after a restart request the old host is still the one serving - the \
                  handoff failed (see the recovery records and server.log)"
                     .into(),
@@ -286,70 +278,64 @@ pub fn restart_server_with(home: &Path, server_entry: &Path) -> OfficeResult<u32
 #[cfg(test)]
 mod connection_tests {
     use super::*;
-    use crate::office::protocol::{read_message, write_message};
+    use crate::server::protocol::{read_message, write_message};
     use std::os::unix::net::UnixListener;
     #[test]
     fn expired_idle_socket_reconnects_but_an_ambiguous_mutation_is_never_replayed() {
         let home = tempfile::tempdir().unwrap();
-        let listener = UnixListener::bind(home.path().join(OFFICE_SOCKET_NAME)).unwrap();
+        let listener = UnixListener::bind(home.path().join(SOCKET_NAME)).unwrap();
         let worker = std::thread::spawn(move || {
             let (mut first, _) = listener.accept().unwrap();
-            let ping: OfficeRequest =
-                serde_json::from_str(&read_message(&mut first).unwrap()).unwrap();
+            let ping: Request = serde_json::from_str(&read_message(&mut first).unwrap()).unwrap();
             write_message(
                 &mut first,
-                &OfficeResponse::ok(ping.request_id, serde_json::json!({"pid":1})),
+                &Response::ok(ping.request_id, serde_json::json!({"pid":1})),
             )
             .unwrap();
             // Idle connection is deliberately closed; the next operation must
             // arrive on a fresh connection rather than the stale fd.
             drop(first);
             let (mut second, _) = listener.accept().unwrap();
-            let ping: OfficeRequest =
-                serde_json::from_str(&read_message(&mut second).unwrap()).unwrap();
-            assert!(matches!(ping.kind, OfficeRequestKind::Ping));
+            let ping: Request = serde_json::from_str(&read_message(&mut second).unwrap()).unwrap();
+            assert!(matches!(ping.kind, RequestKind::Ping));
             write_message(
                 &mut second,
-                &OfficeResponse::ok(ping.request_id, serde_json::json!({"pid":1})),
+                &Response::ok(ping.request_id, serde_json::json!({"pid":1})),
             )
             .unwrap();
-            let mutation: OfficeRequest =
+            let mutation: Request =
                 serde_json::from_str(&read_message(&mut second).unwrap()).unwrap();
-            assert!(matches!(mutation.kind, OfficeRequestKind::Workspace { .. }));
+            assert!(matches!(mutation.kind, RequestKind::Workspace { .. }));
             drop(second); // applied, but its response was lost
             let (mut third, _) = listener.accept().unwrap();
-            let ping: OfficeRequest =
-                serde_json::from_str(&read_message(&mut third).unwrap()).unwrap();
-            assert!(matches!(ping.kind, OfficeRequestKind::Ping));
+            let ping: Request = serde_json::from_str(&read_message(&mut third).unwrap()).unwrap();
+            assert!(matches!(ping.kind, RequestKind::Ping));
             write_message(
                 &mut third,
-                &OfficeResponse::ok(ping.request_id, serde_json::json!({"pid":1})),
+                &Response::ok(ping.request_id, serde_json::json!({"pid":1})),
             )
             .unwrap();
-            let request: OfficeRequest =
+            let request: Request =
                 serde_json::from_str(&read_message(&mut third).unwrap()).unwrap();
-            assert!(matches!(request.kind, OfficeRequestKind::Status));
+            assert!(matches!(request.kind, RequestKind::Status));
             write_message(
                 &mut third,
-                &OfficeResponse::ok(request.request_id, serde_json::json!({"safe":true})),
+                &Response::ok(request.request_id, serde_json::json!({"safe":true})),
             )
             .unwrap();
         });
-        let mut client = OfficeClient::connect(home.path()).unwrap();
+        let mut client = Client::connect(home.path()).unwrap();
         client.last_activity = Instant::now() - Duration::from_secs(12);
         assert!(
             client
-                .call(OfficeRequestKind::Workspace {
+                .call(RequestKind::Workspace {
                     action: "new".into(),
                     value: Some("once".into()),
                     project_id: None
                 })
                 .is_err()
         );
-        assert_eq!(
-            client.call(OfficeRequestKind::Status).unwrap()["safe"],
-            true
-        );
+        assert_eq!(client.call(RequestKind::Status).unwrap()["safe"], true);
         worker.join().unwrap();
     }
 }

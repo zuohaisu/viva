@@ -121,7 +121,7 @@ fn scope_boundaries_keep_personal_knowledge_private() {
         .expect("project");
     registry
         .record(
-            "Office charter",
+            "Viva charter",
             Scope::Team,
             write_body(dir.path(), "charter.md", "session dies, resident persists"),
             "IDEA.md",
@@ -150,7 +150,7 @@ fn scope_boundaries_keep_personal_knowledge_private() {
         titles.contains(&"Samuel's private note"),
         "own personal entry visible: {titles:?}"
     );
-    assert!(titles.contains(&"Office charter"));
+    assert!(titles.contains(&"Viva charter"));
 
     let rook_view = registry
         .select_for_context(
@@ -167,7 +167,7 @@ fn scope_boundaries_keep_personal_knowledge_private() {
         !titles.contains(&"Samuel's private note"),
         "another member's personal entry must never leak: {titles:?}"
     );
-    assert!(titles.contains(&"Office charter"), "team scope is shared");
+    assert!(titles.contains(&"Viva charter"), "team scope is shared");
     assert!(
         titles.contains(&"Viva build steps"),
         "matching project scope is shared"

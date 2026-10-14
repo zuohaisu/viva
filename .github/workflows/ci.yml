@@ -48,6 +48,11 @@ jobs:
   # The Python product runtime is retired (V13, issue #22); the only Python
   # left is the acceptance tooling under tools/acceptance, which is
   # stdlib-only and tested with pytest.
+  #
+  # These tests drive the REAL viva binary (the peak scenario starts
+  # `viva server`), so this job builds it first. Before issue #66 it did not,
+  # and the two tests that need the binary were skipped on every CI run. A
+  # missing binary is now a test failure, not a skip.
   acceptance-tools:
     runs-on: ubuntu-latest
     steps:
@@ -59,8 +64,16 @@ jobs:
           python-version: "3.11"
       - name: Install pytest
         run: python -m pip install pytest
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+      - name: Build the real viva binary
+        run: cargo build -p viva
       - name: Run acceptance tooling tests
-        run: python -m pytest tests/acceptance -q
+        # -rs lists every skipped test with its reason in the log; the
+        # expected skip count is 0.
+        run: python -m pytest tests/acceptance -q -rs
 
   pi-extension:
     runs-on: ubuntu-latest
@@ -79,12 +92,22 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Build the real viva binary
         run: cargo build -p viva
-      - name: Typecheck + test the Pi extension (strict tsc + node:test)
+      - name: Install the Pi extension dependencies (pinned real Pi + typebox)
+        working-directory: extensions/pi
+        run: npm ci
+      - name: Typecheck the Pi extension (strict tsc, real Pi types)
+        working-directory: extensions/pi
+        run: npm run typecheck
+      # Issue #101: load the extension in the REAL Pi (the pinned version npm ci
+      # just installed, no global install, no model credentials) and check the
+      # tools it registers. Its own step so a failure names itself; `npm test`
+      # below runs it again with the rest of the suite.
+      - name: Load the extension in the real Pi (smoke)
+        working-directory: extensions/pi
+        run: npm run test:real-pi
+      - name: Test the Pi extension (node:test)
         working-directory: extensions/pi
         env:
           # The contract test runs the extension against this real binary.
           VIVA_BIN: ${{ github.workspace }}/target/debug/viva
-        run: |
-          npm ci
-          npm run typecheck
-          npm test
+        run: npm test

@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::git::cli::CliRunner;
 
 /// What one main-checkout sync actually did. Every variant is auditable
@@ -27,7 +27,7 @@ pub enum MainSyncOutcome {
 
 /// Fetch a task worktree. Fetch never touches the working tree — this is
 /// the only automatic thing a task worktree ever gets (V15-4 ruling).
-pub fn fetch_worktree(worktree_path: &Path, runner: &CliRunner) -> OfficeResult<()> {
+pub fn fetch_worktree(worktree_path: &Path, runner: &CliRunner) -> Result<()> {
     runner
         .git_ok(worktree_path, &["fetch", "--prune", "origin"])
         .map(|_| ())
@@ -35,11 +35,11 @@ pub fn fetch_worktree(worktree_path: &Path, runner: &CliRunner) -> OfficeResult<
 
 /// Fast-forward the main checkout: clean tree only, `--ff-only`, no
 /// force, no merge. A dirty tree is a skip (with reason), never a stash.
-pub fn sync_main_checkout(repo_root: &Path, runner: &CliRunner) -> OfficeResult<MainSyncOutcome> {
+pub fn sync_main_checkout(repo_root: &Path, runner: &CliRunner) -> Result<MainSyncOutcome> {
     let status = runner
         .git(repo_root, &["status", "--porcelain"])
         .map_err(|failure| {
-            OfficeError::Validation(format!(
+            Error::Validation(format!(
                 "git status failed in {}: {failure}",
                 repo_root.display()
             ))
@@ -51,7 +51,7 @@ pub fn sync_main_checkout(repo_root: &Path, runner: &CliRunner) -> OfficeResult<
     runner
         .git_ok(repo_root, &["pull", "--ff-only"])
         .map_err(|failure| {
-            OfficeError::Validation(format!(
+            Error::Validation(format!(
                 "git pull --ff-only failed (the tree was left exactly as it was): {failure}"
             ))
         })?;
@@ -73,7 +73,7 @@ pub fn ahead_behind(
     worktree_path: &Path,
     branch: &str,
     runner: &CliRunner,
-) -> OfficeResult<Option<(u32, u32)>> {
+) -> Result<Option<(u32, u32)>> {
     let upstream = format!("origin/{branch}");
     let range = format!("{upstream}...HEAD");
     let out = match runner.git(

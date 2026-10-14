@@ -62,8 +62,9 @@ are configuration, and every completion claim carries recorded evidence.
   integration: `viva memory …` adds member/project scope, provenance and
   recoverable archive over the Holographic provider in the user's local
   Hermes checkout (`unavailable` without it). There is no automatic recall
-  or write-back, the Pi memory tools wait on #101, and real-provider tests
-  are pending independent re-verification.
+  or write-back. Since #101 the Pi memory tools register against the real Pi
+  API, but they have not yet been exercised end to end in real Pi, and
+  real-provider tests are pending independent re-verification.
 - **Data preservation** — `viva data export --out <dir>` dumps every fact
   table read-only to JSON with a manifest. Historical Ticket Autopilot data
   is never read, written or migrated.
@@ -176,7 +177,7 @@ crates/viva/src/
   git/          worktrees (discover/create/adopt), read-only GitHub evidence
   knowledge/    sources, lifecycle, selection, usage evidence
   conversations/                        tree, forks, handoffs (V10)
-  office/       active host, control channel, reconciliation (V07)
+  server/       active host, control channel, reconciliation (V07)
   harness/      explicit launch combinations; Pi specialization (V09)
   tui/          shell, parallel-development workbench (V14), conversations
 extensions/pi/  the Pi member extension (TypeScript, independently tested)

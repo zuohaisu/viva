@@ -14,8 +14,16 @@
  * extension.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "../pi-api.ts";
-import { officeEnv, runEnvelope, toolText, type OfficeEnv } from "../lib.ts";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import {
+  officeEnv,
+  runEnvelope,
+  toolFailure,
+  toolSuccess,
+  type OfficeEnv,
+  type PiHost,
+} from "../lib.ts";
 
 interface NativeForkResult {
   sessionId: string;
@@ -27,6 +35,11 @@ interface NativeForkResult {
  * Pi versions, so this feature-detects the documented candidates and
  * reports honestly when none exists. Returns null when no fork API is
  * available — the caller must refuse, not improvise.
+ *
+ * In Pi 1.2.0 the tool context's `sessionManager` is read-only and has no
+ * fork method, so this returns null there and the fork tool refuses and
+ * proposes a handoff. That is the intended honest behaviour, not a gap to
+ * paper over; the cast below is the feature detection.
  */
 export async function tryNativeFork(ctx?: ExtensionContext): Promise<NativeForkResult | null> {
   const sm = (ctx as unknown as { sessionManager?: Record<string, unknown> })?.sessionManager;
@@ -48,37 +61,35 @@ export async function tryNativeFork(ctx?: ExtensionContext): Promise<NativeForkR
   return null;
 }
 
-export default function vivaConversations(pi: ExtensionAPI): void {
+export default function vivaConversations(pi: PiHost): void {
   const env: OfficeEnv | null = officeEnv(process.env);
   if (!env) return;
 
-  pi.registerTool("viva_conversations_fork", {
+  pi.registerTool({
+    name: "viva_conversations_fork",
+    label: "Viva conversation fork",
     description:
       "Fork the current conversation into a new branch: Pi forks natively first, then the office records the branch. Refuses when native fork is unavailable (use handoff).",
-    parameters: {
-      type: "object",
-      properties: {
-        display_name: { type: "string", description: "Office display name for the new branch." },
-        parent_node_id: { type: "string", description: "Office node id to branch from." },
+    parameters: Type.Object(
+      {
+        display_name: Type.String({ description: "Office display name for the new branch." }),
+        parent_node_id: Type.String({ description: "Office node id to branch from." }),
       },
-      required: ["display_name", "parent_node_id"],
-      additionalProperties: false,
-    },
-    execute: async (args, ctx) => {
-      const displayName = typeof args.display_name === "string" ? args.display_name : "";
-      const parentNode = typeof args.parent_node_id === "string" ? args.parent_node_id : "";
+      { additionalProperties: false },
+    ),
+    execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+      const displayName = params.display_name;
+      const parentNode = params.parent_node_id;
       if (!displayName.trim() || !parentNode.trim()) {
-        return { content: "fork needs a display name and a parent node id", isError: true };
+        return toolFailure("fork needs a display name and a parent node id");
       }
       // 1) Native fork FIRST. A fork the harness did not confirm is never
       //    recorded as an office fact.
       const native = await tryNativeFork(ctx);
       if (!native) {
-        return {
-          content:
-            "this Pi build exposes no native fork entry point; nothing was forked and nothing was recorded — use viva_conversations_handoff instead",
-          isError: true,
-        };
+        return toolFailure(
+          "this Pi build exposes no native fork entry point; nothing was forked and nothing was recorded — use viva_conversations_handoff instead",
+        );
       }
       // 2) Office record SECOND.
       try {
@@ -93,88 +104,91 @@ export default function vivaConversations(pi: ExtensionAPI): void {
           native.sessionId,
           ...(native.nodeId ? ["--native-node", native.nodeId] : []),
         ]);
-        return { content: toolText(payload) };
+        return toolSuccess(payload);
       } catch (err) {
         // The fork happened natively but the office record failed: say so
         // plainly instead of hiding either fact.
-        return {
-          content: `native fork succeeded (${native.sessionId}) but the office record failed: ${String(err)}`,
-          isError: true,
-        };
+        return toolFailure(
+          `native fork succeeded (${native.sessionId}) but the office record failed: ${String(err)}`,
+        );
       }
     },
   });
 
-  pi.registerTool("viva_conversations_rename", {
+  pi.registerTool({
+    name: "viva_conversations_rename",
+    label: "Viva conversation rename",
     description:
       "Rename a branch in the office (display name is office-owned metadata; the harness's own title stays untouched).",
-    parameters: {
-      type: "object",
-      properties: {
-        node_id: { type: "string" },
-        display_name: { type: "string" },
+    parameters: Type.Object(
+      {
+        node_id: Type.String(),
+        display_name: Type.String(),
       },
-      required: ["node_id", "display_name"],
-      additionalProperties: false,
-    },
-    execute: async (args) => {
-      const nodeId = typeof args.node_id === "string" ? args.node_id : "";
-      const displayName = typeof args.display_name === "string" ? args.display_name : "";
-      if (!nodeId.trim() || !displayName.trim()) {
-        return { content: "rename needs a node id and a display name", isError: true };
+      { additionalProperties: false },
+    ),
+    execute: async (_toolCallId, params) => {
+      if (!params.node_id.trim() || !params.display_name.trim()) {
+        return toolFailure("rename needs a node id and a display name");
       }
       try {
-        await runEnvelope(env, ["conversations", "rename", "--node", nodeId, "--name", displayName]);
-        return { content: `renamed to "${displayName}" in the office` };
+        await runEnvelope(env, [
+          "conversations",
+          "rename",
+          "--node",
+          params.node_id,
+          "--name",
+          params.display_name,
+        ]);
+        return toolSuccess(`renamed to "${params.display_name}" in the office`);
       } catch (err) {
-        return { content: `rename failed: ${String(err)}`, isError: true };
+        return toolFailure(`rename failed: ${String(err)}`);
       }
     },
   });
 
-  pi.registerTool("viva_conversations_handoff", {
+  pi.registerTool({
+    name: "viva_conversations_handoff",
+    label: "Viva conversation handoff",
     description:
       "Record a handoff of this conversation branch to another harness: identity, brief snapshot and a history reference travel; the original record stays traceable. No transcript conversion is promised.",
-    parameters: {
-      type: "object",
-      properties: {
-        node_id: { type: "string", description: "Office node id being handed off." },
-        to_harness: { type: "string", description: "Target harness name (e.g. codex)." },
-        capability: {
-          type: "string",
-          enum: ["native_fork", "handoff_only"],
-          description: "The target harness's declared fork capability.",
-        },
-        brief: { type: "string", description: "Brief snapshot carried over." },
-        task_id: { type: "string", description: "Optional task association." },
+    parameters: Type.Object(
+      {
+        node_id: Type.String({ description: "Office node id being handed off." }),
+        to_harness: Type.String({ description: "Target harness name (e.g. codex)." }),
+        capability: Type.Optional(
+          Type.Unsafe<"native_fork" | "handoff_only">({
+            type: "string",
+            enum: ["native_fork", "handoff_only"],
+            description: "The target harness's declared fork capability.",
+          }),
+        ),
+        brief: Type.Optional(Type.String({ description: "Brief snapshot carried over." })),
+        task_id: Type.Optional(Type.String({ description: "Optional task association." })),
       },
-      required: ["node_id", "to_harness"],
-      additionalProperties: false,
-    },
-    execute: async (args) => {
-      const nodeId = typeof args.node_id === "string" ? args.node_id : "";
-      const toHarness = typeof args.to_harness === "string" ? args.to_harness : "";
-      if (!nodeId.trim() || !toHarness.trim()) {
-        return { content: "handoff needs a node id and a target harness", isError: true };
+      { additionalProperties: false },
+    ),
+    execute: async (_toolCallId, params) => {
+      if (!params.node_id.trim() || !params.to_harness.trim()) {
+        return toolFailure("handoff needs a node id and a target harness");
       }
-      const capability = args.capability === "native_fork" ? "native_fork" : "handoff_only";
+      const capability = params.capability === "native_fork" ? "native_fork" : "handoff_only";
       const argv = [
         "conversations",
         "handoff",
         "--node",
-        nodeId,
+        params.node_id,
         "--to",
-        toHarness,
+        params.to_harness,
         "--capability",
         capability,
       ];
-      if (typeof args.brief === "string" && args.brief.trim()) argv.push("--brief", args.brief);
-      if (typeof args.task_id === "string" && args.task_id.trim()) argv.push("--task", args.task_id);
+      if (params.brief?.trim()) argv.push("--brief", params.brief);
+      if (params.task_id?.trim()) argv.push("--task", params.task_id);
       try {
-        const payload = await runEnvelope(env, argv);
-        return { content: toolText(payload) };
+        return toolSuccess(await runEnvelope(env, argv));
       } catch (err) {
-        return { content: `handoff not recorded: ${String(err)}`, isError: true };
+        return toolFailure(`handoff not recorded: ${String(err)}`);
       }
     },
   });

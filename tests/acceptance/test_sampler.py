@@ -16,7 +16,8 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from real_viva import REPO_ROOT, real_viva_binary
+
 sys.path.insert(0, str(REPO_ROOT / "tools" / "acceptance"))
 
 import sampler  # noqa: E402
@@ -116,9 +117,7 @@ def test_machine_profile_names_the_target() -> None:
 
 
 def test_slice_cli_workload_record_is_schema_valid(tmp_path: Path) -> None:
-    binary = REPO_ROOT / "target" / "debug" / "viva"
-    if not binary.exists():
-        pytest.skip("rust binary not built in this environment")
+    binary = real_viva_binary()  # fails, never skips, when the binary is missing
     record = sampler.make_record(
         workload=sampler.slice_cli_workload(binary, tmp_path / "home"),
         window_path=tmp_path / "window.lock",

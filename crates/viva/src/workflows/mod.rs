@@ -35,7 +35,7 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 use crate::authority::{Actor, AuthorityEngine, PROTECTED_ACTIONS};
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{GrantId, MemberId, TaskId, utc_now};
 use crate::foundation::store::{DOMAIN_WORKFLOWS, MigrationRegistry, Store};
 
@@ -268,33 +268,33 @@ impl WorkflowConfig {
         }
     }
 
-    fn validate(&self) -> OfficeResult<()> {
+    fn validate(&self) -> Result<()> {
         if self.name.trim().is_empty() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "workflow config name must not be empty".into(),
             ));
         }
         if self.steps.is_empty() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "a workflow needs at least one step".into(),
             ));
         }
         let ids: Vec<&str> = self.steps.iter().map(|s| s.step_id.as_str()).collect();
         for step in &self.steps {
             if step.step_id.trim().is_empty() || step.role.trim().is_empty() {
-                return Err(OfficeError::Validation(
+                return Err(Error::Validation(
                     "workflow steps need a step_id and a role".into(),
                 ));
             }
             if step.max_attempts == 0 {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "step `{}` needs a retry budget of at least 1",
                     step.step_id
                 )));
             }
             if let Some(action) = &step.action {
                 if PROTECTED_ACTIONS.contains(&action.as_str()) {
-                    return Err(OfficeError::Validation(format!(
+                    return Err(Error::Validation(format!(
                         "step `{}` names protected action `{action}` — no workflow may \
                          carry a protected action (merge/approve are owner-only, never \
                          workflow steps)",
@@ -303,7 +303,7 @@ impl WorkflowConfig {
                 }
             }
             if ids.iter().filter(|id| **id == step.step_id).count() > 1 {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "duplicate step id `{}`",
                     step.step_id
                 )));
@@ -311,13 +311,13 @@ impl WorkflowConfig {
             for (field, target) in [("on_pass", &step.on_pass), ("on_fail", &step.on_fail)] {
                 if let Some(target) = target {
                     if !ids.contains(&target.as_str()) {
-                        return Err(OfficeError::Validation(format!(
+                        return Err(Error::Validation(format!(
                             "step `{}` {field} targets unknown step `{target}`",
                             step.step_id
                         )));
                     }
                     if field == "on_fail" && target == &step.step_id {
-                        return Err(OfficeError::Validation(format!(
+                        return Err(Error::Validation(format!(
                             "step `{}` on_fail must differ from itself",
                             step.step_id
                         )));
@@ -481,7 +481,7 @@ impl<'a> WorkflowEngine<'a> {
     /// Register a workflow configuration. Protected actions are rejected
     /// here, structurally: no grant, no flag and no config can put a merge
     /// or an approval inside a workflow.
-    pub fn register_config(&self, config: &WorkflowConfig) -> OfficeResult<String> {
+    pub fn register_config(&self, config: &WorkflowConfig) -> Result<String> {
         config.validate()?;
         let existing: Option<String> = self
             .store
@@ -493,7 +493,7 @@ impl<'a> WorkflowEngine<'a> {
             )
             .optional()?;
         if existing.is_some() {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "workflow config `{}` is already registered",
                 config.name
             )));
@@ -512,7 +512,7 @@ impl<'a> WorkflowEngine<'a> {
         Ok(config_id)
     }
 
-    pub fn config_by_name(&self, name: &str) -> OfficeResult<Option<(String, WorkflowConfig)>> {
+    pub fn config_by_name(&self, name: &str) -> Result<Option<(String, WorkflowConfig)>> {
         let row: Option<(String, String)> = self
             .store
             .connection()
@@ -537,17 +537,17 @@ impl<'a> WorkflowEngine<'a> {
         task_id: &TaskId,
         config_name: &str,
         head_sha: impl Into<String>,
-    ) -> OfficeResult<WorkflowRun> {
+    ) -> Result<WorkflowRun> {
         self.require_task(task_id)?;
-        let (config_id, _) =
-            self.config_by_name(config_name)?
-                .ok_or_else(|| OfficeError::NotFound {
-                    entity: "workflow config",
-                    id: config_name.to_string(),
-                })?;
+        let (config_id, _) = self
+            .config_by_name(config_name)?
+            .ok_or_else(|| Error::NotFound {
+                entity: "workflow config",
+                id: config_name.to_string(),
+            })?;
         let head_sha = validate_head_sha(head_sha)?;
         if let Some(active) = self.active_run_for_task(task_id)? {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "task `{}` already has an active workflow run `{}` ({}) — resolve it \
                  (complete or abort) before starting another",
                 task_id,
@@ -587,7 +587,7 @@ impl<'a> WorkflowEngine<'a> {
     }
 
     /// The one active (running/paused) run of a task, if any.
-    pub fn active_run_for_task(&self, task_id: &TaskId) -> OfficeResult<Option<WorkflowRun>> {
+    pub fn active_run_for_task(&self, task_id: &TaskId) -> Result<Option<WorkflowRun>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT run_id, task_id, config_id, status, current_step, head_sha,
                     pause_reason, created_at, updated_at
@@ -598,7 +598,7 @@ impl<'a> WorkflowEngine<'a> {
         Ok(row)
     }
 
-    pub fn get_run(&self, run_id: &str) -> OfficeResult<Option<WorkflowRun>> {
+    pub fn get_run(&self, run_id: &str) -> Result<Option<WorkflowRun>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT run_id, task_id, config_id, status, current_step, head_sha,
                     pause_reason, created_at, updated_at
@@ -608,8 +608,8 @@ impl<'a> WorkflowEngine<'a> {
         Ok(row)
     }
 
-    fn require_run(&self, run_id: &str) -> OfficeResult<WorkflowRun> {
-        self.get_run(run_id)?.ok_or_else(|| OfficeError::NotFound {
+    fn require_run(&self, run_id: &str) -> Result<WorkflowRun> {
+        self.get_run(run_id)?.ok_or_else(|| Error::NotFound {
             entity: "workflow run",
             id: run_id.to_string(),
         })
@@ -619,14 +619,10 @@ impl<'a> WorkflowEngine<'a> {
     /// after a fix commit). Records keep their old head bindings — history
     /// shows exactly which head every earlier result belonged to. Nothing
     /// is replayed: the current step simply owes fresh evidence.
-    pub fn resume_paused(
-        &self,
-        run_id: &str,
-        new_head_sha: Option<String>,
-    ) -> OfficeResult<WorkflowRun> {
+    pub fn resume_paused(&self, run_id: &str, new_head_sha: Option<String>) -> Result<WorkflowRun> {
         let mut run = self.require_run(run_id)?;
         if run.status != RunStatus::Paused {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "run `{}` is {}; only a paused run can be resumed",
                 run_id,
                 run.status.as_str()
@@ -650,16 +646,14 @@ impl<'a> WorkflowEngine<'a> {
     }
 
     /// Abort a run. Abortion is recorded; it completes nothing.
-    pub fn abort_run(&self, run_id: &str, reason: impl Into<String>) -> OfficeResult<()> {
+    pub fn abort_run(&self, run_id: &str, reason: impl Into<String>) -> Result<()> {
         let reason = reason.into();
         if reason.trim().is_empty() {
-            return Err(OfficeError::Validation(
-                "aborting a run requires a reason".into(),
-            ));
+            return Err(Error::Validation("aborting a run requires a reason".into()));
         }
         let run = self.require_run(run_id)?;
         if matches!(run.status, RunStatus::Completed | RunStatus::Aborted) {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "run `{}` is already {}",
                 run_id,
                 run.status.as_str()
@@ -687,23 +681,23 @@ impl<'a> WorkflowEngine<'a> {
         actor: &MemberId,
         passed: bool,
         evidence: Vec<StepEvidence>,
-    ) -> OfficeResult<StepAdvance> {
+    ) -> Result<StepAdvance> {
         let run = self.require_run(run_id)?;
         if run.status != RunStatus::Running {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "run `{}` is {}; results are recorded on running runs only",
                 run_id,
                 run.status.as_str()
             )));
         }
-        let (_, config) =
-            self.config_by_id(&run.config_id)?
-                .ok_or_else(|| OfficeError::NotFound {
-                    entity: "workflow config",
-                    id: run.config_id.clone(),
-                })?;
+        let (_, config) = self
+            .config_by_id(&run.config_id)?
+            .ok_or_else(|| Error::NotFound {
+                entity: "workflow config",
+                id: run.config_id.clone(),
+            })?;
         let step = config.steps.get(run.current_step).ok_or_else(|| {
-            OfficeError::Validation(format!(
+            Error::Validation(format!(
                 "run `{}` current step index {} is outside its config ({} steps) — \
                  the config changed after the run started",
                 run_id,
@@ -716,7 +710,7 @@ impl<'a> WorkflowEngine<'a> {
             if let Some(head) = &item.head_sha {
                 let head = validate_head_sha(head)?;
                 if !same_commit(&head, &run.head_sha) {
-                    return Err(OfficeError::Validation(format!(
+                    return Err(Error::Validation(format!(
                         "evidence for step `{}` was bound to head {head}, but run `{}` is \
                          bound to {} — results only apply to the head they were produced on",
                         step.step_id, run_id, run.head_sha
@@ -839,7 +833,7 @@ impl<'a> WorkflowEngine<'a> {
         run: &WorkflowRun,
         step: &WorkflowStep,
         evidence: &[StepEvidence],
-    ) -> OfficeResult<()> {
+    ) -> Result<()> {
         let needs_authorization = step
             .action
             .as_deref()
@@ -847,7 +841,7 @@ impl<'a> WorkflowEngine<'a> {
         for requirement in &step.requires_evidence {
             let covered = evidence.iter().any(|item| item.kind == requirement.kind);
             if !covered {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "step `{}` cannot pass without `{}` evidence — claims are not evidence",
                     step.step_id, requirement.kind
                 )));
@@ -857,7 +851,7 @@ impl<'a> WorkflowEngine<'a> {
                     .iter()
                     .any(|item| item.kind == requirement.kind && item.head_sha.is_some());
                 if !bound {
-                    return Err(OfficeError::Validation(format!(
+                    return Err(Error::Validation(format!(
                         "step `{}` `{}` evidence must carry the head SHA it was produced on",
                         step.step_id, requirement.kind
                     )));
@@ -870,27 +864,27 @@ impl<'a> WorkflowEngine<'a> {
                 .iter()
                 .find(|item| item.kind == "authorization")
                 .ok_or_else(|| {
-                    OfficeError::Validation(format!(
+                    Error::Validation(format!(
                         "step `{}` performs the world-mutating action `{action}` — passing it \
                          requires authorization evidence citing the owner grant",
                         step.step_id
                     ))
                 })?;
             let grant_id = item.grant_id.as_deref().ok_or_else(|| {
-                OfficeError::Validation(format!(
+                Error::Validation(format!(
                     "step `{}` authorization evidence must cite the owner grant id",
                     step.step_id
                 ))
             })?;
             let grant_id = GrantId::from_str(grant_id).map_err(|err| {
-                OfficeError::Validation(format!("authorization grant id invalid: {err}"))
+                Error::Validation(format!("authorization grant id invalid: {err}"))
             })?;
             let engine = AuthorityEngine::new(self.store);
             // An office-wide grant may authorize other actions, but cannot
             // attest that THIS task was authorized for a dispatch step.
             let grant = engine.require_grant(&grant_id)?;
             if grant.task_id.as_ref() != Some(&run.task_id) {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "step `{}` authorization rejected: grant must name this run's task",
                     step.step_id
                 )));
@@ -904,7 +898,7 @@ impl<'a> WorkflowEngine<'a> {
                 Some(&run.task_id),
             )?;
             if let Err(reason) = decision {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "step `{}` authorization rejected: {reason}",
                     step.step_id
                 )));
@@ -917,14 +911,14 @@ impl<'a> WorkflowEngine<'a> {
 
     /// The full, recoverable process record: run, its config as data, and
     /// every appended attempt with its evidence and head bindings.
-    pub fn run_history(&self, run_id: &str) -> OfficeResult<RunHistory> {
+    pub fn run_history(&self, run_id: &str) -> Result<RunHistory> {
         let run = self.require_run(run_id)?;
-        let (_, config) =
-            self.config_by_id(&run.config_id)?
-                .ok_or_else(|| OfficeError::NotFound {
-                    entity: "workflow config",
-                    id: run.config_id.clone(),
-                })?;
+        let (_, config) = self
+            .config_by_id(&run.config_id)?
+            .ok_or_else(|| Error::NotFound {
+                entity: "workflow config",
+                id: run.config_id.clone(),
+            })?;
         let mut stmt = self.store.connection().prepare(
             "SELECT record_id, run_id, step_index, step_id, role, actor_member_id,
                     outcome, evidence_json, recorded_at
@@ -993,7 +987,7 @@ impl<'a> WorkflowEngine<'a> {
 
     // -- Helpers ------------------------------------------------------------
 
-    fn config_by_id(&self, config_id: &str) -> OfficeResult<Option<(String, WorkflowConfig)>> {
+    fn config_by_id(&self, config_id: &str) -> Result<Option<(String, WorkflowConfig)>> {
         let row: Option<(String, String)> = self
             .store
             .connection()
@@ -1007,12 +1001,12 @@ impl<'a> WorkflowEngine<'a> {
             .transpose()
     }
 
-    fn step_index_of(&self, config: &WorkflowConfig, step_id: &str) -> OfficeResult<usize> {
+    fn step_index_of(&self, config: &WorkflowConfig, step_id: &str) -> Result<usize> {
         config
             .steps
             .iter()
             .position(|s| s.step_id == step_id)
-            .ok_or_else(|| OfficeError::Validation(format!("unknown step `{step_id}`")))
+            .ok_or_else(|| Error::Validation(format!("unknown step `{step_id}`")))
     }
 
     fn count_attempts_in_tx(
@@ -1020,7 +1014,7 @@ impl<'a> WorkflowEngine<'a> {
         tx: &rusqlite::Transaction<'_>,
         run_id: &str,
         step_index: usize,
-    ) -> OfficeResult<u32> {
+    ) -> Result<u32> {
         let n: i64 = tx.query_row(
             "SELECT COUNT(*) FROM workflow_step_records WHERE run_id = ?1 AND step_index = ?2",
             rusqlite::params![run_id, step_index as i64],
@@ -1029,7 +1023,7 @@ impl<'a> WorkflowEngine<'a> {
         Ok(n as u32)
     }
 
-    fn require_task(&self, task_id: &TaskId) -> OfficeResult<()> {
+    fn require_task(&self, task_id: &TaskId) -> Result<()> {
         let exists: Option<String> = self
             .store
             .connection()
@@ -1039,18 +1033,18 @@ impl<'a> WorkflowEngine<'a> {
                 |row| row.get(0),
             )
             .optional()?;
-        exists.map(|_| ()).ok_or_else(|| OfficeError::NotFound {
+        exists.map(|_| ()).ok_or_else(|| Error::NotFound {
             entity: "task",
             id: task_id.to_string(),
         })
     }
 }
 
-fn validate_head_sha(head_sha: impl Into<String>) -> OfficeResult<String> {
+fn validate_head_sha(head_sha: impl Into<String>) -> Result<String> {
     let head_sha = head_sha.into();
     let trimmed = head_sha.trim();
     if trimmed.len() < 7 || trimmed.len() > 64 || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "`{trimmed}` is not a git head SHA (expected 7–64 hex characters)"
         )));
     }

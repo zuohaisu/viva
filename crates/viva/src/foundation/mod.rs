@@ -19,7 +19,7 @@ pub mod paths;
 pub mod records;
 pub mod store;
 
-pub use error::{OfficeError, OfficeResult};
+pub use error::{Error, Result};
 pub use store::{Domain, FrozenMigrations, MigrationRegistry};
 
 use std::sync::OnceLock;

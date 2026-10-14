@@ -18,7 +18,7 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{ChannelId, ExecutionId, GrantId, RequestId, TerminalId, utc_now};
 use crate::foundation::store::Store;
 
@@ -116,13 +116,13 @@ impl ChannelRegistry {
     }
 
     /// Revoke a live channel. Revoked channels reject every further request.
-    pub fn revoke(&mut self, channel_id: &ChannelId) -> OfficeResult<()> {
+    pub fn revoke(&mut self, channel_id: &ChannelId) -> Result<()> {
         match self.channels.get_mut(channel_id.as_str()) {
             Some(channel) => {
                 channel.revoked = true;
                 Ok(())
             }
-            None => Err(OfficeError::NotFound {
+            None => Err(Error::NotFound {
                 entity: "channel",
                 id: channel_id.to_string(),
             }),
@@ -263,7 +263,7 @@ impl ControlRequest {
         self
     }
 
-    pub fn payload_size(&self) -> OfficeResult<usize> {
+    pub fn payload_size(&self) -> Result<usize> {
         Ok(serde_json::to_vec(&self.payload)?.len())
     }
 }
@@ -316,7 +316,7 @@ impl<'a> ControlDispatcher<'a> {
     /// Validate and record one request. Never panics on bad input — bad input
     /// is a rejection. Replay detection runs first: a request id whose
     /// outcome is already recorded replays that outcome without re-validation.
-    pub fn submit(&self, request: &ControlRequest) -> OfficeResult<ControlOutcome> {
+    pub fn submit(&self, request: &ControlRequest) -> Result<ControlOutcome> {
         if let Some(existing) = self.lookup(&request.request_id)? {
             // Idempotency by request id: the recorded outcome stands.
             return Ok(ControlOutcome::Replayed {
@@ -373,11 +373,7 @@ impl<'a> ControlDispatcher<'a> {
         })
     }
 
-    fn reject(
-        &self,
-        request: &ControlRequest,
-        reason: RejectionReason,
-    ) -> OfficeResult<ControlOutcome> {
+    fn reject(&self, request: &ControlRequest, reason: RejectionReason) -> Result<ControlOutcome> {
         // A conflict rejection must not claim the disputed key for itself —
         // the key already belongs to the original request's row.
         let strip_key = matches!(reason, RejectionReason::IdempotencyConflict { .. });
@@ -395,7 +391,7 @@ impl<'a> ControlDispatcher<'a> {
         rejection: Option<RejectionReason>,
         result_json: Option<&str>,
         strip_key: bool,
-    ) -> OfficeResult<()> {
+    ) -> Result<()> {
         self.store.connection().execute(
             "INSERT INTO control_requests(
                 request_id, idempotency_key, caller_channel, caller_role, kind,
@@ -420,7 +416,7 @@ impl<'a> ControlDispatcher<'a> {
         Ok(())
     }
 
-    fn lookup(&self, request_id: &RequestId) -> OfficeResult<Option<StoredControlRequest>> {
+    fn lookup(&self, request_id: &RequestId) -> Result<Option<StoredControlRequest>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT request_id, idempotency_key, caller_channel, caller_role, kind,
                     status, rejection, result_json, received_at
@@ -430,7 +426,7 @@ impl<'a> ControlDispatcher<'a> {
         Ok(row)
     }
 
-    fn lookup_by_key(&self, key: &str) -> OfficeResult<Option<StoredControlRequest>> {
+    fn lookup_by_key(&self, key: &str) -> Result<Option<StoredControlRequest>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT request_id, idempotency_key, caller_channel, caller_role, kind,
                     status, rejection, result_json, received_at

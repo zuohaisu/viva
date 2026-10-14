@@ -12,7 +12,7 @@ use tempfile::TempDir;
 use viva::authority::{AuthorityEngine, GrantMode};
 use viva::foundation::ids::MemberId;
 use viva::members::{MemberBinding, MemberRegistry};
-use viva::office::{self, OfficeHost, OfficeRequestKind};
+use viva::server::{self, Host, RequestKind};
 use viva::tasks::TaskRegistry;
 
 // ---------------------------------------------------------------------------
@@ -34,12 +34,12 @@ fn socket_ready(home: &std::path::Path) -> bool {
     // A real connect, not a file check: the file can exist while the host
     // is still claiming (or after it died), and only a live listener makes
     // the channel usable.
-    std::os::unix::net::UnixStream::connect(home.join(office::OFFICE_SOCKET_NAME)).is_ok()
+    std::os::unix::net::UnixStream::connect(home.join(server::SOCKET_NAME)).is_ok()
 }
 
-fn send(home: &std::path::Path, kind: OfficeRequestKind) -> Result<Value, String> {
+fn send(home: &std::path::Path, kind: RequestKind) -> Result<Value, String> {
     let response =
-        office::send_request(home, office::new_request(kind)).map_err(|e| e.to_string())?;
+        server::send_request(home, server::new_request(kind)).map_err(|e| e.to_string())?;
     if response.ok {
         Ok(response.result.unwrap_or(Value::Null))
     } else {
@@ -57,7 +57,7 @@ struct Seed {
 fn seed(home: &std::path::Path, task_goal: &str) -> Seed {
     let store = viva::foundation::store::Store::open(
         &viva::foundation::paths::database_path(home),
-        office::office_migrations(),
+        server::migrations(),
     )
     .expect("seed store");
     let members = MemberRegistry::new(&store);
@@ -98,8 +98,8 @@ fn seed(home: &std::path::Path, task_goal: &str) -> Seed {
     }
 }
 
-fn dispatch_request(seed: &Seed, request_key: &str, argv: Vec<String>) -> OfficeRequestKind {
-    OfficeRequestKind::Dispatch {
+fn dispatch_request(seed: &Seed, request_key: &str, argv: Vec<String>) -> RequestKind {
+    RequestKind::Dispatch {
         task_id: seed.task_id.clone(),
         member_id: seed.member_id.to_string(),
         grant_id: seed.grant_id.clone(),
@@ -112,7 +112,7 @@ fn dispatch_request(seed: &Seed, request_key: &str, argv: Vec<String>) -> Office
 
 fn spawn_host_thread(home: std::path::PathBuf) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        let host = OfficeHost::open(&home).expect("host opens");
+        let host = Host::open(&home).expect("host opens");
         host.serve().expect("serve");
     })
 }
@@ -120,7 +120,7 @@ fn spawn_host_thread(home: std::path::PathBuf) -> std::thread::JoinHandle<()> {
 fn count_executions(home: &std::path::Path) -> i64 {
     let store = viva::foundation::store::Store::open(
         &viva::foundation::paths::database_path(home),
-        office::office_migrations(),
+        server::migrations(),
     )
     .expect("count store");
     store.row_count("office_executions").expect("count")
@@ -186,7 +186,7 @@ fn cli_dispatches_observes_and_stops_over_the_real_channel() {
     // Observe: the snapshot comes from the real PTY of terminal A.
     wait_until("terminal a output", Duration::from_secs(10), || {
         matches!(
-            send(&home, OfficeRequestKind::TerminalSnapshot { terminal_id: terminal_a.clone() })
+            send(&home, RequestKind::TerminalSnapshot { terminal_id: terminal_a.clone() })
                 .ok()
                 .and_then(|s| s["visible"].as_array().cloned()),
             Some(rows) if rows.iter().any(|r| r.as_str().unwrap_or("").contains("v07-ready-a"))
@@ -213,7 +213,7 @@ fn cli_dispatches_observes_and_stops_over_the_real_channel() {
     // Stop terminal A; terminal B keeps running (neighbor isolation).
     send(
         &home,
-        OfficeRequestKind::TerminalStop {
+        RequestKind::TerminalStop {
             terminal_id: terminal_a.clone(),
         },
     )
@@ -222,7 +222,7 @@ fn cli_dispatches_observes_and_stops_over_the_real_channel() {
         // The exit watcher records through the launch-intent protocol.
         let store = viva::foundation::store::Store::open(
             &viva::foundation::paths::database_path(&home),
-            office::office_migrations(),
+            server::migrations(),
         )
         .expect("store");
         let state: String = store
@@ -237,7 +237,7 @@ fn cli_dispatches_observes_and_stops_over_the_real_channel() {
     });
     let b_alive = send(
         &home,
-        OfficeRequestKind::TerminalSnapshot {
+        RequestKind::TerminalSnapshot {
             terminal_id: terminal_b.clone(),
         },
     )
@@ -245,7 +245,7 @@ fn cli_dispatches_observes_and_stops_over_the_real_channel() {
     assert!(b_alive, "stopping terminal A must not touch terminal B");
 
     // Status is visible over the channel, with honest ownership labels.
-    let status = send(&home, OfficeRequestKind::Status).expect("status");
+    let status = send(&home, RequestKind::Status).expect("status");
     let terminals = status["terminals"].as_array().expect("terminals");
     assert_eq!(terminals.len(), 2);
     assert!(
@@ -265,7 +265,7 @@ fn cli_dispatches_observes_and_stops_over_the_real_channel() {
     wait_until("task results", Duration::from_secs(10), || {
         send(
             &home,
-            OfficeRequestKind::TaskResults {
+            RequestKind::TaskResults {
                 task_id: seed_a.task_id.clone(),
             },
         )
@@ -273,9 +273,9 @@ fn cli_dispatches_observes_and_stops_over_the_real_channel() {
         .unwrap_or(false)
     });
 
-    office::send_request(
+    server::send_request(
         &home,
-        office::new_request(OfficeRequestKind::Shutdown { close_policy: None }),
+        server::new_request(RequestKind::Shutdown { close_policy: None }),
     )
     .expect("shutdown");
     host.join().expect("host thread ends after shutdown");
@@ -291,7 +291,7 @@ fn revoked_grant_denies_dispatch_and_creates_no_execution() {
     {
         let store = viva::foundation::store::Store::open(
             &viva::foundation::paths::database_path(&home),
-            office::office_migrations(),
+            server::migrations(),
         )
         .expect("store");
         let authority = AuthorityEngine::new(&store);
@@ -314,16 +314,16 @@ fn revoked_grant_denies_dispatch_and_creates_no_execution() {
     assert!(err.contains("denied"), "got: {err}");
     assert_eq!(count_executions(&home), 0, "no execution may be created");
 
-    office::send_request(
+    server::send_request(
         &home,
-        office::new_request(OfficeRequestKind::Shutdown { close_policy: None }),
+        server::new_request(RequestKind::Shutdown { close_policy: None }),
     )
     .ok();
     host.join().ok();
 }
 
 #[test]
-fn mutation_without_active_office_is_rejected_and_starts_no_daemon() {
+fn mutation_without_active_server_is_rejected_and_starts_no_daemon() {
     let dir = TempDir::new().expect("dir");
     let home = dir.path().to_path_buf();
     let seed = seed(&home, "nobody home");
@@ -335,7 +335,7 @@ fn mutation_without_active_office_is_rejected_and_starts_no_daemon() {
     .expect_err("no host listening");
     assert!(err.contains("no active office"), "got: {err}");
     assert!(
-        !home.join(office::OFFICE_SOCKET_NAME).exists(),
+        !home.join(server::SOCKET_NAME).exists(),
         "the client must not have conjured a socket/daemon into existence"
     );
 }
@@ -349,10 +349,10 @@ fn second_host_refuses_and_names_the_running_one() {
     let host = spawn_host_thread(home.clone());
     wait_until("socket", Duration::from_secs(10), || socket_ready(&home));
 
-    let status = send(&home, OfficeRequestKind::Status).expect("status");
+    let status = send(&home, RequestKind::Status).expect("status");
     let pid = status["pid"].as_u64().expect("host pid");
 
-    let err = match OfficeHost::open(&home) {
+    let err = match Host::open(&home) {
         Err(err) => err,
         Ok(_second) => panic!("second host must refuse to start"),
     };
@@ -363,9 +363,9 @@ fn second_host_refuses_and_names_the_running_one() {
         "the refusal should name the running host's pid {pid}: {message}"
     );
 
-    office::send_request(
+    server::send_request(
         &home,
-        office::new_request(OfficeRequestKind::Shutdown { close_policy: None }),
+        server::new_request(RequestKind::Shutdown { close_policy: None }),
     )
     .ok();
     host.join().ok();
@@ -390,14 +390,14 @@ fn graceful_shutdown_stops_owned_terminals_and_persists_the_handoff() {
     )
     .expect("dispatch");
 
-    office::send_request(
+    server::send_request(
         &home,
-        office::new_request(OfficeRequestKind::Shutdown { close_policy: None }),
+        server::new_request(RequestKind::Shutdown { close_policy: None }),
     )
     .expect("shutdown accepted");
     host.join().expect("serve ends");
     assert!(
-        !home.join(office::OFFICE_SOCKET_NAME).exists(),
+        !home.join(server::SOCKET_NAME).exists(),
         "the channel is released on exit"
     );
 
@@ -409,7 +409,7 @@ fn graceful_shutdown_stops_owned_terminals_and_persists_the_handoff() {
         || {
             let store = viva::foundation::store::Store::open(
                 &viva::foundation::paths::database_path(&home),
-                office::office_migrations(),
+                server::migrations(),
             )
             .expect("store");
             let state: String = store
@@ -424,7 +424,7 @@ fn graceful_shutdown_stops_owned_terminals_and_persists_the_handoff() {
         },
     );
 
-    let offline = office::offline_status(&home).expect("offline status");
+    let offline = server::offline_status(&home).expect("offline status");
     assert_eq!(
         offline["last_host"]["exit_kind"],
         Value::String("graceful".into()),
@@ -450,7 +450,7 @@ fn crash_restart_reconciles_without_rerunning_finished_work() {
     {
         let store = viva::foundation::store::Store::open(
             &viva::foundation::paths::database_path(&home),
-            office::office_migrations(),
+            server::migrations(),
         )
         .expect("store");
         let tasks = TaskRegistry::new(&store);
@@ -497,11 +497,11 @@ fn crash_restart_reconciles_without_rerunning_finished_work() {
     wait_until("restarted socket", Duration::from_secs(15), || {
         socket_ready(&home)
     });
-    let _ = send(&home, OfficeRequestKind::Status).expect("restarted host answers");
+    let _ = send(&home, RequestKind::Status).expect("restarted host answers");
 
     let store = viva::foundation::store::Store::open(
         &viva::foundation::paths::database_path(&home),
-        office::office_migrations(),
+        server::migrations(),
     )
     .expect("store");
     let kinds: Vec<String> = {
@@ -559,9 +559,9 @@ fn crash_restart_reconciles_without_rerunning_finished_work() {
         "the refusal created no execution"
     );
 
-    office::send_request(
+    server::send_request(
         &home,
-        office::new_request(OfficeRequestKind::Shutdown { close_policy: None }),
+        server::new_request(RequestKind::Shutdown { close_policy: None }),
     )
     .ok();
     host.join().ok();
@@ -594,9 +594,9 @@ fn graceful_shutdown_records_every_exit_before_the_handoff() {
     )
     .expect("dispatch");
 
-    office::send_request(
+    server::send_request(
         &home,
-        office::new_request(OfficeRequestKind::Shutdown { close_policy: None }),
+        server::new_request(RequestKind::Shutdown { close_policy: None }),
     )
     .expect("shutdown");
     host.join().expect("serve ends");
@@ -607,7 +607,7 @@ fn graceful_shutdown_records_every_exit_before_the_handoff() {
         || {
             let store = viva::foundation::store::Store::open(
                 &viva::foundation::paths::database_path(&home),
-                office::office_migrations(),
+                server::migrations(),
             )
             .expect("store");
             let (state, exit_code): (String, Option<i64>) = store
@@ -627,7 +627,7 @@ fn graceful_shutdown_records_every_exit_before_the_handoff() {
     wait_until("socket", Duration::from_secs(10), || socket_ready(&home));
     let store = viva::foundation::store::Store::open(
         &viva::foundation::paths::database_path(&home),
-        office::office_migrations(),
+        server::migrations(),
     )
     .expect("store");
     let false_orphans: Vec<String> = {
@@ -647,9 +647,9 @@ fn graceful_shutdown_records_every_exit_before_the_handoff() {
         false_orphans.is_empty(),
         "a graceful shutdown must not be recorded as orphaning its own terminals: {false_orphans:?}"
     );
-    office::send_request(
+    server::send_request(
         &home,
-        office::new_request(OfficeRequestKind::Shutdown { close_policy: None }),
+        server::new_request(RequestKind::Shutdown { close_policy: None }),
     )
     .ok();
     host.join().ok();
@@ -678,9 +678,9 @@ fn host_home_and_channel_are_private_and_authenticated() {
         );
     }
 
-    office::send_request(
+    server::send_request(
         &home,
-        office::new_request(OfficeRequestKind::Shutdown { close_policy: None }),
+        server::new_request(RequestKind::Shutdown { close_policy: None }),
     )
     .ok();
     host.join().ok();
@@ -698,7 +698,7 @@ fn a_grant_never_serves_a_member_other_than_its_principal() {
     let member2: MemberId = {
         let store = viva::foundation::store::Store::open(
             &viva::foundation::paths::database_path(&home),
-            office::office_migrations(),
+            server::migrations(),
         )
         .expect("store");
         let members = MemberRegistry::new(&store);
@@ -720,7 +720,7 @@ fn a_grant_never_serves_a_member_other_than_its_principal() {
 
     let err = send(
         &home,
-        OfficeRequestKind::Dispatch {
+        RequestKind::Dispatch {
             task_id: seed.task_id.clone(),
             member_id: member2.to_string(),
             grant_id: seed.grant_id.clone(),
@@ -734,9 +734,9 @@ fn a_grant_never_serves_a_member_other_than_its_principal() {
     assert!(err.contains("was not issued to member"), "got: {err}");
     assert_eq!(count_executions(&home), 0, "no execution may be created");
 
-    office::send_request(
+    server::send_request(
         &home,
-        office::new_request(OfficeRequestKind::Shutdown { close_policy: None }),
+        server::new_request(RequestKind::Shutdown { close_policy: None }),
     )
     .ok();
     host.join().ok();
@@ -771,7 +771,7 @@ fn request_keys_never_replay_across_tasks() {
     // And the refusal created no execution for task two.
     let store = viva::foundation::store::Store::open(
         &viva::foundation::paths::database_path(&home),
-        office::office_migrations(),
+        server::migrations(),
     )
     .expect("store");
     let task2_intents: i64 = store
@@ -784,9 +784,9 @@ fn request_keys_never_replay_across_tasks() {
         .unwrap_or(0);
     assert_eq!(task2_intents, 0, "task two must have no intent");
 
-    office::send_request(
+    server::send_request(
         &home,
-        office::new_request(OfficeRequestKind::Shutdown { close_policy: None }),
+        server::new_request(RequestKind::Shutdown { close_policy: None }),
     )
     .ok();
     host.join().ok();
@@ -804,8 +804,8 @@ fn channel_survives_delayed_and_pipelined_requests() {
     let host = spawn_host_thread(home.clone());
     wait_until("socket", Duration::from_secs(10), || socket_ready(&home));
 
-    let mut stream = std::os::unix::net::UnixStream::connect(home.join(office::OFFICE_SOCKET_NAME))
-        .expect("connect");
+    let mut stream =
+        std::os::unix::net::UnixStream::connect(home.join(server::SOCKET_NAME)).expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("read timeout");
@@ -813,15 +813,15 @@ fn channel_survives_delayed_and_pipelined_requests() {
     // 1. Delayed first frame: connect, wait well past any scheduling
     //    window, only then send.
     std::thread::sleep(Duration::from_millis(300));
-    office::write_message(&mut stream, &office::new_request(OfficeRequestKind::Ping))
+    server::write_message(&mut stream, &server::new_request(RequestKind::Ping))
         .expect("delayed first frame");
-    let first = office::read_message(&mut stream).expect("delayed frame answered");
+    let first = server::read_message(&mut stream).expect("delayed frame answered");
     assert!(first.contains("\"ok\":true"), "got: {first}");
 
     // 2. A second request on the SAME connection must be served too.
-    office::write_message(&mut stream, &office::new_request(OfficeRequestKind::Ping))
+    server::write_message(&mut stream, &server::new_request(RequestKind::Ping))
         .expect("second frame on the same connection");
-    let second = office::read_message(&mut stream).expect("second frame answered");
+    let second = server::read_message(&mut stream).expect("second frame answered");
     assert!(second.contains("\"ok\":true"), "got: {second}");
 
     // 3. A malformed frame gets an error RESPONSE (not a dropped pipe).
@@ -829,12 +829,12 @@ fn channel_survives_delayed_and_pipelined_requests() {
     stream
         .write_all(b"this is not json\n")
         .expect("write malformed");
-    let third = office::read_message(&mut stream).expect("malformed answered in-band");
+    let third = server::read_message(&mut stream).expect("malformed answered in-band");
     assert!(third.contains("\"ok\":false"), "got: {third}");
 
-    office::send_request(
+    server::send_request(
         &home,
-        office::new_request(OfficeRequestKind::Shutdown { close_policy: None }),
+        server::new_request(RequestKind::Shutdown { close_policy: None }),
     )
     .ok();
     host.join().ok();

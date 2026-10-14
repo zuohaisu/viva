@@ -28,7 +28,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::foundation::error::OfficeResult;
+use crate::foundation::error::Result;
 use crate::terminal::TerminalSnapshot;
 
 /// The agent CLIs the office detects in its first version (owner ruling,
@@ -69,7 +69,7 @@ impl AgentStatus {
         }
     }
 
-    pub fn parse(text: &str) -> OfficeResult<Self> {
+    pub fn parse(text: &str) -> Result<Self> {
         match text {
             "working" => Ok(AgentStatus::Working),
             "blocked" => Ok(AgentStatus::Blocked),
@@ -77,7 +77,7 @@ impl AgentStatus {
             "idle" => Ok(AgentStatus::Idle),
             "rate_limited" => Ok(AgentStatus::RateLimited),
             "unknown" => Ok(AgentStatus::Unknown),
-            other => Err(crate::foundation::error::OfficeError::Validation(format!(
+            other => Err(crate::foundation::error::Error::Validation(format!(
                 "unknown agent status `{other}`"
             ))),
         }
@@ -277,12 +277,12 @@ pub struct ProcessTable {
     commands: HashMap<u32, (String, String)>,
 }
 impl ProcessTable {
-    pub fn capture() -> OfficeResult<Self> {
+    pub fn capture() -> Result<Self> {
         let output = std::process::Command::new("ps")
             .args(["-eo", "pid=,ppid=,lstart=,command="])
             .output()?;
         if !output.status.success() {
-            return Err(crate::foundation::OfficeError::Validation(
+            return Err(crate::foundation::Error::Validation(
                 "process detection unavailable".into(),
             ));
         }
@@ -328,7 +328,7 @@ impl ProcessTable {
         None
     }
 }
-pub fn identify_by_process_tree(child_pid: Option<u32>) -> OfficeResult<Option<String>> {
+pub fn identify_by_process_tree(child_pid: Option<u32>) -> Result<Option<String>> {
     if child_pid.is_none() {
         return Ok(None);
     }
