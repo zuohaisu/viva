@@ -230,6 +230,9 @@ pub fn restart_server(home: &Path) -> Result<u32> {
 /// terminals to the new version.
 pub fn restart_server_with(home: &Path, server_entry: &Path) -> Result<u32> {
     crate::foundation::paths::ensure_private_dir(home)?;
+    // Do not ask a server that still runs on the previous table names to hand
+    // over: the resumed server would have to rename them underneath it.
+    crate::foundation::legacy::refuse_live_handoff(&crate::foundation::paths::database_path(home))?;
     // The OLD server must be running; a restart never spawns anything.
     // Record its identity: during the handoff window the old host keeps
     // answering, and the resumed host REBINDS the same socket path within

@@ -277,7 +277,7 @@ fn cli_lists_and_conditionally_releases_only_authorized_unknown_leases() {
     assert_eq!(rows, 1, "healthy lease still held");
     let events: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM office_events WHERE kind='foreground_lease_released'",
+            "SELECT COUNT(*) FROM events WHERE kind='foreground_lease_released'",
             [],
             |r| r.get(0),
         )
@@ -285,7 +285,7 @@ fn cli_lists_and_conditionally_releases_only_authorized_unknown_leases() {
     assert_eq!(events, 1, "exactly one appended audit event");
     let (origin, payload): (String, String) = conn
         .query_row(
-            "SELECT origin, payload FROM office_events WHERE kind='foreground_lease_released'",
+            "SELECT origin, payload FROM events WHERE kind='foreground_lease_released'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -344,7 +344,7 @@ fn delegated_release_grant_cannot_clear_an_unknown_holder() {
         .unwrap_err();
     assert!(err.to_string().contains("owner-issued"), "{err}");
     assert_eq!(store.row_count("foreground_leases").unwrap(), 1);
-    assert_eq!(store.row_count("office_events").unwrap(), 0);
+    assert_eq!(store.row_count("events").unwrap(), 0);
 }
 
 #[test]

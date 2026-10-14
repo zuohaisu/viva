@@ -669,9 +669,9 @@ fn cmd_doctor() -> Result<()> {
         println!("migration: {domain} v{version} `{name}` at {applied_at}");
     }
     for table in [
-        "office_events",
-        "office_sessions",
-        "office_executions",
+        "events",
+        "sessions",
+        "executions",
         "launch_specs",
         "terminal_events",
         "control_requests",

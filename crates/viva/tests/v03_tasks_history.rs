@@ -191,7 +191,7 @@ fn retried_request_key_never_duplicates_executions() {
             .len(),
         2
     );
-    assert_eq!(store.row_count("office_executions").expect("executions"), 2);
+    assert_eq!(store.row_count("executions").expect("executions"), 2);
 }
 
 /// Acceptance: "异常在启动意图与 pid 写入之间发生时可如实记录待对账状态".

@@ -29,7 +29,7 @@ pub const CONVERSATIONS_V1_SQL: &str = r#"
 -- harness owns the transcript, this table owns only Viva facts.
 CREATE TABLE conversation_nodes (
     node_id            TEXT PRIMARY KEY,
-    session_id         TEXT NOT NULL REFERENCES office_sessions(session_id),
+    session_id         TEXT NOT NULL REFERENCES sessions(session_id),
     parent_node_id     TEXT REFERENCES conversation_nodes(node_id),
     display_name       TEXT NOT NULL CHECK (length(trim(display_name)) > 0),
     harness            TEXT NOT NULL,
@@ -328,7 +328,7 @@ impl<'a> ConversationRegistry<'a> {
     fn insert_node(&self, node: ConversationNode) -> Result<ConversationNode> {
         // The session must exist: nodes hang off real sessions.
         let exists: i64 = self.store.connection().query_row(
-            "SELECT COUNT(*) FROM office_sessions WHERE session_id = ?1",
+            "SELECT COUNT(*) FROM sessions WHERE session_id = ?1",
             [node.session_id.as_str()],
             |row| row.get(0),
         )?;

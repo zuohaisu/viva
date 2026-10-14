@@ -123,7 +123,7 @@ fn count_executions(home: &std::path::Path) -> i64 {
         server::migrations(),
     )
     .expect("count store");
-    store.row_count("office_executions").expect("count")
+    store.row_count("executions").expect("count")
 }
 
 // ---------------------------------------------------------------------------
@@ -507,7 +507,7 @@ fn crash_restart_reconciles_without_rerunning_finished_work() {
     let kinds: Vec<String> = {
         let mut stmt = store
             .connection()
-            .prepare("SELECT kind FROM office_recovery_events ORDER BY seq")
+            .prepare("SELECT kind FROM recovery_events ORDER BY seq")
             .expect("prepare");
         let rows = stmt
             .query_map([], |row| row.get::<_, String>(0))
@@ -529,7 +529,7 @@ fn crash_restart_reconciles_without_rerunning_finished_work() {
         let status: String = store
             .connection()
             .query_row(
-                "SELECT status FROM office_executions WHERE execution_id = ?1",
+                "SELECT status FROM executions WHERE execution_id = ?1",
                 [live["execution_id"].as_str().unwrap_or("")],
                 |row| row.get(0),
             )
@@ -634,7 +634,7 @@ fn graceful_shutdown_records_every_exit_before_the_handoff() {
         let mut stmt = store
             .connection()
             .prepare(
-                "SELECT detail FROM office_recovery_events
+                "SELECT detail FROM recovery_events
                  WHERE kind = 'execution_orphaned'",
             )
             .expect("prepare");
