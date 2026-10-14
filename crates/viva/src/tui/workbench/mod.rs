@@ -1399,9 +1399,13 @@ impl WorkbenchApp {
             if let Some(id) = self.terminal_mode.clone() {
                 self.scroll_offsets.insert(id, 0);
             }
-            return terminal_view::key(key, &self.input_modes())
-                .map(KeyOutcome::Forward)
-                .unwrap_or(KeyOutcome::Ignored);
+            return match terminal_view::key(key, &self.input_modes()) {
+                Some(bytes) => KeyOutcome::Forward(bytes),
+                None => {
+                    self.set_status("key not forwarded in this terminal mode");
+                    KeyOutcome::Ignored
+                }
+            };
         }
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
@@ -4047,6 +4051,83 @@ mod tests {
         );
     }
 
+    #[test]
+    fn paste_forwards_bracketed_when_cli_reports_the_mode() {
+        let mut app = WorkbenchApp::new();
+        app.attach_terminal("t1".into());
+        app.enter_terminal_mode("t1");
+        app.set_snapshot(
+            "t1",
+            snapshot_with_modes(crate::terminal::screen::InputModes {
+                bracketed_paste: true,
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            app.on_paste("line1\nline2"),
+            KeyOutcome::Forward(b"\x1b[200~line1\nline2\x1b[201~".to_vec())
+        );
+    }
+
+    fn app_with_terminal_pane() -> WorkbenchApp {
+        let mut app = WorkbenchApp::new();
+        app.attach_terminal("t1".into());
+        app.grid = PaneNode::split_new(
+            PaneContent::Browser,
+            SplitAxis::Horizontal,
+            PaneContent::Terminal("t1".into()),
+        );
+        app.last_pane_area = Some(Rect::new(0, 0, 100, 40));
+        app
+    }
+
+    #[test]
+    fn terminal_mouse_forwards_sgr_and_shift_keeps_host_scroll() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut app = app_with_terminal_pane();
+        app.set_snapshot(
+            "t1",
+            snapshot_with_modes(crate::terminal::screen::InputModes {
+                mouse_mode: 3,
+                mouse_encoding: 2,
+                ..Default::default()
+            }),
+        );
+        app.pane_geometry = vec![("t1".into(), Rect::new(50, 5, 40, 20))];
+        app.enter_terminal_mode("t1");
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 52,
+            row: 7,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        };
+        let (id, bytes) = app.terminal_mouse(event).expect("cli mouse");
+        assert_eq!(id, "t1");
+        assert_eq!(bytes, b"\x1b[<0;3;3M");
+        let shifted = MouseEvent {
+            modifiers: ratatui::crossterm::event::KeyModifiers::SHIFT,
+            ..event
+        };
+        assert!(
+            app.terminal_mouse(shifted).is_none(),
+            "Shift reserves host scroll/selection"
+        );
+    }
+
+    #[test]
+    fn draw_records_terminal_inner_rect_for_resize() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.attach_terminal("term-1".into());
+        render(&mut app, 120, 30);
+        let geom = app.visible_geometry();
+        assert!(
+            geom.iter()
+                .any(|(id, rect)| id == "term-1" && rect.width > 0 && rect.height > 0),
+            "pane inner rect must be published for PTY resize: {geom:?}"
+        );
+    }
+
     fn snapshot_with(lines: &[&str]) -> TerminalSnapshot {
         TerminalSnapshot {
             screen: None,
@@ -4056,6 +4137,26 @@ mod tests {
             scrollback: vec![],
             scrollback_capped: false,
             total_output_bytes: 64,
+            log_truncated: false,
+        }
+    }
+
+    fn snapshot_with_modes(modes: crate::terminal::screen::InputModes) -> TerminalSnapshot {
+        TerminalSnapshot {
+            screen: Some(crate::terminal::screen::ScreenView {
+                lines: vec![],
+                cursor: (0, 0),
+                cursor_visible: true,
+                modes,
+                scrollback_offset: 0,
+                retained: 0,
+            }),
+            cols: 80,
+            rows: 12,
+            visible: vec![],
+            scrollback: vec![],
+            scrollback_capped: false,
+            total_output_bytes: 0,
             log_truncated: false,
         }
     }

@@ -301,6 +301,27 @@ struct SessionShared {
     reader_gone: AtomicBool,
 }
 
+/// PTY master fd ownership (issue #63 audit):
+///
+/// - [`OwnedMaster`] holds exactly one `close`-on-drop owner of the master fd
+///   opened at spawn or received at adopt.
+/// - [`Self::input`] writes through a **dup** closed when the writer
+///   [`File`] drops (never shared with resize).
+/// - The reader thread owns another **dup** closed when the thread exits
+///   ([`spawn_reader`]); poll/read use that same fd number only inside the
+///   thread.
+/// - [`Self::resize`] and [`Self::master_fd_for_transfer`] operate on the
+///   [`OwnedMaster`] (or fresh dups of it), not on the reader/writer dups.
+/// - Live handoff: the sender keeps its [`OwnedMaster`] until the ack; the
+///   receiver calls [`OwnedMaster::from_received`] and becomes the sole
+///   closer of that fd number on its side.
+///
+/// Under this model, `resize` returning `EBADF` would require closing the
+/// master fd while [`OwnedMaster`] is still `Some` — no production path does
+/// that. A missing master is surfaced as validation (`terminal has no live PTY
+/// master`), not a silent skip. Residual `EBADF` reports in CI were traced to
+/// transient reader teardown (EINTR/EAGAIN), not duplicate close.
+///
 /// Handle to one live terminal session. Cloneable; all operations are
 /// thread-safe. Dropping the last handle reaps the child in the background
 /// without killing it (leaked handles never kill unowned processes).
