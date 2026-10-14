@@ -809,6 +809,10 @@ fn handle_request(shared: Arc<Shared>, request: &Request) -> Result<serde_json::
         RequestKind::TerminalOpenInWorktree { worktree_id } => {
             terminal_open_in_worktree(&shared, worktree_id)
         }
+        RequestKind::HarnessOpenInWorktree {
+            worktree_id,
+            harness,
+        } => harness_open_in_worktree(&shared, worktree_id, harness),
         RequestKind::WorktreeCreateForTask {
             task_id,
             branch,
@@ -909,6 +913,7 @@ fn is_member_gated_kind(kind: &RequestKind) -> bool {
             | RequestKind::Workspace { .. }
             | RequestKind::WorkbenchLayout { .. }
             | RequestKind::TerminalOpenInWorktree { .. }
+            | RequestKind::HarnessOpenInWorktree { .. }
             | RequestKind::TerminalCreate { .. }
             | RequestKind::TerminalInput { .. }
             | RequestKind::TerminalResize { .. }
@@ -1457,6 +1462,80 @@ fn terminal_open_in_worktree(shared: &Shared, worktree_id: &str) -> Result<serde
         "pid": handle.pid(),
         "cwd": path.display().to_string(),
         "branch": branch,
+    }))
+}
+
+/// Open a member-scoped harness at a task worktree (M1 S6 / V09).
+fn harness_open_in_worktree(
+    shared: &Shared,
+    worktree_id: &str,
+    harness: &str,
+) -> Result<serde_json::Value> {
+    let harness = harness.trim();
+    if harness != "pi" {
+        return Err(Error::Validation(format!(
+            "harness `{harness}` has no Viva launch combination yet; \
+             use workbench handoff (`h`) for bare agent CLIs, or `viva harness matrix` \
+             for supported capabilities"
+        )));
+    }
+    let worktree_id = WorktreeId::from_str(worktree_id)?;
+    let store = shared.store.lock().expect("store");
+    let service = crate::git::worktrees::WorktreeService::new(
+        &store,
+        crate::git::worktrees::ProtectedRefs::new(vec![]),
+    );
+    let record = service
+        .record(&worktree_id)?
+        .ok_or_else(|| Error::NotFound {
+            entity: "worktree",
+            id: worktree_id.to_string(),
+        })?;
+    let task = TaskRegistry::new(&store).require_task(&record.task_id)?;
+    let member_id = task.assignee_member_id.clone().ok_or_else(|| {
+        Error::Validation(
+            "this worktree's task has no assignee member — set one before launching Pi".into(),
+        )
+    })?;
+    let member = MemberRegistry::new(&store).require(&member_id)?;
+    let binding = MemberRegistry::new(&store).binding(&member_id)?;
+    let pi = crate::harness::pi::PiHarness::for_installation();
+    match pi.availability() {
+        crate::harness::pi::Availability::Unavailable { reason } => {
+            return Err(Error::Validation(format!("pi is unavailable: {reason}")));
+        }
+        crate::harness::pi::Availability::Available => {}
+    }
+    if !pi.extension_path.is_file() {
+        return Err(Error::Validation(format!(
+            "pi extension not found at {}",
+            pi.extension_path.display()
+        )));
+    }
+    let spec = pi.launch(
+        &member,
+        binding.as_ref(),
+        Some(&task),
+        &record.worktree_path,
+        None,
+    )?;
+    let mut term = crate::terminal::TerminalSpec::new(spec.argv.clone(), spec.cwd.clone())?;
+    term.env = spec.env.clone();
+    let (terminal_id, handle) = shared.terminals.spawn(
+        term,
+        TerminalOwner::AgentCli,
+        Some(worktree_id.clone()),
+        format!("pi · {} · {}", member.display_name, record.branch),
+        None,
+        Some(&store),
+    )?;
+    seed_agent_identification(shared, &terminal_id, std::slice::from_ref(&spec.name));
+    Ok(serde_json::json!({
+        "terminal_id": terminal_id.to_string(),
+        "pid": handle.pid(),
+        "harness": harness,
+        "member_id": member.member_id.to_string(),
+        "task_id": task.task_id.to_string(),
     }))
 }
 

@@ -12,6 +12,7 @@
 //! Pi specialization lives in [`pi`]: it knows the extension path, the
 //! default binary name and how to probe availability honestly.
 
+pub mod capabilities;
 pub mod pi;
 
 use std::path::PathBuf;
