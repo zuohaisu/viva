@@ -309,9 +309,6 @@ Report what the tests and the real runs show, and name what was not run.
 
 ## Current Focus
 
-Viva's minimal loop (members → tasks → executions → delegation →
-recovery → knowledge/GitHub linkage) is implemented and tested. The next
-milestones grow it one coherent step at a time — structured workflows on top of
-Tasks, knowledge curation loops, and execution-driver integrations — each with
-measurable evidence. The Start Prompt research and comparison tooling remains a
-parked supporting track.
+The current stage, milestone and next steps are maintained only in the Wiki's
+`Roadmap`; this charter does not restate them. The Start Prompt research and
+comparison tooling remains a parked supporting track.
