@@ -809,6 +809,10 @@ fn handle_request(shared: Arc<Shared>, request: &Request) -> Result<serde_json::
         RequestKind::TerminalOpenInWorktree { worktree_id } => {
             terminal_open_in_worktree(&shared, worktree_id)
         }
+        RequestKind::HarnessOpenInWorktree {
+            worktree_id,
+            harness,
+        } => harness_open_in_worktree(&shared, worktree_id, harness),
         RequestKind::WorktreeCreateForTask {
             task_id,
             branch,
@@ -909,6 +913,7 @@ fn is_member_gated_kind(kind: &RequestKind) -> bool {
             | RequestKind::Workspace { .. }
             | RequestKind::WorkbenchLayout { .. }
             | RequestKind::TerminalOpenInWorktree { .. }
+            | RequestKind::HarnessOpenInWorktree { .. }
             | RequestKind::TerminalCreate { .. }
             | RequestKind::TerminalInput { .. }
             | RequestKind::TerminalResize { .. }
@@ -1457,6 +1462,80 @@ fn terminal_open_in_worktree(shared: &Shared, worktree_id: &str) -> Result<serde
         "pid": handle.pid(),
         "cwd": path.display().to_string(),
         "branch": branch,
+    }))
+}
+
+/// Open a member-scoped harness at a task worktree (M1 S6 / V09).
+fn harness_open_in_worktree(
+    shared: &Shared,
+    worktree_id: &str,
+    harness: &str,
+) -> Result<serde_json::Value> {
+    let harness = harness.trim();
+    if harness != "pi" {
+        return Err(Error::Validation(format!(
+            "harness `{harness}` has no Viva launch combination yet; \
+             use workbench handoff (`h`) for bare agent CLIs, or `viva harness matrix` \
+             for supported capabilities"
+        )));
+    }
+    let worktree_id = WorktreeId::from_str(worktree_id)?;
+    let store = shared.store.lock().expect("store");
+    let service = crate::git::worktrees::WorktreeService::new(
+        &store,
+        crate::git::worktrees::ProtectedRefs::new(vec![]),
+    );
+    let record = service
+        .record(&worktree_id)?
+        .ok_or_else(|| Error::NotFound {
+            entity: "worktree",
+            id: worktree_id.to_string(),
+        })?;
+    let task = TaskRegistry::new(&store).require_task(&record.task_id)?;
+    let member_id = task.assignee_member_id.clone().ok_or_else(|| {
+        Error::Validation(
+            "this worktree's task has no assignee member — set one before launching Pi".into(),
+        )
+    })?;
+    let member = MemberRegistry::new(&store).require(&member_id)?;
+    let binding = MemberRegistry::new(&store).binding(&member_id)?;
+    let pi = crate::harness::pi::PiHarness::for_installation();
+    match pi.availability() {
+        crate::harness::pi::Availability::Unavailable { reason } => {
+            return Err(Error::Validation(format!("pi is unavailable: {reason}")));
+        }
+        crate::harness::pi::Availability::Available => {}
+    }
+    if !pi.extension_path.is_file() {
+        return Err(Error::Validation(format!(
+            "pi extension not found at {}",
+            pi.extension_path.display()
+        )));
+    }
+    let spec = pi.launch(
+        &member,
+        binding.as_ref(),
+        Some(&task),
+        &record.worktree_path,
+        None,
+    )?;
+    let mut term = crate::terminal::TerminalSpec::new(spec.argv.clone(), spec.cwd.clone())?;
+    term.env = spec.env.clone();
+    let (terminal_id, handle) = shared.terminals.spawn(
+        term,
+        TerminalOwner::AgentCli,
+        Some(worktree_id.clone()),
+        format!("pi · {} · {}", member.display_name, record.branch),
+        None,
+        Some(&store),
+    )?;
+    seed_agent_identification(shared, &terminal_id, std::slice::from_ref(&spec.name));
+    Ok(serde_json::json!({
+        "terminal_id": terminal_id.to_string(),
+        "pid": handle.pid(),
+        "harness": harness,
+        "member_id": member.member_id.to_string(),
+        "task_id": task.task_id.to_string(),
     }))
 }
 
@@ -4234,6 +4313,250 @@ mod s2_workbench_tests {
             })
             .expect("stop shell");
         host.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod s6_harness_open_tests {
+    use super::*;
+    use crate::server::Client;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    struct RunningHost {
+        _dir: tempfile::TempDir,
+        home: std::path::PathBuf,
+        server: std::thread::JoinHandle<()>,
+    }
+
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(["-c", "user.email=test@viva.local", "-c", "user.name=test"])
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn write_fake_pi(dir: &std::path::Path) -> std::path::PathBuf {
+        let fake = dir.join("fake-pi");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"--version\" ]; then echo \"pi 1.2.0-test\"; exit 0; fi\n\
+             if [ \"$1\" = \"--extension\" ]; then\n\
+               echo \"harness-context member=$VIVA_MEMBER_NAME task=$VIVA_TASK_ID\"\n\
+               exec cat\n\
+             fi\n\
+             exec cat\n",
+        )
+        .expect("fake pi script");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        fake
+    }
+
+    fn start_host() -> RunningHost {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fake_pi = write_fake_pi(dir.path());
+        let ext = dir.path().join("viva.ts");
+        std::fs::write(&ext, "// fixture extension for harness open tests\n").expect("ext");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        // Single test function owns these for the whole contract — avoids
+        // parallel tests fighting over process-wide overrides.
+        unsafe {
+            std::env::set_var("VIVA_PI_BINARY", &fake_pi);
+            std::env::set_var("VIVA_PI_EXTENSION", &ext);
+        }
+        let host = Host::open(&home).expect("host");
+        let server = host.serve_background();
+        let socket = home.join(SOCKET_NAME);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !socket.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        RunningHost {
+            _dir: dir,
+            home,
+            server,
+        }
+    }
+
+    fn shutdown(host: RunningHost) {
+        if let Ok(mut client) = Client::connect(&host.home) {
+            let _ = client.call(RequestKind::Shutdown { close_policy: None });
+        }
+        let _ = host.server.join();
+        unsafe {
+            std::env::remove_var("VIVA_PI_BINARY");
+            std::env::remove_var("VIVA_PI_EXTENSION");
+        }
+    }
+
+    /// Returns (worktree_id, member_id).
+    fn seed(host: &RunningHost, with_assignee: bool, wt_name: &str) -> (String, String) {
+        let repo = host._dir.path().join("repo");
+        if !repo.join(".git").exists() {
+            std::fs::create_dir_all(&repo).expect("repo");
+            git(&repo, &["init", "-b", "main"]);
+            std::fs::write(repo.join("README.md"), "seed\n").expect("seed");
+            git(&repo, &["add", "."]);
+            git(&repo, &["commit", "-m", "seed"]);
+        }
+
+        let store = Store::open(
+            &crate::foundation::paths::database_path(&host.home),
+            migrations(),
+        )
+        .expect("store");
+        let projects = crate::projects::ProjectRegistry::new(&store);
+        let project = projects
+            .list(true)
+            .expect("list projects")
+            .into_iter()
+            .find(|p| p.repo_path == repo)
+            .unwrap_or_else(|| projects.register(None, "demo", &repo).expect("project"));
+        let members = crate::members::MemberRegistry::new(&store);
+        let member = members
+            .list()
+            .expect("list members")
+            .into_iter()
+            .find(|m| m.display_name == "Harness QA")
+            .unwrap_or_else(|| {
+                let m = members.register("Harness QA").expect("member");
+                members
+                    .set_binding(&crate::members::MemberBinding {
+                        member_id: m.member_id.clone(),
+                        role: "qa".into(),
+                        model_binding: "pi".into(),
+                        tools: vec![],
+                        updated_at: utc_now(),
+                    })
+                    .expect("binding");
+                m
+            });
+        let task = TaskRegistry::new(&store)
+            .create_task(
+                format!("harness open {wt_name}"),
+                vec![],
+                with_assignee.then(|| member.member_id.clone()),
+                None,
+                Some(project.project_id.clone()),
+            )
+            .expect("task");
+        let wt_path = host._dir.path().join(wt_name);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                wt_path.to_str().unwrap(),
+                "-b",
+                &format!("qa/{wt_name}"),
+            ],
+        );
+        let mut service = crate::git::worktrees::WorktreeService::new(
+            &store,
+            crate::git::worktrees::ProtectedRefs::new(vec![]),
+        );
+        let record = service
+            .adopt_existing(&repo, &wt_path, &task.task_id)
+            .expect("adopt");
+        (record.worktree_id.to_string(), member.member_id.to_string())
+    }
+
+    fn wait_for_snapshot(client: &mut Client, terminal_id: &str, needle: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Ok(view) = client.call(RequestKind::TerminalSnapshot {
+                terminal_id: terminal_id.to_string(),
+            }) && format!("{view}").contains(needle)
+            {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    #[test]
+    fn harness_open_in_worktree_socket_contract() {
+        let host = start_host();
+        let (wt, member) = seed(&host, true, "wt-a");
+        let mut client = Client::connect(&host.home).expect("client");
+
+        let err = client
+            .call(RequestKind::HarnessOpenInWorktree {
+                worktree_id: wt.clone(),
+                harness: "codex".into(),
+            })
+            .expect_err("unknown harness");
+        assert!(
+            err.to_string().contains("no Viva launch combination"),
+            "got: {err}"
+        );
+
+        let err = client
+            .call(RequestKind::HarnessOpenInWorktree {
+                worktree_id: "not-a-worktree".into(),
+                harness: "pi".into(),
+            })
+            .expect_err("bad worktree");
+        assert!(
+            err.to_string().contains("worktree") || err.to_string().contains("NotFound"),
+            "got: {err}"
+        );
+
+        let (wt_no_assignee, _) = seed(&host, false, "wt-b");
+        let err = client
+            .call(RequestKind::HarnessOpenInWorktree {
+                worktree_id: wt_no_assignee,
+                harness: "pi".into(),
+            })
+            .expect_err("no assignee");
+        assert!(err.to_string().contains("no assignee member"), "got: {err}");
+
+        let opened = client
+            .call(RequestKind::HarnessOpenInWorktree {
+                worktree_id: wt.clone(),
+                harness: "pi".into(),
+            })
+            .expect("pi harness opens");
+        let terminal_id = opened
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .expect("terminal id")
+            .to_string();
+        assert_eq!(
+            opened.get("member_id").and_then(|v| v.as_str()),
+            Some(member.as_str())
+        );
+        let list = client.call(RequestKind::TerminalList).expect("list");
+        let listed = format!("{list}");
+        assert!(listed.contains(&terminal_id), "{listed}");
+        assert!(listed.contains("agent_cli"), "{listed}");
+        assert!(
+            wait_for_snapshot(
+                &mut client,
+                &terminal_id,
+                "harness-context member=Harness QA"
+            ),
+            "fake pi must echo injected member/task context"
+        );
+
+        client
+            .call(RequestKind::TerminalStop {
+                terminal_id: terminal_id.clone(),
+            })
+            .expect("stop");
+        shutdown(host);
     }
 }
 

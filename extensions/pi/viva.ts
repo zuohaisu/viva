@@ -54,9 +54,21 @@ export default function viva(pi: PiHost): void {
         "This is plain conversation: no task is attached, and chat carries no Viva-wide authority.",
       );
     }
-    lines.push(
-      "No external memory system is connected: nothing here claims to remember beyond what Viva has recorded.",
-    );
+    try {
+      const status = await runEnvelope(env, ["memory", "status"]);
+      const text = typeof status === "string" ? status : JSON.stringify(status);
+      if (text.toLowerCase().includes("unavailable") || text.toLowerCase().includes("not configured")) {
+        lines.push(
+          "External memory: not connected on this machine — recall/remember tools will report unavailable until a store is wired.",
+        );
+      } else {
+        lines.push(`External memory: ${text.trim()}`);
+      }
+    } catch {
+      lines.push(
+        "External memory: could not reach Viva memory status — recall/remember may be unavailable.",
+      );
+    }
     ctx.ui.notify(lines.join("\n"), "info");
   });
 

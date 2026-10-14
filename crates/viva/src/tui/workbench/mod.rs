@@ -208,6 +208,8 @@ pub enum WorkbenchAction {
     SplitBelow,
     /// Open a shell at the selected worktree (the `o` action).
     OpenWorktreeShell(String),
+    /// Launch Pi with member/task context at the selected worktree (`p`).
+    OpenPiHarness(String),
     /// Create the selected task's worktree (the `w` action).
     CreateTaskWorktree(String),
     /// V15-1: open the file browser for a worktree.
@@ -407,7 +409,7 @@ impl WorkbenchApp {
             snapshots: std::collections::HashMap::new(),
             terminal_mode: None,
             diff_view: None,
-            status_line: "1 spaces · 2 agents · 3 tasks · Enter/o open · d diff · f files · D cleanup · h handoff · g auto-pull · | - split · x close · z zoom · Ctrl+arrows panes · q detach".into(),
+            status_line: "1 spaces · 2 agents · 3 tasks · Enter/o shell · p pi · d diff · f files · D cleanup · h handoff · g auto-pull · | - split · x close · z zoom · Ctrl+arrows panes · q detach".into(),
             quit_requested: false,
             layout_dirty: false,
             file_panel: None,
@@ -1333,13 +1335,16 @@ impl WorkbenchApp {
                     KeyOutcome::Handled
                 }
                 KeyCode::Enter => {
-                    let (worktree_id, agent) = {
-                        let picker = self.handoff_picker.as_ref().unwrap();
-                        (
-                            picker.worktree_id.clone(),
-                            picker.agents[picker.selected].clone(),
-                        )
-                    };
+                    let picker = self.handoff_picker.as_ref().unwrap();
+                    if picker.agents.is_empty() {
+                        self.handoff_picker = None;
+                        self.set_status("no handoff targets in harness matrix");
+                        return KeyOutcome::Handled;
+                    }
+                    let (worktree_id, agent) = (
+                        picker.worktree_id.clone(),
+                        picker.agents[picker.selected].clone(),
+                    );
                     self.handoff_picker = None;
                     KeyOutcome::Action(WorkbenchAction::HandoffTo { worktree_id, agent })
                 }
@@ -1522,10 +1527,7 @@ impl WorkbenchApp {
                     Some(id) => {
                         self.handoff_picker = Some(HandoffPicker {
                             worktree_id: id,
-                            agents: crate::agents::DETECTABLE_AGENTS
-                                .iter()
-                                .map(|agent| agent.to_string())
-                                .collect(),
+                            agents: crate::harness::capabilities::handoff_targets(),
                             selected: 0,
                         });
                         KeyOutcome::Handled
@@ -1567,6 +1569,12 @@ impl WorkbenchApp {
             KeyCode::Char('o') if self.focus == Focus::Worktrees => {
                 match self.selected_worktree() {
                     Some(id) => KeyOutcome::Action(WorkbenchAction::OpenWorktreeShell(id)),
+                    None => KeyOutcome::Ignored,
+                }
+            }
+            KeyCode::Char('p') if self.focus == Focus::Worktrees => {
+                match self.selected_worktree() {
+                    Some(id) => KeyOutcome::Action(WorkbenchAction::OpenPiHarness(id)),
                     None => KeyOutcome::Ignored,
                 }
             }
@@ -3643,6 +3651,46 @@ fn apply_client_action(
             app.attach_terminal(terminal_id.clone());
             app.enter_terminal_mode(terminal_id);
             Ok(())
+        }
+        WorkbenchAction::OpenPiHarness(worktree_id) => {
+            if app.selected_scene() != worktree_id {
+                app.select_worktree(worktree_id.clone());
+            }
+            let has_tab = app
+                .scenes
+                .scenes
+                .get(app.selected_scene())
+                .is_some_and(|s| !s.active.is_empty());
+            if !has_tab && !app.new_tab("Pi".into()) {
+                return Ok(());
+            }
+            let value = client.call(crate::server::RequestKind::HarnessOpenInWorktree {
+                worktree_id,
+                harness: "pi".into(),
+            });
+            match value {
+                Ok(v) => {
+                    let terminal_id = v
+                        .get("terminal_id")
+                        .and_then(|x| x.as_str())
+                        .ok_or_else(|| {
+                            crate::foundation::Error::Validation(
+                                "harness open returned no terminal id".into(),
+                            )
+                        })?
+                        .to_string();
+                    app.attach_terminal(terminal_id.clone());
+                    app.enter_terminal_mode(terminal_id);
+                    app.set_status(
+                        "Pi launched with member/task context (see harness matrix if unavailable)",
+                    );
+                    Ok(())
+                }
+                Err(err) => {
+                    app.set_status(format!("Pi launch refused: {err}"));
+                    Ok(())
+                }
+            }
         }
         WorkbenchAction::BrowseFiles(worktree_id) => {
             let value = client.call(crate::server::RequestKind::WorktreeFiles {

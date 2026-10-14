@@ -144,6 +144,12 @@ pub enum RequestKind {
     TerminalOpenInWorktree {
         worktree_id: String,
     },
+    /// Open a configured agent harness at a task worktree with member/task
+    /// context (V09 + M1 S6). Only explicit harness names are accepted.
+    HarnessOpenInWorktree {
+        worktree_id: String,
+        harness: String,
+    },
     /// Create a task worktree from the task's project repo (V08 policy:
     /// protected refs, one checkout per branch). Removal is never a socket
     /// action — it stays an explicitly authorized human operation.

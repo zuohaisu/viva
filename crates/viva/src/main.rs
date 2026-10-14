@@ -72,6 +72,7 @@ fn run(args: &[String]) -> Result<()> {
         Some("data") => cmd_data(args.get(1..).unwrap_or(&[])),
         Some("tools") => cmd_tools(args.get(1..).unwrap_or(&[])),
         Some("memory") => cmd_memory(args.get(1..).unwrap_or(&[])),
+        Some("harness") => cmd_harness(args.get(1..).unwrap_or(&[])),
         Some("workflow") => cmd_workflow(args.get(1..).unwrap_or(&[])),
         Some("maintenance") => cmd_maintenance(args.get(1..).unwrap_or(&[])),
         Some("version" | "--version" | "-V") => {
@@ -619,6 +620,11 @@ USAGE:
         Report which store/checkout Viva is wired to — from a real
         adapter round trip, not file existence.
 
+    viva harness matrix
+        Cross-harness capability matrix (launch / interactive / status /
+        handoff / native resume / fork) with tested, unsupported or unknown
+        labels. Probes Pi on this machine when listed.
+
     viva workflow register --builtin <delivery|read-only-review> | --file <config.json>
         Register a workflow configuration (data: steps, roles, evidence
         requirements, retry budgets, transitions).
@@ -701,7 +707,26 @@ fn cmd_doctor() -> Result<()> {
     ] {
         println!("count:     {table} = {}", store.row_count(table)?);
     }
+    let matrix = viva::harness::capabilities::build(true);
+    println!(
+        "harness:   {} rows (run `viva harness matrix` for JSON)",
+        matrix.rows.len()
+    );
     Ok(())
+}
+
+fn cmd_harness(args: &[String]) -> Result<()> {
+    match args.first().map(String::as_str) {
+        Some("matrix") => {
+            let matrix = viva::harness::capabilities::build(true);
+            println!("{}", serde_json::to_string_pretty(&matrix)?);
+            Ok(())
+        }
+        _ => {
+            print_usage();
+            Err(Error::Validation("harness needs `matrix`".into()))
+        }
+    }
 }
 
 fn cmd_event(args: &[String]) -> Result<()> {

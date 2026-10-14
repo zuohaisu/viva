@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::foundation::error::{Error, Result};
 use crate::harness::HarnessSpec;
@@ -54,12 +54,45 @@ pub struct PiHarness {
 }
 
 impl PiHarness {
+    /// Resolve the shipped Pi extension without depending on cwd (same
+    /// strategy as the memory adapter: env override, binary ancestors,
+    /// then dev checkout).
+    pub fn resolve_extension_path() -> PathBuf {
+        if let Ok(from_env) = std::env::var("VIVA_PI_EXTENSION") {
+            return PathBuf::from(from_env);
+        }
+        let relative = PathBuf::from(EXTENSION_RELATIVE_PATH);
+        if let Ok(exe) = std::env::current_exe() {
+            for dir in exe.ancestors().skip(1) {
+                let candidate = dir.join(&relative);
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+        }
+        let dev_checkout =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../extensions/pi/viva.ts");
+        if dev_checkout.is_file() {
+            return dev_checkout;
+        }
+        relative
+    }
+
     /// The harness for a repository checkout: the extension ships with the
     /// repo (V13 later ships it with the installation).
     pub fn for_repo(repo_root: &Path) -> Self {
         Self {
             pi_binary: "pi".into(),
             extension_path: repo_root.join(EXTENSION_RELATIVE_PATH),
+        }
+    }
+
+    /// Default Pi harness for the running installation (release layout or
+    /// dev checkout).
+    pub fn for_installation() -> Self {
+        Self {
+            pi_binary: std::env::var("VIVA_PI_BINARY").unwrap_or_else(|_| "pi".into()),
+            extension_path: Self::resolve_extension_path(),
         }
     }
 
@@ -165,7 +198,7 @@ impl PiHarness {
 
 /// What the availability probe actually saw. Rendered for display; never
 /// coerced into a pass.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Availability {
     Available,

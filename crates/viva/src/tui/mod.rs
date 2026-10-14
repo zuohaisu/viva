@@ -5,7 +5,7 @@
 //! - Viva is the **only** physical-terminal renderer. Child tools' output
 //!   lives in their emulation state (V05 snapshots); the shell draws
 //!   projections of it. There is no second Viva chat engine here and no
-//!   Pi conversation UI — that composition lands with V09/V07.
+//!   Agent harness UIs (Pi, etc.) run inside Viva terminals (V09/V14).
 //! - The draw loop consumes a cached snapshot. Blocking queries and tool
 //!   probes never run inside drawing: data enters only through an explicit
 //!   [`TuiApp::refresh`] call from the event loop.
@@ -18,7 +18,7 @@
 //!   restores the physical terminal (raw mode off, main screen back) on
 //!   every exit path, including errors.
 //! - Unknown capabilities are displayed as unknown; nothing here claims a
-//!   live embedded PTY view (real Pi display lands in V09/V12).
+//!   live embedded PTY view; run `viva harness matrix` for per-harness evidence.
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
