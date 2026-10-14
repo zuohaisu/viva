@@ -225,11 +225,11 @@ test("tools answer in Pi's result shape: text content, structured details, isErr
     assert.deepEqual(JSON.parse(textOf(okResult)), { home: "/h", terminals: [] });
     assert.deepEqual(okResult.details, { home: "/h", terminals: [] }, "the CLI payload is kept as details");
 
-    const bad = load(fakeViva('#!/bin/sh\necho "no active office" >&2\nexit 3\n'));
+    const bad = load(fakeViva('#!/bin/sh\necho "no active server" >&2\nexit 3\n'));
     const badResult = await callTool(toolNamed(bad, "viva_office_status"), {});
     assert.equal(badResult.isError, true);
     assert.match(textOf(badResult), /office status unavailable/);
-    assert.match(textOf(badResult), /no active office/);
+    assert.match(textOf(badResult), /no active server/);
     assert.deepEqual(badResult.details, {});
   });
 });
