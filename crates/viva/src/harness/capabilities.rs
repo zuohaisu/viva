@@ -54,8 +54,9 @@ fn static_rows() -> Vec<HarnessCapabilityRow> {
     let mut rows: Vec<HarnessCapabilityRow> = crate::agents::DETECTABLE_AGENTS
         .iter()
         .map(|&agent| {
-            let (status, handoff, notes) = if agent == "pi" {
+            let (status, handoff, interactive, notes) = if agent == "pi" {
                 (
+                    CapabilityEvidence::Tested,
                     CapabilityEvidence::Tested,
                     CapabilityEvidence::Tested,
                     "Viva launches pi --extension viva.ts with member/task env (V09). \
@@ -66,15 +67,17 @@ fn static_rows() -> Vec<HarnessCapabilityRow> {
             } else {
                 (
                     CapabilityEvidence::Unknown,
-                    CapabilityEvidence::Tested,
-                    "Bare argv launch and workbench handoff brief (no Viva extension). \
-                     Controlled status reports need hook integration — not wired.",
+                    CapabilityEvidence::Unknown,
+                    CapabilityEvidence::Unknown,
+                    "PTY/handoff mechanics are tested in this repo with /bin/sh stand-ins only; \
+                     this CLI has no real harness check here yet. A local `program --version` \
+                     success is not upgraded to tested in the matrix.",
                 )
             };
             HarnessCapabilityRow {
                 harness: agent.into(),
                 launch: CapabilityEvidence::Unknown,
-                interactive: CapabilityEvidence::Tested,
+                interactive,
                 status_report: status,
                 handoff,
                 native_resume: CapabilityEvidence::Unknown,
@@ -124,7 +127,12 @@ pub fn build(probe_pi: bool) -> HarnessMatrix {
         if row.harness == "user_shell" {
             continue;
         }
-        row.launch = binary_launch_evidence(&row.harness);
+        if binary_present(&row.harness) {
+            row.notes.push_str(" This machine: `");
+            row.notes.push_str(&row.harness);
+            row.notes
+                .push_str(" --version` succeeded (install hint only).");
+        }
     }
     HarnessMatrix {
         generated_at: crate::foundation::ids::utc_now(),
@@ -144,16 +152,15 @@ fn pi_launch_evidence(harness: &PiHarness, probe: Option<&Availability>) -> Capa
     }
 }
 
-fn binary_launch_evidence(program: &str) -> CapabilityEvidence {
-    match std::process::Command::new(program)
+/// Whether `program --version` exits 0 on this host (hint only — never
+/// promotes matrix cells to `tested`).
+fn binary_present(program: &str) -> bool {
+    std::process::Command::new(program)
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-    {
-        Ok(status) if status.success() => CapabilityEvidence::Tested,
-        _ => CapabilityEvidence::Unknown,
-    }
+        .is_ok_and(|s| s.success())
 }
 
 #[cfg(test)]
@@ -173,5 +180,14 @@ mod tests {
         let targets = handoff_targets();
         assert!(targets.iter().any(|t| t == "pi"));
         assert!(!targets.iter().any(|t| t == "user_shell"));
+    }
+
+    #[test]
+    fn bare_cli_rows_stay_unknown_without_repo_evidence() {
+        let m = build(false);
+        let codex = m.rows.iter().find(|r| r.harness == "codex").expect("codex");
+        assert_eq!(codex.launch, CapabilityEvidence::Unknown);
+        assert_eq!(codex.interactive, CapabilityEvidence::Unknown);
+        assert_eq!(codex.handoff, CapabilityEvidence::Unknown);
     }
 }

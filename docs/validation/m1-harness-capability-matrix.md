@@ -13,7 +13,7 @@ Dimensions (M1 exit criteria):
 | native_resume | Harness-owned session resume (not Viva server resume) |
 | fork | Native conversation fork inside the harness |
 
-Evidence labels: `tested`, `unsupported`, `unknown` — never upgraded without real checks.
+Evidence labels: `tested`, `unsupported`, `unknown` — never upgraded without real checks. A local `program --version` success is recorded in row notes only (install hint), not as `tested`. Bare agent CLIs stay `unknown` until this repo has real harness checks for that tool (PTY/handoff tests today use `/bin/sh` stand-ins).
 
 ## Full-chain walkthrough (daily path)
 

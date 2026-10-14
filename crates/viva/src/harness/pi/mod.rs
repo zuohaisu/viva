@@ -91,7 +91,7 @@ impl PiHarness {
     /// dev checkout).
     pub fn for_installation() -> Self {
         Self {
-            pi_binary: "pi".into(),
+            pi_binary: std::env::var("VIVA_PI_BINARY").unwrap_or_else(|_| "pi".into()),
             extension_path: Self::resolve_extension_path(),
         }
     }
