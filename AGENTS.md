@@ -5,11 +5,16 @@ persistent AI members work through Viva; Viva is **not** an AI member.
 
 # Project North Star and Drift Guard
 
-This repository's North Star is:
+This repository's North Star is the one in the Wiki's `Core-Thesis`, quoted
+verbatim:
 
-> Build Viva so Haisu's AI members keep their continuity
-> while working through tasks, worktrees, workers and cognitive engines — and
-> where the history of that work outlives every worker session.
+```text
+Haisu's AI members should keep their continuity over time:
+each member keeps its own role, history and knowledge;
+tasks that outlive any single worker session;
+executions whose attribution and authority are always recoverable;
+work that actually gets done through real tools.
+```
 
 Core ontology invariants — every design must preserve them:
 
