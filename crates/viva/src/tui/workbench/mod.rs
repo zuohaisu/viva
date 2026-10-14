@@ -3924,6 +3924,30 @@ mod tests {
     }
 
     #[test]
+    fn enter_on_worktree_selects_scene_without_opening_shell() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        assert_eq!(app.focus(), Focus::Worktrees);
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Enter)),
+            KeyOutcome::Action(WorkbenchAction::SelectWorktree("wt1".into()))
+        );
+        app.select_worktree("wt1".into());
+        assert_eq!(app.selected_scene(), "wt1");
+        assert_eq!(app.terminal_leaves(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn o_on_worktree_is_the_explicit_new_shell_action() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('o'))),
+            KeyOutcome::Action(WorkbenchAction::OpenWorktreeShell("wt1".into()))
+        );
+    }
+
+    #[test]
     fn sidebar_sections_switch_and_render_facts() {
         let mut app = WorkbenchApp::new();
         app.set_model(sample());

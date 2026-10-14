@@ -79,3 +79,43 @@ fn legacy_and_dead_references_are_retained_without_replay() {
     a.restore_layout("garbage", &Default::default());
     assert_eq!(a.serialize_layout(), before);
 }
+
+#[test]
+fn per_worktree_tab_names_survive_a_b_a_without_cross_contamination() {
+    let mut a = app();
+    a.select_worktree("a".into());
+    a.new_tab("alpha-build".into());
+    a.attach_terminal("t0".into());
+    a.select_worktree("b".into());
+    a.new_tab("beta-agent".into());
+    a.attach_terminal("t2".into());
+    a.select_worktree("a".into());
+    assert_eq!(a.selected_scene(), "a");
+    assert_eq!(a.terminal_leaves(), vec!["t0"]);
+    let saved: serde_json::Value = serde_json::from_str(&a.serialize_layout()).unwrap();
+    let tabs = saved["scenes"]["a"]["tabs"].as_array().expect("tabs");
+    assert!(
+        tabs.iter().any(|t| t["name"] == "alpha-build"),
+        "alpha tab name kept: {tabs:?}"
+    );
+    let beta = saved["scenes"]["b"]["tabs"].as_array().expect("beta tabs");
+    assert!(
+        beta.iter().any(|t| t["name"] == "beta-agent"),
+        "beta scene untouched: {beta:?}"
+    );
+}
+
+#[test]
+fn scene_book_locate_matches_workbench_terminal_location() {
+    let mut a = app();
+    a.select_worktree("a".into());
+    a.new_tab("shell".into());
+    a.attach_terminal("t0".into());
+    a.split_pane(SplitAxis::Horizontal, "t1".into());
+    let book: viva::SceneBook = serde_json::from_str(&a.serialize_layout()).unwrap();
+    let from_book = book.locate("t1").expect("book locate");
+    let from_app = a.terminal_location("t1").expect("app locate");
+    assert_eq!(from_book.scene_id, from_app.scene_id);
+    assert_eq!(from_book.tab_id, from_app.tab_id);
+    assert_eq!(from_book.pane_id, from_app.pane_id);
+}
