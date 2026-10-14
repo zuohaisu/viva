@@ -377,10 +377,15 @@ impl Store {
     }
 
     fn configure(conn: &Connection) -> Result<()> {
+        // The busy handler has to be in place before the journal-mode change.
+        // Switching a rollback-journal file to WAL takes an exclusive lock, and
+        // with no handler SQLite returns SQLITE_BUSY immediately. Concurrent
+        // first opens then fail with "database is locked" instead of waiting
+        // out the switch.
+        conn.busy_timeout(Duration::from_millis(5_000))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.busy_timeout(Duration::from_millis(5_000))?;
         Ok(())
     }
 
@@ -399,6 +404,9 @@ impl Store {
             );",
         )?;
         for migration in migrations.all() {
+            // Read-only fast path for a database that is already current.
+            // A concurrent first open can still pass this check on a stale
+            // snapshot, so the decision is repeated after the write lock.
             let already = self.conn.query_row(
                 "SELECT COUNT(*) FROM schema_migrations WHERE domain = ?1 AND version = ?2",
                 rusqlite::params![migration.domain.as_str(), migration.version as i64],
@@ -412,6 +420,14 @@ impl Store {
             let tx = self
                 .conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let already = tx.query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE domain = ?1 AND version = ?2",
+                rusqlite::params![migration.domain.as_str(), migration.version as i64],
+                |row| row.get::<_, i64>(0),
+            )? > 0;
+            if already {
+                continue;
+            }
             tx.execute_batch(migration.sql).map_err(|err| {
                 if migration.domain == DOMAIN_MAINTENANCE
                     && migration.version == 2
@@ -720,5 +736,39 @@ mod tests {
         let store = Store::open_in_memory(&foundation_only()).expect("open");
         let meta = store.schema_meta().expect("meta");
         assert_eq!(meta.get("layout_version").map(String::as_str), Some("1"));
+    }
+
+    /// A rollback-journal file switched to WAL takes an exclusive lock.
+    /// Openers that arrive together must wait that lock out, not fail it.
+    #[test]
+    fn concurrent_first_opens_of_a_rollback_journal_database_all_succeed() {
+        let dir = TempDir::new().expect("tempdir");
+        for trial in 0..12 {
+            let db = dir.path().join(format!("trial-{trial}.db"));
+            {
+                let conn = rusqlite::Connection::open(&db).expect("seed");
+                conn.execute_batch("CREATE TABLE seeded (id INTEGER PRIMARY KEY);")
+                    .expect("seed table");
+            }
+            let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let mut handles = Vec::new();
+            for _ in 0..8 {
+                let db = db.clone();
+                let start = std::sync::Arc::clone(&start);
+                handles.push(std::thread::spawn(move || {
+                    start.wait();
+                    let store =
+                        Store::open(&db, &foundation_only()).expect("every opener succeeds");
+                    let mode: String = store
+                        .connection()
+                        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                        .expect("journal mode");
+                    assert_eq!(mode, "wal");
+                }));
+            }
+            for handle in handles {
+                handle.join().expect("thread");
+            }
+        }
     }
 }
