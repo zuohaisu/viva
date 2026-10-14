@@ -17,8 +17,12 @@
 //!   domains create their own tables and reference them; they never `ALTER`
 //!   foundation tables.
 
-use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::{File, OpenOptions};
+use std::os::unix::fs::OpenOptionsExt as _;
+use std::os::unix::io::AsRawFd as _;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use rusqlite::Connection;
@@ -330,13 +334,108 @@ pub struct Store {
     legacy_migration: Option<legacy::Migrated>,
 }
 
+/// Sidecar lock released on drop. Held for the whole of one `Store::open`.
+struct DatabaseFileLock {
+    file: File,
+}
+
+impl Drop for DatabaseFileLock {
+    fn drop(&mut self) {
+        // SAFETY: `file` is the descriptor this guard locked with LOCK_EX.
+        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+impl DatabaseFileLock {
+    fn acquire(db_path: &Path) -> Result<Self> {
+        let path = open_lock_path(db_path);
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)?;
+        lock_exclusive(&file)?;
+        Ok(Self { file })
+    }
+}
+
+fn in_process_open_lock(path: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    let mut locks = LOCKS.lock().unwrap_or_else(|err| err.into_inner());
+    locks
+        .entry(open_lock_key(path))
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+fn open_lock_key(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("viva.db"));
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent
+            .canonicalize()
+            .unwrap_or_else(|_| parent.to_path_buf())
+            .join(name),
+        _ => name,
+    }
+}
+
+fn open_lock_path(db_path: &Path) -> PathBuf {
+    let mut name = db_path
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_else(|| std::ffi::OsString::from("viva.db"));
+    name.push(".open.lock");
+    match db_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(name),
+        _ => PathBuf::from(name),
+    }
+}
+
+fn lock_exclusive(file: &File) -> std::io::Result<()> {
+    let fd = file.as_raw_fd();
+    loop {
+        // SAFETY: `fd` is an open file descriptor owned by `file`. LOCK_EX
+        // waits until this process holds the advisory lock.
+        let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
+        if rc == 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        return Err(err);
+    }
+}
+
 impl Store {
     /// Open (creating if needed) the database at `path` and apply all pending
     /// migrations from `migrations`.
     pub fn open(path: &Path, migrations: &FrozenMigrations) -> Result<Store> {
+        // Switching a rollback journal to WAL takes an exclusive lock, and
+        // SQLite returns SQLITE_BUSY immediately — without calling the busy
+        // handler — when two connections race for it. Wait here, before any
+        // connection is opened. The mutex covers threads in this process
+        // (on macOS `flock` does not block another thread of the same
+        // process). The file lock covers other processes. Both guards stay
+        // alive until this function returns, so the open finishes before
+        // either lock is released.
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)?;
+            }
+        }
+        let thread_lock = in_process_open_lock(path);
+        let _thread_guard = thread_lock.lock().unwrap_or_else(|err| err.into_inner());
+        let _file_lock = DatabaseFileLock::acquire(path)?;
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
                 legacy::ensure_current_database_file(parent, path)?;
             }
         }
@@ -377,10 +476,14 @@ impl Store {
     }
 
     fn configure(conn: &Connection) -> Result<()> {
+        // Before the journal-mode change, so a switch that does call the
+        // busy handler waits. Some exclusive-lock races never call it;
+        // `Store::open` keeps those off this connection by admitting one
+        // opener at a time.
+        conn.busy_timeout(Duration::from_millis(5_000))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.busy_timeout(Duration::from_millis(5_000))?;
         Ok(())
     }
 
@@ -399,6 +502,9 @@ impl Store {
             );",
         )?;
         for migration in migrations.all() {
+            // Read-only fast path for a database that is already current.
+            // A concurrent first open can still pass this check on a stale
+            // snapshot, so the decision is repeated after the write lock.
             let already = self.conn.query_row(
                 "SELECT COUNT(*) FROM schema_migrations WHERE domain = ?1 AND version = ?2",
                 rusqlite::params![migration.domain.as_str(), migration.version as i64],
@@ -412,6 +518,14 @@ impl Store {
             let tx = self
                 .conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let already = tx.query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE domain = ?1 AND version = ?2",
+                rusqlite::params![migration.domain.as_str(), migration.version as i64],
+                |row| row.get::<_, i64>(0),
+            )? > 0;
+            if already {
+                continue;
+            }
             tx.execute_batch(migration.sql).map_err(|err| {
                 if migration.domain == DOMAIN_MAINTENANCE
                     && migration.version == 2
@@ -720,5 +834,39 @@ mod tests {
         let store = Store::open_in_memory(&foundation_only()).expect("open");
         let meta = store.schema_meta().expect("meta");
         assert_eq!(meta.get("layout_version").map(String::as_str), Some("1"));
+    }
+
+    /// A rollback-journal file switched to WAL takes an exclusive lock.
+    /// Openers that arrive together must wait that lock out, not fail it.
+    #[test]
+    fn concurrent_first_opens_of_a_rollback_journal_database_all_succeed() {
+        let dir = TempDir::new().expect("tempdir");
+        for trial in 0..12 {
+            let db = dir.path().join(format!("trial-{trial}.db"));
+            {
+                let conn = rusqlite::Connection::open(&db).expect("seed");
+                conn.execute_batch("CREATE TABLE seeded (id INTEGER PRIMARY KEY);")
+                    .expect("seed table");
+            }
+            let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let mut handles = Vec::new();
+            for _ in 0..8 {
+                let db = db.clone();
+                let start = std::sync::Arc::clone(&start);
+                handles.push(std::thread::spawn(move || {
+                    start.wait();
+                    let store =
+                        Store::open(&db, &foundation_only()).expect("every opener succeeds");
+                    let mode: String = store
+                        .connection()
+                        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                        .expect("journal mode");
+                    assert_eq!(mode, "wal");
+                }));
+            }
+            for handle in handles {
+                handle.join().expect("thread");
+            }
+        }
     }
 }

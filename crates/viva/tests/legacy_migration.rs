@@ -554,10 +554,13 @@ fn reopening_a_migrated_database_changes_nothing() {
 #[test]
 fn concurrent_openers_migrate_exactly_once() {
     let (dir, db) = legacy_home();
+    let start = std::sync::Arc::new(std::sync::Barrier::new(4));
     let handles: Vec<_> = (0..4)
         .map(|_| {
             let db = db.clone();
+            let start = std::sync::Arc::clone(&start);
             std::thread::spawn(move || {
+                start.wait();
                 let store = open(&db).expect("every opener succeeds");
                 store.legacy_migration().is_some()
             })
