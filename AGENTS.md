@@ -194,7 +194,13 @@ then through a pull request and a merge into the remote default branch.
   tooling and `extensions/pi` has its own npm suite), `git diff --check`,
   and an inspection of the final diff for secrets and generated
   artifacts. Report blocked or unrun checks honestly; never weaken
-  or skip tests to make them pass.
+  or skip tests to make them pass. A `skip`, `ignored`, or unrun check is
+  not evidence that the item passed. A real CLI, host, or SDK contract
+  change needs a real binary, host, or official-SDK check. When fixing a
+  known failure, reproduce it on a recorded pre-fix commit, then verify
+  the same scenario; do not manufacture a failure on `main`. When the
+  change only adds coverage, record the old skip or miss and what the new
+  run actually executed. The procedure is in `.agents/prompts/delivery.md`.
 
   #### Docs-only fast path
 
@@ -222,7 +228,11 @@ then through a pull request and a merge into the remote default branch.
   to `origin` with upstream tracking. Never force-push, delete remote
   branches, or alter branch protection as part of this workflow.
 - Open one PR per task branch, in **Ready for review** state unless the user
-  asks for a draft, targeting the remote default branch. The body must contain
+  asks for a draft, targeting the remote default branch. A task whose spec
+  must be approved first does not enter formal implementation before that
+  approval. If the work cannot wait, the early implementation may proceed
+  only as a Draft PR whose body says 「规格未批准」. It stays Draft, and it
+  is not merged, until the spec is approved. The body must contain
   Summary, Validation (exact commands and results), Risk/Safety Boundaries,
   and Known Limitations.
 - After pushing, rebase or merge the latest base if the branch conflicts, fix
