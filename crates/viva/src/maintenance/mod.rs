@@ -2,7 +2,7 @@
 //! (F02, issue #24).
 //!
 //! Semantics:
-//! - Maintenance runs only while the office is open: every scan is recorded
+//! - Maintenance runs only while Viva is open: every scan is recorded
 //!   under an explicit [`MaintenanceSession`] that the host (workbench)
 //!   opens on start and ends on shutdown. There is no daemon and no timer
 //!   here; closing the TUI ends the session.
@@ -11,10 +11,10 @@
 //!   duplicates; changing facts produce a new proposal, honestly.
 //! - Exits stay reversible and traceable: knowledge archiving goes through
 //!   the knowledge registry's lifecycle (reason + actor appended, body file
-//!   untouched, restore path intact); skill disabling flips office state
+//!   untouched, restore path intact); skill disabling flips Viva state
 //!   only and never touches SKILL.md.
 //! - Authorization comes from the user: executing a proposal requires a
-//!   live grant covering `maintain_knowledge` (an ACT_* office-wide grant —
+//!   live grant covering `maintain_knowledge` (an ACT_* Viva-wide grant —
 //!   maintenance is not task-scoped, so a task-scoped grant is refused).
 //! - There is **no delete** in this module, no worktree removal, and no
 //!   remote/branch prune: worktree and cleanliness findings are proposals
@@ -50,7 +50,7 @@ pub fn register_migrations(registry: MigrationRegistry) -> MigrationRegistry {
 }
 
 pub const MAINTENANCE_V1_SQL: &str = r#"
--- Review sessions: proof that a scan ran under a live office host. The
+-- Review sessions: proof that a scan ran under a live server. The
 -- host opens a session on start and ends it on shutdown; no session means
 -- no maintenance ran.
 CREATE TABLE maintenance_sessions (
@@ -132,7 +132,7 @@ impl ProposalKind {
 pub enum SuggestedAction {
     /// Low-risk, reversible exit through the knowledge lifecycle.
     ArchiveKnowledge,
-    /// Reversible office-state change (the skill's files are untouched).
+    /// Reversible Viva-state change (the skill's files are untouched).
     DisableSkill,
     /// A human must name the exact action; maintenance never performs it.
     HumanReview,
@@ -201,14 +201,14 @@ pub struct ScanReport {
 // Session
 // ---------------------------------------------------------------------------
 
-/// A live maintenance window, owned by the office host. Closing the office
+/// A live maintenance window, owned by the server. Closing the server
 /// ends the window; a restart opens a new one and only restores records.
 pub struct MaintenanceSession {
     session_id: String,
 }
 
 impl MaintenanceSession {
-    /// Open a session for this process. The host calls this when the office
+    /// Open a session for this process. The host calls this when the server
     /// becomes active.
     pub fn open(store: &Store) -> Result<MaintenanceSession> {
         let session = MaintenanceSession {
@@ -330,7 +330,7 @@ impl<'a> MaintenanceService<'a> {
         }
 
         // Enabled skills without a single usage record: candidates for
-        // disabling (reversible office state), never for deletion.
+        // disabling (reversible Viva state), never for deletion.
         for skill in registry.list_skills(true)? {
             let usage = registry.usage_of(&skill.item_id)?;
             if !usage.is_empty() {
@@ -497,7 +497,7 @@ impl<'a> MaintenanceService<'a> {
 
     /// Execute one open proposal under a live grant. Knowledge exits go
     /// through the reversible lifecycle (reason recorded, body file kept,
-    /// restore available); skill disabling flips office state only.
+    /// restore available); skill disabling flips Viva state only.
     /// `human_review` proposals are refused: maintenance does not prune
     /// worktrees, delete files or touch remotes — that action stays with a
     /// human who names it.
@@ -524,7 +524,7 @@ impl<'a> MaintenanceService<'a> {
                     .into(),
             ));
         }
-        // Office-wide mutation needs an office-wide live grant; a
+        // Viva-wide mutation needs a Viva-wide live grant; a
         // task-scoped grant is refused by the cross-task check on purpose.
         authority
             .check(actor, "maintain_knowledge", None)?
@@ -560,7 +560,7 @@ impl<'a> MaintenanceService<'a> {
     }
 
     /// Dismiss a proposal without executing it (decision recorded).
-    /// Dismissal silences a finding, so it is an office-state mutation too:
+    /// Dismissal silences a finding, so it is a Viva-state mutation too:
     /// it requires a live `maintain_knowledge` grant like execution does,
     /// and the denial is appended when refused.
     pub fn dismiss_proposal(

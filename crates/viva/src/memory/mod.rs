@@ -613,7 +613,7 @@ impl<'a> MemoryService<'a> {
                 "workers do not exit memories; member grants only".into(),
             ));
         };
-        // Exit is an office-state mutation: a live grant is required, and
+        // Exit is a Viva-state mutation: a live grant is required, and
         // the authority engine appends its own denial record.
         authority
             .check(actor, "maintain_knowledge", None)?
@@ -872,7 +872,7 @@ mod tests {
     fn adapter_config_defaults_are_explicit_paths() {
         // The db default is the verified real store; the adapter refuses
         // to run without an explicit --db regardless, so the default only
-        // names WHERE the office looks, never silently writes elsewhere.
+        // names WHERE Viva looks, never silently writes elsewhere.
         let config = AdapterConfig {
             python: PathBuf::from("python3"),
             adapter_script: PathBuf::from("extensions/pi/memory/memory_adapter.py"),

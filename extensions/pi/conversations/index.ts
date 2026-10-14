@@ -1,16 +1,16 @@
 /**
  * Viva conversations sub-extension for the Pi coding agent (V10, issue #19).
  *
- * Registers conversation-tree tools on top of the office conversation
- * metadata: fork (native-first, office-records-second), rename (office
+ * Registers conversation-tree tools on top of Viva's conversation
+ * metadata: fork (native-first, Viva-records-second), rename (Viva
  * display name only), and handoff (explicit, capability-declared).
  *
- * Ordering rule enforced here: a fork is recorded in the office only after
+ * Ordering rule enforced here: a fork is recorded in Viva only after
  * the harness's native fork succeeded. If this Pi build exposes no fork
  * API the tool refuses and proposes a handoff instead — it never records a
  * fork the harness did not confirm, and never pretends one happened.
  *
- * Sessions without office context stay inert, exactly like the main
+ * Sessions without Viva context stay inert, exactly like the main
  * extension.
  */
 
@@ -69,11 +69,11 @@ export default function vivaConversations(pi: PiHost): void {
     name: "viva_conversations_fork",
     label: "Viva conversation fork",
     description:
-      "Fork the current conversation into a new branch: Pi forks natively first, then the office records the branch. Refuses when native fork is unavailable (use handoff).",
+      "Fork the current conversation into a new branch: Pi forks natively first, then Viva records the branch. Refuses when native fork is unavailable (use handoff).",
     parameters: Type.Object(
       {
-        display_name: Type.String({ description: "Office display name for the new branch." }),
-        parent_node_id: Type.String({ description: "Office node id to branch from." }),
+        display_name: Type.String({ description: "Display name for the new branch." }),
+        parent_node_id: Type.String({ description: "Node id to branch from." }),
       },
       { additionalProperties: false },
     ),
@@ -84,14 +84,14 @@ export default function vivaConversations(pi: PiHost): void {
         return toolFailure("fork needs a display name and a parent node id");
       }
       // 1) Native fork FIRST. A fork the harness did not confirm is never
-      //    recorded as an office fact.
+      //    recorded as a Viva fact.
       const native = await tryNativeFork(ctx);
       if (!native) {
         return toolFailure(
           "this Pi build exposes no native fork entry point; nothing was forked and nothing was recorded — use viva_conversations_handoff instead",
         );
       }
-      // 2) Office record SECOND.
+      // 2) Viva record SECOND.
       try {
         const payload = await runEnvelope(env, [
           "conversations",
@@ -106,10 +106,10 @@ export default function vivaConversations(pi: PiHost): void {
         ]);
         return toolSuccess(payload);
       } catch (err) {
-        // The fork happened natively but the office record failed: say so
+        // The fork happened natively but Viva's record failed: say so
         // plainly instead of hiding either fact.
         return toolFailure(
-          `native fork succeeded (${native.sessionId}) but the office record failed: ${String(err)}`,
+          `native fork succeeded (${native.sessionId}) but the Viva record failed: ${String(err)}`,
         );
       }
     },
@@ -119,7 +119,7 @@ export default function vivaConversations(pi: PiHost): void {
     name: "viva_conversations_rename",
     label: "Viva conversation rename",
     description:
-      "Rename a branch in the office (display name is office-owned metadata; the harness's own title stays untouched).",
+      "Rename a branch in Viva (display name is Viva-owned metadata; the harness's own title stays untouched).",
     parameters: Type.Object(
       {
         node_id: Type.String(),
@@ -140,7 +140,7 @@ export default function vivaConversations(pi: PiHost): void {
           "--name",
           params.display_name,
         ]);
-        return toolSuccess(`renamed to "${params.display_name}" in the office`);
+        return toolSuccess(`renamed to "${params.display_name}" in Viva`);
       } catch (err) {
         return toolFailure(`rename failed: ${String(err)}`);
       }
@@ -154,7 +154,7 @@ export default function vivaConversations(pi: PiHost): void {
       "Record a handoff of this conversation branch to another harness: identity, brief snapshot and a history reference travel; the original record stays traceable. No transcript conversion is promised.",
     parameters: Type.Object(
       {
-        node_id: Type.String({ description: "Office node id being handed off." }),
+        node_id: Type.String({ description: "Node id being handed off." }),
         to_harness: Type.String({ description: "Target harness name (e.g. codex)." }),
         capability: Type.Optional(
           Type.Unsafe<"native_fork" | "handoff_only">({

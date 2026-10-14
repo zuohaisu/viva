@@ -5,9 +5,9 @@ This adapter REUSES the implementation that already runs on this machine
 (the bundled plugin inside the user's hermes-agent checkout); it does not
 re-implement HRR, FTS or storage. Its whole job:
 
-- speak JSON on stdout so the Rust office can call it as a subprocess;
+- speak JSON on stdout so Viva can call it as a subprocess;
 - carry an explicit db path (Viva's tests use a temp store; the real
-  store is only touched when the office is actually configured for it);
+  store is only touched when Viva is actually configured for it);
 - NEVER delete: the bundled ``remove_fact`` is a physical SQL DELETE and
   there is no archive in the bundled schema, so exit handling lives on
   the Viva side and this adapter simply does not expose removal;
@@ -23,7 +23,7 @@ Usage:
   memory_adapter.py status --agent-dir DIR [--db PATH]
 
 This file is never executed directly by hand in production: the Rust
-office spawns it with the interpreter it was configured with (the
+binary spawns it with the interpreter it was configured with (the
 hermes-agent venv python, because the plugin package imports YAML
 tooling that a bare system python lacks).
 """
@@ -66,7 +66,7 @@ def make_provider(agent_dir: str, db: str | None):
         # memory_store.db when no path is given — during development a
         # test write once landed there because this adapter did not
         # forward an explicit path. That default is now structurally
-        # impossible here: the office always passes an explicit store
+        # impossible here: Viva always passes an explicit store
         # path, and without one this adapter refuses to run.
         raise ValueError(
             "refusing to run without an explicit --db path: the bundled default "

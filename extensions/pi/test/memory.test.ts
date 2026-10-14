@@ -3,8 +3,8 @@
  * Run with: npm test
  *
  * Both tools are exercised against a fake `viva` binary, so the real
- * chain (tool -> office CLI argv -> payload) is verified without a live
- * office or any memory store.
+ * chain (tool -> viva CLI argv -> payload) is verified without a live
+ * server or any memory store.
  */
 
 import { test } from "node:test";
@@ -51,7 +51,7 @@ function fakeViva(): string {
   const dir = mkdtempSync(join(tmpdir(), "viva-memory-test-"));
   const path = join(dir, "fake-viva");
   // The fake answers with the argv it received as a JSON array, so tests
-  // assert the real CLI envelope the office will see (runEnvelope
+  // assert the real CLI envelope Viva will see (runEnvelope
   // JSON-parses stdout). POSIX sh only: the test runner's PATH may not
   // resolve `env node` for shebangs. Test args never contain quotes, so
   // naive quoting is safe here.
@@ -70,7 +70,7 @@ function fakeViva(): string {
   return path;
 }
 
-test("the office entry registers the memory tools", () => {
+test("the main entry registers the memory tools", () => {
   withEnv(BASE_ENV, () => {
     const fake = createFakePi();
     vivaOffice(fake.host);

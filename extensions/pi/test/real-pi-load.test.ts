@@ -18,7 +18,7 @@
  * load from a bad one. This test needs no network and no credentials.
  *
  * Guards against a false green:
- * - The harness-injected office variables are set. Without them the
+ * - The harness-injected variables are set. Without them the
  *   extension stays inert by design, loads trivially, and would pass while
  *   registering nothing; a control test below pins that behaviour.
  * - Tool names are compared for exact equality, not "at least one tool".
@@ -178,14 +178,14 @@ function assertLoadsCleanlyWithTools(load: RealPiLoad, expected: string[], what:
   }
 }
 
-test("control: a bare Pi run loads the extension inertly (why the office env is injected)", async (t) => {
+test("control: a bare Pi run loads the extension inertly (why the harness injects its environment)", async (t) => {
   t.diagnostic(`real Pi ${VERSION}`);
   const load = await loadInRealPi(HARNESS_ENTRY, false);
   assert.deepEqual(load.errors, [], "an inert extension must load without errors");
   assert.deepEqual(
     load.registeredTools,
     [],
-    "without the office environment the extension registers nothing, so a load " +
+    "without the harness-injected environment the extension registers nothing, so a load " +
       "check without it would pass vacuously",
   );
 });

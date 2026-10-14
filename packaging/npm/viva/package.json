@@ -1,7 +1,7 @@
 {
   "name": "@zuohaisu/viva",
   "version": "0.0.0-set-by-prepare",
-  "description": "viva — the Personal AI Office host (prebuilt macOS binary; the package name is the delivery channel, the command stays `viva`).",
+  "description": "viva — the local-first personal AI collaboration system (prebuilt macOS binary; the package name is the delivery channel, the command stays `viva`).",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -26,7 +26,6 @@
   "keywords": [
     "ai",
     "agents",
-    "office",
     "local-first"
   ]
 }

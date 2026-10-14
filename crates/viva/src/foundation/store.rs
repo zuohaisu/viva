@@ -13,7 +13,7 @@
 //!   each migration runs in its own transaction so a failed migration leaves
 //!   no half state.
 //! - Foundation tables are the frozen reference slice (sessions, executions,
-//!   launch specs, terminal events, control requests, office events). Other
+//!   launch specs, terminal events, control requests, events). Other
 //!   domains create their own tables and reference them; they never `ALTER`
 //!   foundation tables.
 
@@ -217,10 +217,10 @@ impl FrozenMigrations {
 
 /// The foundation reference schema (version 1). The migration engine itself
 /// owns `schema_meta` and `schema_migrations` (created before any migration
-/// runs); foundation v1 owns the office tables below. See the module docs for
+/// runs); foundation v1 owns the tables below. See the module docs for
 /// the ownership rules of these tables.
 pub const FOUNDATION_V1_SQL: &str = r#"
--- Append-only office event log. UPDATE/DELETE are rejected by trigger; the
+-- Append-only event log. UPDATE/DELETE are rejected by trigger; the
 -- CHECK bounds payload growth in bytes (bounded logging, ADR 0011).
 CREATE TABLE office_events (
     seq          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -241,7 +241,7 @@ CREATE TRIGGER office_events_no_delete
 BEFORE DELETE ON office_events
 BEGIN SELECT RAISE(ABORT, 'office_events is append-only'); END;
 
--- Office-side session references. A plain conversation session needs no task;
+-- Viva-side session references. A plain conversation session needs no task;
 -- a task execution session must carry its task. Harness-native session ids
 -- are pointers to foreign records, never a second copy of the chat facts.
 CREATE TABLE office_sessions (
@@ -322,7 +322,7 @@ CREATE TABLE control_requests (
 INSERT INTO schema_meta(key, value) VALUES ('layout_version', '1');
 "#;
 
-/// An open office store. Single-writer per process; WAL keeps readers cheap.
+/// An open store. Single-writer per process; WAL keeps readers cheap.
 pub struct Store {
     conn: Connection,
     schema_versions: BTreeMap<Domain, u32>,
@@ -403,7 +403,7 @@ impl Store {
                 {
                     Error::Migration(format!(
                         "maintenance v2 could not backfill conflicting proposal keys ({err}); \
-                         no proposal was changed. Stop the office, preserve the database with \
+                         no proposal was changed. Stop the server, preserve the database with \
                          SQLite backup, then inspect both proposals and resolve the key conflict \
                          as described in the Wiki (F01-F04-Acceptance). A private raw \
                          inventory is available via `viva data export --out <dir>`"

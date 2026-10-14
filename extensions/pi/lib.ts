@@ -1,20 +1,20 @@
 /**
- * Office-envelope plumbing for the Viva Pi extension (V09, issue #18).
+ * Envelope plumbing for the Viva Pi extension (V09, issue #18).
  *
  * The fixed CLI envelope: the extension calls the `viva` binary's
  * top-level control commands — `status`, `brief`, `dispatch`, `handoff`
- * (JSON on stdout, non-zero exit on rejection) — and never speaks for the
- * office itself. There is no `office` namespace to type through, and
+ * (JSON on stdout, non-zero exit on rejection) — and never speaks for
+ * Viva itself. There is no separate namespace to type through, and
  * `test/viva-office.contract.test.ts` runs these commands against the real
  * binary. Everything here is deliberately boring and side-effect-free
  * unless it is actually spawning that CLI.
  *
  * Authority rules this module enforces structurally:
  * - Without a member identity in the environment the extension has no
- *   office context and stays inert (`officeEnv` returns null).
+ *   Viva context and stays inert (`officeEnv` returns null).
  * - Without a live grant reference there is no dispatch: `planDispatch`
  *   returns a refusal that proposes asking the user for authorization.
- *   A chat session never receives office-wide authority.
+ *   A chat session never receives Viva-wide authority.
  */
 
 import { spawnSync } from "node:child_process";
@@ -39,9 +39,9 @@ export interface OfficeEnv {
 }
 
 /**
- * Parse the office context the Rust harness injected into the environment
+ * Parse the Viva context the Rust harness injected into the environment
  * (see `crates/viva/src/harness/pi/mod.rs` for the contract). Returns null
- * when the session was not launched by the office — the extension must
+ * when the session was not launched by Viva — the extension must
  * then claim nothing about membership or tasks.
  */
 export function officeEnv(raw: NodeJS.ProcessEnv): OfficeEnv | null {
@@ -75,7 +75,7 @@ export interface DispatchRequest {
 
 /**
  * Decide how a dispatch request may proceed. Missing grant or missing task
- * context is a REFUSAL with a proposal — the office's dispatch endpoint
+ * context is a REFUSAL with a proposal — Viva's dispatch endpoint
  * enforces the grant again server-side; this refusal is the extension-side
  * guarantee that a chat without authorization cannot even attempt it.
  */
@@ -86,7 +86,7 @@ export function planDispatch(env: OfficeEnv, req: DispatchRequest): DispatchPlan
     return {
       kind: "refuse",
       reason:
-        "no task is attached to this session; create a task in the office and dispatch from there",
+        "no task is attached to this session; create a task in Viva and dispatch from there",
     };
   }
   if (!grantId) {
@@ -94,7 +94,7 @@ export function planDispatch(env: OfficeEnv, req: DispatchRequest): DispatchPlan
       kind: "refuse",
       reason:
         "no live grant covers this dispatch; ask the user to authorize one for this task " +
-        "(the office issues grants; chat cannot self-authorize)",
+        "(Viva issues grants; chat cannot self-authorize)",
     };
   }
   if (!req.argv || req.argv.length === 0 || !req.argv[0] || req.argv[0].trim() === "") {
@@ -134,7 +134,7 @@ export interface EnvelopeOutcome {
 }
 
 /**
- * Run one office CLI call through the fixed envelope: JSON on stdout, a
+ * Run one viva CLI call through the fixed envelope: JSON on stdout, a
  * non-zero exit meaning rejection. Network/host problems surface as thrown
  * errors with the CLI's own words — the extension never invents an outcome.
  */
@@ -152,7 +152,7 @@ export function runEnvelope(env: OfficeEnv, officeArgs: string[]): Promise<unkno
     if (result.status !== 0) {
       reject(
         new Error(
-          `office rejected the request (exit ${result.status}): ${result.stderr.trim() || "no reason given"}`,
+          `Viva rejected the request (exit ${result.status}): ${result.stderr.trim() || "no reason given"}`,
         ),
       );
       return;
@@ -162,7 +162,7 @@ export function runEnvelope(env: OfficeEnv, officeArgs: string[]): Promise<unkno
     } catch {
       reject(
         new Error(
-          `office CLI returned malformed JSON: ${result.stdout.slice(0, 200) || "(empty)"}`,
+          `viva CLI returned malformed JSON: ${result.stdout.slice(0, 200) || "(empty)"}`,
         ),
       );
     }

@@ -70,7 +70,7 @@ What is checked, by whom:
 - **Loading and tool registration, by CI, on the pinned real Pi.**
   `test/real-pi-load.test.ts` loads `viva-office.ts` (the file the harness
   passes to `pi --extension`) and `conversations/index.ts` through Pi's own
-  extension loader, with the office environment the harness injects, and
+  extension loader, with the environment variables the harness injects, and
   compares the registered tool names exactly. It needs no network and no model
   credentials, and it fails (never skips) if Pi cannot be loaded. It uses the
   SDK rather than `pi -p`, because without an API key `pi -p` exits 1 whether

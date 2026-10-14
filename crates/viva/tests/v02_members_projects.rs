@@ -107,7 +107,7 @@ fn multi_project_context_with_references_and_plain_directories() {
         "the scenario requires projects in different parents"
     );
 
-    // A temporary reference edge is explicit office bookkeeping.
+    // A temporary reference edge is explicit Viva bookkeeping.
     let reference_target = dir.path().join("shared-asset");
     std::fs::create_dir_all(&reference_target).expect("mkdir ref");
     projects
