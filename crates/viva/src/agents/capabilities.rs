@@ -48,10 +48,10 @@ pub fn capability_matrix() -> &'static [AgentCliProfile] {
     &[
         AgentCliProfile {
             tool: "pi",
-            controlled_report: Verified,
+            controlled_report: Unverified,
             process_identification: Verified,
             screen_inference: Unverified,
-            note: "Pi extension reports through the controlled channel in-repo.",
+            note: "Controlled endpoint tested in-repo via synthetic reports; no pi-side reporter wired yet.",
         },
         AgentCliProfile {
             tool: "codex",

@@ -41,7 +41,7 @@ fn process_instances_and_exits_are_separate_even_for_the_same_tool() {
 fn capability_matrix_marks_unknown_and_unverified_honestly() {
     assert_eq!(capability_matrix().len(), 7);
     let pi = profile_for("pi").expect("pi");
-    assert_eq!(pi.controlled_report, CapabilityLevel::Verified);
+    assert_eq!(pi.controlled_report, CapabilityLevel::Unverified);
     let cline = profile_for("cline").expect("cline");
     assert_eq!(cline.controlled_report, CapabilityLevel::Unknown);
     let codex = profile_for("codex").expect("codex");
