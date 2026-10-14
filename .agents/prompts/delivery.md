@@ -28,6 +28,8 @@
 
 ## 2. GitHub issue 是唯一的事实来源
 
+规则见 `AGENTS.md` 的 "GitHub Issues Are the Source of Truth"；这里写怎么做。
+
 - 每个开发任务必须有对应的 GitHub issue。没有就先停下，在 Multica 上说明缺口，请对应的人补建；不要无 issue 开 PR。
 - 规格、PR 链接、检查证据、QA 结论、复盘这些结论性内容，**必须发到 GitHub issue 上**：
 
@@ -64,13 +66,13 @@ git status --short                           # 只应有本任务的文件
 ## 5. 边界：只做到开 PR
 
 - 不改版本号，不合并，不发版，不删 worktree，不批准自己的 PR。
-- `main` 已开启分支保护，只能通过 PR 更新；不 push `main`，不 force push，不删远端分支。
+- `main` 已开启分支保护，只能通过 PR 更新（`AGENTS.md` "Concurrent Development"）；不 push `main`，不 force push，不删远端分支。
 - PR 不改任何版本号；版本和发布由 owner 人工负责。规则见 `AGENTS.md` 的 "npm Releases and Version Policy"。
 - 其他权限边界见 `AGENTS.md` 的 "Actor-Aware Delivery Authority"。
 
 ## 6. Wiki 修改
 
-Wiki 修改不走 PR（owner 于 2026-10-13 裁决）。什么时候该改 Wiki，见 `AGENTS.md`；这里只写怎么改。
+Wiki 修改不走 PR，规则和什么时候该改 Wiki 都见 `AGENTS.md` 的 "Documentation and Project Knowledge"；这里只写怎么改。
 
 1. 不在只读参考副本里改。在任务的工作目录里另建一份：
 

@@ -66,6 +66,11 @@ the relevant Wiki page as part of the same task:
 5. update the affected cross-links;
 6. update `Roadmap` when the current stage or milestone is affected.
 
+Wiki edits do not go through pull requests. Commit directly to the Wiki's
+`master`, one change per commit, never force-push, and post each commit link
+on the GitHub issue the change belongs to. The step-by-step procedure is in
+[`.agents/prompts/delivery.md`](.agents/prompts/delivery.md) §6.
+
 When historical repository documents (or Git history) conflict with current
 Wiki content, the Wiki represents the current canonical understanding — but
 historical evidence is never deleted or rewritten: provenance stays traceable
@@ -135,19 +140,29 @@ capabilities that were still useful live in the Rust implementation
 retired in V13 (issue #22); the Rust binary is the only `viva` entry. Historical run data (`~/.ticket-autopilot/`, `qa-verdict.json`,
 `tasks/` archives) is preserved and must not be deleted or rewritten.
 
+## GitHub Issues Are the Source of Truth
+
+Every development task has a GitHub issue in `zuohaisu/viva`. Conclusions —
+specifications, PR links, check evidence, QA verdicts and retrospectives — are
+posted on that issue. Tasks and comments on other platforms (for example
+Multica) are copies of, or pointers to, the GitHub issue. Do not open a PR for
+work that has no GitHub issue.
+
 ## Concurrent Development: Worktree(+Branch) → Commits → PR → Merge
 
 Multiple agents and the repository owner develop this repo in parallel. The
 main checkout is shared state: never do task work directly in it. Every change
 is delivered from an isolated worktree as one or more commits on its branch,
 then through a pull request and a merge into the remote default branch.
+`main` is branch-protected: it changes only through merged pull requests.
 
 - Treat any user request to implement, fix, refactor, or otherwise change the
   repository as authorization to deliver through the full workflow below. The
   user only describes the desired outcome; they do not need to pick branch
   names, approve routine commits, push, or separately ask for a PR.
-  Documentation-only edits follow the same workflow unless the user explicitly
-  asks for local-only changes.
+  Repository documentation-only edits follow the same workflow unless the
+  user explicitly asks for local-only changes. Wiki edits follow the Wiki
+  rule in "Documentation and Project Knowledge" instead.
 - **One task = one worktree + one branch.** Create a dedicated git worktree per
   task (viva's own worktree service may allocate it; `worktrees/` is ignored in
   the main checkout). Derive the base from the remote default branch — run
