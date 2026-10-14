@@ -1,4 +1,8 @@
 //! Persistent views over existing server terminals; never a process owner.
+//!
+//! Each worktree (or [`FLOATING`]) owns a [`Scene`] of [`TabView`] rows keyed
+//! by stable ids. [`SceneBook::locate`] is the navigation API for finding a
+//! live terminal id's worktree/tab/pane without mutating neighbors (#75).
 use crate::tui::layout::{MAX_PANES, PaneContent, PaneNode};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

@@ -29,3 +29,7 @@ pub mod tui;
 pub mod update;
 pub mod workflows;
 pub mod workspaces;
+
+/// Workbench scene layout persisted per worktree (#75). S4 agent locate uses
+/// [`SceneBook::locate`] / [`TerminalLocation`].
+pub use tui::workbench::scenes::{SceneBook, TerminalLocation};
