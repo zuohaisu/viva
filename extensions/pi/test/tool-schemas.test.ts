@@ -16,21 +16,21 @@ import assert from "node:assert/strict";
 import { Value } from "typebox/value";
 
 import vivaConversations from "../conversations/index.ts";
-import vivaOffice from "../viva-office.ts";
+import viva from "../viva.ts";
 import { createFakePi, type RegisteredTool } from "./fake-pi.ts";
 
 const OFFICE_ENV: NodeJS.ProcessEnv = {
-  VIVA_OFFICE_MEMBER_ID: "mem-1",
-  VIVA_OFFICE_MEMBER_NAME: "Samuel",
+  VIVA_MEMBER_ID: "mem-1",
+  VIVA_MEMBER_NAME: "Samuel",
   VIVA_HOME: "/tmp/viva-home",
 };
 
 /** Every tool and its required parameters (the contract the model sees). */
 const REQUIRED: Record<string, string[]> = {
-  viva_office_status: [],
-  viva_office_task_brief: [],
-  viva_office_dispatch: ["argv", "cwd", "request_key"],
-  viva_office_handoff: ["summary"],
+  viva_status: [],
+  viva_task_brief: [],
+  viva_dispatch: ["argv", "cwd", "request_key"],
+  viva_handoff: ["summary"],
   viva_computer_audit: [],
   viva_memory_search: ["query"],
   viva_memory_remember: ["content"],
@@ -41,10 +41,10 @@ const REQUIRED: Record<string, string[]> = {
 
 /** A call that satisfies each tool's required fields. */
 const VALID_CALL: Record<string, Record<string, unknown>> = {
-  viva_office_status: {},
-  viva_office_task_brief: { task_id: "task-1" },
-  viva_office_dispatch: { argv: ["/bin/true"], cwd: "/tmp", request_key: "rk-1", grant_id: "g-1" },
-  viva_office_handoff: { summary: "done", task_id: "task-1" },
+  viva_status: {},
+  viva_task_brief: { task_id: "task-1" },
+  viva_dispatch: { argv: ["/bin/true"], cwd: "/tmp", request_key: "rk-1", grant_id: "g-1" },
+  viva_handoff: { summary: "done", task_id: "task-1" },
   viva_computer_audit: {},
   viva_memory_search: { query: "q", project_id: "p-1" },
   viva_memory_remember: { content: "c", source: "s", project_id: "p-1" },
@@ -64,7 +64,7 @@ function allTools(): Map<string, RegisteredTool> {
   process.env = { ...OFFICE_ENV };
   try {
     const fake = createFakePi();
-    vivaOffice(fake.host);
+    viva(fake.host);
     vivaConversations(fake.host);
     return fake.tools;
   } finally {
@@ -112,9 +112,9 @@ test("TypeBox accepts a complete call and rejects missing, extra and mistyped fi
 
 test("typed fields reject the wrong type", () => {
   const tools = allTools();
-  const dispatch = tools.get("viva_office_dispatch")!;
+  const dispatch = tools.get("viva_dispatch")!;
   assert.equal(
-    Value.Check(dispatch.parameters, { ...VALID_CALL.viva_office_dispatch, argv: "/bin/true" }),
+    Value.Check(dispatch.parameters, { ...VALID_CALL.viva_dispatch, argv: "/bin/true" }),
     false,
     "argv must be an array, never a joined shell string",
   );

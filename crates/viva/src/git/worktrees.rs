@@ -153,7 +153,7 @@ pub struct DiscoveredWorktree {
     /// Set when a task holds this worktree.
     pub occupied_by_task: Option<TaskId>,
     /// How Viva claims it (created/adopted), when it does.
-    pub office_source: Option<WorktreeSource>,
+    pub claim_source: Option<WorktreeSource>,
 }
 
 pub struct WorktreeService<'a> {
@@ -189,7 +189,7 @@ impl<'a> WorktreeService<'a> {
             if let Some(branch) = entry.branch.clone() {
                 let claim = self.claim(repo_root, &branch)?;
                 entry.occupied_by_task = claim.as_ref().map(|(task, _)| task.clone());
-                entry.office_source = claim.map(|(_, source)| source);
+                entry.claim_source = claim.map(|(_, source)| source);
             }
         }
         Ok(found)
@@ -219,7 +219,7 @@ impl<'a> WorktreeService<'a> {
                     prunable: None,
                     tree: TreeState::Clean,
                     occupied_by_task: None,
-                    office_source: None,
+                    claim_source: None,
                 });
             } else if let Some(sha) = line.strip_prefix("HEAD ") {
                 if let Some(entry) = current.as_mut() {

@@ -17,9 +17,9 @@
  */
 
 import { Type } from "typebox";
-import { runEnvelope, toolFailure, toolSuccess, type OfficeEnv, type PiHost } from "../lib.ts";
+import { runEnvelope, toolFailure, toolSuccess, type VivaEnv, type PiHost } from "../lib.ts";
 
-export function registerComputerTools(pi: PiHost, env: OfficeEnv): void {
+export function registerComputerTools(pi: PiHost, env: VivaEnv): void {
   pi.registerTool({
     name: "viva_computer_audit",
     label: "Viva computer audit",

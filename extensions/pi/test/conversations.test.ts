@@ -12,12 +12,12 @@ import { join } from "node:path";
 
 import { tryNativeFork } from "../conversations/index.ts";
 import vivaConversations from "../conversations/index.ts";
-import { officeEnv, type OfficeEnv } from "../lib.ts";
+import { readEnv, type VivaEnv } from "../lib.ts";
 import { callTool, createFakePi, textOf, toolNamed, type FakePi } from "./fake-pi.ts";
 
 const BASE_ENV: NodeJS.ProcessEnv = {
-  VIVA_OFFICE_MEMBER_ID: "mem-1",
-  VIVA_OFFICE_MEMBER_NAME: "Samuel",
+  VIVA_MEMBER_ID: "mem-1",
+  VIVA_MEMBER_NAME: "Samuel",
   VIVA_HOME: "/tmp/viva-home",
 };
 
@@ -45,11 +45,11 @@ function fakeViva(script: string): string {
   return path;
 }
 
-function harnessWith(vivaBin: string): OfficeEnv {
+function harnessWith(vivaBin: string): VivaEnv {
   return { home: "/tmp/viva-home", memberId: "mem-1", memberName: "Samuel", vivaBin };
 }
 
-function fakePiWith(env: OfficeEnv): FakePi {
+function fakePiWith(env: VivaEnv): FakePi {
   const fake = createFakePi();
   process.env.VIVA_BIN = env.vivaBin;
   vivaConversations(fake.host);
@@ -136,12 +136,12 @@ test("rename is Viva-owned and handoff declares its capability", async () => {
 });
 
 test("the sub-extension stays inert without Viva context", () => {
-  withEnv({ VIVA_OFFICE_MEMBER_NAME: "Samuel" }, () => {
+  withEnv({ VIVA_MEMBER_NAME: "Samuel" }, () => {
     const fake = createFakePi();
     vivaConversations(fake.host);
     assert.equal(fake.tools.size, 0);
   });
 });
 
-// officeEnv import used by consumers of this test file; keep referenced.
-void officeEnv;
+// readEnv import used by consumers of this test file; keep referenced.
+void readEnv;

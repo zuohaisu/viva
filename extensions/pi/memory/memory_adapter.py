@@ -74,7 +74,7 @@ def make_provider(agent_dir: str, db: str | None):
         )
     cls = load_provider(agent_dir)
     provider = cls(config={"db_path": db})
-    provider.initialize(session_id="viva-office-adapter")
+    provider.initialize(session_id="viva-adapter")
     return provider
 
 

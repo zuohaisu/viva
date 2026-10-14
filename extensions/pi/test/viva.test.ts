@@ -10,7 +10,7 @@
  * Two fakes, two blind spots, each covered by a real-environment test:
  * - A fake `viva` accepts ANY arguments, so nothing in this file proves the
  *   real CLI understands the commands the extension emits:
- *   `viva-office.contract.test.ts` runs them against the real `viva` binary
+ *   `viva.contract.test.ts` runs them against the real `viva` binary
  *   (build it first: `cargo build -p viva`).
  * - A fake Pi proves only the extension's own logic: `real-pi-load.test.ts`
  *   loads the extension in the real Pi.
@@ -22,8 +22,8 @@ import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { officeEnv, planDispatch, runEnvelope } from "../lib.ts";
-import vivaOffice from "../viva-office.ts";
+import { readEnv, planDispatch, runEnvelope } from "../lib.ts";
+import viva from "../viva.ts";
 import { callTool, createFakePi, emit, textOf, toolNamed } from "./fake-pi.ts";
 
 function withEnv(raw: NodeJS.ProcessEnv, fn: () => void | Promise<void>): Promise<void> | void {
@@ -53,16 +53,16 @@ function fakeViva(script: string): string {
 }
 
 const BASE_ENV: NodeJS.ProcessEnv = {
-  VIVA_OFFICE_MEMBER_ID: "mem-1",
-  VIVA_OFFICE_MEMBER_NAME: "Samuel",
+  VIVA_MEMBER_ID: "mem-1",
+  VIVA_MEMBER_NAME: "Samuel",
   VIVA_HOME: "/tmp/viva-home",
-  VIVA_OFFICE_TASK_ID: "task-1",
-  VIVA_OFFICE_GRANT_ID: "grant-1",
+  VIVA_TASK_ID: "task-1",
+  VIVA_GRANT_ID: "grant-1",
 };
 
-test("officeEnv parses the harness context and stays inert without identity", () => {
+test("readEnv parses the harness context and stays inert without identity", () => {
   withEnv(BASE_ENV, () => {
-    const env = officeEnv(process.env);
+    const env = readEnv(process.env);
     assert.ok(env, "Viva launch must produce context");
     assert.equal(env.memberId, "mem-1");
     assert.equal(env.taskId, "task-1");
@@ -70,18 +70,18 @@ test("officeEnv parses the harness context and stays inert without identity", ()
     assert.equal(env.vivaBin, "viva");
   });
 
-  withEnv({ VIVA_OFFICE_MEMBER_NAME: "Samuel" }, () => {
-    assert.equal(officeEnv(process.env), null, "no member id -> no Viva context");
+  withEnv({ VIVA_MEMBER_NAME: "Samuel" }, () => {
+    assert.equal(readEnv(process.env), null, "no member id -> no Viva context");
   });
 
-  withEnv({ VIVA_OFFICE_MEMBER_ID: "mem-1" }, () => {
-    assert.equal(officeEnv(process.env), null, "no member name -> no Viva context");
+  withEnv({ VIVA_MEMBER_ID: "mem-1" }, () => {
+    assert.equal(readEnv(process.env), null, "no member name -> no Viva context");
   });
 });
 
 test("planDispatch refuses without a grant and proposes asking the user", () => {
-  withEnv({ ...BASE_ENV, VIVA_OFFICE_GRANT_ID: "" }, () => {
-    const env = officeEnv(process.env)!;
+  withEnv({ ...BASE_ENV, VIVA_GRANT_ID: "" }, () => {
+    const env = readEnv(process.env)!;
     const noGrant = planDispatch(env, {
       argv: ["/bin/true"],
       cwd: "/tmp",
@@ -96,13 +96,13 @@ test("planDispatch refuses without a grant and proposes asking the user", () => 
 });
 
 test("planDispatch refuses without task, argv, absolute cwd or request key", () => {
-  withEnv({ ...BASE_ENV, VIVA_OFFICE_TASK_ID: "", VIVA_OFFICE_GRANT_ID: "" }, () => {
-    const env = officeEnv(process.env)!;
+  withEnv({ ...BASE_ENV, VIVA_TASK_ID: "", VIVA_GRANT_ID: "" }, () => {
+    const env = readEnv(process.env)!;
     const noTask = planDispatch(env, { argv: ["/bin/true"], cwd: "/tmp", requestKey: "rk" });
     assert.equal(noTask.kind, "refuse");
   });
   withEnv(BASE_ENV, () => {
-    const env = officeEnv(process.env)!;
+    const env = readEnv(process.env)!;
     assert.equal(
       planDispatch(env, { argv: [], cwd: "/tmp", requestKey: "rk" }).kind,
       "refuse",
@@ -123,7 +123,7 @@ test("planDispatch refuses without task, argv, absolute cwd or request key", () 
 
 test("planDispatch builds the fixed CLI envelope argv", () => {
   withEnv(BASE_ENV, () => {
-    const env = officeEnv(process.env)!;
+    const env = readEnv(process.env)!;
     const plan = planDispatch(env, {
       argv: ["/bin/echo", "hi"],
       cwd: "/wt/one",
@@ -154,7 +154,7 @@ test("planDispatch builds the fixed CLI envelope argv", () => {
 
 test("runEnvelope parses real CLI JSON and surfaces real failures", async () => {
   await withEnv(BASE_ENV, async () => {
-    const env = officeEnv(process.env)!;
+    const env = readEnv(process.env)!;
 
     const good = fakeViva('#!/bin/sh\necho \'{"ok": true}\'\n');
     const payload = await runEnvelope({ ...env, vivaBin: good }, ["status"]);
@@ -183,23 +183,23 @@ test("the extension registers its tools and refuses unauthorized dispatch", asyn
   // No grant in the environment from the start: the factory captures the
   // Viva context at load time, so the authorization must already be
   // absent when it runs.
-  await withEnv({ ...BASE_ENV, VIVA_OFFICE_GRANT_ID: "" }, async () => {
+  await withEnv({ ...BASE_ENV, VIVA_GRANT_ID: "" }, async () => {
     const fake = createFakePi();
-    vivaOffice(fake.host);
+    viva(fake.host);
     assert.deepEqual(
       [...fake.tools.keys()].sort(),
       [
         "viva_computer_audit",
+        "viva_dispatch",
+        "viva_handoff",
         "viva_memory_remember",
         "viva_memory_search",
-        "viva_office_dispatch",
-        "viva_office_handoff",
-        "viva_office_status",
-        "viva_office_task_brief",
+        "viva_status",
+        "viva_task_brief",
       ],
     );
 
-    const refusalResult = await callTool(toolNamed(fake, "viva_office_dispatch"), {
+    const refusalResult = await callTool(toolNamed(fake, "viva_dispatch"), {
       argv: ["/bin/true"],
       cwd: "/tmp",
       request_key: "rk-1",
@@ -215,20 +215,20 @@ test("tools answer in Pi's result shape: text content, structured details, isErr
   const load = (vivaBin: string) => {
     process.env.VIVA_BIN = vivaBin;
     const fake = createFakePi();
-    vivaOffice(fake.host);
+    viva(fake.host);
     return fake;
   };
   await withEnv(BASE_ENV, async () => {
     const good = load(fakeViva('#!/bin/sh\necho \'{"home": "/h", "terminals": []}\'\n'));
-    const okResult = await callTool(toolNamed(good, "viva_office_status"), {});
+    const okResult = await callTool(toolNamed(good, "viva_status"), {});
     assert.equal(okResult.isError, undefined);
     assert.deepEqual(JSON.parse(textOf(okResult)), { home: "/h", terminals: [] });
     assert.deepEqual(okResult.details, { home: "/h", terminals: [] }, "the CLI payload is kept as details");
 
     const bad = load(fakeViva('#!/bin/sh\necho "no active server" >&2\nexit 3\n'));
-    const badResult = await callTool(toolNamed(bad, "viva_office_status"), {});
+    const badResult = await callTool(toolNamed(bad, "viva_status"), {});
     assert.equal(badResult.isError, true);
-    assert.match(textOf(badResult), /office status unavailable/);
+    assert.match(textOf(badResult), /Viva status unavailable/);
     assert.match(textOf(badResult), /no active server/);
     assert.deepEqual(badResult.details, {});
   });
@@ -237,7 +237,7 @@ test("tools answer in Pi's result shape: text content, structured details, isErr
 test("the session_start handler tells the user who the member is, at the real 'info' level", async () => {
   await withEnv(BASE_ENV, async () => {
     const fake = createFakePi();
-    vivaOffice(fake.host);
+    viva(fake.host);
     const notices: { message: string; level?: string }[] = [];
     await emit(fake, "session_start", { type: "session_start", reason: "startup" }, {
       ui: {
@@ -254,9 +254,9 @@ test("the session_start handler tells the user who the member is, at the real 'i
 });
 
 test("the extension stays inert without Viva context", () => {
-  withEnv({ VIVA_OFFICE_MEMBER_NAME: "Samuel" }, () => {
+  withEnv({ VIVA_MEMBER_NAME: "Samuel" }, () => {
     const fake = createFakePi();
-    vivaOffice(fake.host);
+    viva(fake.host);
     assert.equal(fake.tools.size, 0, "no Viva context -> no tools, no claims");
     assert.equal(fake.handlers.size, 0, "no Viva context -> no event handlers either");
   });

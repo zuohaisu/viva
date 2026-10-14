@@ -44,18 +44,18 @@ import {
 const EXTENSION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** The entry the Rust harness really passes to `pi --extension` (harness/pi/mod.rs). */
-const HARNESS_ENTRY = join(EXTENSION_ROOT, "viva-office.ts");
+const HARNESS_ENTRY = join(EXTENSION_ROOT, "viva.ts");
 /** Not loaded by the harness today; checked so it cannot rot unnoticed. */
 const CONVERSATIONS_ENTRY = join(EXTENSION_ROOT, "conversations", "index.ts");
 
 const HARNESS_ENTRY_TOOLS = [
   "viva_computer_audit",
+  "viva_dispatch",
+  "viva_handoff",
   "viva_memory_remember",
   "viva_memory_search",
-  "viva_office_dispatch",
-  "viva_office_handoff",
-  "viva_office_status",
-  "viva_office_task_brief",
+  "viva_status",
+  "viva_task_brief",
 ];
 
 const CONVERSATIONS_TOOLS = [
@@ -77,10 +77,10 @@ interface RealPiLoad {
 function officeEnvironment(home: string): Record<string, string> {
   return {
     VIVA_HOME: home,
-    VIVA_OFFICE_MEMBER_ID: "mem-00000000000000000000000000000001",
-    VIVA_OFFICE_MEMBER_NAME: "Smoke Member",
-    VIVA_OFFICE_TASK_ID: "task-00000000000000000000000000000001",
-    VIVA_OFFICE_GRANT_ID: "grant-00000000000000000000000000000001",
+    VIVA_MEMBER_ID: "mem-00000000000000000000000000000001",
+    VIVA_MEMBER_NAME: "Smoke Member",
+    VIVA_TASK_ID: "task-00000000000000000000000000000001",
+    VIVA_GRANT_ID: "grant-00000000000000000000000000000001",
   };
 }
 
@@ -190,10 +190,10 @@ test("control: a bare Pi run loads the extension inertly (why the harness inject
   );
 });
 
-test("real Pi loads the harness entry (viva-office.ts) and registers its 7 tools", async (t) => {
+test("real Pi loads the harness entry (viva.ts) and registers its 7 tools", async (t) => {
   t.diagnostic(`real Pi ${VERSION}`);
   const load = await loadInRealPi(HARNESS_ENTRY, true);
-  assertLoadsCleanlyWithTools(load, HARNESS_ENTRY_TOOLS, "viva-office.ts");
+  assertLoadsCleanlyWithTools(load, HARNESS_ENTRY_TOOLS, "viva.ts");
 });
 
 test("real Pi loads the conversations sub-extension and registers its 3 tools", async (t) => {
