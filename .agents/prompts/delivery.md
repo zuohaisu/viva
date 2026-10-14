@@ -65,7 +65,7 @@ git status --short                           # 只应有本任务的文件
 
 - 不改版本号，不合并，不发版，不删 worktree，不批准自己的 PR。
 - `main` 已开启分支保护，只能通过 PR 更新；不 push `main`，不 force push，不删远端分支。
-- 版本和发布由人工负责（owner 于 2026-10-13 裁决）。`AGENTS.md` 的 "Post-Merge npm Releases" 一节写的是 PR 自带版本 bump，与此冲突时，以本节边界为准；`AGENTS.md` 的修订另行跟踪。
+- PR 不改任何版本号；版本和发布由 owner 人工负责。规则见 `AGENTS.md` 的 "npm Releases and Version Policy"。
 - 其他权限边界见 `AGENTS.md` 的 "Actor-Aware Delivery Authority"。
 
 ## 6. Wiki 修改

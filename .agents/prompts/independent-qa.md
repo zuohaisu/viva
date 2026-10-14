@@ -57,7 +57,7 @@
 | server、PTY、终端与恢复 | 重复请求、断连、退出、崩溃、live handoff、resize、stop 的竞态；fd、进程组和 host 所有权；一个任务的输入或停止是否影响邻居；恢复是否误重跑已完成工作。 |
 | TUI 与交互 | 焦点、鼠标、布局、终端输入与用户看到的状态是否一致；测试替身或截图是否不能证明实际交互；缺少真实视觉/交互走查时保留 pending，不编造视觉通过。 |
 | harness 与外部 provider | 真实 CLI/provider 与 mock 的差异；不可用工具是否明确报错而非静默替换；resume/fork/handoff 是否符合该 harness 的实际能力；忽略的真 provider 测试是否被误算成通过。 |
-| 工作流、GitHub 与发布 | 检查和审核证据是否绑定当前 head；旧提交的绿灯是否被用于新提交；状态是否冒充授权；版本、tag、二进制、npm wrapper 与平台依赖是否一致；发布是否遵循现有合并后流程与 patch-only 规则。 |
+| 工作流、GitHub 与发布 | 检查和审核证据是否绑定当前 head；旧提交的绿灯是否被用于新提交；状态是否冒充授权；PR 是否改了任何版本号（PR 不改版本号，发版由 owner 人工管理，见 `AGENTS.md` "npm Releases and Version Policy"）；只有被明确授权的发版，才核对 tag、二进制、npm wrapper 与平台依赖的版本是否一致。 |
 
 这些是风险入口，不是新产品要求；判断依据仍需引用当前契约、源码或实际复现。
 
