@@ -226,7 +226,7 @@ then through a pull request and a merge into the remote default branch.
   task-caused failures, and push follow-up commits.
 - **Merge authority is unchanged by this workflow.** Per Actor-Aware Delivery
   Authority, no agent merges or approves its own PR; the repository owner
-  performs (or explicitly authorizes the Controller for) the merge.
+  performs the merge (or explicitly authorizes an agent for that one merge).
 - If authentication, permissions, or network block push or PR creation,
   complete all safe local work and validation, then report the exact blocker
   and the smallest user action needed. Never work around access controls.
@@ -279,10 +279,10 @@ under real pressure.
 
 Safety restrictions apply to autonomous Agents, not to the repository owner.
 Developer and QA Agents may never push a protected branch, authorize their own
-override, approve their own work, or merge a Pull Request. The Controller may
-push an isolated feature branch or merge only when the repository owner
-explicitly authorizes that exact action and the audit record includes actor,
-action, timestamp, and reason. Workers and AI members invoked by Viva inherit
+override, approve their own work, or merge a Pull Request. An agent may merge
+only when the repository owner explicitly authorizes that exact merge, and the
+audit record includes actor, action, timestamp, and reason. Pushing an
+isolated task branch and opening its PR is the normal delivery workflow above. Workers and AI members invoked by Viva inherit
 this rule: they never gain owner authority.
 
 `QA_PENDING` and `HUMAN_VISUAL_REVIEW_PENDING` are evidence states, not
