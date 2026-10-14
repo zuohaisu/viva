@@ -4,7 +4,7 @@
 //! - Commands are always argv arrays (paths with spaces work; there is no
 //!   shell string anywhere).
 //! - Git itself is the engine; this runner wraps `git` and `gh` binaries
-//!   with the user's real credential environment — the office never copies
+//!   with the user's real credential environment — Viva never copies
 //!   or stores credentials.
 //! - Failures classify into actionable states (missing repo, dirty tree,
 //!   merge conflicts, missing auth, network); raw stderr travels with the
@@ -83,7 +83,7 @@ impl std::fmt::Display for GitFailure {
     }
 }
 
-/// Runs `git` (or `gh`) with the office's rules. `gh` subcommand
+/// Runs `git` (or `gh`) with Viva's rules. `gh` subcommand
 /// whitelisting lives in `crate::git::evidence`.
 pub struct CliRunner {
     pub timeout: Duration,
@@ -203,7 +203,7 @@ impl CliRunner {
         self.run("git", cwd, args)
     }
 
-    /// Run git expecting success; map failures into the office error type.
+    /// Run git expecting success; map failures into the error type.
     pub fn git_ok(&self, cwd: &Path, args: &[&str]) -> Result<CommandOutput> {
         self.git(cwd, args)
             .map_err(|f| Error::Validation(f.to_string()))
@@ -265,7 +265,7 @@ fn classify(program: &str, cwd: &Path, out: &CommandOutput) -> GitFailure {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TreeState {
     Clean,
-    /// Modifications present — the office never discards them.
+    /// Modifications present — Viva never discards them.
     Dirty {
         entries: Vec<String>,
     },

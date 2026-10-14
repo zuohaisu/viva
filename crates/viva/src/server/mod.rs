@@ -1,11 +1,11 @@
-//! The active Office host and its control plane (V07, issue #16), now the
+//! The active server and its control plane (V07, issue #16), now the
 //! resident-server side of the client/server split (V14 S1, issue #43;
 //! ADR 0012).
 //!
-//! One `VIVA_HOME` has at most one active Office host. The host owns the
+//! One `VIVA_HOME` has at most one active server. The host owns the
 //! private Unix-socket control channel (`office.sock` inside the 0700 home),
 //! serves CLI callbacks over it, supervises every terminal it spawned, and
-//! releases the channel on exit. A second `office start` refuses and names
+//! releases the channel on exit. A second `viva server` refuses and names
 //! the running host; a stale socket left by a crashed host is claimed with
 //! an explicit recovery record.
 //!
@@ -26,7 +26,7 @@
 //! Authorization (ADR 0012 decision 4): the socket lives in the 0700 home
 //! and accepts same-uid peers only; grant semantics extend to the wire —
 //! any presented grant is validated, member-attributed mutations need a
-//! live grant, and every denial is appended to the office event log.
+//! live grant, and every denial is appended to the event log.
 
 mod client;
 mod handoff;
@@ -56,13 +56,13 @@ use crate::members::MemberRegistry;
 use crate::tasks::{ExecutionStart, TaskRegistry, TaskStatus};
 use crate::terminal::{StopPolicy, TerminalRegistry};
 
-/// The `office_host` migration domain: host registry, recovery records and
+/// The `host` migration domain: host registry, recovery records and
 /// a tiny settings table (S6 close-policy / pause persistence).
-pub const DOMAIN_HOST: Domain = Domain::new("office_host");
+pub const DOMAIN_HOST: Domain = Domain::new("host");
 
 pub const HOST_V1_SQL: &str = r#"
--- One row per office-host process that ever claimed this VIVA_HOME.
-CREATE TABLE office_hosts (
+-- One row per server process that ever claimed this VIVA_HOME.
+CREATE TABLE hosts (
     host_id    TEXT PRIMARY KEY,
     pid        INTEGER NOT NULL,
     started_at TEXT NOT NULL,
@@ -71,7 +71,7 @@ CREATE TABLE office_hosts (
 );
 -- Honest recovery records: crash reconciliation notes written by a later
 -- host about what the previous host left behind (never rewritten).
-CREATE TABLE office_recovery_events (
+CREATE TABLE recovery_events (
     seq         INTEGER PRIMARY KEY AUTOINCREMENT,
     host_id     TEXT NOT NULL,
     kind        TEXT NOT NULL,
@@ -80,17 +80,17 @@ CREATE TABLE office_recovery_events (
 );
 "#;
 
-/// The office_host v2 slice: key/value settings for owner-controlled
+/// The host v2 slice: key/value settings for owner-controlled
 /// semantics that must survive a restart (close-policy pause, and the
 /// pause itself).
 pub const HOST_V2_SQL: &str = r#"
-CREATE TABLE office_settings (
+CREATE TABLE settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 "#;
 
-/// The office_host v3 slice: rate-limit recovery plans (V15-5). A plan is
+/// The host v3 slice: rate-limit recovery plans (V15-5). A plan is
 /// created by a `rate_limited` report WITH a reset time (or the owner via
 /// the CLI); it fires by prompting the terminal to continue, and every
 /// outcome is audited.
@@ -117,7 +117,7 @@ pub const HANDOFF_SOCKET_NAME: &str = "handoff.sock";
 /// control socket, and how long the old host waits for the resumed one.
 const HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The full office composition: every delivered domain, registered in one
+/// The full composition: every delivered domain, registered in one
 /// frozen set. This is the lane-A composition V01 left to V07.
 pub fn migrations() -> &'static crate::foundation::store::FrozenMigrations {
     use std::sync::OnceLock;
@@ -157,17 +157,12 @@ pub fn migrations() -> &'static crate::foundation::store::FrozenMigrations {
         let registry = crate::maintenance::register_migrations(registry);
         let registry = crate::tools::computer::register_migrations(registry);
         let registry = crate::memory::register_migrations(registry);
-        let registry = registry.register(DOMAIN_HOST, 2, "office host v2 (settings)", HOST_V2_SQL);
-        let registry = registry.register(
-            DOMAIN_HOST,
-            3,
-            "office host v3 (recovery plans)",
-            HOST_V3_SQL,
-        );
+        let registry = registry.register(DOMAIN_HOST, 2, "host v2 (settings)", HOST_V2_SQL);
+        let registry = registry.register(DOMAIN_HOST, 3, "host v3 (recovery plans)", HOST_V3_SQL);
         registry
-            .register(DOMAIN_HOST, 1, "office host v1", HOST_V1_SQL)
+            .register(DOMAIN_HOST, 1, "host v1", HOST_V1_SQL)
             .freeze()
-            .expect("office registry is well-formed")
+            .expect("registry is well-formed")
     })
 }
 
@@ -212,12 +207,12 @@ pub struct Shared {
     /// Exit-watchers for dispatched executions. The graceful shutdown
     /// joins them BEFORE writing its handoff record — otherwise the
     /// process exit would die with the process and the next host would
-    /// record a false "orphaned" recovery for a terminal this office
+    /// record a false "orphaned" recovery for a terminal this server
     /// stopped itself.
     watchers: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
-/// A claimed, running Office host.
+/// A claimed, running server.
 pub struct Host {
     shared: Arc<Shared>,
     listener: UnixListener,
@@ -238,7 +233,7 @@ impl Host {
             match Self::probe_socket(&socket_path) {
                 Ok(Some(pid)) => {
                     return Err(Error::Validation(format!(
-                        "an office host is already active for {} (pid {pid}); \
+                        "a server is already active for {} (pid {pid}); \
                          refusing to start a second host",
                         home.display()
                     )));
@@ -263,14 +258,14 @@ impl Host {
         let persisted_pause: bool = store
             .connection()
             .query_row(
-                "SELECT value FROM office_settings WHERE key = 'paused'",
+                "SELECT value FROM settings WHERE key = 'paused'",
                 [],
                 |row| row.get::<_, String>(0),
             )
             .map(|value| value == "true")
             .unwrap_or(false);
         store.connection().execute(
-            "INSERT INTO office_hosts(host_id, pid, started_at) VALUES (?1, ?2, ?3)",
+            "INSERT INTO hosts(host_id, pid, started_at) VALUES (?1, ?2, ?3)",
             rusqlite::params![host_id, std::process::id() as i64, utc_now()],
         )?;
 
@@ -319,7 +314,7 @@ impl Host {
     }
 
     /// Crash reconciliation, before serving. Marks the previous host
-    /// `crashed`, resolves interrupted intents, and stops (in the office's
+    /// `crashed`, resolves interrupted intents, and stops (in Viva's
     /// records) executions whose supervision died with that host. Nothing
     /// is re-run; nothing is killed; completed work is never touched.
     fn reconcile(store: &Store, new_host_id: &str) -> Result<String> {
@@ -327,14 +322,14 @@ impl Host {
         let previous: Vec<(String, i64)> = {
             let mut stmt = store
                 .connection()
-                .prepare("SELECT host_id, pid FROM office_hosts WHERE exited_at IS NULL")?;
+                .prepare("SELECT host_id, pid FROM hosts WHERE exited_at IS NULL")?;
             let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
         let persisted_pause: bool = store
             .connection()
             .query_row(
-                "SELECT value FROM office_settings WHERE key = 'paused'",
+                "SELECT value FROM settings WHERE key = 'paused'",
                 [],
                 |row| row.get::<_, String>(0),
             )
@@ -342,7 +337,7 @@ impl Host {
             .unwrap_or(false);
         for (old_host, pid) in previous {
             store.connection().execute(
-                "UPDATE office_hosts SET exited_at = ?2, exit_kind = 'crashed' WHERE host_id = ?1",
+                "UPDATE hosts SET exited_at = ?2, exit_kind = 'crashed' WHERE host_id = ?1",
                 rusqlite::params![old_host, now],
             )?;
             record_recovery(
@@ -387,13 +382,13 @@ impl Host {
         }
 
         // Executions still `running`: their supervising host is gone. The
-        // office-side supervision ended — recorded as `stopped` with the
+        // Viva-side supervision ended — recorded as `stopped` with the
         // pid start marker, so a recycled pid can never be mistaken for
         // the orphan. The orphan itself is not signalled.
         let orphans: Vec<(String, Option<i64>, Option<String>)> = {
             let mut stmt = store.connection().prepare(
                 "SELECT execution_id, process_exit, completion_evidence
-                 FROM office_executions WHERE status = 'running'",
+                 FROM executions WHERE status = 'running'",
             )?;
             let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -409,7 +404,7 @@ impl Host {
                 )
                 .ok();
             store.connection().execute(
-                "UPDATE office_executions SET status = 'stopped', updated_at = ?2
+                "UPDATE executions SET status = 'stopped', updated_at = ?2
                  WHERE execution_id = ?1 AND status = 'running'",
                 rusqlite::params![execution_id, now],
             )?;
@@ -506,7 +501,7 @@ impl Host {
         let transferred = shared.transferred.load(Ordering::SeqCst);
         let mut terminal_count = 0usize;
         if !transferred {
-            let store = shared.store.lock().expect("office store");
+            let store = shared.store.lock().expect("store");
             let terminals = shared.terminals.list();
             terminal_count = terminals.len();
             for entry in terminals {
@@ -533,9 +528,9 @@ impl Host {
                 let _ = watcher.join();
             }
         }
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         store.connection().execute(
-            "UPDATE office_hosts SET exited_at = ?2, exit_kind = 'graceful'
+            "UPDATE hosts SET exited_at = ?2, exit_kind = 'graceful'
              WHERE host_id = ?1 AND exited_at IS NULL",
             rusqlite::params![shared.host_id, utc_now()],
         )?;
@@ -577,7 +572,7 @@ impl Host {
 
 fn record_recovery(store: &Store, host_id: &str, kind: &str, detail: &str) -> Result<()> {
     store.connection().execute(
-        "INSERT INTO office_recovery_events(host_id, kind, detail, recorded_at)
+        "INSERT INTO recovery_events(host_id, kind, detail, recorded_at)
          VALUES (?1, ?2, ?3, ?4)",
         rusqlite::params![host_id, kind, detail, utc_now()],
     )?;
@@ -797,54 +792,14 @@ fn handle_request(shared: Arc<Shared>, request: &Request) -> Result<serde_json::
             value,
             project_id,
         } => {
-            let store = shared.store.lock().expect("office store");
-            let nav = crate::workspaces::navigation::Navigation { store: &store };
-            let required = || {
-                value
-                    .as_deref()
-                    .ok_or_else(|| Error::Validation("workspace action needs value".into()))
-            };
-            let id = match action.as_str() {
-                "open" => Some(nav.open(Path::new(required()?))?),
-                "new" => Some(nav.create(required()?)?),
-                "select" => {
-                    nav.select(required()?)?;
-                    nav.selected()?
-                }
-                "add" => {
-                    let id = nav
-                        .selected()?
-                        .ok_or_else(|| Error::Validation("select a workspace first".into()))?;
-                    nav.add(&id, serde_json::json!({"path":required()?}), Path::new("/"))?;
-                    Some(id)
-                }
-                "remove" => {
-                    let id = nav
-                        .selected()?
-                        .ok_or_else(|| Error::Validation("select a workspace first".into()))?;
-                    nav.remove(
-                        &id,
-                        project_id
-                            .as_deref()
-                            .ok_or_else(|| Error::Validation("remove needs project_id".into()))?,
-                    )?;
-                    Some(id)
-                }
-                "save" => {
-                    let id = nav
-                        .selected()?
-                        .ok_or_else(|| Error::Validation("select a workspace first".into()))?;
-                    nav.save_as(&id, Path::new(required()?))?;
-                    Some(id)
-                }
-                "list" => nav.selected()?,
-                _ => {
-                    return Err(Error::Validation(
-                        "workspace action: open | new | select | add | remove | save | list".into(),
-                    ));
-                }
-            };
-            Ok(serde_json::json!({"workspace_id":id,"workspaces":nav.list()?}))
+            // Owner-only (see `authorize_socket_request`): composition is
+            // navigation state and never carries grants or executions.
+            let store = shared.store.lock().expect("store");
+            crate::workspaces::navigation::Navigation { store: &store }.apply(
+                action,
+                value.as_deref(),
+                project_id.as_deref(),
+            )
         }
         RequestKind::WorkbenchView => workbench_view(Arc::clone(&shared)),
         RequestKind::WorkbenchDiff { worktree_id } => workbench_diff(&shared, worktree_id),
@@ -1004,7 +959,7 @@ fn authorize_socket_request(shared: &Shared, request: &Request) -> Result<()> {
     // Mutex is not reentrant — holding it across the audit deadlocks the
     // connection thread until the client's read timeout fires.
     let verdict = {
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         let authority = AuthorityEngine::new(&store);
         (|| -> Result<crate::authority::Grant> {
             let grant_id = GrantId::from_str(grant_text)?;
@@ -1091,10 +1046,10 @@ fn authorize_socket_request(shared: &Shared, request: &Request) -> Result<()> {
     Ok(())
 }
 
-/// Record one socket-grant denial as an append-only office event and return
+/// Record one socket-grant denial as an append-only event and return
 /// the matching error for the caller.
 fn audit_grant_denial(shared: &Shared, request: &Request, reason: &str) -> Error {
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let payload = serde_json::json!({
         "kind": format!("{:?}", std::mem::discriminant(&request.kind)),
         "method": serde_json::to_string(&request.kind).unwrap_or_default(),
@@ -1109,7 +1064,7 @@ fn audit_grant_denial(shared: &Shared, request: &Request, reason: &str) -> Error
             kind: "socket_grant_denied".into(),
             subject_type: "socket_request".into(),
             subject_id: request.request_id.clone(),
-            origin: "office_host".into(),
+            origin: "host".into(),
             payload,
         },
     );
@@ -1150,7 +1105,7 @@ fn terminal_create(
     spec.rows = rows;
     spec.validate()?;
     let worktree = worktree_id.map(WorktreeId::from_str).transpose()?;
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let (terminal_id, handle) = shared.terminals.spawn(
         spec,
         owner,
@@ -1197,7 +1152,7 @@ fn workbench_view(shared: Arc<Shared>) -> Result<serde_json::Value> {
             let _ = auto_sync_all(&background, false);
         });
     }
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let mut model = crate::tui::workbench::assemble_view(&store, &shared.terminals)?;
 
     // Process identification is independent of screen text and refreshed for
@@ -1321,7 +1276,7 @@ fn workbench_view(shared: Arc<Shared>) -> Result<serde_json::Value> {
             store
                 .connection()
                 .query_row(
-                    "SELECT value FROM office_settings WHERE key = 'last_sync_note'",
+                    "SELECT value FROM settings WHERE key = 'last_sync_note'",
                     [],
                     |row| row.get(0),
                 )
@@ -1331,7 +1286,7 @@ fn workbench_view(shared: Arc<Shared>) -> Result<serde_json::Value> {
 
     // V15-2/V15-4 row enrichment. The worktree records are collected UNDER
     // the store lock; the slow probes (gh network calls, rev-list) run
-    // AFTER it is dropped — the office keeps answering while enriching.
+    // AFTER it is dropped — Viva keeps answering while enriching.
     let mut records: Vec<(String, crate::git::worktrees::TaskWorktreeRecord)> = Vec::new();
     {
         let service = crate::git::worktrees::WorktreeService::new(
@@ -1399,9 +1354,9 @@ fn workbench_view(shared: Arc<Shared>) -> Result<serde_json::Value> {
 
 /// The pane-layout preference store (QA F5): the client persists its pane
 /// tree so a later attach rebuilds the same view. A UI preference in
-/// office_settings - bounded, validated as JSON, never an office fact.
+/// settings - bounded, validated as JSON, never a Viva fact.
 fn workbench_layout(shared: &Shared, layout_json: Option<&str>) -> Result<serde_json::Value> {
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     match layout_json {
         Some(json) => {
             if json.len() > 64 * 1024 {
@@ -1410,9 +1365,9 @@ fn workbench_layout(shared: &Shared, layout_json: Option<&str>) -> Result<serde_
             // Must parse: a layout the client cannot restore is junk.
             serde_json::from_str::<serde_json::Value>(json)
                 .map_err(|e| Error::Validation(format!("layout is not valid JSON: {e}")))?;
-            store.connection().execute("INSERT OR IGNORE INTO office_settings(key,value) SELECT 'workbench_layout_legacy',value FROM office_settings WHERE key='workbench_layout' AND json_extract(value,'$.version') IS NULL",[])?;
+            store.connection().execute("INSERT OR IGNORE INTO settings(key,value) SELECT 'workbench_layout_legacy',value FROM settings WHERE key='workbench_layout' AND json_extract(value,'$.version') IS NULL",[])?;
             store.connection().execute(
-                "INSERT INTO office_settings(key, value) VALUES ('workbench_layout', ?1)
+                "INSERT INTO settings(key, value) VALUES ('workbench_layout', ?1)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 [json],
             )?;
@@ -1422,7 +1377,7 @@ fn workbench_layout(shared: &Shared, layout_json: Option<&str>) -> Result<serde_
             let saved: Option<String> = store
                 .connection()
                 .query_row(
-                    "SELECT value FROM office_settings WHERE key = 'workbench_layout'",
+                    "SELECT value FROM settings WHERE key = 'workbench_layout'",
                     [],
                     |row| row.get(0),
                 )
@@ -1436,7 +1391,7 @@ fn workbench_layout(shared: &Shared, layout_json: Option<&str>) -> Result<serde_
 /// socket for the workbench `d` action).
 fn workbench_diff(shared: &Shared, worktree_id: &str) -> Result<serde_json::Value> {
     let worktree_id = WorktreeId::from_str(worktree_id)?;
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let service = crate::git::worktrees::WorktreeService::new(
         &store,
         crate::git::worktrees::ProtectedRefs::new(vec![]),
@@ -1455,7 +1410,7 @@ fn workbench_diff(shared: &Shared, worktree_id: &str) -> Result<serde_json::Valu
 /// action): a user_shell owned by the server, attached to the worktree.
 fn terminal_open_in_worktree(shared: &Shared, worktree_id: &str) -> Result<serde_json::Value> {
     if let Some(pid) = worktree_id.strip_prefix("directory:") {
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         let project = crate::projects::ProjectRegistry::new(&store)
             .require(&crate::foundation::ids::ProjectId::from_str(pid)?)?;
         let spec = crate::terminal::TerminalSpec::new(
@@ -1473,7 +1428,7 @@ fn terminal_open_in_worktree(shared: &Shared, worktree_id: &str) -> Result<serde
         return Ok(serde_json::json!({"terminal_id":id.to_string(),"pid":handle.pid()}));
     }
     let worktree_id = WorktreeId::from_str(worktree_id)?;
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let service = crate::git::worktrees::WorktreeService::new(
         &store,
         crate::git::worktrees::ProtectedRefs::new(vec![]),
@@ -1516,7 +1471,7 @@ fn worktree_create_for_task(
     base_dir: Option<&str>,
 ) -> Result<serde_json::Value> {
     let task_id = TaskId::from_str(task_id)?;
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let task = TaskRegistry::new(&store).require_task(&task_id)?;
     let project_id = task.project_id.ok_or_else(|| {
         Error::Validation(format!(
@@ -1590,7 +1545,7 @@ fn agent_report(
     if agent.trim().is_empty() {
         return Err(Error::Validation("agent name must not be empty".into()));
     }
-    // A report about a terminal this office hosts: identity checks out.
+    // A report about a terminal this server hosts: identity checks out.
     shared
         .terminals
         .handle(&terminal_id)?
@@ -1607,7 +1562,7 @@ fn agent_report(
         updated_at: utc_now(),
     };
     shared.agent_board.observe(record.clone());
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     crate::foundation::events::append(
         &store,
         crate::foundation::events::NewEvent {
@@ -1615,7 +1570,7 @@ fn agent_report(
             kind: "agent_status_reported".into(),
             subject_type: "terminal".into(),
             subject_id: terminal_id.to_string(),
-            origin: "office_host".into(),
+            origin: "host".into(),
             payload: serde_json::json!({
                 "agent": agent,
                 "status": status.as_str(),
@@ -1625,12 +1580,12 @@ fn agent_report(
         },
     )?;
     // V15-5: rate-limit recovery plans. rate_limited REQUIRES a reset
-    // time (the office never guesses one); any other reported status
+    // time (Viva never guesses one); any other reported status
     // cancels the open plan — the limit is over.
     if status == crate::agents::AgentStatus::RateLimited {
         let Some(reset_at) = reset_at else {
             return Err(Error::Validation(
-                "rate_limited requires reset_at (RFC3339); the office does not \
+                "rate_limited requires reset_at (RFC3339); Viva does not \
                  schedule recovery for an unknown time"
                     .into(),
             ));
@@ -1711,7 +1666,7 @@ fn agent_content_submit(
         let mut file = file.open(&path)?;
         serde_json::to_writer_pretty(&mut file, &record)?;
     }
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     crate::foundation::events::append(
         &store,
         crate::foundation::events::NewEvent {
@@ -1719,7 +1674,7 @@ fn agent_content_submit(
             kind: "agent_content_submitted".into(),
             subject_type: "agent_content".into(),
             subject_id: content_id.clone(),
-            origin: "office_host".into(),
+            origin: "host".into(),
             payload: serde_json::json!({
                 "kind": kind,
                 "terminal_id": terminal_id,
@@ -1777,7 +1732,7 @@ fn agent_prompt(shared: &Shared, terminal_id: &str, prompt: &str) -> Result<serd
             id: terminal_id.to_string(),
         })?;
     handle.input(prompt.as_bytes())?;
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     crate::foundation::events::append(
         &store,
         crate::foundation::events::NewEvent {
@@ -1785,7 +1740,7 @@ fn agent_prompt(shared: &Shared, terminal_id: &str, prompt: &str) -> Result<serd
             kind: "agent_prompt_sent".into(),
             subject_type: "terminal".into(),
             subject_id: terminal_id.to_string(),
-            origin: "office_host".into(),
+            origin: "host".into(),
             payload: serde_json::json!({
                 "bytes": prompt.len(),
                 "digest_fnv1a_64": format!("{:016x}", fnv1a_64(prompt.as_bytes())),
@@ -1830,7 +1785,7 @@ fn agent_wait(
                     && record.status == wanted
             });
         if let Some(record) = matched {
-            let store = shared.store.lock().expect("office store");
+            let store = shared.store.lock().expect("store");
             crate::foundation::events::append(
                 &store,
                 crate::foundation::events::NewEvent {
@@ -1838,7 +1793,7 @@ fn agent_wait(
                     kind: "agent_wait_matched".into(),
                     subject_type: "terminal".into(),
                     subject_id: terminal_id.to_string(),
-                    origin: "office_host".into(),
+                    origin: "host".into(),
                     payload: serde_json::json!({
                         "status": wanted.as_str(),
                         "detail": record.detail,
@@ -1853,7 +1808,7 @@ fn agent_wait(
             }));
         }
         if Instant::now() >= deadline {
-            let store = shared.store.lock().expect("office store");
+            let store = shared.store.lock().expect("store");
             crate::foundation::events::append(
                 &store,
                 crate::foundation::events::NewEvent {
@@ -1861,7 +1816,7 @@ fn agent_wait(
                     kind: "agent_wait_timeout".into(),
                     subject_type: "terminal".into(),
                     subject_id: terminal_id.to_string(),
-                    origin: "office_host".into(),
+                    origin: "host".into(),
                     payload: serde_json::json!({ "status": wanted.as_str() }),
                 },
             )?;
@@ -1875,15 +1830,15 @@ fn agent_wait(
     }
 }
 
-/// The durable event feed: office events after a sequence number. This is
+/// The durable event feed: events after a sequence number. This is
 /// how a disconnected orchestrator catches up - reconnect and ask again
 /// with the last seq you saw.
 fn events_feed(shared: &Shared, since_seq: u64, limit: u32) -> Result<serde_json::Value> {
     let limit = limit.clamp(1, 500);
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let mut stmt = store.connection().prepare(
         "SELECT seq, event_id, occurred_at, domain, kind, subject_type, subject_id, origin, payload
-         FROM office_events WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",
+         FROM events WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",
     )?;
     let rows = stmt.query_map(rusqlite::params![since_seq as i64, limit], |row| {
         Ok(serde_json::json!({
@@ -1920,9 +1875,9 @@ fn events_feed(shared: &Shared, since_seq: u64, limit: u32) -> Result<serde_json
 fn pause_server(shared: &Shared, paused: bool) -> Result<serde_json::Value> {
     shared.paused.store(paused, Ordering::SeqCst);
     {
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         store.connection().execute(
-            "INSERT INTO office_settings(key, value) VALUES ('paused', ?1)
+            "INSERT INTO settings(key, value) VALUES ('paused', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             rusqlite::params![if paused { "true" } else { "false" }],
         )?;
@@ -1930,15 +1885,10 @@ fn pause_server(shared: &Shared, paused: bool) -> Result<serde_json::Value> {
             &store,
             crate::foundation::events::NewEvent {
                 domain: DOMAIN_HOST,
-                kind: if paused {
-                    "office_paused"
-                } else {
-                    "office_resumed"
-                }
-                .into(),
-                subject_type: "office".into(),
+                kind: if paused { "paused" } else { "resumed" }.into(),
+                subject_type: "host".into(),
                 subject_id: shared.host_id.clone(),
-                origin: "office_host".into(),
+                origin: "host".into(),
                 payload: serde_json::json!({
                     "note": if paused {
                         "no new dispatch, no maintenance cycles; running executions untouched"
@@ -1956,7 +1906,7 @@ fn pause_server(shared: &Shared, paused: bool) -> Result<serde_json::Value> {
 }
 
 /// The maintenance gate (S6, issue #48 QA F4): bounded maintenance windows
-/// run only when the office is not explicitly paused. Reads the PERSISTED
+/// run only when Viva is not explicitly paused. Reads the PERSISTED
 /// pause, so the gate holds even with no live host - the pause itself
 /// persists, and this keeps "pause stops new dispatch AND maintenance
 /// cycles" true end to end.
@@ -1964,7 +1914,7 @@ pub fn assert_maintenance_allowed(store: &Store) -> Result<()> {
     let paused: bool = store
         .connection()
         .query_row(
-            "SELECT value FROM office_settings WHERE key = 'paused'",
+            "SELECT value FROM settings WHERE key = 'paused'",
             [],
             |row| row.get::<_, String>(0),
         )
@@ -1972,7 +1922,7 @@ pub fn assert_maintenance_allowed(store: &Store) -> Result<()> {
         .unwrap_or(false);
     if paused {
         return Err(Error::Validation(
-            "office is paused: maintenance windows are gated (running executions are \
+            "Viva is paused: maintenance windows are gated (running executions are \
              unaffected; `viva resume` lifts the pause)"
                 .into(),
         ));
@@ -1983,7 +1933,7 @@ pub fn assert_maintenance_allowed(store: &Store) -> Result<()> {
 /// Apply the close-policy hook at shutdown time. `pause` persists the
 /// paused state so the NEXT server starts paused; `continue` explicitly
 /// clears any pause; `None` (an unadorned shutdown) leaves the CURRENT
-/// state untouched - an operator-paused office that is shut down comes
+/// state untouched - an operator-paused server that is shut down comes
 /// back paused, because the pause was an explicit owner decision.
 fn apply_close_policy(shared: &Shared, close_policy: Option<&str>) -> Result<()> {
     match close_policy {
@@ -2065,7 +2015,7 @@ fn perform_handoff(shared: Arc<Shared>, listener: UnixListener, handoff_path: st
     let collected = match collect {
         Ok(list) => list,
         Err(err) => {
-            let store = shared.store.lock().expect("office store");
+            let store = shared.store.lock().expect("store");
             let _ = record_recovery(
                 &store,
                 &shared.host_id,
@@ -2170,7 +2120,7 @@ fn perform_handoff(shared: Arc<Shared>, listener: UnixListener, handoff_path: st
 
     match outcome {
         Ok(count) => {
-            let store = shared.store.lock().expect("office store");
+            let store = shared.store.lock().expect("store");
             let _ = record_recovery(
                 &store,
                 &shared.host_id,
@@ -2194,7 +2144,7 @@ fn perform_handoff(shared: Arc<Shared>, listener: UnixListener, handoff_path: st
             for (entry, _, _) in &collected {
                 if let Ok(Some(handle)) = shared.terminals.handle(&entry.terminal_id) {
                     if let Err(reattach_err) = handle.reattach_reader() {
-                        let store = shared.store.lock().expect("office store");
+                        let store = shared.store.lock().expect("store");
                         let _ = record_recovery(
                             &store,
                             &shared.host_id,
@@ -2209,7 +2159,7 @@ fn perform_handoff(shared: Arc<Shared>, listener: UnixListener, handoff_path: st
                     }
                 }
             }
-            let store = shared.store.lock().expect("office store");
+            let store = shared.store.lock().expect("store");
             let _ = record_recovery(
                 &store,
                 &shared.host_id,
@@ -2231,6 +2181,10 @@ fn perform_handoff(shared: Arc<Shared>, listener: UnixListener, handoff_path: st
 /// then claim and serve as usual.
 pub fn resume_server(home: &Path) -> Result<()> {
     crate::foundation::paths::ensure_private_dir(home)?;
+    // An older server that still runs on the previous table names cannot hand
+    // its terminals to a binary that renames them. Refuse before touching the
+    // handoff socket: the old server times out waiting and keeps serving.
+    crate::foundation::legacy::refuse_live_handoff(&crate::foundation::paths::database_path(home))?;
     let handoff_path = home.join(HANDOFF_SOCKET_NAME);
     // The old host creates the rendezvous in its ServerRestart handler;
     // poll for it (the CLI starts this process right after that response).
@@ -2275,7 +2229,7 @@ pub fn resume_server(home: &Path) -> Result<()> {
     let host = Host::open(home)?;
     {
         let shared = host.shared();
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         for (entry, fd) in manifest.entries.iter().zip(fds) {
             let adopt = (|| -> Result<()> {
                 let terminal_id = TerminalId::from_str(&entry.terminal_id)?;
@@ -2329,7 +2283,7 @@ pub fn resume_server(home: &Path) -> Result<()> {
         );
     }
     eprintln!(
-        "office: resumed with {} transferred terminal(s)",
+        "server: resumed with {} transferred terminal(s)",
         manifest.entries.len()
     );
     host.serve()
@@ -2355,17 +2309,17 @@ fn owner_from_label(text: &str) -> Result<TerminalOwner> {
 }
 
 fn status(shared: &Shared) -> Result<serde_json::Value> {
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let (row_count_executions, running, completed): (i64, i64, i64) = {
         let count = |status: &str| -> Result<i64> {
             Ok(store.connection().query_row(
-                "SELECT COUNT(*) FROM office_executions WHERE status = ?1",
+                "SELECT COUNT(*) FROM executions WHERE status = ?1",
                 [status],
                 |row| row.get(0),
             )?)
         };
         (
-            store.row_count("office_executions")?,
+            store.row_count("executions")?,
             count("running")?,
             count("completed")?,
         )
@@ -2428,7 +2382,7 @@ fn dispatch(
     // separate stop.
     if shared.paused.load(Ordering::SeqCst) {
         return Err(Error::Validation(
-            "office is paused: no new dispatch (running executions are unaffected;              `viva resume` lifts the pause)"
+            "Viva is paused: no new dispatch (running executions are unaffected;              `viva resume` lifts the pause)"
                 .into(),
         ));
     }
@@ -2436,7 +2390,7 @@ fn dispatch(
     let member_id = MemberId::from_str(member_id)?;
     let grant_id = GrantId::from_str(grant_id)?;
 
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let members = MemberRegistry::new(&store);
     let _member = members.require(&member_id)?;
     let binding = members.binding(&member_id)?.ok_or_else(|| {
@@ -2500,9 +2454,9 @@ fn dispatch(
         )));
     }
 
-    // A named worktree must be a real office record, not a free-form
-    // string: the attribution should never point at a worktree this
-    // office does not know.
+    // A named worktree must be a real Viva record, not a free-form
+    // string: the attribution should never point at a worktree
+    // Viva does not know.
     if let Some(worktree) = worktree_id {
         let known: i64 = store.connection().query_row(
             "SELECT COUNT(*) FROM task_worktrees
@@ -2623,16 +2577,16 @@ fn dispatch(
             // a stopped process must always land in the ledger.
             let code = exit.code.unwrap_or(-1);
             let server_stopped = !matches!(exit.via, crate::terminal::ExitVia::ChildExit);
-            let store = watcher_shared.store.lock().expect("office store");
+            let store = watcher_shared.store.lock().expect("store");
             let tasks = TaskRegistry::new(&store);
             let _ = tasks.record_exit(&watcher_key, code);
             {
                 // The exit-code ledger sorts non-zero into `failed`; an
-                // exit the OFFICE caused (graceful stop / forced kill) is
+                // exit Viva caused (graceful stop / forced kill) is
                 // a stop, not a failure — correct the record and say why.
                 if server_stopped {
                     let _ = store.connection().execute(
-                        "UPDATE office_executions SET status = 'stopped', updated_at = ?2
+                        "UPDATE executions SET status = 'stopped', updated_at = ?2
                          WHERE execution_id = ?1 AND status = 'failed'",
                         rusqlite::params![watcher_execution.as_str(), utc_now()],
                     );
@@ -2714,7 +2668,7 @@ fn terminal_input(
 
 fn terminal_stop(shared: &Shared, terminal_id: &str) -> Result<serde_json::Value> {
     let terminal_id = TerminalId::from_str(terminal_id)?;
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let exit = shared
         .terminals
         .stop(&terminal_id, StopPolicy::default(), Some(&store))?;
@@ -2723,7 +2677,7 @@ fn terminal_stop(shared: &Shared, terminal_id: &str) -> Result<serde_json::Value
 
 fn task_results(shared: &Shared, task_id: &str) -> Result<serde_json::Value> {
     let task_id = TaskId::from_str(task_id)?;
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let tasks = TaskRegistry::new(&store);
     let results = tasks.results_for_task(&task_id)?;
     Ok(serde_json::to_value(&results)?)
@@ -2746,7 +2700,7 @@ fn handoff(
             "handoff summary must not be empty".into(),
         ));
     }
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let tasks = TaskRegistry::new(&store);
     tasks.require_task(&task_id)?;
     // Attach the task's most recent launched execution when one exists; a
@@ -2803,13 +2757,13 @@ fn fnv1a(text: &str) -> u64 {
 // Client side: send a request to the active host, or fail honestly
 // ---------------------------------------------------------------------------
 
-/// Send one request to the active office host over the real channel. When
+/// Send one request to the active server over the real channel. When
 /// no host listens, this fails cleanly and never starts a daemon.
 pub fn send_request(home: &Path, request: Request) -> Result<Response> {
     let socket_path = home.join(SOCKET_NAME);
     if !socket_path.exists() {
         return Err(Error::Validation(format!(
-            "no active office in {} (mutation rejected; start one with `viva start`)",
+            "no active server in {} (mutation rejected; start one with `viva start`)",
             home.display()
         )));
     }
@@ -2838,7 +2792,7 @@ pub fn offline_status(home: &Path) -> Result<serde_json::Value> {
     let store = Store::open(&db, migrations())?;
     let last_host: Option<(String, i64, Option<String>, Option<String>)> = {
         let mut stmt = store.connection().prepare(
-            "SELECT host_id, pid, exited_at, exit_kind FROM office_hosts
+            "SELECT host_id, pid, exited_at, exit_kind FROM hosts
              ORDER BY started_at DESC LIMIT 1",
         )?;
         stmt.query_row([], |row| {
@@ -2849,9 +2803,7 @@ pub fn offline_status(home: &Path) -> Result<serde_json::Value> {
     let recoveries: i64 =
         store
             .connection()
-            .query_row("SELECT COUNT(*) FROM office_recovery_events", [], |row| {
-                row.get(0)
-            })?;
+            .query_row("SELECT COUNT(*) FROM recovery_events", [], |row| row.get(0))?;
     let mut value = serde_json::json!({
         "home": home.display().to_string(),
         "socket_present": socket_path.exists(),
@@ -2889,7 +2841,7 @@ fn auto_sync_due(shared: &Shared) -> bool {
     // The fetch half runs regardless of auto_pull (QA F3): behind/ahead
     // markers stay fresh with the switch OFF; only the PULL half is
     // gated. Both halves share the same 5-min cadence.
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     drop(store);
     match *shared.last_sync.lock().expect("last sync") {
         Some(last) => last.elapsed() >= Duration::from_secs(5 * 60),
@@ -2899,9 +2851,9 @@ fn auto_sync_due(shared: &Shared) -> bool {
 
 /// V15-4: the user-facing switch (default off, persisted).
 fn set_auto_pull(shared: &Shared, on: bool) -> Result<serde_json::Value> {
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     store.connection().execute(
-        "INSERT INTO office_settings(key, value) VALUES ('auto_pull', ?1)
+        "INSERT INTO settings(key, value) VALUES ('auto_pull', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         rusqlite::params![if on { "true" } else { "false" }],
     )?;
@@ -2910,9 +2862,9 @@ fn set_auto_pull(shared: &Shared, on: bool) -> Result<serde_json::Value> {
         crate::foundation::events::NewEvent {
             domain: DOMAIN_HOST,
             kind: "auto_pull_toggled".into(),
-            subject_type: "office".into(),
+            subject_type: "host".into(),
             subject_id: shared.host_id.clone(),
-            origin: "office_host".into(),
+            origin: "host".into(),
             payload: serde_json::json!({ "on": on }),
         },
     )?;
@@ -2921,7 +2873,7 @@ fn set_auto_pull(shared: &Shared, on: bool) -> Result<serde_json::Value> {
 
 // ---------------------------------------------------------------------------
 // V15 workbench deepening (issues V15-1..V15-5): files, PR cleanup,
-// handoff, auto-sync, rate-limit recovery. All handlers keep the office
+// handoff, auto-sync, rate-limit recovery. All handlers keep Viva
 // discipline: typed ids, bounded reads, audit events, honest unknowns.
 // ---------------------------------------------------------------------------
 
@@ -2968,7 +2920,7 @@ fn read_auto_pull(store: &Store) -> bool {
     store
         .connection()
         .query_row(
-            "SELECT value FROM office_settings WHERE key = 'auto_pull'",
+            "SELECT value FROM settings WHERE key = 'auto_pull'",
             [],
             |row| row.get::<_, String>(0),
         )
@@ -2994,7 +2946,7 @@ fn auto_sync_all(shared: &Shared, force: bool) -> Result<serde_json::Value> {
         return Ok(serde_json::json!({ "skipped": "cycle already in flight" }));
     }
     // QA round 6 G4: the clear is DROP-guarded — an inner panic cannot
-    // leave the office stuck "in flight" forever.
+    // leave Viva stuck "in flight" forever.
     struct InFlightGuard<'a>(&'a AtomicBool);
     impl Drop for InFlightGuard<'_> {
         fn drop(&mut self) {
@@ -3020,9 +2972,9 @@ fn auto_sync_all_inner(shared: &Shared, force: bool) -> Result<serde_json::Value
     // Phase 1 — snapshot WHAT to sync under the store lock, then DROP it
     // for the whole git phase (QA F3 round 2: the probes are network
     // operations with a 30s timeout each, and this same mutex guards every
-    // office request; holding it across them froze the workbench).
+    // server request; holding it across them froze the workbench).
     let (main_checkouts, worktrees, auto_pull) = {
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         let mains: Vec<(String, std::path::PathBuf)> =
             crate::projects::ProjectRegistry::new(&store)
                 .list(true)?
@@ -3091,7 +3043,7 @@ fn auto_sync_all_inner(shared: &Shared, force: bool) -> Result<serde_json::Value
     }
 
     // Phase 3 — re-lock ONLY for the audit writes and the cycle bookkeeping.
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     for row in &results {
         crate::foundation::events::append(
             &store,
@@ -3109,7 +3061,7 @@ fn auto_sync_all_inner(shared: &Shared, force: bool) -> Result<serde_json::Value
                     .or_else(|| row["worktree"].as_str())
                     .unwrap_or("unknown")
                     .to_string(),
-                origin: "office_host".into(),
+                origin: "host".into(),
                 payload: row.clone(),
             },
         )?;
@@ -3123,7 +3075,7 @@ fn auto_sync_all_inner(shared: &Shared, force: bool) -> Result<serde_json::Value
     store
         .connection()
         .execute(
-            "INSERT INTO office_settings(key, value) VALUES ('last_sync_note', ?1)
+            "INSERT INTO settings(key, value) VALUES ('last_sync_note', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             rusqlite::params![note],
         )
@@ -3208,7 +3160,7 @@ fn sweep_recovery_plans(shared: &Shared) {
                 kind: "recovery_plan_fired".into(),
                 subject_type: "recovery_plan".into(),
                 subject_id: id.to_string(),
-                origin: "office_host".into(),
+                origin: "host".into(),
                 payload: serde_json::json!({
                     "outcome": outcome,
                     "note": note,
@@ -3225,7 +3177,7 @@ fn sweep_recovery_plans(shared: &Shared) {
 fn worktree_files(shared: &Shared, worktree_id: &str) -> Result<serde_json::Value> {
     let wid = WorktreeId::from_str(worktree_id)?;
     let cwd = {
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         let service = crate::git::worktrees::WorktreeService::new(
             &store,
             crate::git::worktrees::ProtectedRefs::new(vec![]),
@@ -3235,7 +3187,7 @@ fn worktree_files(shared: &Shared, worktree_id: &str) -> Result<serde_json::Valu
             id: worktree_id.to_string(),
         })?;
         // Drop the store lock BEFORE the git probes (QA round 5 F5): a
-        // slow worktree must not freeze every office request.
+        // slow worktree must not freeze every server request.
         record.worktree_path
     };
     let runner = crate::git::cli::CliRunner::default();
@@ -3327,7 +3279,7 @@ fn worktree_file_content(
         ));
     }
     let (worktree_path, base_sha) = {
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         let service = crate::git::worktrees::WorktreeService::new(
             &store,
             crate::git::worktrees::ProtectedRefs::new(vec![]),
@@ -3391,7 +3343,7 @@ fn worktree_file_content(
 }
 
 /// V15-2: the merged-PR cleanup. The gate is real: the branch's PR must be
-/// MERGED (re-checked live, not from cache). `release` records the office
+/// MERGED (re-checked live, not from cache). `release` records Viva
 /// giving the worktree up; the directory removal then runs WITHOUT force —
 /// a dirty tree refuses and says so. The caller confirmed the exact path
 /// (two-step UI); the action is audited either way.
@@ -3405,7 +3357,7 @@ fn worktree_cleanup(
     // below is a network call (30s timeout); holding the mutex across it
     // freezes every pane for that long (QA F15 — residual F3 class).
     let (repo_root, worktree_path, branch) = {
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         let service = crate::git::worktrees::WorktreeService::new(
             &store,
             crate::git::worktrees::ProtectedRefs::new(vec![]),
@@ -3428,7 +3380,7 @@ fn worktree_cleanup(
         .unwrap_or_else(|| "unknown".into());
     if state != "merged" {
         // The refusal is a fact too (#53 boundary: every outcome audited).
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         crate::foundation::events::append(
             &store,
             crate::foundation::events::NewEvent {
@@ -3436,7 +3388,7 @@ fn worktree_cleanup(
                 kind: "worktree_cleanup_refused".into(),
                 subject_type: "worktree".into(),
                 subject_id: worktree_id.to_string(),
-                origin: "office_host".into(),
+                origin: "host".into(),
                 payload: serde_json::json!({
                     "branch": branch,
                     "pr_state": state,
@@ -3452,7 +3404,7 @@ fn worktree_cleanup(
     }
     let runner = crate::git::cli::CliRunner::default();
     let removal = {
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         let service = crate::git::worktrees::WorktreeService::new(
             &store,
             crate::git::worktrees::ProtectedRefs::new(vec![]),
@@ -3471,7 +3423,7 @@ fn worktree_cleanup(
         )
     };
     if let Err(failure) = removal {
-        let store = shared.store.lock().expect("office store");
+        let store = shared.store.lock().expect("store");
         crate::foundation::events::append(
             &store,
             crate::foundation::events::NewEvent {
@@ -3479,7 +3431,7 @@ fn worktree_cleanup(
                 kind: "worktree_cleanup_failed".into(),
                 subject_type: "worktree".into(),
                 subject_id: worktree_id.to_string(),
-                origin: "office_host".into(),
+                origin: "host".into(),
                 payload: serde_json::json!({
                     "path": worktree_path.display().to_string(),
                     "requested_by": requested_by,
@@ -3489,13 +3441,13 @@ fn worktree_cleanup(
             },
         )?;
         return Err(Error::Validation(format!(
-            "worktree `{}` was released in the office records but its directory could \
+            "worktree `{}` was released in Viva's records but its directory could \
              not be removed ({}); remove it by hand after checking the tree",
             worktree_path.display(),
             failure
         )));
     }
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     crate::foundation::events::append(
         &store,
         crate::foundation::events::NewEvent {
@@ -3503,7 +3455,7 @@ fn worktree_cleanup(
             kind: "worktree_cleaned".into(),
             subject_type: "worktree".into(),
             subject_id: worktree_id.to_string(),
-            origin: "office_host".into(),
+            origin: "host".into(),
             payload: serde_json::json!({
                 "path": worktree_path.display().to_string(),
                 "branch": branch,
@@ -3540,7 +3492,7 @@ fn agent_handoff(
             "handoff target must be a bare command name (no spaces, no paths)".into(),
         ));
     }
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let service = crate::git::worktrees::WorktreeService::new(
         &store,
         crate::git::worktrees::ProtectedRefs::new(vec![]),
@@ -3647,7 +3599,7 @@ fn agent_handoff(
             kind: "agent_handoff".into(),
             subject_type: "worktree".into(),
             subject_id: worktree_id.to_string(),
-            origin: "office_host".into(),
+            origin: "host".into(),
             payload: serde_json::json!({
                 "requested_by": requested_by,
                 "to_agent": to_agent,
@@ -3672,7 +3624,7 @@ fn sync_now(shared: &Shared) -> Result<serde_json::Value> {
 }
 
 fn recovery_list(shared: &Shared) -> Result<serde_json::Value> {
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let mut stmt = store.connection().prepare(
         "SELECT id, terminal_id, task_id, reset_at, action, state, created_at, fired_at
          FROM recovery_plans ORDER BY id DESC LIMIT 50",
@@ -3710,7 +3662,7 @@ fn recovery_schedule(
             entity: "terminal",
             id: terminal_id.to_string(),
         })?;
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     store.connection().execute(
         "INSERT INTO recovery_plans(terminal_id, task_id, reset_at, action, state, created_at)
          VALUES (?1, ?2, ?3, 'resume_prompt', 'scheduled', ?4)",
@@ -3724,7 +3676,7 @@ fn recovery_schedule(
             kind: "recovery_plan_scheduled".into(),
             subject_type: "recovery_plan".into(),
             subject_id: id.to_string(),
-            origin: "office_host".into(),
+            origin: "host".into(),
             payload: serde_json::json!({ "terminal_id": terminal_id, "reset_at": reset_at }),
         },
     )?;
@@ -3732,7 +3684,7 @@ fn recovery_schedule(
 }
 
 fn recovery_cancel(shared: &Shared, plan_id: i64) -> Result<serde_json::Value> {
-    let store = shared.store.lock().expect("office store");
+    let store = shared.store.lock().expect("store");
     let changed = store.connection().execute(
         "UPDATE recovery_plans SET state = 'cancelled', fired_at = ?2
          WHERE id = ?1 AND state = 'scheduled'",
@@ -3964,7 +3916,7 @@ mod server_split_tests {
         host.shutdown();
     }
 
-    /// An invalid grant is rejected AND audited (office_events keeps the
+    /// An invalid grant is rejected AND audited (events keeps the
     /// refusal — the denial is a recorded fact, not a silent close).
     #[test]
     fn invalid_grant_is_rejected_and_audited() {
@@ -3994,7 +3946,7 @@ mod server_split_tests {
         let denials: i64 = store
             .connection()
             .query_row(
-                "SELECT COUNT(*) FROM office_events WHERE kind = 'socket_grant_denied'",
+                "SELECT COUNT(*) FROM events WHERE kind = 'socket_grant_denied'",
                 [],
                 |row| row.get(0),
             )
@@ -4419,7 +4371,7 @@ mod s3_handoff_tests {
             let out: i64 = store
                 .connection()
                 .query_row(
-                    "SELECT COUNT(*) FROM office_recovery_events WHERE kind = 'live_handoff_out'",
+                    "SELECT COUNT(*) FROM recovery_events WHERE kind = 'live_handoff_out'",
                     [],
                     |row| row.get(0),
                 )
@@ -4427,7 +4379,7 @@ mod s3_handoff_tests {
             let inn: i64 = store
                 .connection()
                 .query_row(
-                    "SELECT COUNT(*) FROM office_recovery_events WHERE kind = 'live_handoff_in'",
+                    "SELECT COUNT(*) FROM recovery_events WHERE kind = 'live_handoff_in'",
                     [],
                     |row| row.get(0),
                 )
@@ -4661,7 +4613,7 @@ mod s3_handoff_tests {
             let failed: i64 = store
                 .connection()
                 .query_row(
-                    "SELECT COUNT(*) FROM office_recovery_events WHERE kind = 'live_handoff_failed'",
+                    "SELECT COUNT(*) FROM recovery_events WHERE kind = 'live_handoff_failed'",
                     [],
                     |row| row.get(0),
                 )
@@ -4712,7 +4664,7 @@ mod s3_handoff_tests {
             let detail: String = store
                 .connection()
                 .query_row(
-                    "SELECT detail FROM office_recovery_events WHERE kind = 'live_handoff_failed' \
+                    "SELECT detail FROM recovery_events WHERE kind = 'live_handoff_failed' \
                      ORDER BY seq DESC LIMIT 1",
                     [],
                     |row| row.get(0),
@@ -4885,7 +4837,7 @@ mod s4_agent_status_tests {
         let audited: i64 = store
             .connection()
             .query_row(
-                "SELECT COUNT(*) FROM office_events WHERE kind = 'agent_status_reported'",
+                "SELECT COUNT(*) FROM events WHERE kind = 'agent_status_reported'",
                 [],
                 |row| row.get(0),
             )
@@ -5031,7 +4983,7 @@ mod s4_agent_status_tests {
         let audited: i64 = store
             .connection()
             .query_row(
-                "SELECT COUNT(*) FROM office_events WHERE kind = 'agent_content_submitted' AND subject_id = ?1",
+                "SELECT COUNT(*) FROM events WHERE kind = 'agent_content_submitted' AND subject_id = ?1",
                 [content_id.as_str()],
                 |row| row.get(0),
             )
@@ -5279,7 +5231,7 @@ mod s5_orchestration_tests {
         let timeouts: i64 = store
             .connection()
             .query_row(
-                "SELECT COUNT(*) FROM office_events WHERE kind = 'agent_wait_timeout'",
+                "SELECT COUNT(*) FROM events WHERE kind = 'agent_wait_timeout'",
                 [],
                 |row| row.get(0),
             )
@@ -5733,7 +5685,7 @@ mod v15_tests {
         let audited: i64 = store
             .connection()
             .query_row(
-                "SELECT COUNT(*) FROM office_events WHERE kind = 'worktree_cleaned'",
+                "SELECT COUNT(*) FROM events WHERE kind = 'worktree_cleaned'",
                 [],
                 |row| row.get(0),
             )
@@ -6097,7 +6049,7 @@ mod v15_tests {
         let audited: i64 = store
             .connection()
             .query_row(
-                "SELECT COUNT(*) FROM office_events WHERE kind = 'recovery_plan_fired'",
+                "SELECT COUNT(*) FROM events WHERE kind = 'recovery_plan_fired'",
                 [],
                 |row| row.get(0),
             )
@@ -6120,7 +6072,7 @@ mod v15_tests {
     }
 
     /// V15-5 honesty: rate_limited without a reset_at is refused — the
-    /// office never guesses a recovery time.
+    /// Viva never guesses a recovery time.
     #[test]
     fn rate_limited_without_reset_at_is_refused() {
         let host = start_host();
@@ -6211,7 +6163,7 @@ mod v15_tests {
             let note: String = store
                 .connection()
                 .query_row(
-                    "SELECT detail FROM office_recovery_events
+                    "SELECT detail FROM recovery_events
                      WHERE kind = 'recovery_plan_expired' ORDER BY seq DESC LIMIT 1",
                     [],
                     |row| row.get(0),
@@ -6370,7 +6322,7 @@ mod s6_pause_tests {
             let value: String = store
                 .connection()
                 .query_row(
-                    "SELECT value FROM office_settings WHERE key = 'paused'",
+                    "SELECT value FROM settings WHERE key = 'paused'",
                     [],
                     |row| row.get(0),
                 )
@@ -6396,7 +6348,7 @@ mod s6_pause_tests {
             store
                 .connection()
                 .execute(
-                    "UPDATE office_settings SET value = 'false' WHERE key = 'paused'",
+                    "UPDATE settings SET value = 'false' WHERE key = 'paused'",
                     [],
                 )
                 .expect("cleanup");
@@ -6432,7 +6384,7 @@ mod s6_pause_tests {
             store
                 .connection()
                 .query_row(
-                    "SELECT COUNT(*) FROM office_recovery_events WHERE kind = 'pause_restored'",
+                    "SELECT COUNT(*) FROM recovery_events WHERE kind = 'pause_restored'",
                     [],
                     |row| row.get(0),
                 )
@@ -6591,7 +6543,7 @@ mod qa_round4_tests {
             let audited: i64 = store
                 .connection()
                 .query_row(
-                    "SELECT COUNT(*) FROM office_events WHERE kind = 'git_auto_sync'",
+                    "SELECT COUNT(*) FROM events WHERE kind = 'git_auto_sync'",
                     [],
                     |row| row.get(0),
                 )
@@ -6735,7 +6687,7 @@ mod qa_round5_tests {
             let audited: i64 = store
                 .connection()
                 .query_row(
-                    "SELECT COUNT(*) FROM office_events WHERE kind = 'git_auto_sync'",
+                    "SELECT COUNT(*) FROM events WHERE kind = 'git_auto_sync'",
                     [],
                     |row| row.get(0),
                 )
@@ -6826,7 +6778,7 @@ mod qa_round5_tests {
             store
                 .connection()
                 .execute(
-                    "INSERT INTO office_settings(key, value) VALUES ('auto_pull', 'true')
+                    "INSERT INTO settings(key, value) VALUES ('auto_pull', 'true')
                      ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                     [],
                 )
@@ -6889,10 +6841,7 @@ mod qa_round5_tests {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        assert!(
-            answered,
-            "the office must keep answering during a slow sync"
-        );
+        assert!(answered, "Viva must keep answering during a slow sync");
 
         let sync_outcome = syncer.join().expect("sync thread ends");
         assert!(

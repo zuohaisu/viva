@@ -3,8 +3,8 @@
  * Run with: npm test
  *
  * Both tools are exercised against a fake `viva` binary, so the real
- * chain (tool -> office CLI argv -> payload) is verified without a live
- * office or any memory store.
+ * chain (tool -> viva CLI argv -> payload) is verified without a live
+ * server or any memory store.
  */
 
 import { test } from "node:test";
@@ -13,17 +13,17 @@ import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { officeEnv } from "../lib.ts";
+import { readEnv } from "../lib.ts";
 import { MEMORY_EXIT_REFUSAL, registerMemoryTools } from "../memory/memory.ts";
-import vivaOffice from "../viva-office.ts";
+import viva from "../viva.ts";
 import { callTool, createFakePi, textOf, toolNamed } from "./fake-pi.ts";
 
 const BASE_ENV: NodeJS.ProcessEnv = {
-  VIVA_OFFICE_MEMBER_ID: "mem-1",
-  VIVA_OFFICE_MEMBER_NAME: "Samuel",
+  VIVA_MEMBER_ID: "mem-1",
+  VIVA_MEMBER_NAME: "Samuel",
   VIVA_HOME: "/tmp/viva-home",
-  VIVA_OFFICE_TASK_ID: "task-1",
-  VIVA_OFFICE_GRANT_ID: "grant-1",
+  VIVA_TASK_ID: "task-1",
+  VIVA_GRANT_ID: "grant-1",
 };
 
 function withEnv(
@@ -51,7 +51,7 @@ function fakeViva(): string {
   const dir = mkdtempSync(join(tmpdir(), "viva-memory-test-"));
   const path = join(dir, "fake-viva");
   // The fake answers with the argv it received as a JSON array, so tests
-  // assert the real CLI envelope the office will see (runEnvelope
+  // assert the real CLI envelope Viva will see (runEnvelope
   // JSON-parses stdout). POSIX sh only: the test runner's PATH may not
   // resolve `env node` for shebangs. Test args never contain quotes, so
   // naive quoting is safe here.
@@ -70,10 +70,10 @@ function fakeViva(): string {
   return path;
 }
 
-test("the office entry registers the memory tools", () => {
+test("the main entry registers the memory tools", () => {
   withEnv(BASE_ENV, () => {
     const fake = createFakePi();
-    vivaOffice(fake.host);
+    viva(fake.host);
     assert.ok(fake.tools.has("viva_memory_search"));
     assert.ok(fake.tools.has("viva_memory_remember"));
   });
@@ -81,7 +81,7 @@ test("the office entry registers the memory tools", () => {
 
 test("memory search is member-scoped and read-only", async () => {
   await withEnv(BASE_ENV, async () => {
-    const env = officeEnv(process.env)!;
+    const env = readEnv(process.env)!;
     env.vivaBin = fakeViva();
     const fake = createFakePi();
     registerMemoryTools(fake.host, env);
@@ -108,7 +108,7 @@ test("memory search is member-scoped and read-only", async () => {
 
 test("memory remember records provenance even when chat omits it", async () => {
   await withEnv(BASE_ENV, async () => {
-    const env = officeEnv(process.env)!;
+    const env = readEnv(process.env)!;
     env.vivaBin = fakeViva();
     const fake = createFakePi();
     registerMemoryTools(fake.host, env);
@@ -133,7 +133,7 @@ test("memory remember records provenance even when chat omits it", async () => {
 
 test("empty content and queries are refused before any call", async () => {
   await withEnv(BASE_ENV, async () => {
-    const env = officeEnv(process.env)!;
+    const env = readEnv(process.env)!;
     // /bin/false would make any real CLI call fail as "unavailable"/"refused",
     // so the exact refusal text below proves nothing was spawned.
     env.vivaBin = "/bin/false";

@@ -35,8 +35,8 @@ pub struct HarnessSpec {
     pub cwd: PathBuf,
     /// The member whose session this is, when launched for a member.
     pub member_id: Option<MemberId>,
-    /// Extra environment (office context: member identity, task id, and —
-    /// only when the office holds a live grant — the grant reference).
+    /// Extra environment (Viva context: member identity, task id, and —
+    /// only when Viva holds a live grant — the grant reference).
     pub env: Vec<(String, String)>,
 }
 
@@ -122,13 +122,13 @@ mod tests {
             vec![
                 "pi".into(),
                 "--extension".into(),
-                "/repo/extensions/pi/viva-office.ts".into(),
+                "/repo/extensions/pi/viva.ts".into(),
             ],
             std::env::temp_dir().join("wt-1"),
         )
         .expect("spec")
         .for_member(MemberId::new())
-        .with_env("VIVA_OFFICE_MEMBER_ID", "mem-1");
+        .with_env("VIVA_MEMBER_ID", "mem-1");
         assert_eq!(spec.name, "pi");
         assert!(spec.member_id.is_some());
         assert_eq!(spec.env.len(), 1);

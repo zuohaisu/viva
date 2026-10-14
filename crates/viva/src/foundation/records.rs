@@ -1,4 +1,4 @@
-//! Office reference records: session kinds, attribution snapshots, execution
+//! Reference records: session kinds, attribution snapshots, execution
 //! records, launch specifications, terminal events, and the workbench
 //! query/action contracts.
 //!
@@ -51,7 +51,7 @@ pub struct HarnessSessionRef {
     pub native_session_id: String,
 }
 
-/// An office-side session record: metadata and references, never a copy of
+/// A Viva-side session record: metadata and references, never a copy of
 /// the conversation itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRecord {
@@ -98,7 +98,7 @@ impl SessionRecord {
 
 pub fn insert_session(store: &Store, session: &SessionRecord) -> Result<()> {
     store.connection().execute(
-        "INSERT INTO office_sessions(
+        "INSERT INTO sessions(
             session_id, kind, title, task_id, member_id,
             harness, harness_native_session_id, created_at
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -126,7 +126,7 @@ pub fn list_sessions(store: &Store) -> Result<Vec<SessionRecord>> {
     let mut stmt = store.connection().prepare(
         "SELECT session_id, kind, title, task_id, member_id,
                 harness, harness_native_session_id, created_at
-         FROM office_sessions ORDER BY created_at, session_id",
+         FROM sessions ORDER BY created_at, session_id",
     )?;
     let rows = stmt.query_map([], |row| {
         let kind: String = row.get(1)?;
@@ -140,7 +140,7 @@ pub fn list_sessions(store: &Store) -> Result<Vec<SessionRecord>> {
                     .expect("DB CHECK guarantees a task id");
                 SessionKind::TaskExecution(task)
             }
-            other => panic!("office_sessions.kind holds an unknown value `{other}`"),
+            other => panic!("sessions.kind holds an unknown value `{other}`"),
         };
         let member_id: Option<String> = row.get(4)?;
         let harness: Option<String> = row.get(5)?;
@@ -322,7 +322,7 @@ impl ExecutionRecord {
 
 pub fn insert_execution(store: &Store, execution: &ExecutionRecord) -> Result<()> {
     store.connection().execute(
-        "INSERT INTO office_executions(
+        "INSERT INTO executions(
             execution_id, task_id, session_id, member_id, attribution, status,
             process_exit, completion_evidence, created_at, updated_at
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -346,7 +346,7 @@ pub fn get_execution(store: &Store, execution_id: &ExecutionId) -> Result<Option
     let mut stmt = store.connection().prepare(
         "SELECT task_id, session_id, member_id, attribution, status,
                 process_exit, completion_evidence, created_at, updated_at
-         FROM office_executions WHERE execution_id = ?1",
+         FROM executions WHERE execution_id = ?1",
     )?;
     let row = stmt
         .query_row([execution_id.as_str()], |row| {
@@ -394,7 +394,7 @@ pub fn get_execution(store: &Store, execution_id: &ExecutionId) -> Result<Option
         "stopped" => ExecutionStatus::Stopped,
         "failed" => ExecutionStatus::Failed,
         "completed" => ExecutionStatus::Completed,
-        other => panic!("office_executions.status holds an unknown value `{other}`"),
+        other => panic!("executions.status holds an unknown value `{other}`"),
     };
     Ok(Some(ExecutionRecord {
         execution_id: execution_id.clone(),
@@ -776,7 +776,7 @@ mod tests {
     fn database_backstops_task_execution_without_task() {
         let store = store();
         let err = store.connection().execute(
-            "INSERT INTO office_sessions(session_id, kind, title, task_id, member_id, harness, harness_native_session_id, created_at)
+            "INSERT INTO sessions(session_id, kind, title, task_id, member_id, harness, harness_native_session_id, created_at)
              VALUES ('sess-x', 'task_execution', 't', NULL, NULL, NULL, NULL, 'now')",
             [],
         );
@@ -792,7 +792,7 @@ mod tests {
 
         // Raw SQL backstop: no task, no execution row.
         let err = store.connection().execute(
-            "INSERT INTO office_executions(execution_id, member_id, attribution, status, created_at, updated_at)
+            "INSERT INTO executions(execution_id, member_id, attribution, status, created_at, updated_at)
              VALUES ('exec-x', 'mem-x', '{}', 'requested', 'now', 'now')",
             [],
         );
@@ -814,7 +814,7 @@ mod tests {
         execution.complete("cargo test g0: all green");
         insert_execution(&store, &execution).expect("insert");
         let err = store.connection().execute(
-            "UPDATE office_executions SET status = 'completed', completion_evidence = NULL",
+            "UPDATE executions SET status = 'completed', completion_evidence = NULL",
             [],
         );
         assert!(

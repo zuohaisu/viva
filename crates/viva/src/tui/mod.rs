@@ -1,4 +1,4 @@
-//! The office TUI shell: office navigation and terminal presentation
+//! The TUI shell: navigation and terminal presentation
 //! (V06, issue #15).
 //!
 //! Scope and honesty:
@@ -11,10 +11,10 @@
 //!   [`TuiApp::refresh`] call from the event loop.
 //! - Only the focused pane is drawn. Behind the current view there are no
 //!   sixteen invisible renderings.
-//! - Navigation is view state only: switching panes never mutates office
+//! - Navigation is view state only: switching panes never mutates Viva
 //!   data or execution attribution (the data trait has no mutators).
 //! - Quit is a protocol, not a handle-drop: `q` requests the quit, the run
-//!   loop asks the office to pause (callback), and the terminal guard
+//!   loop asks Viva to pause (callback), and the terminal guard
 //!   restores the physical terminal (raw mode off, main screen back) on
 //!   every exit path, including errors.
 //! - Unknown capabilities are displayed as unknown; nothing here claims a
@@ -47,7 +47,7 @@ pub struct TaskRow {
     pub status: String,
 }
 
-/// What the shell shows for one terminal row. `live` is the office's real
+/// What the shell shows for one terminal row. `live` is Viva's real
 /// knowledge; the shell never guesses a state it was not told.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalRow {
@@ -58,7 +58,7 @@ pub struct TerminalRow {
     pub live: Option<bool>,
 }
 
-/// Office overview: members and projects (display configuration only).
+/// Overview: members and projects (display configuration only).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Overview {
     pub members: Vec<String>,
@@ -97,7 +97,7 @@ pub enum Focus {
 pub enum KeyOutcome {
     Handled,
     Ignored,
-    /// The user asked to quit; the run loop must invoke the office pause
+    /// The user asked to quit; the run loop must invoke the pause
     /// and restore the terminal (never drop handles directly).
     QuitRequested,
 }
@@ -255,13 +255,13 @@ impl<D: OverviewSource> TuiApp<D> {
         ])
         .split(frame.area());
 
-        // Header: the office name + which pane is focused.
+        // Header: the product name + which pane is focused.
         let header = Line::from(vec![
             Span::styled(" viva", ratatui::style::Style::new().bold()),
-            Span::raw(" — personal ai office  "),
+            Span::raw(" — personal ai collaboration system  "),
             Span::styled(
                 match self.focus {
-                    Focus::Overview => "[office]",
+                    Focus::Overview => "[overview]",
                     Focus::Tasks => "[tasks]",
                     Focus::Terminals => "[terminals]",
                 },
@@ -313,17 +313,11 @@ impl<D: OverviewSource> TuiApp<D> {
                 ListItem::new(Line::from(format!("{marker}project: {name}")))
             })
             .collect();
-        let members_list = List::new(members).block(
-            Block::new()
-                .title(" office — members ")
-                .borders(Borders::ALL),
-        );
+        let members_list =
+            List::new(members).block(Block::new().title(" members ").borders(Borders::ALL));
         frame.render_widget(members_list, rows[0]);
-        let projects_list = List::new(projects).block(
-            Block::new()
-                .title(" office — projects ")
-                .borders(Borders::ALL),
-        );
+        let projects_list =
+            List::new(projects).block(Block::new().title(" projects ").borders(Borders::ALL));
         frame.render_widget(projects_list, rows[1]);
     }
 
@@ -385,13 +379,13 @@ impl<D: OverviewSource> TuiApp<D> {
             Line::from(" viva shell — help"),
             Line::from(""),
             Line::from(" ?        toggle this help"),
-            Line::from(" 1/2/3    focus office / tasks / terminals"),
+            Line::from(" 1/2/3    focus overview / tasks / terminals"),
             Line::from(" Tab      cycle panes"),
             Line::from(" j / ↓    move down"),
             Line::from(" k / ↑    move up"),
-            Line::from(" q        quit (office pause + terminal restore)"),
+            Line::from(" q        quit (pause + terminal restore)"),
             Line::from(""),
-            Line::from(" keys sent to agents are managed per-terminal by the office"),
+            Line::from(" keys sent to agents are managed per-terminal by Viva's"),
             Line::from(" composition; the shell itself never eats an agent's keys."),
         ])
         .block(Block::new().title(" help ").borders(Borders::ALL))
@@ -456,7 +450,7 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// The run loop's quit step: ask the office to pause (callback), then the
+/// The run loop's quit step: ask Viva to pause (callback), then the
 /// guard's drop restores the terminal. Kept as an explicit function so
 /// tests can prove the pause runs exactly once before restore.
 pub fn shutdown_with_pause(pause_server: &mut impl FnMut()) {
@@ -651,7 +645,7 @@ mod tests {
         assert!(tasks_view.contains("Ship V01"));
         assert!(
             !tasks_view.contains("member: Samuel"),
-            "hidden office pane must not render"
+            "hidden overview pane must not render"
         );
         assert!(
             !tasks_view.contains("user_shell"),
@@ -700,7 +694,7 @@ mod tests {
         );
         assert!(app.quit_requested());
 
-        // The run loop's shutdown: the office pause runs exactly once,
+        // The run loop's shutdown: the pause runs exactly once,
         // before the guard restores the terminal (drop order: shutdown
         // runs while the guard is alive).
         let mut pauses = 0;

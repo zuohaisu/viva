@@ -53,7 +53,7 @@ child.on("close", (code, signal) => {
   process.exitCode = code === null ? 1 : code;
 });
 
-// Forward termination signals so Ctrl-C and `kill` reach the office host
+// Forward termination signals so Ctrl-C and `kill` reach the `viva` process
 // (its quit path stops owned terminals and persists the handoff).
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.on(sig, () => {

@@ -316,7 +316,7 @@ fn unrelated_archive_entries_are_never_unpacked() {
     let mut fixture = Fixture::new();
     fixture.set_archive(archive(&[
         (
-            "viva-macos-arm64/extensions/pi/viva-office.ts",
+            "viva-macos-arm64/extensions/pi/viva.ts",
             b"not installed",
             tar::EntryType::Regular,
         ),

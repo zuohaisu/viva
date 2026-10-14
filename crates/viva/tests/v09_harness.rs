@@ -1,5 +1,5 @@
 //! V09 acceptance tests (issue #18): the Pi harness launch combination and
-//! the extension-facing office endpoints. The TS extension package has its
+//! the extension-facing endpoints. The TS extension package has its
 //! own independent typecheck/test suite under `extensions/pi/`; these tests
 //! cover the Rust side of the contract (launch context, honest
 //! availability, handoff facts that never complete a task).
@@ -112,7 +112,7 @@ fn pi_launch_combination_injects_identity_and_task_context() {
     std::fs::create_dir_all(&repo).expect("repo dir");
     let seed = seed(&home, "prepare the release");
 
-    // The launch context is built from real office records.
+    // The launch context is built from real Viva records.
     let store = viva::foundation::store::Store::open(
         &viva::foundation::paths::database_path(&home),
         server::migrations(),
@@ -153,13 +153,13 @@ fn pi_launch_combination_injects_identity_and_task_context() {
     assert!(
         spec.argv
             .iter()
-            .any(|a| a.ends_with("extensions/pi/viva-office.ts")),
+            .any(|a| a.ends_with("extensions/pi/viva.ts")),
         "the shipped extension is loaded explicitly: {:?}",
         spec.argv
     );
 
     // A plain-chat launch carries identity but no task and no grant:
-    // chat never inherits office authority.
+    // chat never inherits Viva authority.
     let chat = harness
         .launch(&member, None, None, &repo, None)
         .expect("chat launch");
@@ -168,11 +168,83 @@ fn pi_launch_combination_injects_identity_and_task_context() {
     assert!(!chat.env.iter().any(|(k, _)| k == ENV_GRANT_ID));
 }
 
+/// The Rust-to-Pi contract is a set of literal names both sides must agree
+/// on (issue #96). The constants are pinned to their literal values here, so
+/// a rename on only one side cannot pass: the Pi contract test
+/// (`extensions/pi/test/viva.contract.test.ts`) reads the same constants out
+/// of `harness/pi/mod.rs` and drives the real extension and the real `viva`
+/// binary with them.
+#[test]
+fn launch_context_uses_the_viva_names_and_nothing_else() {
+    // The real checkout, so the launch argv names the extension Pi would load.
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let member = viva::members::MemberRecord {
+        member_id: MemberId::new(),
+        display_name: "Samuel".into(),
+        created_at: viva::foundation::ids::utc_now(),
+    };
+    let binding = MemberBinding {
+        member_id: member.member_id.clone(),
+        role: "coordinator".into(),
+        model_binding: "glm-5.3-flash".into(),
+        tools: vec!["pi-cli".into()],
+        updated_at: viva::foundation::ids::utc_now(),
+    };
+    let task = viva::tasks::TaskRecord {
+        task_id: viva::foundation::ids::TaskId::new(),
+        goal: "pin the contract names".into(),
+        constraints: vec![],
+        assignee_member_id: Some(member.member_id.clone()),
+        workspace_id: None,
+        project_id: None,
+        status: viva::tasks::TaskStatus::Open,
+        created_at: viva::foundation::ids::utc_now(),
+        updated_at: viva::foundation::ids::utc_now(),
+    };
+    let grant = viva::foundation::ids::GrantId::new();
+
+    let spec = PiHarness::for_repo(&repo)
+        .launch(&member, Some(&binding), Some(&task), &repo, Some(&grant))
+        .expect("launch");
+    assert_eq!(spec.argv[1], "--extension");
+
+    let mut keys: Vec<&str> = spec.env.iter().map(|(k, _)| k.as_str()).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "VIVA_BIN",
+            "VIVA_GRANT_ID",
+            "VIVA_MEMBER_ID",
+            "VIVA_MEMBER_NAME",
+            "VIVA_MODEL_BINDING",
+            "VIVA_TASK_ID",
+        ],
+        "the harness injects exactly the documented variables, none under the retired names"
+    );
+    assert_eq!(ENV_MEMBER_ID, "VIVA_MEMBER_ID");
+    assert_eq!(ENV_MEMBER_NAME, "VIVA_MEMBER_NAME");
+    assert_eq!(ENV_TASK_ID, "VIVA_TASK_ID");
+    assert_eq!(ENV_GRANT_ID, "VIVA_GRANT_ID");
+
+    // The extension the harness loads is a file that really ships in this
+    // checkout (and in the release tarball, which copies extensions/pi whole).
+    assert_eq!(
+        viva::harness::pi::EXTENSION_RELATIVE_PATH,
+        "extensions/pi/viva.ts"
+    );
+    assert!(
+        std::path::Path::new(&spec.argv[2]).is_file(),
+        "the extension the harness passes to Pi must exist: {}",
+        spec.argv[2]
+    );
+}
+
 #[test]
 fn pi_availability_is_honest_when_missing() {
     let harness = PiHarness {
         pi_binary: "/nonexistent/viva-fake-pi".into(),
-        extension_path: std::env::temp_dir().join("extensions/pi/viva-office.ts"),
+        extension_path: std::env::temp_dir().join("extensions/pi/viva.ts"),
     };
     match harness.availability() {
         Availability::Unavailable { reason } => {

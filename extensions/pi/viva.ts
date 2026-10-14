@@ -1,20 +1,20 @@
 /**
- * Viva office extension for the Pi coding agent (V09, issue #18).
+ * Viva extension for the Pi coding agent (V09, issue #18).
  *
  * What this extension does — and honestly does not:
- * - Injects the member identity and current task context the office's Rust
+ * - Injects the member identity and current task context Viva's Rust
  *   harness placed in the environment. The member is configuration data;
  *   nothing here hard-codes a member name.
- * - Registers office query tools (status, task brief), a CONTROLLED
+ * - Registers query tools (status, task brief), a CONTROLLED
  *   dispatch tool (refuses without a live grant — chat never self-
  *   authorizes) and an explicit handoff tool (a member report; it never
  *   marks a task complete).
  * - States plainly when no external memory system is connected. There is
  *   no fake Holographic, no "remembers", no "learned".
- * - Sessions without office context (plain `pi` runs) leave this extension
+ * - Sessions without Viva context (plain `pi` runs) leave this extension
  *   inert: it registers nothing and claims nothing.
  *
- * Pi keeps its own chat UI and agent loop; the office keeps its own facts.
+ * Pi keeps its own chat UI and agent loop; Viva keeps its own facts.
  *
  * Tools use Pi's real `registerTool({ name, label, description, parameters,
  * execute })` form with TypeBox parameter schemas.
@@ -25,61 +25,61 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
-  officeEnv,
+  readEnv,
   planDispatch,
   runEnvelope,
   toolFailure,
   toolSuccess,
-  type OfficeEnv,
+  type VivaEnv,
   type PiHost,
 } from "./lib.ts";
 import { registerComputerTools } from "./computer/computer.ts";
 import { registerMemoryTools } from "./memory/memory.ts";
 
-export default function vivaOffice(pi: PiHost): void {
-  const env: OfficeEnv | null = officeEnv(process.env);
-  // Not launched by the office: stay silent and claim nothing.
+export default function viva(pi: PiHost): void {
+  const env: VivaEnv | null = readEnv(process.env);
+  // Not launched by Viva: stay silent and claim nothing.
   if (!env) return;
 
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
     const lines: string[] = [];
     lines.push(
-      `Viva office context loaded: you are ${env.memberName} (member ${env.memberId}). ` +
-        "This identity comes from the office's member records, not from this chat.",
+      `Viva context loaded: you are ${env.memberName} (member ${env.memberId}). ` +
+        "This identity comes from Viva's member records, not from this chat.",
     );
     if (env.taskId) {
-      lines.push(`Current task: ${env.taskId}. Use the viva_office_task_brief tool to read its real brief.`);
+      lines.push(`Current task: ${env.taskId}. Use the viva_task_brief tool to read its real brief.`);
     } else {
       lines.push(
-        "This is plain conversation: no task is attached, and chat carries no office-wide authority.",
+        "This is plain conversation: no task is attached, and chat carries no Viva-wide authority.",
       );
     }
     lines.push(
-      "No external memory system is connected: nothing here claims to remember beyond what the office has recorded.",
+      "No external memory system is connected: nothing here claims to remember beyond what Viva has recorded.",
     );
     ctx.ui.notify(lines.join("\n"), "info");
   });
 
   pi.registerTool({
-    name: "viva_office_status",
-    label: "Viva office status",
+    name: "viva_status",
+    label: "Viva status",
     description:
-      "Read the Viva office status: active host, terminals and execution counts (read-only).",
+      "Read Viva's status: active host, terminals and execution counts (read-only).",
     parameters: Type.Object({}, { additionalProperties: false }),
     execute: async () => {
       try {
         return toolSuccess(await runEnvelope(env, ["status"]));
       } catch (err) {
-        return toolFailure(`office status unavailable: ${String(err)}`);
+        return toolFailure(`Viva status unavailable: ${String(err)}`);
       }
     },
   });
 
   pi.registerTool({
-    name: "viva_office_task_brief",
+    name: "viva_task_brief",
     label: "Viva task brief",
     description:
-      "Read the current task's brief from the office records (read-only). Uses the task attached to this session.",
+      "Read the current task's brief from Viva's records (read-only). Uses the task attached to this session.",
     parameters: Type.Object(
       {
         task_id: Type.Optional(
@@ -102,10 +102,10 @@ export default function vivaOffice(pi: PiHost): void {
   });
 
   pi.registerTool({
-    name: "viva_office_dispatch",
+    name: "viva_dispatch",
     label: "Viva dispatch",
     description:
-      "Dispatch a task execution through the office under this session's grant. Refuses without a live grant: ask the user to authorize.",
+      "Dispatch a task execution through Viva under this session's grant. Refuses without a live grant: ask the user to authorize.",
     parameters: Type.Object(
       {
         argv: Type.Array(Type.String(), {
@@ -144,7 +144,7 @@ export default function vivaOffice(pi: PiHost): void {
   });
 
   pi.registerTool({
-    name: "viva_office_handoff",
+    name: "viva_handoff",
     label: "Viva handoff",
     description:
       "Record an explicit handoff summary for the current task (a member-reported fact; it never completes the task).",
@@ -185,10 +185,10 @@ export default function vivaOffice(pi: PiHost): void {
   });
 
   // F03 (issue #25): the read-only computer audit tool. Input stays off
-  // chat — it lives on the office's task-scoped grant path only.
+  // chat — it lives on Viva's task-scoped grant path only.
   registerComputerTools(pi, env);
 
-  // F04 (issue #26): office-linked external memory tools (scoped recall
-  // with provenance; exits stay office-side).
+  // F04 (issue #26): Viva-linked external memory tools (scoped recall
+  // with provenance; exits stay Viva-side).
   registerMemoryTools(pi, env);
 }

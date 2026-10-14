@@ -880,7 +880,7 @@ impl<'a> WorkflowEngine<'a> {
                 Error::Validation(format!("authorization grant id invalid: {err}"))
             })?;
             let engine = AuthorityEngine::new(self.store);
-            // An office-wide grant may authorize other actions, but cannot
+            // A Viva-wide grant may authorize other actions, but cannot
             // attest that THIS task was authorized for a dispatch step.
             let grant = engine.require_grant(&grant_id)?;
             if grant.task_id.as_ref() != Some(&run.task_id) {

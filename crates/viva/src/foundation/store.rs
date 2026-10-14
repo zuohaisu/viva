@@ -13,7 +13,7 @@
 //!   each migration runs in its own transaction so a failed migration leaves
 //!   no half state.
 //! - Foundation tables are the frozen reference slice (sessions, executions,
-//!   launch specs, terminal events, control requests, office events). Other
+//!   launch specs, terminal events, control requests, events). Other
 //!   domains create their own tables and reference them; they never `ALTER`
 //!   foundation tables.
 
@@ -25,6 +25,7 @@ use rusqlite::Connection;
 
 use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::utc_now;
+use crate::foundation::legacy;
 
 /// The known migration domains. Each domain owner (see
 /// Wiki page `G0-Interface-Contracts`) sequences its own versions.
@@ -217,12 +218,12 @@ impl FrozenMigrations {
 
 /// The foundation reference schema (version 1). The migration engine itself
 /// owns `schema_meta` and `schema_migrations` (created before any migration
-/// runs); foundation v1 owns the office tables below. See the module docs for
+/// runs); foundation v1 owns the tables below. See the module docs for
 /// the ownership rules of these tables.
 pub const FOUNDATION_V1_SQL: &str = r#"
--- Append-only office event log. UPDATE/DELETE are rejected by trigger; the
+-- Append-only event log. UPDATE/DELETE are rejected by trigger; the
 -- CHECK bounds payload growth in bytes (bounded logging, ADR 0011).
-CREATE TABLE office_events (
+CREATE TABLE events (
     seq          INTEGER PRIMARY KEY AUTOINCREMENT,
     event_id     TEXT NOT NULL UNIQUE,
     occurred_at  TEXT NOT NULL,
@@ -234,17 +235,17 @@ CREATE TABLE office_events (
     payload      TEXT NOT NULL,
     CHECK (length(CAST(payload AS BLOB)) <= 65536)
 );
-CREATE TRIGGER office_events_no_update
-BEFORE UPDATE ON office_events
-BEGIN SELECT RAISE(ABORT, 'office_events is append-only'); END;
-CREATE TRIGGER office_events_no_delete
-BEFORE DELETE ON office_events
-BEGIN SELECT RAISE(ABORT, 'office_events is append-only'); END;
+CREATE TRIGGER events_no_update
+BEFORE UPDATE ON events
+BEGIN SELECT RAISE(ABORT, 'events is append-only'); END;
+CREATE TRIGGER events_no_delete
+BEFORE DELETE ON events
+BEGIN SELECT RAISE(ABORT, 'events is append-only'); END;
 
--- Office-side session references. A plain conversation session needs no task;
+-- Viva-side session references. A plain conversation session needs no task;
 -- a task execution session must carry its task. Harness-native session ids
 -- are pointers to foreign records, never a second copy of the chat facts.
-CREATE TABLE office_sessions (
+CREATE TABLE sessions (
     session_id               TEXT PRIMARY KEY,
     kind                     TEXT NOT NULL CHECK (kind IN ('conversation', 'task_execution')),
     title                    TEXT NOT NULL,
@@ -259,10 +260,10 @@ CREATE TABLE office_sessions (
 -- Execution records. A task execution must attach its task and its full
 -- attribution snapshot; completion requires evidence — a process exit code is
 -- never accepted as proof of completion.
-CREATE TABLE office_executions (
+CREATE TABLE executions (
     execution_id        TEXT PRIMARY KEY,
     task_id             TEXT NOT NULL,
-    session_id          TEXT REFERENCES office_sessions(session_id),
+    session_id          TEXT REFERENCES sessions(session_id),
     member_id           TEXT NOT NULL,
     attribution         TEXT NOT NULL,
     status              TEXT NOT NULL CHECK (status IN ('requested', 'running', 'stopped', 'failed', 'completed')),
@@ -322,10 +323,11 @@ CREATE TABLE control_requests (
 INSERT INTO schema_meta(key, value) VALUES ('layout_version', '1');
 "#;
 
-/// An open office store. Single-writer per process; WAL keeps readers cheap.
+/// An open store. Single-writer per process; WAL keeps readers cheap.
 pub struct Store {
     conn: Connection,
     schema_versions: BTreeMap<Domain, u32>,
+    legacy_migration: Option<legacy::Migrated>,
 }
 
 impl Store {
@@ -337,14 +339,27 @@ impl Store {
                 std::fs::create_dir_all(parent)?;
             }
         }
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         Self::configure(&conn)?;
+        // Old table/value names are migrated first, so the domain migrations
+        // below see a database that already speaks the current names.
+        let legacy_migration = legacy::migrate_if_needed(&mut conn, path)?;
+        if let Some(migrated) = &legacy_migration {
+            eprintln!("{}", migrated.notice());
+        }
         let mut store = Store {
             conn,
             schema_versions: BTreeMap::new(),
+            legacy_migration,
         };
         store.apply_migrations(migrations)?;
         Ok(store)
+    }
+
+    /// What the one-time rename of the old table/value names did while this
+    /// store was being opened, if it ran.
+    pub fn legacy_migration(&self) -> Option<&legacy::Migrated> {
+        self.legacy_migration.as_ref()
     }
 
     /// In-memory store for tests.
@@ -354,6 +369,7 @@ impl Store {
         let mut store = Store {
             conn,
             schema_versions: BTreeMap::new(),
+            legacy_migration: None,
         };
         store.apply_migrations(migrations)?;
         Ok(store)
@@ -403,7 +419,7 @@ impl Store {
                 {
                     Error::Migration(format!(
                         "maintenance v2 could not backfill conflicting proposal keys ({err}); \
-                         no proposal was changed. Stop the office, preserve the database with \
+                         no proposal was changed. Stop the server, preserve the database with \
                          SQLite backup, then inspect both proposals and resolve the key conflict \
                          as described in the Wiki (F01-F04-Acceptance). A private raw \
                          inventory is available via `viva data export --out <dir>`"
@@ -559,7 +575,7 @@ mod tests {
         {
             let store = Store::open(&db, &frozen).expect("open");
             assert_eq!(store.schema_versions().get(&DOMAIN_FOUNDATION), Some(&1));
-            assert_eq!(store.row_count("office_events").expect("count"), 0);
+            assert_eq!(store.row_count("events").expect("count"), 0);
         }
         // Reopen: no re-application, no duplicate rows.
         {
@@ -662,7 +678,7 @@ mod tests {
 
         let tx = store.transaction().expect("tx");
         tx.execute(
-            "INSERT INTO office_events(event_id, occurred_at, domain, kind, subject_type, subject_id, origin, payload)
+            "INSERT INTO events(event_id, occurred_at, domain, kind, subject_type, subject_id, origin, payload)
              VALUES ('evt-1', '2026-01-01T00:00:00Z', 'foundation', 'demo', 'user', 'u1', 'cli', '{}')",
             [],
         )
@@ -672,7 +688,7 @@ mod tests {
         drop(tx); // rollback
 
         assert_eq!(
-            store.row_count("office_events").expect("count"),
+            store.row_count("events").expect("count"),
             0,
             "no half event may survive"
         );
@@ -684,18 +700,18 @@ mod tests {
         store
             .connection()
             .execute(
-                "INSERT INTO office_events(event_id, occurred_at, domain, kind, subject_type, subject_id, origin, payload)
+                "INSERT INTO events(event_id, occurred_at, domain, kind, subject_type, subject_id, origin, payload)
                  VALUES ('evt-1', '2026-01-01T00:00:00Z', 'foundation', 'demo', 'user', 'u1', 'cli', '{}')",
                 [],
             )
             .expect("insert");
         let update = store
             .connection()
-            .execute("UPDATE office_events SET kind = 'tampered'", []);
+            .execute("UPDATE events SET kind = 'tampered'", []);
         assert!(update.is_err(), "UPDATE must be rejected");
-        let delete = store.connection().execute("DELETE FROM office_events", []);
+        let delete = store.connection().execute("DELETE FROM events", []);
         assert!(delete.is_err(), "DELETE must be rejected");
-        assert_eq!(store.row_count("office_events").expect("count"), 1);
+        assert_eq!(store.row_count("events").expect("count"), 1);
     }
 
     #[test]

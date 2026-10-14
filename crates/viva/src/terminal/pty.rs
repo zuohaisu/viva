@@ -1,6 +1,6 @@
 //! A minimal, owned PTY backend (V14 S3, issue #45).
 //!
-//! The office previously spawned terminals through `portable-pty`, which
+//! Viva previously spawned terminals through `portable-pty`, which
 //! does not expose the master file descriptor. Live handoff (ADR 0012
 //! decision 2) transfers the master fd itself — SCM_RIGHTS needs the raw
 //! fd — so the backend is now a small owned implementation of the same

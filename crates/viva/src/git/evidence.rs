@@ -8,10 +8,10 @@
 //!   the raw state JSON and the fetch time. On later reads the row is
 //!   flagged stale when the worktree head has moved past it.
 //! - Missing auth or network produces an explicit
-//!   `EvidenceState::Unavailable` — the office never reports evidence PASS
+//!   `EvidenceState::Unavailable` — Viva never reports evidence PASS
 //!   when it could not actually look.
 //! - Credentials stay wherever the user keeps them; `gh` runs with the
-//!   user's environment and the office copies nothing.
+//!   user's environment and Viva copies nothing.
 
 use std::path::Path;
 
@@ -115,7 +115,7 @@ impl GhRunner {
         }
         Err(GhRejection::WriteAttempt {
             detail: format!(
-                "`gh {} {}` is outside the office's read-only surface — writes need a \
+                "`gh {} {}` is outside Viva's read-only surface — writes need a \
                  separate, owner-authorized path",
                 args[0], args[1]
             ),

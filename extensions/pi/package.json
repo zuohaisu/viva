@@ -1,9 +1,9 @@
 {
-  "name": "@viva/pi-office-extension",
+  "name": "@viva/pi-extension",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Viva office extension for the Pi coding agent: member identity, office queries, controlled dispatch and explicit handoff (V09, issue #18).",
+  "description": "Viva extension for the Pi coding agent: member identity, status and task queries, controlled dispatch and explicit handoff (V09, issue #18).",
   "license": "MIT",
   "scripts": {
     "typecheck": "tsc --noEmit",

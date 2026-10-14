@@ -1,7 +1,7 @@
-//! Viva — Personal AI Office host.
+//! Viva — local-first personal AI collaboration system.
 //!
 //! `foundation` holds the V01/G0 contracts: typed ids, the SQLite store and
-//! per-domain migration registry, the append-only office event log, the
+//! per-domain migration registry, the append-only event log, the
 //! control-request envelope, and the reference records (sessions, executions,
 //! launch specs, terminal events, workbench contracts).
 //!

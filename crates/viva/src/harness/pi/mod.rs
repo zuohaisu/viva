@@ -4,19 +4,19 @@
 //! Division of labor (ADR 0011): Viva owns members/tasks/worktrees/terminals
 //! and the terminal process; Pi owns its chat UI, model calls, tool loop and
 //! compaction. This module builds the *launch combination* — explicit argv
-//! plus the office-context environment the extension reads — and probes
+//! plus the Viva-context environment the extension reads — and probes
 //! availability honestly. It never starts a fallback harness when Pi is
 //! missing: an unavailable provider is an error, not a swap.
 //!
 //! Identity rules encoded here:
 //! - The member is whatever configuration says. The coordinating member is
-//!   resolved by the caller (office configuration); `Samuel` is never
+//!   resolved by the caller (Viva configuration); `Samuel` is never
 //!   hard-coded in this crate.
-//! - Member identity travels as `VIVA_OFFICE_MEMBER_ID`; display name and
+//! - Member identity travels as `VIVA_MEMBER_ID`; display name and
 //!   model binding are captured at launch as configuration facts. Changing
 //!   a binding later never rewrites identity or history.
-//! - The dispatch grant, if any, is per-task and comes from the office's
-//!   own grant records. Plain chat never receives an office-wide grant.
+//! - The dispatch grant, if any, is per-task and comes from Viva's
+//!   own grant records. Plain chat never receives a Viva-wide grant.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -31,10 +31,11 @@ use crate::tasks::TaskRecord;
 
 /// Environment contract between the Rust harness and the TS extension.
 /// Documented once, here and in `extensions/pi/README.md`.
-pub const ENV_MEMBER_ID: &str = "VIVA_OFFICE_MEMBER_ID";
-pub const ENV_MEMBER_NAME: &str = "VIVA_OFFICE_MEMBER_NAME";
-pub const ENV_TASK_ID: &str = "VIVA_OFFICE_TASK_ID";
-pub const ENV_GRANT_ID: &str = "VIVA_OFFICE_GRANT_ID";
+pub const ENV_MEMBER_ID: &str = "VIVA_MEMBER_ID";
+pub const ENV_MEMBER_NAME: &str = "VIVA_MEMBER_NAME";
+pub const ENV_TASK_ID: &str = "VIVA_TASK_ID";
+pub const ENV_GRANT_ID: &str = "VIVA_GRANT_ID";
+pub const ENV_MODEL_BINDING: &str = "VIVA_MODEL_BINDING";
 /// Overrides the `viva` binary the extension calls (tests use a fake).
 pub const ENV_VIVA_BIN: &str = "VIVA_BIN";
 
@@ -42,7 +43,7 @@ pub const ENV_VIVA_BIN: &str = "VIVA_BIN";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Where the shipped extension lives, relative to a repository checkout.
-pub const EXTENSION_RELATIVE_PATH: &str = "extensions/pi/viva-office.ts";
+pub const EXTENSION_RELATIVE_PATH: &str = "extensions/pi/viva.ts";
 
 #[derive(Debug, Clone)]
 pub struct PiHarness {
@@ -64,8 +65,8 @@ impl PiHarness {
 
     /// Build the launch combination for one member's interactive session.
     /// `task` attaches the current task context (brief and handoff target);
-    /// `grant` is the office's live per-task grant reference — passing one
-    /// is an office decision recorded at dispatch, never a chat capability.
+    /// `grant` is Viva's live per-task grant reference — passing one
+    /// is a Viva decision recorded at dispatch, never a chat capability.
     pub fn launch(
         &self,
         member: &MemberRecord,
@@ -106,7 +107,7 @@ impl PiHarness {
             // The binding is a launch-time configuration snapshot (shown to
             // the member for orientation). It is not identity: identity is
             // the member id.
-            spec = spec.with_env("VIVA_OFFICE_MODEL_BINDING", binding.model_binding.clone());
+            spec = spec.with_env(ENV_MODEL_BINDING, binding.model_binding.clone());
         }
         Ok(spec)
     }
@@ -239,17 +240,14 @@ mod tests {
         assert_eq!(env(ENV_MEMBER_NAME).as_deref(), Some("Samuel"));
         assert_eq!(env(ENV_TASK_ID).as_deref(), Some(task.task_id.as_str()));
         assert_eq!(env(ENV_GRANT_ID).as_deref(), Some(grant.as_str()));
-        assert_eq!(
-            env("VIVA_OFFICE_MODEL_BINDING").as_deref(),
-            Some("glm-5.3-flash")
-        );
+        assert_eq!(env(ENV_MODEL_BINDING).as_deref(), Some("glm-5.3-flash"));
         assert_eq!(spec.member_id.as_ref(), Some(&m.member_id));
     }
 
     #[test]
     fn plain_chat_has_no_grant_reference() {
         // Without a task and without a grant, the environment carries
-        // identity only — chat never inherits office authority.
+        // identity only — chat never inherits Viva authority.
         let repo = std::env::temp_dir();
         let harness = PiHarness::for_repo(&repo);
         let m = member();

@@ -71,7 +71,7 @@ pub fn run(args: &[String]) -> Result<()> {
     // action. Reject known member contexts rather than treating their
     // request as the owner's. Like other CLI gates, this is NOT an OS sandbox.
     if matches!(mode, Mode::Install { .. })
-        && ["VIVA_OFFICE_MEMBER_ID", "VIVA_OFFICE_GRANT_ID"]
+        && ["VIVA_MEMBER_ID", "VIVA_GRANT_ID"]
             .iter()
             .any(|key| std::env::var_os(key).is_some())
     {

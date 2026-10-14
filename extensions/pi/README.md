@@ -1,4 +1,4 @@
-# @viva/pi-office-extension
+# @viva/pi-extension
 
 Viva member-context extension for the [Pi coding agent](https://github.com/earendil-works/pi)
 (V09, issue #18). It gives a Pi session its member identity and current task
@@ -10,9 +10,9 @@ brief, and offers controlled actions through the `viva` CLI.
   launches `pi --extension <this file>` with member/task context in environment
   variables. The extension surfaces that identity at session start. The
   member is configuration data; no member name is hard-coded here.
-- **Status query tools**: `viva_office_status` and `viva_office_task_brief`
+- **Status query tools**: `viva_status` and `viva_task_brief`
   read real Viva records (read-only).
-- **Controlled dispatch**: `viva_office_dispatch` requires a live grant
+- **Controlled dispatch**: `viva_dispatch` requires a live grant
   reference. Without one it refuses with a proposal to ask the user — chat
   never self-authorizes, and Viva's dispatch endpoint re-checks the
   grant server-side at the moment of effect.
@@ -24,19 +24,19 @@ brief, and offers controlled actions through the `viva` CLI.
   user's local Hermes checkout, which Viva does not ship; without it every
   call returns `unavailable`. Recall and writes happen only when a tool is
   called; nothing is recalled or written automatically. Since #101 they
-  register against the real Pi API; of all the tools, only `viva_office_status`
-  and `viva_office_task_brief` have been exercised end to end in real Pi so
+  register against the real Pi API; of all the tools, only `viva_status`
+  and `viva_task_brief` have been exercised end to end in real Pi so
   far. Real-provider tests are pending
   independent re-verification, and no memory backend has been chosen as the
   default.
-- **Explicit handoff**: `viva_office_handoff` records a member-reported
+- **Explicit handoff**: `viva_handoff` records a member-reported
   summary for the current task. It is stored as a fact ("member X reported
   this"), never as a completion verdict and never as acceptance PASS.
 
 ## What it does NOT do
 
 - `conversations/index.ts` (fork / rename / handoff tools) is **not loaded in
-  production**: the harness passes only `viva-office.ts` to `pi --extension`,
+  production**: the harness passes only `viva.ts` to `pi --extension`,
   and that file does not register the conversations tools. Its three tools
   are written against the real Pi API and checked by CI, but a Pi session
   launched by Viva does not have them. Wiring it in changes what members can
@@ -55,10 +55,10 @@ brief, and offers controlled actions through the `viva` CLI.
 
 | Variable | Meaning |
 | --- | --- |
-| `VIVA_OFFICE_MEMBER_ID` | Member id of this session (required; without it the extension stays inert) |
-| `VIVA_OFFICE_MEMBER_NAME` | Display name at launch time (required) |
-| `VIVA_OFFICE_TASK_ID` | Attached task, when the session is task-scoped |
-| `VIVA_OFFICE_GRANT_ID` | Live per-task dispatch grant, when Viva holds one |
+| `VIVA_MEMBER_ID` | Member id of this session (required; without it the extension stays inert) |
+| `VIVA_MEMBER_NAME` | Display name at launch time (required) |
+| `VIVA_TASK_ID` | Attached task, when the session is task-scoped |
+| `VIVA_GRANT_ID` | Live per-task dispatch grant, when Viva holds one |
 | `VIVA_HOME` | Viva home the CLI calls operate on |
 | `VIVA_BIN` | `viva` binary override (tests) |
 
@@ -82,9 +82,9 @@ test fails where Pi stops accepting a tool.
 What is checked, by whom:
 
 - **Loading and tool registration, by CI, on the pinned real Pi.**
-  `test/real-pi-load.test.ts` loads `viva-office.ts` (the file the harness
+  `test/real-pi-load.test.ts` loads `viva.ts` (the file the harness
   passes to `pi --extension`) and `conversations/index.ts` through Pi's own
-  extension loader, with the office environment the harness injects, and
+  extension loader, with the environment variables the harness injects, and
   compares the registered tool names exactly. It needs no network and no model
   credentials, and it fails (never skips) if Pi cannot be loaded. It uses the
   SDK rather than `pi -p`, because without an API key `pi -p` exits 1 whether
@@ -94,7 +94,7 @@ What is checked, by whom:
   claimed as exercised by anything in this package.
 
 The commands the tools emit are checked against the real `viva` binary by
-`test/viva-office.contract.test.ts`; envelope logic and refusals are checked
+`test/viva.contract.test.ts`; envelope logic and refusals are checked
 against a fake `viva` and a fake Pi (`test/fake-pi.ts`, typed against the real
 SDK).
 

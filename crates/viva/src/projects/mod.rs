@@ -1,13 +1,13 @@
-//! Projects: real directories the office works in, plus explicit
+//! Projects: real directories Viva works in, plus explicit
 //! reference/dependency edges (V02, #11).
 //!
 //! Domain semantics:
 //! - A project is any directory the user works in. Directories can be opened
-//!   directly without registration; registration only adds office context
+//!   directly without registration; registration only adds Viva context
 //!   (selection, worktrees, evidence) on top.
 //! - Projects may live in different, unrelated parent directories; sibling
 //!   `reference` edges record that one project references another path —
-//!   they are office bookkeeping, never software dependencies.
+//!   they are Viva bookkeeping, never software dependencies.
 //! - Deactivating a project or removing a reference never deletes history:
 //!   rows keep their ids and gain a deactivation timestamp.
 
@@ -22,7 +22,7 @@ use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{ProjectId, WorkspaceId, utc_now};
 use crate::foundation::store::Store;
 
-/// A project registered in the office.
+/// A project registered in Viva.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectRecord {
     pub project_id: ProjectId,
@@ -40,7 +40,7 @@ pub struct ProjectRecord {
 pub struct ProjectReference {
     pub project_id: ProjectId,
     pub reference_path: PathBuf,
-    /// `reference` (a sibling checkout the office should know about) or
+    /// `reference` (a sibling checkout Viva should know about) or
     /// `dependency` (a path this project depends on at build/run time).
     pub kind: ReferenceKind,
     pub note: String,
@@ -65,7 +65,7 @@ impl ReferenceKind {
     }
 }
 
-/// A plain directory opened without registration: the office reads its path
+/// A plain directory opened without registration: Viva reads its path
 /// as-is and creates no project record. This is the "目录直接进入" path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlainDirectory {
@@ -83,7 +83,7 @@ impl<'a> ProjectRegistry<'a> {
     }
 
     /// Register a project directory. Projects may sit in unrelated parents;
-    /// the path must be absolute so office facts stay unambiguous.
+    /// the path must be absolute so Viva facts stay unambiguous.
     pub fn register(
         &self,
         workspace_id: Option<WorkspaceId>,
@@ -185,7 +185,7 @@ impl<'a> ProjectRegistry<'a> {
     }
 
     /// Add an explicit reference/dependency edge. Sibling references are
-    /// office bookkeeping — nothing here makes one project depend on another
+    /// Viva bookkeeping — nothing here makes one project depend on another
     /// at the software level.
     pub fn add_reference(
         &self,
@@ -277,7 +277,7 @@ impl<'a> ProjectRegistry<'a> {
     }
 
     /// Open a plain directory without registering it: no rows are written;
-    /// the office simply returns a handle-shaped record for this session.
+    /// Viva simply returns a handle-shaped record for this session.
     pub fn open_plain_directory(&self, path: impl Into<PathBuf>) -> Result<PlainDirectory> {
         let path = path.into();
         if !path.is_absolute() {

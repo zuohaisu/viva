@@ -6,9 +6,9 @@
 //!   fetch` first, then `origin/<default>`), never from a stale local main.
 //! - Protected refs are never checked out, created, or written; the
 //!   protected set is explicit configuration.
-//! - One writable checkout per branch, office-wide: a branch already
+//! - One writable checkout per branch, Viva-wide: a branch already
 //!   checked out in any worktree (including a user's own) is refused.
-//!   Creation within the office is mutually exclusive (DB UNIQUE +
+//!   Creation within Viva is mutually exclusive (DB UNIQUE +
 //!   in-process lock).
 //! - Deletion/prune/cleanup never happens implicitly: no function in this
 //!   module removes a worktree — release only marks the registry row.
@@ -66,7 +66,7 @@ CREATE TABLE github_evidence (
 );
 "#;
 
-/// Refs the office must never check out or write. Names are branch names
+/// Refs Viva must never check out or write. Names are branch names
 /// (`refs/heads/` stripped).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtectedRefs {
@@ -74,7 +74,7 @@ pub struct ProtectedRefs {
 }
 
 impl ProtectedRefs {
-    /// The office default: the repository default branch names (`main`,
+    /// Viva's default: the repository default branch names (`main`,
     /// `master`) are always protected. Callers may extend this set, never
     /// shrink it.
     pub fn new(branches: Vec<String>) -> Self {
@@ -115,7 +115,7 @@ pub struct TaskWorktreeRecord {
     pub worktree_path: PathBuf,
     pub branch: String,
     pub base_sha: String,
-    /// `created` (office allocated) or `adopted` (pre-existing, explicitly
+    /// `created` (Viva allocated) or `adopted` (pre-existing, explicitly
     /// selected — e.g. a worktree the user once created inside Orca).
     pub source: WorktreeSource,
     pub created_at: String,
@@ -138,7 +138,7 @@ impl WorktreeSource {
     }
 }
 
-/// One discovered worktree as git reports it, with office annotations.
+/// One discovered worktree as git reports it, with Viva annotations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscoveredWorktree {
     pub path: PathBuf,
@@ -150,10 +150,10 @@ pub struct DiscoveredWorktree {
     pub prunable: Option<String>,
     /// Working-tree state (dirty/conflicts are facts to show, never to fix).
     pub tree: TreeState,
-    /// Set when a task in this office holds this worktree.
+    /// Set when a task holds this worktree.
     pub occupied_by_task: Option<TaskId>,
-    /// How the office claims it (created/adopted), when it does.
-    pub office_source: Option<WorktreeSource>,
+    /// How Viva claims it (created/adopted), when it does.
+    pub claim_source: Option<WorktreeSource>,
 }
 
 pub struct WorktreeService<'a> {
@@ -178,8 +178,27 @@ impl<'a> WorktreeService<'a> {
     // -- Discovery -----------------------------------------------------------
 
     /// Git-native discovery of every worktree of `repo_root`, annotated
-    /// with dirty state and office occupancy. Read-only.
+    /// with dirty state and Viva occupancy. Read-only.
     pub fn discover(&self, repo_root: &Path) -> Result<Vec<DiscoveredWorktree>> {
+        let mut found = self.list_registered(repo_root)?;
+        // Annotate: tree state (missing for prunable/deleted dirs is fine).
+        for entry in &mut found {
+            if !entry.bare {
+                entry.tree = tree_state(&self.runner, &entry.path);
+            }
+            if let Some(branch) = entry.branch.clone() {
+                let claim = self.claim(repo_root, &branch)?;
+                entry.occupied_by_task = claim.as_ref().map(|(task, _)| task.clone());
+                entry.claim_source = claim.map(|(_, source)| source);
+            }
+        }
+        Ok(found)
+    }
+
+    /// The worktrees git itself lists for `repo_root` (`git worktree list
+    /// --porcelain`), without tree-state or office annotations. One cheap
+    /// process; navigation re-scans with this on every workspace switch.
+    pub fn list_registered(&self, repo_root: &Path) -> Result<Vec<DiscoveredWorktree>> {
         let out = self
             .runner
             .git_ok(repo_root, &["worktree", "list", "--porcelain"])?;
@@ -200,7 +219,7 @@ impl<'a> WorktreeService<'a> {
                     prunable: None,
                     tree: TreeState::Clean,
                     occupied_by_task: None,
-                    office_source: None,
+                    claim_source: None,
                 });
             } else if let Some(sha) = line.strip_prefix("HEAD ") {
                 if let Some(entry) = current.as_mut() {
@@ -235,18 +254,6 @@ impl<'a> WorktreeService<'a> {
         }
         if let Some(prev) = current.take() {
             found.push(prev);
-        }
-
-        // Annotate: tree state (missing for prunable/deleted dirs is fine).
-        for entry in &mut found {
-            if !entry.bare {
-                entry.tree = tree_state(&self.runner, &entry.path);
-            }
-            if let Some(branch) = entry.branch.clone() {
-                let claim = self.claim(repo_root, &branch)?;
-                entry.occupied_by_task = claim.as_ref().map(|(task, _)| task.clone());
-                entry.office_source = claim.map(|(_, source)| source);
-            }
         }
         Ok(found)
     }
@@ -341,7 +348,7 @@ impl<'a> WorktreeService<'a> {
             .git(repo_root, &["fetch", "--prune", "origin"])
             .map_err(|failure| match failure {
                 GitFailure::AuthMissing { detail } => Error::Validation(format!(
-                    "git authentication missing while fetching (configure credentials for the user; the office stores none): {detail}"
+                    "git authentication missing while fetching (configure credentials for the user; Viva stores none): {detail}"
                 )),
                 GitFailure::Network { detail } => Error::Validation(format!(
                     "network unreachable while fetching; no task worktree was created: {detail}"
@@ -414,7 +421,7 @@ impl<'a> WorktreeService<'a> {
     }
 
     /// Release a task worktree from the registry. **No deletion happens** —
-    /// releasing only records that the office no longer claims it; removing
+    /// releasing only records that Viva no longer claims it; removing
     /// the directory requires a human request naming the exact target.
     pub fn release(&self, worktree_id: &WorktreeId) -> Result<()> {
         let n = self.store.connection().execute(
@@ -471,13 +478,13 @@ impl<'a> WorktreeService<'a> {
                     };
                 }
             }
-            // Another creation in this office holds the repo; wait for it.
+            // Another creation in Viva holds the repo; wait for it.
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
 
     /// Whether any worktree of `repo_root` (git-discovered) has `branch`
-    /// checked out — including ones the office never created.
+    /// checked out — including ones Viva never created.
     fn branch_checked_out_anywhere(&self, repo_root: &Path, branch: &str) -> Result<bool> {
         Ok(self
             .discover(repo_root)?
@@ -485,7 +492,7 @@ impl<'a> WorktreeService<'a> {
             .any(|w| w.branch.as_deref() == Some(branch)))
     }
 
-    /// The office's live claim on a branch: which task holds it and via
+    /// Viva's live claim on a branch: which task holds it and via
     /// which source (created vs adopted).
     fn claim(&self, repo_root: &Path, branch: &str) -> Result<Option<(TaskId, WorktreeSource)>> {
         let mut stmt = self.store.connection().prepare(
