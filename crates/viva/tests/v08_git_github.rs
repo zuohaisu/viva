@@ -312,6 +312,11 @@ fn discovery_marks_dirty_worktrees_without_modifying_them() {
         mine.office_source,
         Some(viva::git::worktrees::WorktreeSource::Created)
     );
+    // Issue #96: the claim source is serialized as `claim_source`; the
+    // retired `office_source` key is gone, not aliased.
+    let json = serde_json::to_value(mine).expect("serialize discovered worktree");
+    assert_eq!(json["claim_source"], "created", "{json}");
+    assert!(json.get("office_source").is_none(), "{json}");
     let diff = service
         .worktree_diff(&wt.worktree_path, 64 * 1024)
         .expect("diff");

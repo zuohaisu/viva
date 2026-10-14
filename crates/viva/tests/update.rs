@@ -11,8 +11,8 @@ fn viva(home: &std::path::Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .env("VIVA_HOME", home)
         .env_remove("VIVA_NPM_PACKAGE_ROOT")
-        .env_remove("VIVA_OFFICE_MEMBER_ID")
-        .env_remove("VIVA_OFFICE_GRANT_ID")
+        .env_remove("VIVA_MEMBER_ID")
+        .env_remove("VIVA_GRANT_ID")
         .output()
         .unwrap()
 }
@@ -41,19 +41,56 @@ fn update_help_and_invalid_arguments_never_initialize_home() {
     assert!(!home.exists());
 }
 
-#[test]
-fn member_context_cannot_upgrade_the_installed_host() {
+/// Run the real `viva update` with one member-context variable set. The
+/// package root points at a directory that does not exist, so a run that
+/// gets past the member-context gate fails on that instead of fetching or
+/// replacing anything: the outcome tells the two cases apart without any
+/// mutation.
+fn update_with_context(key: &str) -> (std::process::Output, std::path::PathBuf, TempDir) {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("unused-home");
     let output = Command::new(env!("CARGO_BIN_EXE_viva"))
         .arg("update")
         .env("VIVA_HOME", &home)
-        .env("VIVA_OFFICE_MEMBER_ID", "member-test")
+        .env("VIVA_NPM_PACKAGE_ROOT", dir.path().join("no-such-package-root"))
+        .env_remove("VIVA_MEMBER_ID")
+        .env_remove("VIVA_GRANT_ID")
+        .env(key, "context-test")
         .output()
         .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("user-only installation operation"));
-    assert!(!home.exists());
+    (output, home, dir)
+}
+
+#[test]
+fn member_context_cannot_upgrade_the_installed_host() {
+    for key in ["VIVA_MEMBER_ID", "VIVA_GRANT_ID"] {
+        let (output, home, _dir) = update_with_context(key);
+        assert!(!output.status.success(), "{key}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("user-only installation operation"),
+            "{key} must mark a member context: {stderr}"
+        );
+        assert!(!home.exists());
+    }
+}
+
+/// The retired variable names are no longer member context (issue #96): no
+/// compatibility window. A session still carrying them gets past the gate,
+/// which is the documented consequence of upgrading under a live Pi session
+/// (restart Pi sessions after upgrading).
+#[test]
+fn retired_variable_names_are_not_member_context() {
+    for key in ["VIVA_OFFICE_MEMBER_ID", "VIVA_OFFICE_GRANT_ID"] {
+        let (output, home, _dir) = update_with_context(key);
+        assert!(!output.status.success(), "{key}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("user-only installation operation"),
+            "{key} must no longer count as member context: {stderr}"
+        );
+        assert!(!home.exists());
+    }
 }
 
 #[cfg(unix)]
@@ -112,8 +149,8 @@ fn real_cli_uses_npm_channel_and_original_global_prefix_without_opening_home() {
             .env("PATH", &path)
             .env("VIVA_HOME", &home)
             .env("VIVA_NPM_PACKAGE_ROOT", &wrapper)
-            .env_remove("VIVA_OFFICE_MEMBER_ID")
-            .env_remove("VIVA_OFFICE_GRANT_ID")
+            .env_remove("VIVA_MEMBER_ID")
+            .env_remove("VIVA_GRANT_ID")
             .output()
             .unwrap()
     };
@@ -273,8 +310,8 @@ fn update_restarts_a_running_server_through_live_handover() {
         .env("PATH", &path)
         .env("VIVA_HOME", &home)
         .env("VIVA_NPM_PACKAGE_ROOT", &wrapper)
-        .env_remove("VIVA_OFFICE_MEMBER_ID")
-        .env_remove("VIVA_OFFICE_GRANT_ID")
+        .env_remove("VIVA_MEMBER_ID")
+        .env_remove("VIVA_GRANT_ID")
         .output()
         .unwrap();
     assert!(
@@ -371,8 +408,8 @@ fn update_with_a_dead_socket_installs_and_does_not_restart() {
         .env("PATH", &path)
         .env("VIVA_HOME", &home)
         .env("VIVA_NPM_PACKAGE_ROOT", &wrapper)
-        .env_remove("VIVA_OFFICE_MEMBER_ID")
-        .env_remove("VIVA_OFFICE_GRANT_ID")
+        .env_remove("VIVA_MEMBER_ID")
+        .env_remove("VIVA_GRANT_ID")
         .output()
         .unwrap();
     assert!(
