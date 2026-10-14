@@ -19,7 +19,7 @@ import vivaConversations from "../conversations/index.ts";
 import viva from "../viva.ts";
 import { createFakePi, type RegisteredTool } from "./fake-pi.ts";
 
-const OFFICE_ENV: NodeJS.ProcessEnv = {
+const HARNESS_ENV: NodeJS.ProcessEnv = {
   VIVA_MEMBER_ID: "mem-1",
   VIVA_MEMBER_NAME: "Samuel",
   VIVA_HOME: "/tmp/viva-home",
@@ -61,7 +61,7 @@ const VALID_CALL: Record<string, Record<string, unknown>> = {
 
 function allTools(): Map<string, RegisteredTool> {
   const saved = process.env;
-  process.env = { ...OFFICE_ENV };
+  process.env = { ...HARNESS_ENV };
   try {
     const fake = createFakePi();
     viva(fake.host);

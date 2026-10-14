@@ -196,7 +196,7 @@ impl<'a> WorktreeService<'a> {
     }
 
     /// The worktrees git itself lists for `repo_root` (`git worktree list
-    /// --porcelain`), without tree-state or office annotations. One cheap
+    /// --porcelain`), without tree-state or claim annotations. One cheap
     /// process; navigation re-scans with this on every workspace switch.
     pub fn list_registered(&self, repo_root: &Path) -> Result<Vec<DiscoveredWorktree>> {
         let out = self

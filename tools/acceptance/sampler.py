@@ -496,7 +496,7 @@ def slice_cli_workload(binary: Path, home: Path) -> Workload:
         name="slice-cli",
         description=(
             "viva init + event add + doctor against an isolated VIVA_HOME "
-            "(first available slice; not the full office)"
+            "(first available slice; not the full peak scenario)"
         ),
         kind="real",
         steps=[
