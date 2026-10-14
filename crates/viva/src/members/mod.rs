@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{MemberId, utc_now};
 use crate::foundation::store::{DOMAIN_MEMBERS, MigrationRegistry, Store};
 
@@ -98,11 +98,11 @@ impl ModelPolicy {
         Self { supported_models }
     }
 
-    pub fn ensure_supported(&self, model_binding: &str) -> OfficeResult<()> {
+    pub fn ensure_supported(&self, model_binding: &str) -> Result<()> {
         if self.supported_models.iter().any(|m| m == model_binding) {
             return Ok(());
         }
-        Err(OfficeError::Validation(format!(
+        Err(Error::Validation(format!(
             "model `{model_binding}` is not supported by this office; supported models: {}. \
              Update the member binding to one of these.",
             self.supported_models.join(", ")
@@ -126,10 +126,10 @@ impl<'a> MemberRegistry<'a> {
 
     /// Register a member. Display names are configuration and may repeat;
     /// identity is the generated id.
-    pub fn register(&self, display_name: impl Into<String>) -> OfficeResult<MemberRecord> {
+    pub fn register(&self, display_name: impl Into<String>) -> Result<MemberRecord> {
         let display_name = display_name.into();
         if display_name.trim().is_empty() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "member display_name must not be empty".into(),
             ));
         }
@@ -149,7 +149,7 @@ impl<'a> MemberRegistry<'a> {
         Ok(record)
     }
 
-    pub fn get(&self, member_id: &MemberId) -> OfficeResult<Option<MemberRecord>> {
+    pub fn get(&self, member_id: &MemberId) -> Result<Option<MemberRecord>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT member_id, display_name, created_at FROM members WHERE member_id = ?1",
         )?;
@@ -171,14 +171,14 @@ impl<'a> MemberRegistry<'a> {
         Ok(row)
     }
 
-    pub fn require(&self, member_id: &MemberId) -> OfficeResult<MemberRecord> {
-        self.get(member_id)?.ok_or_else(|| OfficeError::NotFound {
+    pub fn require(&self, member_id: &MemberId) -> Result<MemberRecord> {
+        self.get(member_id)?.ok_or_else(|| Error::NotFound {
             entity: "member",
             id: member_id.to_string(),
         })
     }
 
-    pub fn list(&self) -> OfficeResult<Vec<MemberRecord>> {
+    pub fn list(&self) -> Result<Vec<MemberRecord>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT member_id, display_name, created_at FROM members ORDER BY created_at, member_id",
         )?;
@@ -210,11 +210,9 @@ impl<'a> MemberRegistry<'a> {
     /// Set (or replace) the role/model/tool configuration. The member id and
     /// every record referencing it stay untouched — bindings are
     /// configuration, identity is not.
-    pub fn set_binding(&self, binding: &MemberBinding) -> OfficeResult<()> {
+    pub fn set_binding(&self, binding: &MemberBinding) -> Result<()> {
         if binding.role.trim().is_empty() {
-            return Err(OfficeError::Validation(
-                "member role must not be empty".into(),
-            ));
+            return Err(Error::Validation("member role must not be empty".into()));
         }
         self.require(&binding.member_id)?;
         let tools = serde_json::to_string(&binding.tools)?;
@@ -238,7 +236,7 @@ impl<'a> MemberRegistry<'a> {
         Ok(())
     }
 
-    pub fn binding(&self, member_id: &MemberId) -> OfficeResult<Option<MemberBinding>> {
+    pub fn binding(&self, member_id: &MemberId) -> Result<Option<MemberBinding>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT role, model_binding, tools_json, updated_at
              FROM member_bindings WHERE member_id = ?1",
@@ -269,17 +267,11 @@ impl<'a> MemberRegistry<'a> {
     }
 
     /// Validate a binding against the office model policy before use.
-    pub fn ensure_model_supported(
-        &self,
-        member_id: &MemberId,
-        policy: &ModelPolicy,
-    ) -> OfficeResult<()> {
-        let binding = self
-            .binding(member_id)?
-            .ok_or_else(|| OfficeError::NotFound {
-                entity: "member binding",
-                id: member_id.to_string(),
-            })?;
+    pub fn ensure_model_supported(&self, member_id: &MemberId, policy: &ModelPolicy) -> Result<()> {
+        let binding = self.binding(member_id)?.ok_or_else(|| Error::NotFound {
+            entity: "member binding",
+            id: member_id.to_string(),
+        })?;
         policy.ensure_supported(&binding.model_binding)
     }
 
@@ -293,9 +285,9 @@ impl<'a> MemberRegistry<'a> {
         timeout: Duration,
         max_output_bytes: usize,
         refresh: bool,
-    ) -> OfficeResult<ToolProbeResult> {
+    ) -> Result<ToolProbeResult> {
         if argv.is_empty() || argv[0].trim().is_empty() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "tool probe argv must name a program (explicit argv, no shell string)".into(),
             ));
         }
@@ -324,7 +316,7 @@ impl<'a> MemberRegistry<'a> {
         Ok(result)
     }
 
-    fn cached_probe(&self, argv_json: &str) -> OfficeResult<Option<ToolProbeResult>> {
+    fn cached_probe(&self, argv_json: &str) -> Result<Option<ToolProbeResult>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT argv_json, available, detail, probed_at
              FROM tool_probe_cache WHERE argv_json = ?1",
@@ -365,7 +357,7 @@ fn run_probe(
     argv: &[String],
     timeout: Duration,
     max_output_bytes: usize,
-) -> OfficeResult<ToolProbeResult> {
+) -> Result<ToolProbeResult> {
     let mut child = match std::process::Command::new(&argv[0])
         .args(&argv[1..])
         .stdin(std::process::Stdio::null())
@@ -629,7 +621,7 @@ mod tests {
             .expect_err("missing member");
         assert!(matches!(
             err,
-            OfficeError::NotFound {
+            Error::NotFound {
                 entity: "member",
                 ..
             }

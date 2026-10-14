@@ -23,7 +23,7 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{
     ExecutionId, GrantId, LaunchSpecId, MemberId, ProjectId, SessionId, TaskId, TerminalId,
     WorkspaceId, WorktreeId, utc_now,
@@ -96,7 +96,7 @@ impl SessionRecord {
     }
 }
 
-pub fn insert_session(store: &Store, session: &SessionRecord) -> OfficeResult<()> {
+pub fn insert_session(store: &Store, session: &SessionRecord) -> Result<()> {
     store.connection().execute(
         "INSERT INTO office_sessions(
             session_id, kind, title, task_id, member_id,
@@ -122,7 +122,7 @@ pub fn insert_session(store: &Store, session: &SessionRecord) -> OfficeResult<()
     Ok(())
 }
 
-pub fn list_sessions(store: &Store) -> OfficeResult<Vec<SessionRecord>> {
+pub fn list_sessions(store: &Store) -> Result<Vec<SessionRecord>> {
     let mut stmt = store.connection().prepare(
         "SELECT session_id, kind, title, task_id, member_id,
                 harness, harness_native_session_id, created_at
@@ -246,7 +246,7 @@ impl AttributionSnapshot {
         self
     }
 
-    pub fn to_json(&self) -> OfficeResult<String> {
+    pub fn to_json(&self) -> Result<String> {
         Ok(serde_json::to_string(self)?)
     }
 }
@@ -308,9 +308,9 @@ impl ExecutionRecord {
     }
 
     /// Transition to a non-completed status.
-    pub fn mark(&mut self, status: ExecutionStatus) -> OfficeResult<()> {
+    pub fn mark(&mut self, status: ExecutionStatus) -> Result<()> {
         if status == ExecutionStatus::Completed {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "completion requires evidence; use ExecutionRecord::complete".into(),
             ));
         }
@@ -320,7 +320,7 @@ impl ExecutionRecord {
     }
 }
 
-pub fn insert_execution(store: &Store, execution: &ExecutionRecord) -> OfficeResult<()> {
+pub fn insert_execution(store: &Store, execution: &ExecutionRecord) -> Result<()> {
     store.connection().execute(
         "INSERT INTO office_executions(
             execution_id, task_id, session_id, member_id, attribution, status,
@@ -342,10 +342,7 @@ pub fn insert_execution(store: &Store, execution: &ExecutionRecord) -> OfficeRes
     Ok(())
 }
 
-pub fn get_execution(
-    store: &Store,
-    execution_id: &ExecutionId,
-) -> OfficeResult<Option<ExecutionRecord>> {
+pub fn get_execution(store: &Store, execution_id: &ExecutionId) -> Result<Option<ExecutionRecord>> {
     let mut stmt = store.connection().prepare(
         "SELECT task_id, session_id, member_id, attribution, status,
                 process_exit, completion_evidence, created_at, updated_at
@@ -387,7 +384,7 @@ pub fn get_execution(
     // The `member_id` column is the query-facing copy of the snapshot's
     // member; a mismatch would mean someone edited one side by hand.
     if attribution.member_id.as_str() != member_id {
-        return Err(OfficeError::Validation(format!(
+        return Err(Error::Validation(format!(
             "execution `{execution_id}` attribution member does not match its member_id column"
         )));
     }
@@ -464,7 +461,7 @@ impl LaunchSpec {
         argv: Vec<String>,
         cwd: impl Into<PathBuf>,
         request_origin: RequestOrigin,
-    ) -> OfficeResult<Self> {
+    ) -> Result<Self> {
         let spec = Self {
             spec_id: LaunchSpecId::new(),
             execution_id: None,
@@ -483,19 +480,19 @@ impl LaunchSpec {
         Ok(spec)
     }
 
-    pub fn validate(&self) -> OfficeResult<()> {
+    pub fn validate(&self) -> Result<()> {
         let Some(program) = self.argv.first() else {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "launch spec argv must name a program; empty argv is rejected".into(),
             ));
         };
         if program.trim().is_empty() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "launch spec argv[0] must be a program, not an empty string".into(),
             ));
         }
         if !self.cwd.is_absolute() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "launch spec cwd must be an absolute path".into(),
             ));
         }
@@ -540,7 +537,7 @@ impl LaunchSpec {
     }
 }
 
-pub fn insert_launch_spec(store: &Store, spec: &LaunchSpec) -> OfficeResult<()> {
+pub fn insert_launch_spec(store: &Store, spec: &LaunchSpec) -> Result<()> {
     spec.validate()?;
     store.connection().execute(
         "INSERT INTO launch_specs(
@@ -651,7 +648,7 @@ impl TerminalEvent {
     }
 }
 
-pub fn insert_terminal_event(store: &Store, event: &TerminalEvent) -> OfficeResult<i64> {
+pub fn insert_terminal_event(store: &Store, event: &TerminalEvent) -> Result<i64> {
     let (owner, execution_id) = event.owner.db_columns();
     store.connection().execute(
         "INSERT INTO terminal_events(terminal_id, owner, execution_id, event_kind, payload, occurred_at)
@@ -703,9 +700,9 @@ pub struct WorkbenchTerminalSummary {
 /// (projects: V02, worktrees: V08, terminals: V05/V07); the signatures are
 /// frozen here.
 pub trait WorkbenchQuery {
-    fn projects(&self) -> OfficeResult<Vec<ProjectSummary>>;
-    fn worktrees(&self, project: &ProjectId) -> OfficeResult<Vec<WorktreeSummary>>;
-    fn terminals(&self, worktree: &WorktreeId) -> OfficeResult<Vec<WorkbenchTerminalSummary>>;
+    fn projects(&self) -> Result<Vec<ProjectSummary>>;
+    fn worktrees(&self, project: &ProjectId) -> Result<Vec<WorktreeSummary>>;
+    fn terminals(&self, worktree: &WorktreeId) -> Result<Vec<WorkbenchTerminalSummary>>;
 }
 
 /// Workbench action contracts: opening and stopping terminals records facts;
@@ -716,8 +713,8 @@ pub trait WorkbenchActions {
         &mut self,
         worktree: &WorktreeId,
         owner: TerminalOwner,
-    ) -> OfficeResult<WorkbenchTerminalSummary>;
-    fn stop_terminal(&mut self, terminal_id: &TerminalId) -> OfficeResult<()>;
+    ) -> Result<WorkbenchTerminalSummary>;
+    fn stop_terminal(&mut self, terminal_id: &TerminalId) -> Result<()>;
 }
 
 #[cfg(test)]
@@ -947,24 +944,21 @@ mod tests {
             terminals: Vec<WorkbenchTerminalSummary>,
         }
         impl WorkbenchQuery for Bench {
-            fn projects(&self) -> OfficeResult<Vec<ProjectSummary>> {
+            fn projects(&self) -> Result<Vec<ProjectSummary>> {
                 Ok(vec![ProjectSummary {
                     project_id: ProjectId::new(),
                     display_name: "viva".into(),
                     repo_path: std::path::PathBuf::from("/Users/hzuo/Documents/code/viva"),
                 }])
             }
-            fn worktrees(&self, _project: &ProjectId) -> OfficeResult<Vec<WorktreeSummary>> {
+            fn worktrees(&self, _project: &ProjectId) -> Result<Vec<WorktreeSummary>> {
                 Ok(vec![WorktreeSummary {
                     worktree_id: WorktreeId::new(),
                     project_id: ProjectId::new(),
                     path: std::path::PathBuf::from("/tmp/wt"),
                 }])
             }
-            fn terminals(
-                &self,
-                _worktree: &WorktreeId,
-            ) -> OfficeResult<Vec<WorkbenchTerminalSummary>> {
+            fn terminals(&self, _worktree: &WorktreeId) -> Result<Vec<WorkbenchTerminalSummary>> {
                 Ok(self.terminals.clone())
             }
         }
@@ -973,7 +967,7 @@ mod tests {
                 &mut self,
                 worktree: &WorktreeId,
                 owner: TerminalOwner,
-            ) -> OfficeResult<WorkbenchTerminalSummary> {
+            ) -> Result<WorkbenchTerminalSummary> {
                 let summary = WorkbenchTerminalSummary {
                     terminal_id: TerminalId::new(),
                     worktree_id: worktree.clone(),
@@ -982,7 +976,7 @@ mod tests {
                 self.terminals.push(summary.clone());
                 Ok(summary)
             }
-            fn stop_terminal(&mut self, terminal_id: &TerminalId) -> OfficeResult<()> {
+            fn stop_terminal(&mut self, terminal_id: &TerminalId) -> Result<()> {
                 self.terminals.retain(|t| &t.terminal_id != terminal_id);
                 Ok(())
             }

@@ -9,7 +9,7 @@ use crate::foundation::envelope::RejectionReason;
 use crate::foundation::ids::IdError;
 
 #[derive(Debug, thiserror::Error)]
-pub enum OfficeError {
+pub enum Error {
     #[error("storage error: {0}")]
     Storage(#[from] rusqlite::Error),
     #[error("io error: {0}")]
@@ -31,4 +31,4 @@ pub enum OfficeError {
     },
 }
 
-pub type OfficeResult<T> = Result<T, OfficeError>;
+pub type Result<T, E = Error> = std::result::Result<T, E>;

@@ -20,7 +20,7 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{ExecutionId, MemberId, TaskId, utc_now};
 use crate::foundation::records::{AttributionSnapshot, ExecutionRecord, ExecutionStatus};
 use crate::foundation::store::{DOMAIN_TASKS_EXECUTIONS, MigrationRegistry, Store};
@@ -290,12 +290,10 @@ impl<'a> TaskRegistry<'a> {
         assignee: Option<MemberId>,
         workspace_id: Option<crate::foundation::ids::WorkspaceId>,
         project_id: Option<crate::foundation::ids::ProjectId>,
-    ) -> OfficeResult<TaskRecord> {
+    ) -> Result<TaskRecord> {
         let goal = goal.into();
         if goal.trim().is_empty() {
-            return Err(OfficeError::Validation(
-                "task goal must not be empty".into(),
-            ));
+            return Err(Error::Validation("task goal must not be empty".into()));
         }
         let now = utc_now();
         let task = TaskRecord {
@@ -327,7 +325,7 @@ impl<'a> TaskRegistry<'a> {
         Ok(task)
     }
 
-    pub fn get_task(&self, task_id: &TaskId) -> OfficeResult<Option<TaskRecord>> {
+    pub fn get_task(&self, task_id: &TaskId) -> Result<Option<TaskRecord>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT task_id, goal, constraints_json, assignee_member_id, workspace_id,
                     project_id, status, created_at, updated_at
@@ -391,16 +389,15 @@ impl<'a> TaskRegistry<'a> {
         }))
     }
 
-    pub fn require_task(&self, task_id: &TaskId) -> OfficeResult<TaskRecord> {
-        self.get_task(task_id)?
-            .ok_or_else(|| OfficeError::NotFound {
-                entity: "task",
-                id: task_id.to_string(),
-            })
+    pub fn require_task(&self, task_id: &TaskId) -> Result<TaskRecord> {
+        self.get_task(task_id)?.ok_or_else(|| Error::NotFound {
+            entity: "task",
+            id: task_id.to_string(),
+        })
     }
 
     /// Paginated task list, oldest first.
-    pub fn list_tasks(&self, offset: u64, limit: u32) -> OfficeResult<Vec<TaskRecord>> {
+    pub fn list_tasks(&self, offset: u64, limit: u32) -> Result<Vec<TaskRecord>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT task_id, goal, constraints_json, assignee_member_id, workspace_id,
                     project_id, status, created_at, updated_at
@@ -475,11 +472,11 @@ impl<'a> TaskRegistry<'a> {
         task_id: &TaskId,
         attribution: &AttributionSnapshot,
         request_key: impl Into<String>,
-    ) -> OfficeResult<ExecutionStart> {
+    ) -> Result<ExecutionStart> {
         self.require_task(task_id)?;
         let request_key = request_key.into();
         if request_key.trim().is_empty() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "launch request_key must not be empty".into(),
             ));
         }
@@ -515,7 +512,7 @@ impl<'a> TaskRegistry<'a> {
                     return Ok(ExecutionStart::Replayed(existing));
                 }
             }
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "launch intent insert failed: {}",
                 message.unwrap_or_default()
             )));
@@ -534,13 +531,13 @@ impl<'a> TaskRegistry<'a> {
         request_key: &str,
         pid: i64,
         pid_start_marker: impl Into<String>,
-    ) -> OfficeResult<LaunchIntent> {
+    ) -> Result<LaunchIntent> {
         let pid_start_marker = pid_start_marker.into();
         let mut intent = self.require_intent_by_request_key(request_key)?;
         match intent.state {
             IntentState::Intended => {}
             other => {
-                return Err(OfficeError::Validation(format!(
+                return Err(Error::Validation(format!(
                     "intent `{}` is {}; only an intended launch can be confirmed",
                     intent.intent_id,
                     other.as_str()
@@ -575,10 +572,10 @@ impl<'a> TaskRegistry<'a> {
     /// Record the honest "the host died before the pid was written" state.
     /// The execution stays `requested` — an uncertain start is never
     /// reported as success or as a clean failure.
-    pub fn mark_unresolved(&self, request_key: &str) -> OfficeResult<LaunchIntent> {
+    pub fn mark_unresolved(&self, request_key: &str) -> Result<LaunchIntent> {
         let mut intent = self.require_intent_by_request_key(request_key)?;
         if intent.state != IntentState::Intended {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "intent `{}` is {}; only an intended launch can become unresolved",
                 intent.intent_id,
                 intent.state.as_str()
@@ -595,10 +592,10 @@ impl<'a> TaskRegistry<'a> {
     /// Record a process exit. This is a process fact: the intent becomes
     /// `exited`, the foundation execution keeps its process_exit, and neither
     /// the task nor the execution is completed by this call.
-    pub fn record_exit(&self, request_key: &str, exit_code: i32) -> OfficeResult<LaunchIntent> {
+    pub fn record_exit(&self, request_key: &str, exit_code: i32) -> Result<LaunchIntent> {
         let mut intent = self.require_intent_by_request_key(request_key)?;
         if intent.state != IntentState::Confirmed {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "intent `{}` is {}; only a confirmed launch can exit",
                 intent.intent_id,
                 intent.state.as_str()
@@ -633,7 +630,7 @@ impl<'a> TaskRegistry<'a> {
         Ok(intent)
     }
 
-    pub fn intent_by_request_key(&self, request_key: &str) -> OfficeResult<Option<LaunchIntent>> {
+    pub fn intent_by_request_key(&self, request_key: &str) -> Result<Option<LaunchIntent>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT intent_id, task_id, request_key, member_id, state, execution_id, pid,
                     pid_start_marker, intended_at, confirmed_at, exited_at, exit_code
@@ -643,16 +640,16 @@ impl<'a> TaskRegistry<'a> {
         Ok(row)
     }
 
-    fn require_intent_by_request_key(&self, request_key: &str) -> OfficeResult<LaunchIntent> {
+    fn require_intent_by_request_key(&self, request_key: &str) -> Result<LaunchIntent> {
         self.intent_by_request_key(request_key)?
-            .ok_or_else(|| OfficeError::NotFound {
+            .ok_or_else(|| Error::NotFound {
                 entity: "launch intent",
                 id: request_key.to_string(),
             })
     }
 
     /// All intents of a task, oldest first (history view).
-    pub fn intents_for_task(&self, task_id: &TaskId) -> OfficeResult<Vec<LaunchIntent>> {
+    pub fn intents_for_task(&self, task_id: &TaskId) -> Result<Vec<LaunchIntent>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT intent_id, task_id, request_key, member_id, state, execution_id, pid,
                     pid_start_marker, intended_at, confirmed_at, exited_at, exit_code
@@ -677,7 +674,7 @@ impl<'a> TaskRegistry<'a> {
         task_id: &TaskId,
         evidence: impl Into<String>,
         actor: impl Into<String>,
-    ) -> OfficeResult<()> {
+    ) -> Result<()> {
         self.append_outcome(task_id, OutcomeKind::Completed, evidence, actor)
             .map(|_| ())
     }
@@ -691,12 +688,12 @@ impl<'a> TaskRegistry<'a> {
         kind: OutcomeKind,
         evidence: impl Into<String>,
         actor: impl Into<String>,
-    ) -> OfficeResult<TaskOutcome> {
+    ) -> Result<TaskOutcome> {
         self.require_task(task_id)?;
         let evidence = evidence.into();
         let actor = actor.into();
         if evidence.trim().is_empty() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "outcome evidence must not be empty".into(),
             ));
         }
@@ -730,7 +727,7 @@ impl<'a> TaskRegistry<'a> {
         })
     }
 
-    pub fn outcomes_for_task(&self, task_id: &TaskId) -> OfficeResult<Vec<TaskOutcome>> {
+    pub fn outcomes_for_task(&self, task_id: &TaskId) -> Result<Vec<TaskOutcome>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT seq, task_id, kind, evidence, actor, recorded_at
              FROM task_outcomes WHERE task_id = ?1 ORDER BY seq",
@@ -784,7 +781,7 @@ impl<'a> TaskRegistry<'a> {
         kind: impl Into<String>,
         dedup_key: impl Into<String>,
         payload: serde_json::Value,
-    ) -> OfficeResult<Result<TaskResult, String>> {
+    ) -> Result<Result<TaskResult, String>> {
         self.require_task(task_id)?;
         let dedup_key = dedup_key.into();
         let existing: Option<String> = self
@@ -825,7 +822,7 @@ impl<'a> TaskRegistry<'a> {
         Ok(Ok(result))
     }
 
-    pub fn results_for_task(&self, task_id: &TaskId) -> OfficeResult<Vec<TaskResult>> {
+    pub fn results_for_task(&self, task_id: &TaskId) -> Result<Vec<TaskResult>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT result_id, task_id, execution_id, source, kind, payload, recorded_at
              FROM task_results WHERE task_id = ?1 ORDER BY recorded_at, result_id",
@@ -884,7 +881,7 @@ impl<'a> TaskRegistry<'a> {
     /// Generate and persist a handoff brief from persisted facts: goal,
     /// constraints, attempts (launch intents), failures, deliverables
     /// (user/QA results) and open items. Survives restarts.
-    pub fn generate_brief(&self, task_id: &TaskId) -> OfficeResult<serde_json::Value> {
+    pub fn generate_brief(&self, task_id: &TaskId) -> Result<serde_json::Value> {
         let task = self.require_task(task_id)?;
         let intents = self.intents_for_task(task_id)?;
         let results = self.results_for_task(task_id)?;
@@ -959,7 +956,7 @@ impl<'a> TaskRegistry<'a> {
     }
 
     /// The latest persisted brief for a task, if any (restart-safe read).
-    pub fn latest_brief(&self, task_id: &TaskId) -> OfficeResult<Option<serde_json::Value>> {
+    pub fn latest_brief(&self, task_id: &TaskId) -> Result<Option<serde_json::Value>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT brief_json FROM task_briefs WHERE task_id = ?1
              ORDER BY generated_at DESC LIMIT 1",
@@ -972,13 +969,13 @@ impl<'a> TaskRegistry<'a> {
     }
 }
 
-fn parse_task_status(status: &str) -> OfficeResult<TaskStatus> {
+fn parse_task_status(status: &str) -> Result<TaskStatus> {
     match status {
         "open" => Ok(TaskStatus::Open),
         "in_progress" => Ok(TaskStatus::InProgress),
         "done" => Ok(TaskStatus::Done),
         "cancelled" => Ok(TaskStatus::Cancelled),
-        other => Err(OfficeError::Validation(format!(
+        other => Err(Error::Validation(format!(
             "tasks.status holds an unknown value `{other}`"
         ))),
     }
@@ -1017,10 +1014,7 @@ fn map_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<LaunchIntent> {
 }
 
 /// Insert an execution inside a caller-owned transaction.
-fn insert_execution_in(
-    tx: &rusqlite::Transaction<'_>,
-    execution: &ExecutionRecord,
-) -> OfficeResult<()> {
+fn insert_execution_in(tx: &rusqlite::Transaction<'_>, execution: &ExecutionRecord) -> Result<()> {
     tx.execute(
         "INSERT INTO office_executions(
             execution_id, task_id, session_id, member_id, attribution, status,

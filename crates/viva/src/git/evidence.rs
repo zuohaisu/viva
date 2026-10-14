@@ -19,7 +19,7 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr as _;
 
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{TaskId, WorktreeId, utc_now};
 use crate::foundation::store::Store;
 use crate::git::cli::{CliRunner, GitFailure};
@@ -128,7 +128,7 @@ impl GhRunner {
     /// (the write never reaches the CLI).
     pub fn read<T, F>(&self, cwd: &Path, args: &[&str], parse: F) -> EvidenceState<T>
     where
-        F: FnOnce(&str) -> OfficeResult<T>,
+        F: FnOnce(&str) -> Result<T>,
     {
         if let Err(rejection) = Self::validate_read_args(args) {
             return EvidenceState::Unavailable {
@@ -175,7 +175,7 @@ impl GhRunner {
                     number: value
                         .get("number")
                         .and_then(|v| v.as_u64())
-                        .ok_or_else(|| OfficeError::Validation("pr view: missing number".into()))?,
+                        .ok_or_else(|| Error::Validation("pr view: missing number".into()))?,
                     title: value
                         .get("title")
                         .and_then(|v| v.as_str())
@@ -227,7 +227,7 @@ impl<'a> EvidenceStore<'a> {
         subject: &str,
         head_sha: Option<String>,
         state: &EvidenceState<T>,
-    ) -> OfficeResult<EvidenceRecord> {
+    ) -> Result<EvidenceRecord> {
         let state_json = serde_json::to_string(state)?;
         let record = EvidenceRecord {
             evidence_id: format!("ev-{}", uuid::Uuid::new_v4().simple()),
@@ -266,7 +266,7 @@ impl<'a> EvidenceStore<'a> {
         &self,
         evidence_id: &str,
         current_head: Option<&str>,
-    ) -> OfficeResult<Option<EvidenceRecord>> {
+    ) -> Result<Option<EvidenceRecord>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT evidence_id, task_id, worktree_id, kind, subject, head_sha, state_json,
                     fetched_at, stale
@@ -331,7 +331,7 @@ impl<'a> EvidenceStore<'a> {
     }
 
     /// All evidence rows for a task (history view).
-    pub fn for_task(&self, task_id: &TaskId) -> OfficeResult<Vec<EvidenceRecord>> {
+    pub fn for_task(&self, task_id: &TaskId) -> Result<Vec<EvidenceRecord>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT evidence_id, task_id, worktree_id, kind, subject, head_sha, state_json,
                     fetched_at, stale

@@ -20,7 +20,7 @@ use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::terminal::TerminalSpec;
 
 /// Duplicate close-on-exec atomically: a concurrent spawn must never
@@ -62,7 +62,7 @@ impl OwnedMaster {
     /// Open a new PTY pair sized for the spec. Returns the owned master
     /// and the raw slave fd (the caller owns that fd and passes it to
     /// [`spawn_child`] exactly once).
-    pub fn open(spec: &TerminalSpec) -> OfficeResult<(Self, RawFd)> {
+    pub fn open(spec: &TerminalSpec) -> Result<(Self, RawFd)> {
         spec.validate()?;
         // SAFETY: posix_openpt returns a fresh master fd or -1; grantpt and
         // unlockpt finalize the slave; ptsname names it (under the global
@@ -74,17 +74,17 @@ impl OwnedMaster {
             let flags = libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC;
             let master = libc::posix_openpt(flags);
             if master < 0 {
-                return Err(OfficeError::Io(io::Error::last_os_error()));
+                return Err(Error::Io(io::Error::last_os_error()));
             }
             if libc::grantpt(master) != 0 {
                 let err = io::Error::last_os_error();
                 libc::close(master);
-                return Err(OfficeError::Io(err));
+                return Err(Error::Io(err));
             }
             if libc::unlockpt(master) != 0 {
                 let err = io::Error::last_os_error();
                 libc::close(master);
-                return Err(OfficeError::Io(err));
+                return Err(Error::Io(err));
             }
             let mut name_buf = [0u8; 256];
             // `ptsname` (not _r) is what the libc crate exposes on macOS;
@@ -94,15 +94,13 @@ impl OwnedMaster {
             if name_ptr.is_null() {
                 let err = io::Error::last_os_error();
                 libc::close(master);
-                return Err(OfficeError::Io(err));
+                return Err(Error::Io(err));
             }
             let slave_cname = std::ffi::CStr::from_ptr(name_ptr);
             let slave_name_bytes = slave_cname.to_bytes();
             if slave_name_bytes.len() >= name_buf.len() {
                 libc::close(master);
-                return Err(OfficeError::Validation(
-                    "ptsname exceeded the name buffer".into(),
-                ));
+                return Err(Error::Validation("ptsname exceeded the name buffer".into()));
             }
             name_buf[..slave_name_bytes.len()].copy_from_slice(slave_name_bytes);
             let name_len = slave_name_bytes.len();
@@ -110,7 +108,7 @@ impl OwnedMaster {
                 Ok(name) => name,
                 Err(e) => {
                     libc::close(master);
-                    return Err(OfficeError::Validation(format!("ptsname: {e}")));
+                    return Err(Error::Validation(format!("ptsname: {e}")));
                 }
             };
             // A detached resident server is itself a session leader. Opening
@@ -123,7 +121,7 @@ impl OwnedMaster {
             if slave < 0 {
                 let err = io::Error::last_os_error();
                 libc::close(master);
-                return Err(OfficeError::Io(err));
+                return Err(Error::Io(err));
             }
             let master = OwnedMaster { fd: master };
             if let Err(err) = master.resize(spec.cols, spec.rows) {
@@ -135,19 +133,19 @@ impl OwnedMaster {
         #[cfg(not(unix))]
         {
             let _ = spec;
-            Err(OfficeError::Validation("PTY requires unix".into()))
+            Err(Error::Validation("PTY requires unix".into()))
         }
     }
 
     /// Duplicate the master fd for an independent I/O handle (reader
     /// thread, input writer).
-    pub fn dup(&self) -> OfficeResult<RawFd> {
-        dup_cloexec(self.fd).map_err(OfficeError::Io)
+    pub fn dup(&self) -> Result<RawFd> {
+        dup_cloexec(self.fd).map_err(Error::Io)
     }
 
     /// Resize the pty. The kernel delivers SIGWINCH to the child's
     /// foreground process group — full-screen programs repaint themselves.
-    pub fn resize(&self, cols: u16, rows: u16) -> OfficeResult<()> {
+    pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         // SAFETY: TIOCSWINSZ on our own fd with a plain winsize struct.
         #[cfg(unix)]
         unsafe {
@@ -158,14 +156,14 @@ impl OwnedMaster {
                 ws_ypixel: 0,
             };
             if libc::ioctl(self.fd, libc::TIOCSWINSZ, &win) != 0 {
-                return Err(OfficeError::Io(io::Error::last_os_error()));
+                return Err(Error::Io(io::Error::last_os_error()));
             }
             Ok(())
         }
         #[cfg(not(unix))]
         {
             let _ = (cols, rows);
-            Err(OfficeError::Validation("PTY requires unix".into()))
+            Err(Error::Validation("PTY requires unix".into()))
         }
     }
 
@@ -191,7 +189,7 @@ impl Drop for OwnedMaster {
 /// Spawn the child on the slave side: own process group (pgid == pid) and
 /// the slave as its controlling terminal. Returns the standard `Child`,
 /// whose non-blocking `try_wait` keeps the V05 reap discipline intact.
-pub fn spawn_child(spec: &TerminalSpec, slave_fd: RawFd) -> OfficeResult<std::process::Child> {
+pub fn spawn_child(spec: &TerminalSpec, slave_fd: RawFd) -> Result<std::process::Child> {
     spec.validate()?;
     // Own every dup immediately, including on partial setup/spawn errors.
     // The tty reference must stay open in the PARENT until spawn returns:
@@ -237,14 +235,14 @@ pub fn spawn_child(spec: &TerminalSpec, slave_fd: RawFd) -> OfficeResult<std::pr
         });
         let child = command
             .spawn()
-            .map_err(|e| OfficeError::Validation(format!("failed to spawn terminal: {e}")));
+            .map_err(|e| Error::Validation(format!("failed to spawn terminal: {e}")));
         // In the child CLOEXEC closes the reference at exec; in the parent
         // the guard is dropped only AFTER pre_exec has finished.
         drop(tty_file);
         child
     }
     #[cfg(not(unix))]
-    Err(OfficeError::Validation("PTY requires unix".into()))
+    Err(Error::Validation("PTY requires unix".into()))
 }
 
 #[cfg(test)]

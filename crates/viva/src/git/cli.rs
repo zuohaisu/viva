@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 
 // TreeState derives Serialize/Deserialize so discovered state can travel
 // through the workbench projection layer.
@@ -204,9 +204,9 @@ impl CliRunner {
     }
 
     /// Run git expecting success; map failures into the office error type.
-    pub fn git_ok(&self, cwd: &Path, args: &[&str]) -> OfficeResult<CommandOutput> {
+    pub fn git_ok(&self, cwd: &Path, args: &[&str]) -> Result<CommandOutput> {
         self.git(cwd, args)
-            .map_err(|f| OfficeError::Validation(f.to_string()))
+            .map_err(|f| Error::Validation(f.to_string()))
     }
 }
 
@@ -313,7 +313,7 @@ pub fn tree_state(runner: &CliRunner, path: &Path) -> TreeState {
 }
 
 /// The checked-out branch of `path`, if any (`None` = detached HEAD).
-pub fn current_branch(runner: &CliRunner, path: &Path) -> OfficeResult<Option<String>> {
+pub fn current_branch(runner: &CliRunner, path: &Path) -> Result<Option<String>> {
     let out = runner.git_ok(path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     let branch = out.stdout.trim();
     Ok(if branch == "HEAD" || branch.is_empty() {
@@ -324,7 +324,7 @@ pub fn current_branch(runner: &CliRunner, path: &Path) -> OfficeResult<Option<St
 }
 
 /// The HEAD commit sha of `path`.
-pub fn head_sha(runner: &CliRunner, path: &Path) -> OfficeResult<String> {
+pub fn head_sha(runner: &CliRunner, path: &Path) -> Result<String> {
     let out = runner.git_ok(path, &["rev-parse", "HEAD"])?;
     Ok(out.stdout.trim().to_string())
 }

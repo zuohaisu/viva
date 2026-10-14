@@ -13,7 +13,7 @@ fn jsonc_preserves_string_delimiters_and_rejects_broken_comments() {
 #[test]
 fn workspace_roundtrip_retains_unavailable_folders_and_other_fields() {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open_in_memory(viva::office::office_migrations()).unwrap();
+    let store = Store::open_in_memory(viva::server::migrations()).unwrap();
     let nav = Navigation { store: &store };
     let input = dir.path().join("example.code-workspace");
     let original = "{ /*keep semantics*/ \"folders\":[{\"path\":\"missing\",\"name\":\"Absent\"},{\"uri\":\"vscode-remote://host/repo\"}],\"settings\":{\"url\":\"https://example.com\"},\"tasks\":{\"command\":\"never execute\"}}";
@@ -69,7 +69,7 @@ fn linked_worktree_and_compositions_share_project_without_task_or_grant() {
             .status
             .success()
     );
-    let store = Store::open_in_memory(viva::office::office_migrations()).unwrap();
+    let store = Store::open_in_memory(viva::server::migrations()).unwrap();
     let nav = Navigation { store: &store };
     let a = nav.open(&repo).unwrap();
     let b = nav.open(&linked).unwrap();

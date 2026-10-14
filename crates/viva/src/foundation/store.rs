@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use rusqlite::Connection;
 
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::utc_now;
 
 /// The known migration domains. Each domain owner (see
@@ -95,7 +95,7 @@ pub struct Migration {
     pub sql: &'static str,
     /// Schema-dependent upgrades run inside the same versioned transaction.
     /// SQL alone cannot conditionally ADD a column to an already existing table.
-    pub apply: Option<fn(&rusqlite::Transaction<'_>) -> OfficeResult<()>>,
+    pub apply: Option<fn(&rusqlite::Transaction<'_>) -> Result<()>>,
 }
 
 /// Registry under construction; validated by [`MigrationRegistry::freeze`].
@@ -136,7 +136,7 @@ impl MigrationRegistry {
         domain: Domain,
         version: u32,
         name: &'static str,
-        apply: fn(&rusqlite::Transaction<'_>) -> OfficeResult<()>,
+        apply: fn(&rusqlite::Transaction<'_>) -> Result<()>,
     ) -> Self {
         self.migrations.push(Migration {
             domain,
@@ -150,11 +150,11 @@ impl MigrationRegistry {
 
     /// Validate the registry: no duplicate `(domain, version)`, no gaps, and
     /// version 0 does not exist. Returns the frozen set the store applies.
-    pub fn freeze(self) -> OfficeResult<FrozenMigrations> {
+    pub fn freeze(self) -> Result<FrozenMigrations> {
         let mut per_domain: BTreeMap<Domain, Vec<Migration>> = BTreeMap::new();
         for migration in self.migrations {
             if migration.version == 0 {
-                return Err(OfficeError::Migration(format!(
+                return Err(Error::Migration(format!(
                     "domain `{}`: migration versions start at 1, got 0 ({})",
                     migration.domain, migration.name
                 )));
@@ -165,7 +165,7 @@ impl MigrationRegistry {
                 .iter()
                 .any(|m| m.version == migration.version)
             {
-                return Err(OfficeError::Migration(format!(
+                return Err(Error::Migration(format!(
                     "domain `{}`: duplicate migration version {}",
                     migration.domain, migration.version
                 )));
@@ -180,7 +180,7 @@ impl MigrationRegistry {
             for (expected, migration) in list.iter().enumerate() {
                 let want = (expected + 1) as u32;
                 if migration.version != want {
-                    return Err(OfficeError::Migration(format!(
+                    return Err(Error::Migration(format!(
                         "domain `{}`: migration versions must be contiguous from 1; \
                          expected {want}, found {} ({})",
                         domain, migration.version, migration.name
@@ -331,7 +331,7 @@ pub struct Store {
 impl Store {
     /// Open (creating if needed) the database at `path` and apply all pending
     /// migrations from `migrations`.
-    pub fn open(path: &Path, migrations: &FrozenMigrations) -> OfficeResult<Store> {
+    pub fn open(path: &Path, migrations: &FrozenMigrations) -> Result<Store> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)?;
@@ -348,7 +348,7 @@ impl Store {
     }
 
     /// In-memory store for tests.
-    pub fn open_in_memory(migrations: &FrozenMigrations) -> OfficeResult<Store> {
+    pub fn open_in_memory(migrations: &FrozenMigrations) -> Result<Store> {
         let conn = Connection::open_in_memory()?;
         Self::configure(&conn)?;
         let mut store = Store {
@@ -359,7 +359,7 @@ impl Store {
         Ok(store)
     }
 
-    fn configure(conn: &Connection) -> OfficeResult<()> {
+    fn configure(conn: &Connection) -> Result<()> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -367,7 +367,7 @@ impl Store {
         Ok(())
     }
 
-    fn apply_migrations(&mut self, migrations: &FrozenMigrations) -> OfficeResult<()> {
+    fn apply_migrations(&mut self, migrations: &FrozenMigrations) -> Result<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_meta (
                 key   TEXT PRIMARY KEY,
@@ -401,7 +401,7 @@ impl Store {
                     && matches!(&err, rusqlite::Error::SqliteFailure(inner, _)
                         if inner.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE)
                 {
-                    OfficeError::Migration(format!(
+                    Error::Migration(format!(
                         "maintenance v2 could not backfill conflicting proposal keys ({err}); \
                          no proposal was changed. Stop the office, preserve the database with \
                          SQLite backup, then inspect both proposals and resolve the key conflict \
@@ -425,7 +425,7 @@ impl Store {
         Ok(())
     }
 
-    fn reload_schema_versions(&mut self) -> OfficeResult<()> {
+    fn reload_schema_versions(&mut self) -> Result<()> {
         let mut stmt = self
             .conn
             .prepare("SELECT domain, MAX(version) FROM schema_migrations GROUP BY domain")?;
@@ -448,7 +448,7 @@ impl Store {
     }
 
     /// Values from the `schema_meta` key/value table.
-    pub fn schema_meta(&self) -> OfficeResult<BTreeMap<String, String>> {
+    pub fn schema_meta(&self) -> Result<BTreeMap<String, String>> {
         let mut stmt = self
             .conn
             .prepare("SELECT key, value FROM schema_meta ORDER BY key")?;
@@ -471,12 +471,12 @@ impl Store {
 
     /// Begin a transaction (deferred) usable through `&self`. Failed
     /// transactions are dropped and rolled back — never half-applied.
-    pub fn transaction(&self) -> OfficeResult<rusqlite::Transaction<'_>> {
+    pub fn transaction(&self) -> Result<rusqlite::Transaction<'_>> {
         Ok(self.conn.unchecked_transaction()?)
     }
 
     /// Applied migration rows, for diagnostics and drift checks.
-    pub fn applied_migrations(&self) -> OfficeResult<Vec<(String, u32, String, String)>> {
+    pub fn applied_migrations(&self) -> Result<Vec<(String, u32, String, String)>> {
         let mut stmt = self
             .conn
             .prepare("SELECT domain, version, name, applied_at FROM schema_migrations ORDER BY domain, version")?;
@@ -496,7 +496,7 @@ impl Store {
     }
 
     /// Count rows of a table; used by tests and the doctor command.
-    pub fn row_count(&self, table: &str) -> OfficeResult<i64> {
+    pub fn row_count(&self, table: &str) -> Result<i64> {
         // Table names are code constants, never user input; quote defensively.
         let sql = format!("SELECT COUNT(*) FROM \"{table}\"");
         let count = self.conn.query_row(&sql, [], |row| row.get::<_, i64>(0))?;
@@ -509,7 +509,7 @@ impl Store {
     }
 
     /// True if `(domain, version)` has been applied.
-    pub fn is_applied(&self, domain: Domain, version: u32) -> OfficeResult<bool> {
+    pub fn is_applied(&self, domain: Domain, version: u32) -> Result<bool> {
         let count = self.conn.query_row(
             "SELECT COUNT(*) FROM schema_migrations WHERE domain = ?1 AND version = ?2",
             rusqlite::params![domain.as_str(), version as i64],
@@ -519,7 +519,7 @@ impl Store {
     }
 
     /// Applied domain set as a HashSet (helper for migration tests).
-    pub fn applied_versions(&self, domain: Domain) -> OfficeResult<HashSet<u32>> {
+    pub fn applied_versions(&self, domain: Domain) -> Result<HashSet<u32>> {
         let mut stmt = self
             .conn
             .prepare("SELECT version FROM schema_migrations WHERE domain = ?1")?;
@@ -679,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn office_events_is_append_only_at_the_database_level() {
+    fn event_log_is_append_only_at_the_database_level() {
         let store = Store::open_in_memory(&foundation_only()).expect("open");
         store
             .connection()

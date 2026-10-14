@@ -387,7 +387,7 @@ fn stop_is_idempotent_under_races_and_never_touches_unowned_processes() {
 fn high_volume_output_stays_bounded_and_the_log_is_redacted() {
     let dir = tempfile::TempDir::new().expect("dir");
     let log_path = dir.path().join("logs").join("session.raw");
-    let secret = "office-token-9f8e7d";
+    let secret = "server-token-9f8e7d";
     let disk_log = Arc::new(
         DiskLog::create(&log_path, vec![secret.to_string()], Some(512 * 1024)).expect("disk log"),
     );
@@ -488,7 +488,7 @@ fn high_volume_output_stays_bounded_and_the_log_is_redacted() {
 
     // The redaction carry flushed the tail correctly: no half-secret.
     assert!(
-        !logged_text.contains("office-token-"),
+        !logged_text.contains("server-token-"),
         "no partial secret either"
     );
 }

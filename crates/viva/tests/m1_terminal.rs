@@ -98,7 +98,7 @@ fn host_history_scrolls_without_replacing_the_live_screen() {
 #[test]
 fn detached_resident_first_spawn_does_not_acquire_the_childs_tty() {
     use std::os::unix::process::CommandExt;
-    use viva::office::{OfficeClient, OfficeRequestKind};
+    use viva::server::{Client, RequestKind};
     let home = tempfile::tempdir().unwrap();
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_viva"));
     command
@@ -118,9 +118,9 @@ fn detached_resident_first_spawn_does_not_acquire_the_childs_tty() {
         });
     }
     let mut server = command.spawn().unwrap();
-    wait(|| OfficeClient::connect(home.path()).is_ok());
-    let mut client = OfficeClient::connect(home.path()).unwrap();
-    let result = client.call(OfficeRequestKind::TerminalCreate {
+    wait(|| Client::connect(home.path()).is_ok());
+    let mut client = Client::connect(home.path()).unwrap();
+    let result = client.call(RequestKind::TerminalCreate {
         argv: vec!["/bin/cat".into()],
         cwd: std::env::temp_dir().to_string_lossy().into(),
         env: vec![],
@@ -130,7 +130,7 @@ fn detached_resident_first_spawn_does_not_acquire_the_childs_tty() {
         worktree_id: None,
         owner: "test_run".into(),
     });
-    let shutdown = client.call(OfficeRequestKind::Shutdown { close_policy: None });
+    let shutdown = client.call(RequestKind::Shutdown { close_policy: None });
     if shutdown.is_err() {
         let _ = server.kill();
     }

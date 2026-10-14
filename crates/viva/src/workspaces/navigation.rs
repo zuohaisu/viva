@@ -3,7 +3,7 @@
 use super::WorkspaceRegistry;
 use crate::foundation::ids::{WorkspaceId, WorktreeId};
 use crate::foundation::store::Store;
-use crate::foundation::{OfficeError, OfficeResult};
+use crate::foundation::{Error, Result};
 use crate::projects::ProjectRegistry;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -50,7 +50,7 @@ pub struct FolderRow {
 
 /// Strip comments and trailing commas without interpreting anything inside strings.
 /// VS Code configuration is data; tasks/launch/settings are never executed.
-pub fn parse_jsonc(text: &str) -> OfficeResult<Value> {
+pub fn parse_jsonc(text: &str) -> Result<Value> {
     let b = text.as_bytes();
     let mut out = b.to_vec();
     let mut i = 0;
@@ -98,7 +98,7 @@ pub fn parse_jsonc(text: &str) -> OfficeResult<Value> {
                 i += 1;
             }
             if !closed {
-                return Err(OfficeError::Validation("unterminated JSONC comment".into()));
+                return Err(Error::Validation("unterminated JSONC comment".into()));
             }
             continue;
         }
@@ -129,14 +129,14 @@ pub fn parse_jsonc(text: &str) -> OfficeResult<Value> {
         i += 1;
     }
     serde_json::from_slice(&out)
-        .map_err(|e| OfficeError::Validation(format!("invalid workspace JSONC: {e}")))
+        .map_err(|e| Error::Validation(format!("invalid workspace JSONC: {e}")))
 }
 
 pub struct Navigation<'a> {
     pub store: &'a Store,
 }
 impl<'a> Navigation<'a> {
-    pub fn list(&self) -> OfficeResult<Vec<WorkspaceRow>> {
+    pub fn list(&self) -> Result<Vec<WorkspaceRow>> {
         let mut st=self.store.connection().prepare("SELECT w.workspace_id,w.display_name,c.source_path FROM workspaces w LEFT JOIN workspace_compositions c USING(workspace_id) ORDER BY c.opened_at DESC,w.created_at DESC")?;
         Ok(st
             .query_map([], |r| {
@@ -148,7 +148,7 @@ impl<'a> Navigation<'a> {
             })?
             .collect::<Result<_, _>>()?)
     }
-    pub fn selected(&self) -> OfficeResult<Option<String>> {
+    pub fn selected(&self) -> Result<Option<String>> {
         Ok(self
             .store
             .connection()
@@ -160,7 +160,7 @@ impl<'a> Navigation<'a> {
             .optional()?
             .flatten())
     }
-    pub fn select(&self, id: &str) -> OfficeResult<()> {
+    pub fn select(&self, id: &str) -> Result<()> {
         WorkspaceRegistry::new(self.store).require(&WorkspaceId::from_str(id)?)?;
         self.store.connection().execute("INSERT INTO navigation_selection VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET workspace_id=excluded.workspace_id",[id])?;
         self.store.connection().execute(
@@ -169,7 +169,7 @@ impl<'a> Navigation<'a> {
         )?;
         Ok(())
     }
-    pub fn folders(&self, id: &str) -> OfficeResult<Vec<FolderRow>> {
+    pub fn folders(&self, id: &str) -> Result<Vec<FolderRow>> {
         let mut st=self.store.connection().prepare("SELECT project_id,folder,resolved_path,diagnostic FROM workspace_folders WHERE workspace_id=?1 ORDER BY ordinal")?;
         Ok(st
             .query_map([id], |r| {
@@ -190,7 +190,7 @@ impl<'a> Navigation<'a> {
             })?
             .collect::<Result<_, _>>()?)
     }
-    pub fn create(&self, name: &str) -> OfficeResult<String> {
+    pub fn create(&self, name: &str) -> Result<String> {
         let w = WorkspaceRegistry::new(self.store).create(name)?;
         self.store.connection().execute(
             "INSERT INTO workspace_compositions(workspace_id,opened_at) VALUES(?1,?2)",
@@ -199,7 +199,7 @@ impl<'a> Navigation<'a> {
         self.select(w.workspace_id.as_str())?;
         Ok(w.workspace_id.to_string())
     }
-    pub fn open(&self, path: &Path) -> OfficeResult<String> {
+    pub fn open(&self, path: &Path) -> Result<String> {
         let path = std::fs::canonicalize(path)?;
         if path.is_dir() {
             let id = self.create(
@@ -211,19 +211,15 @@ impl<'a> Navigation<'a> {
             return Ok(id);
         }
         if std::fs::metadata(&path)?.len() > 1024 * 1024 {
-            return Err(OfficeError::Validation(
-                "workspace file exceeds 1 MiB".into(),
-            ));
+            return Err(Error::Validation("workspace file exceeds 1 MiB".into()));
         }
         let doc = parse_jsonc(&std::fs::read_to_string(&path)?)?;
         let folders = doc
             .get("folders")
             .and_then(Value::as_array)
-            .ok_or_else(|| OfficeError::Validation("workspace needs a folders array".into()))?;
+            .ok_or_else(|| Error::Validation("workspace needs a folders array".into()))?;
         if folders.len() > 128 {
-            return Err(OfficeError::Validation(
-                "workspace exceeds 128 folders".into(),
-            ));
+            return Err(Error::Validation("workspace exceeds 128 folders".into()));
         }
         // An already opened file restores the composition, including unsaved edits.
         let old: Option<String> = self
@@ -253,7 +249,7 @@ impl<'a> Navigation<'a> {
         }
         Ok(id)
     }
-    pub fn add(&self, id: &str, folder: Value, base: &Path) -> OfficeResult<()> {
+    pub fn add(&self, id: &str, folder: Value, base: &Path) -> Result<()> {
         WorkspaceRegistry::new(self.store).require(&WorkspaceId::from_str(id)?)?;
         let count: i64 = self.store.connection().query_row(
             "SELECT COUNT(*) FROM workspace_folders WHERE workspace_id=?1",
@@ -261,9 +257,7 @@ impl<'a> Navigation<'a> {
             |r| r.get(0),
         )?;
         if count >= 128 {
-            return Err(OfficeError::Validation(
-                "workspace exceeds 128 folders".into(),
-            ));
+            return Err(Error::Validation("workspace exceeds 128 folders".into()));
         }
         let (path, diagnostic) = match folder.get("path").and_then(Value::as_str) {
             Some(p) => {
@@ -326,18 +320,16 @@ impl<'a> Navigation<'a> {
         self.store.connection().execute("INSERT INTO workspace_folders(workspace_id,ordinal,project_id,folder,resolved_path,diagnostic) SELECT ?1,COALESCE(MAX(ordinal)+1,0),?2,?3,?4,?5 FROM workspace_folders WHERE workspace_id=?1",rusqlite::params![id,project,folder.to_string(),path.map(|p|p.to_string_lossy().to_string()),diagnostic])?;
         Ok(())
     }
-    pub fn remove(&self, id: &str, project: &str) -> OfficeResult<()> {
+    pub fn remove(&self, id: &str, project: &str) -> Result<()> {
         self.store.connection().execute(
             "DELETE FROM workspace_folders WHERE workspace_id=?1 AND project_id=?2",
             rusqlite::params![id, project],
         )?;
         Ok(())
     }
-    pub fn save_as(&self, id: &str, path: &Path) -> OfficeResult<()> {
+    pub fn save_as(&self, id: &str, path: &Path) -> Result<()> {
         if !path.is_absolute() {
-            return Err(OfficeError::Validation(
-                "Save As needs an absolute path".into(),
-            ));
+            return Err(Error::Validation("Save As needs an absolute path".into()));
         }
         let (source, document): (Option<String>, String) = self.store.connection().query_row(
             "SELECT source_path,document FROM workspace_compositions WHERE workspace_id=?1",
@@ -345,7 +337,7 @@ impl<'a> Navigation<'a> {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         let mut doc: Value =
-            serde_json::from_str(&document).map_err(|e| OfficeError::Validation(e.to_string()))?;
+            serde_json::from_str(&document).map_err(|e| Error::Validation(e.to_string()))?;
         let base = source.as_deref().and_then(|p| Path::new(p).parent());
         let mut st = self.store.connection().prepare(
             "SELECT folder FROM workspace_folders WHERE workspace_id=?1 ORDER BY ordinal",
@@ -353,7 +345,7 @@ impl<'a> Navigation<'a> {
         let mut folders = Vec::new();
         for row in st.query_map([id], |r| r.get::<_, String>(0))? {
             let mut f: Value =
-                serde_json::from_str(&row?).map_err(|e| OfficeError::Validation(e.to_string()))?;
+                serde_json::from_str(&row?).map_err(|e| Error::Validation(e.to_string()))?;
             if let Some(p) = f.get("path").and_then(Value::as_str) {
                 let p = PathBuf::from(p);
                 if !p.is_absolute() {
@@ -368,10 +360,10 @@ impl<'a> Navigation<'a> {
         let mut tmp = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(Path::new("/")))?;
         use std::io::Write;
         tmp.write_all(serde_json::to_string_pretty(&doc).unwrap().as_bytes())?;
-        tmp.persist(path).map_err(|e| OfficeError::Io(e.error))?;
+        tmp.persist(path).map_err(|e| Error::Io(e.error))?;
         Ok(())
     }
-    pub fn checkout(&self, id: &str) -> OfficeResult<Option<(PathBuf, String)>> {
+    pub fn checkout(&self, id: &str) -> Result<Option<(PathBuf, String)>> {
         Ok(self
             .store
             .connection()

@@ -89,7 +89,7 @@ fn multi_project_context_with_references_and_plain_directories() {
     let workspaces = WorkspaceRegistry::new(&store);
     let projects = ProjectRegistry::new(&store);
 
-    let workspace = workspaces.create("Haisu's office").expect("workspace");
+    let workspace = workspaces.create("Haisu's workspace").expect("workspace");
     let repo_a = dir.path().join("code").join("viva");
     let repo_b = dir.path().join("elsewhere").join("VicTrader");
     std::fs::create_dir_all(&repo_a).expect("mkdir a");

@@ -22,7 +22,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tempfile::{NamedTempFile, TempDir};
 
-use crate::foundation::{OfficeError, OfficeResult};
+use crate::foundation::{Error, Result};
 
 const LATEST_RELEASE: &str = "https://api.github.com/repos/zuohaisu/viva/releases/latest";
 const NPM_PACKAGE: &str = "@zuohaisu/viva";
@@ -39,8 +39,8 @@ const USAGE: &str = "USAGE: viva update [--check] [--no-restart]\n\
     After installing, a running resident server is restarted through the\n\
     live handover (its terminals survive). VIVA_HOME data is untouched.";
 
-fn invalid(message: impl Into<String>) -> OfficeError {
-    OfficeError::Validation(message.into())
+fn invalid(message: impl Into<String>) -> Error {
+    Error::Validation(message.into())
 }
 
 #[derive(Debug, PartialEq)]
@@ -50,7 +50,7 @@ enum Mode {
     Help,
 }
 
-fn parse_args(args: &[String]) -> OfficeResult<Mode> {
+fn parse_args(args: &[String]) -> Result<Mode> {
     match args {
         [] => Ok(Mode::Install { restart: true }),
         [arg] if arg == "--check" => Ok(Mode::Check),
@@ -61,7 +61,7 @@ fn parse_args(args: &[String]) -> OfficeResult<Mode> {
 }
 
 /// No automatic/background updates and no runtime/store side effects.
-pub fn run(args: &[String]) -> OfficeResult<()> {
+pub fn run(args: &[String]) -> Result<()> {
     let mode = parse_args(args)?;
     if mode == Mode::Help {
         println!("{USAGE}");
@@ -125,7 +125,7 @@ pub fn run(args: &[String]) -> OfficeResult<()> {
     Ok(())
 }
 
-fn version(raw: &str) -> OfficeResult<Version> {
+fn version(raw: &str) -> Result<Version> {
     Version::parse(raw.strip_prefix('v').unwrap_or(raw))
         .map_err(|err| invalid(format!("invalid release version `{raw}`: {err}")))
 }
@@ -145,7 +145,7 @@ fn is_build_output(path: &Path) -> bool {
     })
 }
 
-fn platform(os: &str, arch: &str) -> OfficeResult<&'static str> {
+fn platform(os: &str, arch: &str) -> Result<&'static str> {
     match (os, arch) {
         ("macos", "aarch64") => Ok("macos-arm64"),
         ("macos", "x86_64") => Ok("macos-intel"),
@@ -171,7 +171,7 @@ struct Asset {
 }
 
 impl Release {
-    fn stable_version(&self) -> OfficeResult<Version> {
+    fn stable_version(&self) -> Result<Version> {
         let version = version(&self.tag_name)?;
         if self.draft || self.prerelease || !version.pre.is_empty() {
             return Err(invalid("latest release is not a published stable version"));
@@ -179,7 +179,7 @@ impl Release {
         Ok(version)
     }
 
-    fn asset_url(&self, name: &str, max_size: u64) -> OfficeResult<&str> {
+    fn asset_url(&self, name: &str, max_size: u64) -> Result<&str> {
         let matches: Vec<_> = self.assets.iter().filter(|a| a.name == name).collect();
         let [asset] = matches.as_slice() else {
             return Err(invalid(format!(
@@ -201,12 +201,12 @@ impl Release {
 }
 
 trait Download {
-    fn fetch(&self, url: &str, destination: &Path, max_bytes: u64) -> OfficeResult<()>;
+    fn fetch(&self, url: &str, destination: &Path, max_bytes: u64) -> Result<()>;
 }
 
 struct Curl;
 impl Download for Curl {
-    fn fetch(&self, url: &str, destination: &Path, max_bytes: u64) -> OfficeResult<()> {
+    fn fetch(&self, url: &str, destination: &Path, max_bytes: u64) -> Result<()> {
         // Use macOS's existing TLS client, not a shell or remotely fetched
         // installer. Ignore curlrc; require HTTPS including every redirect.
         let mut command = Command::new("/usr/bin/curl");
@@ -248,7 +248,7 @@ fn update_native(
     platform: &str,
     check: bool,
     download: &impl Download,
-) -> OfficeResult<bool> {
+) -> Result<bool> {
     let metadata_dir = TempDir::new()?;
     let metadata = metadata_dir.path().join("release.json");
     download.fetch(LATEST_RELEASE, &metadata, MAX_METADATA)?;
@@ -320,7 +320,7 @@ fn update_native(
     // Unix filesystems, even while the old inode is executing.
     candidate
         .persist(target)
-        .map_err(|err| OfficeError::Io(err.error))?;
+        .map_err(|err| Error::Io(err.error))?;
     if let Err(err) = File::open(parent).and_then(|dir| dir.sync_all()) {
         eprintln!("viva: binary replaced, but syncing its directory failed: {err}");
     }
@@ -328,7 +328,7 @@ fn update_native(
     Ok(true)
 }
 
-fn read_bounded(path: &Path, limit: u64) -> OfficeResult<Vec<u8>> {
+fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     File::open(path)?.take(limit + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > limit {
@@ -337,7 +337,7 @@ fn read_bounded(path: &Path, limit: u64) -> OfficeResult<Vec<u8>> {
     Ok(bytes)
 }
 
-fn verify_checksum(archive: &Path, checksum: &Path, archive_name: &str) -> OfficeResult<()> {
+fn verify_checksum(archive: &Path, checksum: &Path, archive_name: &str) -> Result<()> {
     let text = String::from_utf8(read_bounded(checksum, MAX_CHECKSUM)?)
         .map_err(|_| invalid("checksum is not UTF-8"))?;
     let fields: Vec<_> = text.split_whitespace().collect();
@@ -369,7 +369,7 @@ fn verify_checksum(archive: &Path, checksum: &Path, archive_name: &str) -> Offic
     Ok(())
 }
 
-fn extract_binary(archive: &Path, expected: &str, output: &mut File) -> OfficeResult<()> {
+fn extract_binary(archive: &Path, expected: &str, output: &mut File) -> Result<()> {
     // Never unpack paths onto the filesystem. Only one exact regular-file
     // entry is copied to our already-open staging file; links/traversal are
     // not followed. Bound expanded bytes as well as the compressed download.
@@ -401,7 +401,7 @@ fn extract_binary(archive: &Path, expected: &str, output: &mut File) -> OfficeRe
     Ok(())
 }
 
-fn lock_installation(target: &Path) -> OfficeResult<File> {
+fn lock_installation(target: &Path) -> Result<File> {
     let name = target
         .file_name()
         .ok_or_else(|| invalid("binary has no filename"))?;
@@ -429,10 +429,10 @@ fn lock_installation(target: &Path) -> OfficeResult<File> {
 /// The npm wrapper supplies its own root. Validate both package identities
 /// and placement; don't let direct execution silently mutate node_modules.
 /// A local install is checkable, but mutation stays with the project's npm.
-fn npm_prefix(target: &Path, wrapper: &Path) -> OfficeResult<Option<PathBuf>> {
+fn npm_prefix(target: &Path, wrapper: &Path) -> Result<Option<PathBuf>> {
     let target = fs::canonicalize(target)?;
     let wrapper = fs::canonicalize(wrapper)?;
-    let package_name = |root: &Path| -> OfficeResult<String> {
+    let package_name = |root: &Path| -> Result<String> {
         let value: serde_json::Value =
             serde_json::from_slice(&read_bounded(&root.join("package.json"), MAX_METADATA)?)?;
         value["name"]
@@ -480,12 +480,7 @@ fn npm_prefix(target: &Path, wrapper: &Path) -> OfficeResult<Option<PathBuf>> {
     Ok(None)
 }
 
-fn update_npm(
-    current: &Version,
-    prefix: Option<&Path>,
-    check: bool,
-    npm: &str,
-) -> OfficeResult<bool> {
+fn update_npm(current: &Version, prefix: Option<&Path>, check: bool, npm: &str) -> Result<bool> {
     if !check && prefix.is_none() {
         return Err(invalid(
             "local npm installation: update from your project with `npm install @zuohaisu/viva@latest`; viva update upgrades global installations only",
@@ -548,14 +543,14 @@ fn npm_wrapper_entry(prefix: &Path) -> PathBuf {
 /// the old generation serving and says so instead of failing the install,
 /// which already succeeded.
 fn restart_running_server(home: &Path, entry: &Path) {
-    let socket = home.join(crate::office::OFFICE_SOCKET_NAME);
+    let socket = home.join(crate::server::SOCKET_NAME);
     if !socket.exists() {
         println!("No running resident server; the next `viva` start will use the new version.");
         return;
     }
     // Only a healthy host can hand over. A socket nobody answers is left
-    // for the next start to claim (`OfficeHost::open` records that).
-    if crate::office::OfficeClient::connect(home).is_err() {
+    // for the next start to claim (`Host::open` records that).
+    if crate::server::Client::connect(home).is_err() {
         eprintln!(
             "viva: socket {} answered no healthy host; nothing to restart — \
              the next `viva` start will claim it if it is stale",
@@ -563,7 +558,7 @@ fn restart_running_server(home: &Path, entry: &Path) {
         );
         return;
     }
-    match crate::office::restart_server_with(home, entry) {
+    match crate::server::restart_server_with(home, entry) {
         Ok(new_pid) => println!(
             "Resident server restarted on the new version (pid {new_pid}); \
              its terminals carried over — reconnect the TUI."
@@ -584,7 +579,7 @@ fn print_restart_skipped() {
 /// Bounded capture + deadline for the existing curl/npm and version probe.
 /// Files avoid pipe deadlocks; no shell interpretation, stdin prompts, or
 /// unbounded in-memory subprocess output. Failures retain their real cause.
-fn capture(command: &mut Command, timeout: Duration) -> OfficeResult<String> {
+fn capture(command: &mut Command, timeout: Duration) -> Result<String> {
     let stdout = NamedTempFile::new()?;
     let stderr = NamedTempFile::new()?;
     let program = command.get_program().to_string_lossy().into_owned();

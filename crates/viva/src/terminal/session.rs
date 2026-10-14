@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use vt100::Parser;
 
-use crate::foundation::error::{OfficeError, OfficeResult};
+use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::TerminalId;
 use crate::foundation::records::{TerminalEvent, TerminalEventKind, TerminalOwner};
 use crate::foundation::store::Store;
@@ -78,7 +78,7 @@ pub struct TerminalSpec {
 }
 
 impl TerminalSpec {
-    pub fn new(argv: Vec<String>, cwd: std::path::PathBuf) -> OfficeResult<Self> {
+    pub fn new(argv: Vec<String>, cwd: std::path::PathBuf) -> Result<Self> {
         let spec = Self {
             argv,
             cwd,
@@ -90,19 +90,19 @@ impl TerminalSpec {
         Ok(spec)
     }
 
-    pub fn validate(&self) -> OfficeResult<()> {
+    pub fn validate(&self) -> Result<()> {
         let Some(program) = self.argv.first() else {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "terminal argv must name a program; empty argv is rejected".into(),
             ));
         };
         if program.trim().is_empty() {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "terminal argv[0] must be a program, not an empty string".into(),
             ));
         }
         if !self.cwd.is_absolute() {
-            return Err(OfficeError::Validation(format!(
+            return Err(Error::Validation(format!(
                 "terminal cwd must be absolute: {}",
                 self.cwd.display()
             )));
@@ -113,7 +113,7 @@ impl TerminalSpec {
             || self.rows > 256
             || u32::from(self.cols) * u32::from(self.rows) > 16384
         {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "terminal size must be 1..512 columns, 1..256 rows and at most 16384 cells".into(),
             ));
         }
@@ -197,7 +197,7 @@ impl DiskLog {
         path: &std::path::Path,
         secrets: Vec<String>,
         max_bytes: Option<u64>,
-    ) -> OfficeResult<Self> {
+    ) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -321,7 +321,7 @@ impl TerminalHandle {
         spec: &TerminalSpec,
         owner: &TerminalOwner,
         disk_log: Option<Arc<DiskLog>>,
-    ) -> OfficeResult<Self> {
+    ) -> Result<Self> {
         spec.validate()?;
         let (master, slave_fd) = OwnedMaster::open(spec)?;
         // SAFETY: open returned a fresh slave fd owned by this caller.
@@ -390,7 +390,7 @@ impl TerminalHandle {
         rows: u16,
         history: Vec<String>,
         disk_log: Option<Arc<DiskLog>>,
-    ) -> OfficeResult<Self> {
+    ) -> Result<Self> {
         Self::adopt_with_screen(
             master_fd,
             pid,
@@ -419,9 +419,9 @@ impl TerminalHandle {
         // transfer is reassembled — its continuation arrives as a
         // sequence, not text.
         pending: &[u8],
-    ) -> OfficeResult<Self> {
+    ) -> Result<Self> {
         if cols == 0 || rows == 0 {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "terminal size must be 1..512 columns, 1..256 rows and at most 16384 cells".into(),
             ));
         }
@@ -482,7 +482,7 @@ impl TerminalHandle {
 
     /// A duplicate of the master fd for live-handoff transfer. The
     /// original stays owned by this session until it is dropped.
-    pub fn master_fd_for_transfer(&self) -> OfficeResult<Option<std::os::fd::RawFd>> {
+    pub fn master_fd_for_transfer(&self) -> Result<Option<std::os::fd::RawFd>> {
         match self.master.lock().expect("pty master").as_ref() {
             Some(master) => Ok(Some(master.dup()?)),
             None => Ok(None),
@@ -496,7 +496,7 @@ impl TerminalHandle {
         terminal_id: &TerminalId,
         owner: &TerminalOwner,
         kind: TerminalEventKind,
-    ) -> OfficeResult<()> {
+    ) -> Result<()> {
         let payload = serde_json::json!({
             "pid": self.pid,
             "pid_start_marker": self.pid_start_marker,
@@ -511,21 +511,21 @@ impl TerminalHandle {
     /// Write bytes to the child's stdin. Backpressure is the PTY's own
     /// bounded pipe: when the child does not consume, this blocks — memory
     /// never grows with a silent consumer.
-    pub fn input(&self, bytes: &[u8]) -> OfficeResult<()> {
+    pub fn input(&self, bytes: &[u8]) -> Result<()> {
         let mut writer = self.shared.writer.lock().expect("pty writer");
         writer.write_all(bytes)?;
         writer.flush()?;
         Ok(())
     }
 
-    pub fn resize(&self, cols: u16, rows: u16) -> OfficeResult<()> {
+    pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         if cols == 0
             || rows == 0
             || cols > 512
             || rows > 256
             || u32::from(cols) * u32::from(rows) > 16384
         {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "terminal size must be 1..512 columns, 1..256 rows and at most 16384 cells".into(),
             ));
         }
@@ -533,7 +533,7 @@ impl TerminalHandle {
             .lock()
             .expect("pty master")
             .as_ref()
-            .ok_or_else(|| OfficeError::Validation("terminal has no live PTY master".into()))?
+            .ok_or_else(|| Error::Validation("terminal has no live PTY master".into()))?
             .resize(cols, rows)?;
         self.shared
             .parser
@@ -547,10 +547,10 @@ impl TerminalHandle {
     /// Snapshot the live grid + bounded scrollback. The scrollback read
     /// temporarily moves the emulator's view; the live offset is restored.
     /// Handoff history (if any) leads the scrollback window.
-    pub fn snapshot(&self) -> OfficeResult<TerminalSnapshot> {
+    pub fn snapshot(&self) -> Result<TerminalSnapshot> {
         self.snapshot_at(0)
     }
-    pub fn snapshot_at(&self, offset: usize) -> OfficeResult<TerminalSnapshot> {
+    pub fn snapshot_at(&self, offset: usize) -> Result<TerminalSnapshot> {
         let mut parser = self.shared.parser.lock().expect("pty parser");
         let (rows, cols) = parser.screen().size();
         // Total scrollback currently retained by the ring. The ring itself
@@ -663,7 +663,7 @@ impl TerminalHandle {
     /// lock is held only across the non-blocking check, never across a
     /// blocking wait, so a concurrent stop() can always run its
     /// signal/escalation protocol and no lock cycle can deadlock.
-    pub fn try_wait(&self) -> OfficeResult<Option<TerminalExit>> {
+    pub fn try_wait(&self) -> Result<Option<TerminalExit>> {
         let mut core = self.shared.core.lock().expect("session core");
         reap_under_lock(&mut core)
     }
@@ -672,7 +672,7 @@ impl TerminalHandle {
     /// conclusion is permanent. Implemented as `try_wait` polling — the
     /// sleep happens outside every lock, so a concurrent stop() can always
     /// acquire the core lock, signal the group, and escalate on time.
-    pub fn wait(&self) -> OfficeResult<TerminalExit> {
+    pub fn wait(&self) -> Result<TerminalExit> {
         loop {
             if let Some(exit) = self.try_wait()? {
                 return Ok(exit);
@@ -684,7 +684,7 @@ impl TerminalHandle {
     /// Stop the session: SIGTERM to the process group, escalate to SIGKILL
     /// on timeout, confirm by reaping. Idempotent — once a conclusion is
     /// recorded, later stops return it unchanged and never signal again.
-    pub fn stop(&self, policy: StopPolicy) -> OfficeResult<TerminalExit> {
+    pub fn stop(&self, policy: StopPolicy) -> Result<TerminalExit> {
         {
             let mut core = self.shared.core.lock().expect("session core");
             if let SessionState::Exited(exit) = core.state.clone() {
@@ -779,15 +779,15 @@ impl TerminalHandle {
     /// blind". Fails when the previous reader never confirmed exit - the
     /// caller records the terminal as degraded (input works, output frozen
     /// until restart) instead of pretending.
-    pub fn reattach_reader(&self) -> OfficeResult<()> {
+    pub fn reattach_reader(&self) -> Result<()> {
         if !self.shared.reader_gone.load(Ordering::SeqCst) {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "the detached reader never confirmed exit; reattaching would race it".into(),
             ));
         }
         let master_guard = self.master.lock().expect("pty master");
         let Some(master) = master_guard.as_ref() else {
-            return Err(OfficeError::Validation(
+            return Err(Error::Validation(
                 "the session has no live master fd to read".into(),
             ));
         };
@@ -957,7 +957,7 @@ fn adopted_pid_alive(pid: u32) -> bool {
 /// and ONLY across non-blocking work. Attribution: a reap after escalation
 /// is the forced kill's conclusion; after a stop request (pre-escalation)
 /// it is the graceful stop's; otherwise the child's own exit.
-fn reap_under_lock(core: &mut SessionCore) -> OfficeResult<Option<TerminalExit>> {
+fn reap_under_lock(core: &mut SessionCore) -> Result<Option<TerminalExit>> {
     if let SessionState::Exited(exit) = core.state.clone() {
         return Ok(Some(exit));
     }
@@ -992,7 +992,7 @@ fn reap_under_lock(core: &mut SessionCore) -> OfficeResult<Option<TerminalExit>>
     };
     let Some(status) = child
         .try_wait()
-        .map_err(|e| OfficeError::Io(std::io::Error::other(e.to_string())))?
+        .map_err(|e| Error::Io(std::io::Error::other(e.to_string())))?
     else {
         return Ok(None);
     };
