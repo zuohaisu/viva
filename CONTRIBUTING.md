@@ -14,8 +14,8 @@ and [Transition-Record](https://github.com/zuohaisu/viva/wiki/Transition-Record)
 - Read the decisions that bind your change: the Wiki's
   [Decisions](https://github.com/zuohaisu/viva/wiki/Decisions) section — and
   check each ADR's **Status** line first, because several early ones are
-  explicitly superseded (0001 partially, 0002/0003/0004 fully) and only the
-  superseding ADR (0006–0010) is current.
+  explicitly superseded. Which ADRs are in force is whatever the Status
+  column of the Decisions table says.
 - Treat a missing requirement, unmet dependency, or ambiguous decision as
   blocked; record evidence rather than guessing.
 
