@@ -15,19 +15,33 @@
  *   inert: it registers nothing and claims nothing.
  *
  * Pi keeps its own chat UI and agent loop; Viva keeps its own facts.
+ *
+ * Tools use Pi's real `registerTool({ name, label, description, parameters,
+ * execute })` form with TypeBox parameter schemas.
+ * `test/real-pi-load.test.ts` loads this file in the real Pi and checks the
+ * tools it registers.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "./pi-api.ts";
-import { officeEnv, planDispatch, runEnvelope, toolText, type OfficeEnv } from "./lib.ts";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import {
+  officeEnv,
+  planDispatch,
+  runEnvelope,
+  toolFailure,
+  toolSuccess,
+  type OfficeEnv,
+  type PiHost,
+} from "./lib.ts";
 import { registerComputerTools } from "./computer/computer.ts";
 import { registerMemoryTools } from "./memory/memory.ts";
 
-export default function vivaOffice(pi: ExtensionAPI): void {
+export default function vivaOffice(pi: PiHost): void {
   const env: OfficeEnv | null = officeEnv(process.env);
   // Not launched by Viva: stay silent and claim nothing.
   if (!env) return;
 
-  pi.on("session_start", async (_event: unknown, ctx: ExtensionContext) => {
+  pi.on("session_start", async (_event, ctx: ExtensionContext) => {
     const lines: string[] = [];
     lines.push(
       `Viva office context loaded: you are ${env.memberName} (member ${env.memberId}). ` +
@@ -46,108 +60,112 @@ export default function vivaOffice(pi: ExtensionAPI): void {
     ctx.ui.notify(lines.join("\n"), "info");
   });
 
-  pi.registerTool("viva_office_status", {
+  pi.registerTool({
+    name: "viva_office_status",
+    label: "Viva office status",
     description:
       "Read the Viva office status: active host, terminals and execution counts (read-only).",
-    parameters: { type: "object", properties: {}, additionalProperties: false },
+    parameters: Type.Object({}, { additionalProperties: false }),
     execute: async () => {
       try {
-        const payload = await runEnvelope(env, ["status"]);
-        return { content: toolText(payload) };
+        return toolSuccess(await runEnvelope(env, ["status"]));
       } catch (err) {
-        return { content: `office status unavailable: ${String(err)}`, isError: true };
+        return toolFailure(`office status unavailable: ${String(err)}`);
       }
     },
   });
 
-  pi.registerTool("viva_office_task_brief", {
+  pi.registerTool({
+    name: "viva_office_task_brief",
+    label: "Viva task brief",
     description:
       "Read the current task's brief from the office records (read-only). Uses the task attached to this session.",
-    parameters: {
-      type: "object",
-      properties: {
-        task_id: { type: "string", description: "Optional; defaults to this session's task." },
+    parameters: Type.Object(
+      {
+        task_id: Type.Optional(
+          Type.String({ description: "Optional; defaults to this session's task." }),
+        ),
       },
-      additionalProperties: false,
-    },
-    execute: async (args) => {
-      const taskId = typeof args.task_id === "string" && args.task_id ? args.task_id : env.taskId;
+      { additionalProperties: false },
+    ),
+    execute: async (_toolCallId, params) => {
+      const taskId = params.task_id || env.taskId;
       if (!taskId) {
-        return { content: "no task is attached to this session", isError: true };
+        return toolFailure("no task is attached to this session");
       }
       try {
-        const payload = await runEnvelope(env, ["brief", taskId]);
-        return { content: toolText(payload) };
+        return toolSuccess(await runEnvelope(env, ["brief", taskId]));
       } catch (err) {
-        return { content: `task brief unavailable: ${String(err)}`, isError: true };
+        return toolFailure(`task brief unavailable: ${String(err)}`);
       }
     },
   });
 
-  pi.registerTool("viva_office_dispatch", {
+  pi.registerTool({
+    name: "viva_office_dispatch",
+    label: "Viva dispatch",
     description:
       "Dispatch a task execution through the office under this session's grant. Refuses without a live grant: ask the user to authorize.",
-    parameters: {
-      type: "object",
-      properties: {
-        argv: {
-          type: "array",
-          items: { type: "string" },
+    parameters: Type.Object(
+      {
+        argv: Type.Array(Type.String(), {
           description: "Explicit program + arguments (never a joined shell string).",
-        },
-        cwd: { type: "string", description: "Absolute working directory (the task worktree)." },
-        request_key: { type: "string", description: "Idempotency key so retries never double-start." },
-        task_id: { type: "string", description: "Optional; defaults to this session's task." },
-        grant_id: { type: "string", description: "Optional; defaults to this session's grant." },
+        }),
+        cwd: Type.String({ description: "Absolute working directory (the task worktree)." }),
+        request_key: Type.String({ description: "Idempotency key so retries never double-start." }),
+        task_id: Type.Optional(
+          Type.String({ description: "Optional; defaults to this session's task." }),
+        ),
+        grant_id: Type.Optional(
+          Type.String({ description: "Optional; defaults to this session's grant." }),
+        ),
       },
-      required: ["argv", "cwd", "request_key"],
-      additionalProperties: false,
-    },
-    execute: async (args) => {
-      const argv = Array.isArray(args.argv)
-        ? args.argv.filter((a): a is string => typeof a === "string")
-        : [];
+      { additionalProperties: false },
+    ),
+    execute: async (_toolCallId, params) => {
       const plan = planDispatch(env, {
-        argv,
-        cwd: typeof args.cwd === "string" ? args.cwd : "",
-        requestKey: typeof args.request_key === "string" ? args.request_key : "",
-        taskId: typeof args.task_id === "string" ? args.task_id : undefined,
-        grantId: typeof args.grant_id === "string" ? args.grant_id : undefined,
+        argv: params.argv,
+        cwd: params.cwd,
+        requestKey: params.request_key,
+        taskId: params.task_id,
+        grantId: params.grant_id,
       });
       if (plan.kind === "refuse") {
         // A refusal is a proposal, not a silent failure: the user is told
         // what authorization is missing.
-        return { content: plan.reason, isError: true };
+        return toolFailure(plan.reason);
       }
       try {
-        const payload = await runEnvelope(env, plan.argv.slice(1));
-        return { content: toolText(payload) };
+        return toolSuccess(await runEnvelope(env, plan.argv.slice(1)));
       } catch (err) {
-        return { content: `dispatch failed: ${String(err)}`, isError: true };
+        return toolFailure(`dispatch failed: ${String(err)}`);
       }
     },
   });
 
-  pi.registerTool("viva_office_handoff", {
+  pi.registerTool({
+    name: "viva_office_handoff",
+    label: "Viva handoff",
     description:
       "Record an explicit handoff summary for the current task (a member-reported fact; it never completes the task).",
-    parameters: {
-      type: "object",
-      properties: {
-        summary: { type: "string", description: "What was done, what remains, where the record lives." },
-        task_id: { type: "string", description: "Optional; defaults to this session's task." },
+    parameters: Type.Object(
+      {
+        summary: Type.String({
+          description: "What was done, what remains, where the record lives.",
+        }),
+        task_id: Type.Optional(
+          Type.String({ description: "Optional; defaults to this session's task." }),
+        ),
       },
-      required: ["summary"],
-      additionalProperties: false,
-    },
-    execute: async (args) => {
-      const taskId = typeof args.task_id === "string" && args.task_id ? args.task_id : env.taskId;
+      { additionalProperties: false },
+    ),
+    execute: async (_toolCallId, params) => {
+      const taskId = params.task_id || env.taskId;
       if (!taskId) {
-        return { content: "no task is attached to this session; nothing to hand off", isError: true };
+        return toolFailure("no task is attached to this session; nothing to hand off");
       }
-      const summary = typeof args.summary === "string" ? args.summary : "";
-      if (!summary.trim()) {
-        return { content: "handoff summary must not be empty", isError: true };
+      if (!params.summary.trim()) {
+        return toolFailure("handoff summary must not be empty");
       }
       try {
         const payload = await runEnvelope(env, [
@@ -157,15 +175,14 @@ export default function vivaOffice(pi: ExtensionAPI): void {
           "--member",
           env.memberId,
           "--summary",
-          summary,
+          params.summary,
         ]);
-        return { content: toolText(payload) };
+        return toolSuccess(payload);
       } catch (err) {
-        return { content: `handoff not recorded: ${String(err)}`, isError: true };
+        return toolFailure(`handoff not recorded: ${String(err)}`);
       }
     },
   });
-
 
   // F03 (issue #25): the read-only computer audit tool. Input stays off
   // chat — it lives on Viva's task-scoped grant path only.

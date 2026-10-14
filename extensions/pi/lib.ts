@@ -19,6 +19,16 @@
 
 import { spawnSync } from "node:child_process";
 
+import type { AgentToolResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+/**
+ * The part of Pi's extension API this package uses. Extension factories take
+ * this narrower type, so a test double only has to supply these two members,
+ * and `npm run typecheck` fails if their signatures stop matching the real
+ * `ExtensionAPI`. Real Pi's `ExtensionAPI` is assignable to it.
+ */
+export type PiHost = Pick<ExtensionAPI, "on" | "registerTool">;
+
 export interface OfficeEnv {
   home: string;
   memberId: string;
@@ -162,4 +172,27 @@ export function runEnvelope(env: OfficeEnv, officeArgs: string[]): Promise<unkno
 /** Stringify a tool result honestly: real payload text or the real error. */
 export function toolText(value: unknown): string {
   return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
+/**
+ * What a Viva tool hands back to Pi: `content` is what the model reads,
+ * `details` carries the CLI's structured payload for logs and the UI, and
+ * `isError` marks a failure without throwing (Pi's `AgentToolResult`).
+ */
+export type ToolOutcome = AgentToolResult<unknown>;
+
+/**
+ * A successful tool result: the CLI payload as text for the model, and, when
+ * it is structured (an object or array), as `details`; otherwise `{}`.
+ */
+export function toolSuccess(payload: unknown): ToolOutcome {
+  return {
+    content: [{ type: "text", text: toolText(payload) }],
+    details: typeof payload === "object" && payload !== null ? payload : {},
+  };
+}
+
+/** A failed tool result: the real reason as text; the model sees an error. */
+export function toolFailure(message: string): ToolOutcome {
+  return { content: [{ type: "text", text: message }], details: {}, isError: true };
 }

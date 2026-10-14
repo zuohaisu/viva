@@ -13,9 +13,10 @@ import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { officeEnv, type OfficeEnv } from "../lib.ts";
+import { officeEnv } from "../lib.ts";
 import { COMPUTER_INPUT_REFUSAL, registerComputerTools } from "../computer/computer.ts";
 import vivaOffice from "../viva-office.ts";
+import { callTool, createFakePi, textOf, toolNamed } from "./fake-pi.ts";
 
 const BASE_ENV: NodeJS.ProcessEnv = {
   VIVA_OFFICE_MEMBER_ID: "mem-1",
@@ -54,35 +55,18 @@ function fakeViva(script: string): string {
   return path;
 }
 
-function fakePi() {
-  const registered: Map<
-    string,
-    { execute: (args: Record<string, unknown>) => Promise<{ content: string; isError?: boolean }> }
-  > = new Map();
-  const pi = {
-    on(_event: string, _handler: unknown) {
-      return () => {};
-    },
-    registerTool(name: string, tool: { execute: (args: Record<string, unknown>) => Promise<{ content: string; isError?: boolean }> }) {
-      registered.set(name, tool);
-    },
-    registerCommand(_name: string, _command: unknown) {},
-  };
-  return { registered, pi };
-}
-
 test("the main entry registers the read-only computer audit tool", () => {
   withEnv(BASE_ENV, () => {
     const env = officeEnv(process.env);
     assert.ok(env, "Viva context must parse");
-    const { registered, pi } = fakePi();
-    vivaOffice(pi as never);
+    const fake = createFakePi();
+    vivaOffice(fake.host);
     assert.ok(
-      registered.has("viva_computer_audit"),
+      fake.tools.has("viva_computer_audit"),
       "the audit tool is registered alongside Viva tools",
     );
     assert.ok(
-      ![...registered.keys()].some((name) => name.includes("type") || name.includes("click")),
+      ![...fake.tools.keys()].some((name) => name.includes("type") || name.includes("click")),
       "no input tool is ever registered from chat",
     );
   });
@@ -92,24 +76,25 @@ test("the audit tool runs the viva CLI and reports its payload", () =>
   withEnv(BASE_ENV, async () => {
     const env = officeEnv(process.env)!;
     env.vivaBin = fakeViva('#!/bin/sh\necho \'{ "audited": ["orca-computer"] }\'\n');
-    const { registered, pi } = fakePi();
-    registerComputerTools(pi as never, env);
+    const fake = createFakePi();
+    registerComputerTools(fake.host, env);
 
-    const payload = await registered.get("viva_computer_audit")!.execute({});
-    assert.equal(payload.isError, undefined);
-    assert.match(payload.content, /orca-computer/);
+    const result = await callTool(toolNamed(fake, "viva_computer_audit"), {});
+    assert.equal(result.isError, undefined);
+    assert.match(textOf(result), /orca-computer/);
+    assert.deepEqual(result.details, { audited: ["orca-computer"] }, "the CLI payload is kept as details");
   }));
 
 test("an unavailable audit is an honest error, never a fake pass", () =>
   withEnv(BASE_ENV, async () => {
     const env = officeEnv(process.env)!;
     env.vivaBin = fakeViva('#!/bin/sh\necho "viva: store missing" >&2\nexit 1\n');
-    const { registered, pi } = fakePi();
-    registerComputerTools(pi as never, env);
+    const fake = createFakePi();
+    registerComputerTools(fake.host, env);
 
-    const payload = await registered.get("viva_computer_audit")!.execute({});
-    assert.equal(payload.isError, true);
-    assert.match(payload.content, /unavailable/);
+    const result = await callTool(toolNamed(fake, "viva_computer_audit"), {});
+    assert.equal(result.isError, true);
+    assert.match(textOf(result), /unavailable/);
   }));
 
 test("computer input stays behind the task-scoped grant path, off chat", () => {

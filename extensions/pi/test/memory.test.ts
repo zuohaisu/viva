@@ -13,9 +13,10 @@ import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { officeEnv, type OfficeEnv } from "../lib.ts";
+import { officeEnv } from "../lib.ts";
 import { MEMORY_EXIT_REFUSAL, registerMemoryTools } from "../memory/memory.ts";
 import vivaOffice from "../viva-office.ts";
+import { callTool, createFakePi, textOf, toolNamed } from "./fake-pi.ts";
 
 const BASE_ENV: NodeJS.ProcessEnv = {
   VIVA_OFFICE_MEMBER_ID: "mem-1",
@@ -69,29 +70,12 @@ function fakeViva(): string {
   return path;
 }
 
-function fakePi() {
-  const registered: Map<
-    string,
-    { execute: (args: Record<string, unknown>) => Promise<{ content: string; isError?: boolean }> }
-  > = new Map();
-  const pi = {
-    on(_event: string, _handler: unknown) {
-      return () => {};
-    },
-    registerTool(name: string, tool: { execute: (args: Record<string, unknown>) => Promise<{ content: string; isError?: boolean }> }) {
-      registered.set(name, tool);
-    },
-    registerCommand(_name: string, _command: unknown) {},
-  };
-  return { registered, pi };
-}
-
 test("the main entry registers the memory tools", () => {
   withEnv(BASE_ENV, () => {
-    const { registered, pi } = fakePi();
-    vivaOffice(pi as never);
-    assert.ok(registered.has("viva_memory_search"));
-    assert.ok(registered.has("viva_memory_remember"));
+    const fake = createFakePi();
+    vivaOffice(fake.host);
+    assert.ok(fake.tools.has("viva_memory_search"));
+    assert.ok(fake.tools.has("viva_memory_remember"));
   });
 });
 
@@ -99,15 +83,16 @@ test("memory search is member-scoped and read-only", async () => {
   await withEnv(BASE_ENV, async () => {
     const env = officeEnv(process.env)!;
     env.vivaBin = fakeViva();
-    const { registered, pi } = fakePi();
-    registerMemoryTools(pi as never, env);
+    const fake = createFakePi();
+    registerMemoryTools(fake.host, env);
 
-    const payload = await registered.get("viva_memory_search")!.execute({
+    const result = await callTool(toolNamed(fake, "viva_memory_search"), {
       query: "release train",
       project_id: "proj-9",
     });
-    assert.equal(payload.isError, undefined);
-    const argv = JSON.parse(payload.content) as string[];
+    assert.equal(result.isError, undefined);
+    const argv = JSON.parse(textOf(result)) as string[];
+    assert.deepEqual(result.details, argv, "the CLI payload is kept as details");
     assert.deepEqual(argv, [
       "memory",
       "search",
@@ -125,14 +110,14 @@ test("memory remember records provenance even when chat omits it", async () => {
   await withEnv(BASE_ENV, async () => {
     const env = officeEnv(process.env)!;
     env.vivaBin = fakeViva();
-    const { registered, pi } = fakePi();
-    registerMemoryTools(pi as never, env);
+    const fake = createFakePi();
+    registerMemoryTools(fake.host, env);
 
-    const payload = await registered.get("viva_memory_remember")!.execute({
+    const result = await callTool(toolNamed(fake, "viva_memory_remember"), {
       content: "The demo is on Fridays",
     });
-    assert.equal(payload.isError, undefined);
-    const argv = JSON.parse(payload.content) as string[];
+    assert.equal(result.isError, undefined);
+    const argv = JSON.parse(textOf(result)) as string[];
     assert.deepEqual(argv, [
       "memory",
       "remember",
@@ -147,14 +132,23 @@ test("memory remember records provenance even when chat omits it", async () => {
 });
 
 test("empty content and queries are refused before any call", async () => {
-  withEnv(BASE_ENV, () => {
+  await withEnv(BASE_ENV, async () => {
     const env = officeEnv(process.env)!;
+    // /bin/false would make any real CLI call fail as "unavailable"/"refused",
+    // so the exact refusal text below proves nothing was spawned.
     env.vivaBin = "/bin/false";
-    const { registered, pi } = fakePi();
-    registerMemoryTools(pi as never, env);
-    void registered;
-    // Synchronous refusal paths are covered by the CLI contract; here we
-    // pin the exported refusal text instead of spawning anything.
+    const fake = createFakePi();
+    registerMemoryTools(fake.host, env);
+
+    const search = await callTool(toolNamed(fake, "viva_memory_search"), { query: "   " });
+    assert.equal(search.isError, true);
+    assert.equal(textOf(search), "memory search needs a non-empty query");
+
+    const write = await callTool(toolNamed(fake, "viva_memory_remember"), { content: "   " });
+    assert.equal(write.isError, true);
+    assert.equal(textOf(write), "memory write needs non-empty content");
+
+    // The exit path is not a chat tool; the refusal text is pinned instead.
     assert.match(MEMORY_EXIT_REFUSAL, /archive/);
     assert.match(MEMORY_EXIT_REFUSAL, /recoverable/);
     assert.match(MEMORY_EXIT_REFUSAL, /never/);
