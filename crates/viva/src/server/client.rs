@@ -70,6 +70,15 @@ impl Client {
     /// running. The spawned server outlives this process by construction:
     /// its own process group, its output in `server.log`.
     pub fn ensure_server(home: &Path) -> Result<Self> {
+        if crate::foundation::legacy::old_control_socket_alive(home)? {
+            return Err(Error::Validation(format!(
+                "the previous control socket {} is still serving; refusing to start a second \
+                 server. Stop the old server with the previous version's `viva shutdown`, then \
+                 start Viva again to finish the migration",
+                home.join(crate::foundation::legacy::OLD_SOCKET_NAME)
+                    .display()
+            )));
+        }
         let socket_path = home.join(SOCKET_NAME);
         if socket_path.exists() {
             match Client::connect(home) {

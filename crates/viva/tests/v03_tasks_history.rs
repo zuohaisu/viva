@@ -32,7 +32,7 @@ fn attribution(member: &MemberId, role: &str, workspace: &WorkspaceId) -> Attrib
 #[test]
 fn attribution_is_frozen_at_creation_and_survives_switches() {
     let dir = tempfile::TempDir::new().expect("dir");
-    let db = dir.path().join("office.db");
+    let db = dir.path().join("viva.db");
     let migrations = frozen();
 
     let (task_id, member_a, workspace_a, original) = {
@@ -100,7 +100,7 @@ fn attribution_is_frozen_at_creation_and_survives_switches() {
 #[test]
 fn concurrent_appends_do_not_lose_events() {
     let dir = tempfile::TempDir::new().expect("dir");
-    let db = dir.path().join("office.db");
+    let db = dir.path().join("viva.db");
     let migrations = frozen();
     let task_id = {
         let store = Store::open(&db, &migrations).expect("open");
@@ -149,7 +149,7 @@ fn concurrent_appends_do_not_lose_events() {
 #[test]
 fn retried_request_key_never_duplicates_executions() {
     let dir = tempfile::TempDir::new().expect("dir");
-    let db = dir.path().join("office.db");
+    let db = dir.path().join("viva.db");
     let store = Store::open(&db, &frozen()).expect("open");
     let tasks = TaskRegistry::new(&store);
     let member = MemberId::new();
@@ -198,7 +198,7 @@ fn retried_request_key_never_duplicates_executions() {
 #[test]
 fn crash_between_intent_and_pid_is_recorded_as_unresolved() {
     let dir = tempfile::TempDir::new().expect("dir");
-    let db = dir.path().join("office.db");
+    let db = dir.path().join("viva.db");
     let migrations = frozen();
     let task_id = {
         let store = Store::open(&db, &migrations).expect("open");
@@ -253,7 +253,7 @@ fn crash_between_intent_and_pid_is_recorded_as_unresolved() {
 #[test]
 fn zero_exit_records_process_end_but_never_closes_the_task() {
     let dir = tempfile::TempDir::new().expect("dir");
-    let db = dir.path().join("office.db");
+    let db = dir.path().join("viva.db");
     let store = Store::open(&db, &frozen()).expect("open");
     let tasks = TaskRegistry::new(&store);
     let member = MemberId::new();
@@ -388,7 +388,7 @@ fn zero_exit_records_process_end_but_never_closes_the_task() {
 #[test]
 fn handoff_brief_is_complete_and_survives_restart() {
     let dir = tempfile::TempDir::new().expect("dir");
-    let db = dir.path().join("office.db");
+    let db = dir.path().join("viva.db");
     let migrations = frozen();
     let task_id = {
         let store = Store::open(&db, &migrations).expect("open");
@@ -486,7 +486,7 @@ fn handoff_brief_is_complete_and_survives_restart() {
 #[test]
 fn task_history_paginates() {
     let dir = tempfile::TempDir::new().expect("dir");
-    let db = dir.path().join("office.db");
+    let db = dir.path().join("viva.db");
     let store = Store::open(&db, &frozen()).expect("open");
     let tasks = TaskRegistry::new(&store);
     for i in 0..7 {
@@ -506,7 +506,7 @@ fn task_history_paginates() {
 #[test]
 fn nonzero_exit_marks_execution_failed_not_task_cancelled() {
     let dir = tempfile::TempDir::new().expect("dir");
-    let db = dir.path().join("office.db");
+    let db = dir.path().join("viva.db");
     let store = Store::open(&db, &frozen()).expect("open");
     let tasks = TaskRegistry::new(&store);
     let member = MemberId::new();
@@ -537,7 +537,7 @@ fn nonzero_exit_marks_execution_failed_not_task_cancelled() {
 #[test]
 fn racing_same_request_key_replays_instead_of_erroring() {
     let dir = tempfile::TempDir::new().expect("dir");
-    let db = dir.path().join("office.db");
+    let db = dir.path().join("viva.db");
     let migrations = frozen();
     let task_id = {
         let store = Store::open(&db, &migrations).expect("open");
@@ -583,7 +583,7 @@ fn racing_same_request_key_replays_instead_of_erroring() {
 #[test]
 fn generated_briefs_respect_redaction() {
     let dir = tempfile::TempDir::new().expect("dir");
-    let db = dir.path().join("office.db");
+    let db = dir.path().join("viva.db");
     let store = Store::open(&db, &frozen()).expect("open");
     let secret = "brief-secret-7734";
     let tasks = TaskRegistry::new(&store).with_redaction(vec![secret.to_string()]);

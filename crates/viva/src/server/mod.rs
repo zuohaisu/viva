@@ -109,7 +109,7 @@ CREATE TABLE recovery_plans (
 "#;
 
 /// Socket file name inside `VIVA_HOME`.
-pub const SOCKET_NAME: &str = "office.sock";
+pub const SOCKET_NAME: &str = "server.sock";
 /// Rendezvous socket for a live handoff (created by the restarting host,
 /// connected by the resumed host) — also inside `VIVA_HOME`.
 pub const HANDOFF_SOCKET_NAME: &str = "handoff.sock";

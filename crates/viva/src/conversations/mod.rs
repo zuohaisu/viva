@@ -622,7 +622,7 @@ mod tests {
     #[test]
     fn rename_and_tree_survive_reopen() {
         let dir = tempfile::TempDir::new().expect("dir");
-        let db = dir.path().join("office.db");
+        let db = dir.path().join("viva.db");
         let frozen = MigrationRegistry::new()
             .register(DOMAIN_FOUNDATION, 1, "foundation v1", FOUNDATION_V1_SQL)
             .register(

@@ -54,7 +54,7 @@ fn store() -> Store {
 #[test]
 fn conflicting_legacy_keys_fail_with_recovery_guidance_and_preserve_rows() {
     let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("office.db");
+    let path = dir.path().join("viva.db");
     let old = Store::open(&path, &frozen()).unwrap();
     old.connection()
         .execute_batch(
@@ -89,7 +89,7 @@ fn conflicting_legacy_keys_fail_with_recovery_guidance_and_preserve_rows() {
 #[test]
 fn v1_proposals_migrate_without_reproposing_dismissed_or_open_subjects() {
     let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("office.db");
+    let path = dir.path().join("viva.db");
     let old = Store::open(&path, &frozen()).unwrap();
     old.connection().execute_batch(
         "INSERT INTO maintenance_sessions VALUES ('session', 1, '2020-01-01T00:00:00Z', NULL);

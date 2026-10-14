@@ -493,8 +493,8 @@ fn backup_is_a_private_openable_copy_of_the_pre_migration_state() {
     let files = backups(dir.path());
     assert_eq!(files.len(), 1, "{files:?}");
     let name = files[0].file_name().unwrap().to_str().unwrap().to_string();
-    assert!(name.starts_with("office.db.pre-office-removal."), "{name}");
-    let stamp = name.trim_start_matches("office.db.pre-office-removal.");
+    assert!(name.starts_with("viva.db.pre-office-removal."), "{name}");
+    let stamp = name.trim_start_matches("viva.db.pre-office-removal.");
     assert!(
         stamp.len() == 16 && stamp.ends_with('Z') && stamp.as_bytes()[8] == b'T',
         "UTC stamp, got `{stamp}`"

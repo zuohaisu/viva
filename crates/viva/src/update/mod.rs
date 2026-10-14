@@ -543,6 +543,13 @@ fn npm_wrapper_entry(prefix: &Path) -> PathBuf {
 /// the old generation serving and says so instead of failing the install,
 /// which already succeeded.
 fn restart_running_server(home: &Path, entry: &Path) {
+    if crate::foundation::legacy::old_control_socket_alive(home).unwrap_or(false) {
+        eprintln!(
+            "viva: upgrade installed; shut down the old server with the previous version's \
+             `viva shutdown`, then start `viva` to finish the migration."
+        );
+        return;
+    }
     let socket = home.join(crate::server::SOCKET_NAME);
     if !socket.exists() {
         println!("No running resident server; the next `viva` start will use the new version.");

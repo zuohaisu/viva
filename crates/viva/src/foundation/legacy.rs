@@ -37,14 +37,16 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 
 use crate::foundation::error::{Error, Result};
-use crate::foundation::paths::ensure_private_dir;
+use crate::foundation::paths::{DATABASE_FILE, ensure_private_dir};
 
 /// Directory (inside the state root) that holds the pre-migration backups.
 const BACKUP_DIR: &str = "backups";
 /// Marks a backup as the one taken before the old names were removed.
 const BACKUP_INFIX: &str = "pre-office-removal";
 /// The control socket the old server listens on (renamed by issue #98).
-const OLD_SOCKET_NAME: &str = "office.sock";
+pub const OLD_SOCKET_NAME: &str = "office.sock";
+/// The database file the old server kept inside the state root (issue #98).
+pub const OLD_DATABASE_FILE: &str = "office.db";
 
 /// Tables renamed by this migration: `(old, new)`.
 const TABLE_RENAMES: [(&str, &str); 6] = [
@@ -137,14 +139,118 @@ pub fn is_legacy_database(db_path: &Path) -> Result<bool> {
 /// to migrate the database while the old server still serves from it. Called
 /// before anything is asked of the running server, so it keeps serving.
 pub fn refuse_live_handoff(db_path: &Path) -> Result<()> {
+    if let Some(home) = db_path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        let legacy_db = home.join(OLD_DATABASE_FILE);
+        if legacy_db.exists() {
+            return Err(cross_version_upgrade_blocked(&format!(
+                "the database file {} is still present",
+                legacy_db.display()
+            )));
+        }
+        if old_control_socket_alive(home)? {
+            return Err(cross_version_upgrade_blocked(&format!(
+                "the previous control socket {} is still accepting connections",
+                home.join(OLD_SOCKET_NAME).display()
+            )));
+        }
+    }
     if is_legacy_database(db_path)? {
-        return Err(Error::Validation(format!(
-            "the database {} still uses the previous table names, and a live handoff cannot \
-             migrate it while the old server is running. The running server was left untouched. \
-             Stop it with the previous version's `viva shutdown`, then start Viva again to \
-             finish the upgrade",
+        return Err(cross_version_upgrade_blocked(&format!(
+            "the database {} still uses the previous table names",
             db_path.display()
         )));
+    }
+    Ok(())
+}
+
+fn cross_version_upgrade_blocked(detail: &str) -> Error {
+    Error::Validation(format!(
+        "{detail}. A live handoff cannot migrate across this upgrade while the old server is \
+         running; the running server was left untouched. Stop it with the previous version's \
+         `viva shutdown`, then start Viva again to finish the migration"
+    ))
+}
+
+/// True when the old control socket exists and a server is listening on it.
+pub fn old_control_socket_alive(home: &Path) -> Result<bool> {
+    let socket = home.join(OLD_SOCKET_NAME);
+    if !socket.exists() {
+        return Ok(false);
+    }
+    Ok(UnixStream::connect(&socket).is_ok())
+}
+
+/// Rename `office.db` → `viva.db` (and `-wal` / `-shm`) once on cold start.
+/// Schema migration on the old file runs here before the rename; at runtime
+/// the product never probes both names.
+pub fn ensure_current_database_file(state_root: &Path, database_file: &Path) -> Result<()> {
+    let Some(name) = database_file.file_name().and_then(|n| n.to_str()) else {
+        return Ok(());
+    };
+    if name != DATABASE_FILE {
+        return Ok(());
+    }
+    let legacy_db = state_root.join(OLD_DATABASE_FILE);
+    if database_file.exists() {
+        if legacy_db.exists() {
+            return Err(Error::Migration(format!(
+                "both {} and {} exist under {}; refusing to pick one. Inspect both files by \
+                 hand or restore from a backup in `{BACKUP_DIR}/`",
+                legacy_db.display(),
+                database_file.display(),
+                state_root.display()
+            )));
+        }
+        return Ok(());
+    }
+    if !legacy_db.exists() {
+        return Ok(());
+    }
+    if old_control_socket_alive(state_root)? {
+        return Err(Error::Validation(format!(
+            "the previous control socket {} is still accepting connections; refusing to rename \
+             {} under a running server. Stop it with the previous version's `viva shutdown`, then \
+             start Viva again",
+            state_root.join(OLD_SOCKET_NAME).display(),
+            legacy_db.display()
+        )));
+    }
+
+    let conn = Connection::open(&legacy_db)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    refuse_if_old_server_alive(&conn, &legacy_db)?;
+    conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
+    drop(conn);
+
+    rename_database_sidecars(state_root, OLD_DATABASE_FILE, DATABASE_FILE)?;
+    let stale_socket = state_root.join(OLD_SOCKET_NAME);
+    if stale_socket.exists() {
+        let _ = std::fs::remove_file(stale_socket);
+    }
+    Ok(())
+}
+
+fn rename_database_sidecars(dir: &Path, old_base: &str, new_base: &str) -> Result<()> {
+    for suffix in ["", "-wal", "-shm"] {
+        let old = dir.join(format!("{old_base}{suffix}"));
+        if !old.exists() {
+            continue;
+        }
+        let new = dir.join(format!("{new_base}{suffix}"));
+        if new.exists() {
+            return Err(Error::Migration(format!(
+                "cannot rename {} to {} because the destination already exists",
+                old.display(),
+                new.display()
+            )));
+        }
+        std::fs::rename(&old, &new).map_err(|err| {
+            Error::Migration(format!(
+                "could not rename {} to {} ({err})",
+                old.display(),
+                new.display()
+            ))
+        })?;
     }
     Ok(())
 }
@@ -209,12 +315,17 @@ fn needs_migration(conn: &Connection) -> Result<bool> {
 /// and refuses connections is a crash leftover with a recycled pid, not a
 /// server, and does not block.
 fn refuse_if_old_server_alive(conn: &Connection, db_path: &Path) -> Result<()> {
-    if !table_exists(conn, "office_hosts")? {
+    let hosts_table = if table_exists(conn, "office_hosts")? {
+        "office_hosts"
+    } else if table_exists(conn, "hosts")? {
+        "hosts"
+    } else {
         return Ok(());
-    }
+    };
     let hosts: Vec<(String, i64)> = {
-        let mut stmt =
-            conn.prepare("SELECT host_id, pid FROM office_hosts WHERE exited_at IS NULL")?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT host_id, pid FROM {hosts_table} WHERE exited_at IS NULL"
+        ))?;
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect::<std::result::Result<_, _>>()?
     };
