@@ -1958,12 +1958,10 @@ impl WorkbenchApp {
             self.help_filtering = false;
             return KeyOutcome::Handled;
         }
-        if self.focus == Focus::Panes {
-            if matches!(key.code, KeyCode::Enter) {
-                if let PaneContent::Terminal(id) = &self.pane_focus {
-                    self.enter_terminal_mode(id.clone());
-                    return KeyOutcome::Handled;
-                }
+        if self.focus == Focus::Panes && matches!(key.code, KeyCode::Enter) {
+            if let PaneContent::Terminal(id) = &self.pane_focus {
+                self.enter_terminal_mode(id.clone());
+                return KeyOutcome::Handled;
             }
         }
         if matches!(

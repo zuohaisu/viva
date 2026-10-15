@@ -25,7 +25,7 @@ struct QueryEdit {
 
 /// Cursor and selection over a live text grid. Coordinates are character
 /// indexes into `lines`, not screen cells of a frozen snapshot.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CopyMode {
     row: usize,
     col: usize,
@@ -33,19 +33,6 @@ pub struct CopyMode {
     linewise: bool,
     search: Option<Search>,
     query: Option<QueryEdit>,
-}
-
-impl Default for CopyMode {
-    fn default() -> Self {
-        Self {
-            row: 0,
-            col: 0,
-            anchor: None,
-            linewise: false,
-            search: None,
-            query: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -326,10 +313,10 @@ impl CopyMode {
         let Some(search) = self.search.clone() else {
             return;
         };
-        let forward = match (search.dir, opposite) {
-            (SearchDir::Forward, false) | (SearchDir::Backward, true) => true,
-            _ => false,
-        };
+        let forward = matches!(
+            (search.dir, opposite),
+            (SearchDir::Forward, false) | (SearchDir::Backward, true)
+        );
         let sensitive = search.query.chars().any(|c| c.is_uppercase());
         let needle = if sensitive {
             search.query.clone()
