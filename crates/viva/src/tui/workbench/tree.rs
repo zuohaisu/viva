@@ -760,6 +760,30 @@ fn resize(
     Ok(())
 }
 
+/// Scene, tab, and focused pane after an open. A browser leaf's pane id
+/// is `browser`. Terminal panes use the terminal id.
+pub fn focused_pane(
+    book: &SceneBook,
+    scene_id: Option<&str>,
+    tab_id: Option<&str>,
+) -> Option<(String, String, String)> {
+    let scene_key = scene_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .unwrap_or(book.selected.as_str());
+    let scene = book.scenes.get(scene_key)?;
+    let tab_key = tab_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .unwrap_or(scene.active.as_str());
+    let tab = scene.tabs.iter().find(|tab| tab.id == tab_key)?;
+    let pane_id = match &tab.focus {
+        PaneContent::Browser => "browser".to_string(),
+        PaneContent::Terminal(id) => id.clone(),
+    };
+    Some((scene_key.to_string(), tab.id.clone(), pane_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
