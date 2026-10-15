@@ -87,6 +87,20 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
+fn prefix_b() -> KeyEvent {
+    KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)
+}
+
+fn prefix_then(app: &mut WorkbenchApp, c: char) -> KeyOutcome {
+    app.on_key(prefix_b());
+    app.on_key(key(KeyCode::Char(c)))
+}
+
+fn prefix_shift(app: &mut WorkbenchApp, c: char) -> KeyOutcome {
+    app.on_key(prefix_b());
+    app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT))
+}
+
 /// Two repositories under unrelated parents, repo-b with one linked
 /// worktree, plus the directory the workspace file lives in.
 struct Fixture {
@@ -569,15 +583,21 @@ fn the_top_switcher_reaches_every_workspace_and_is_stable_across_switches() {
         "stable creation order: {first_strip}"
     );
 
-    // `]` walks All → one → two → three → All; four presses wrap around.
-    let mut visited = vec![app.model().workspace_id.clone()];
-    for _ in 0..4 {
-        let out = app.on_key(key(KeyCode::Char(']')));
+    let order: Vec<Option<String>> = std::iter::once(None)
+        .chain(ids.iter().cloned().map(Some))
+        .collect();
+    let mut visited = Vec::new();
+    for id in order.iter().chain(order.iter()) {
+        let value = id.as_ref().map(|i| i.as_str()).unwrap_or("all").to_string();
+        let out = KeyOutcome::Action(WorkbenchAction::Workspace {
+            action: "select".into(),
+            value: Some(value),
+            project_id: None,
+        });
         run_action(&mut app, &store, &terminals, out);
         visited.push(app.model().workspace_id.clone());
     }
-    assert_eq!(visited[0], visited[4], "and wrap around: {visited:?}");
-    let mut seen: Vec<_> = visited[..4].to_vec();
+    let mut seen: Vec<_> = visited.clone();
     seen.sort();
     seen.dedup();
     assert_eq!(seen.len(), 4, "All projects + 3 workspaces: {visited:?}");
@@ -587,15 +607,6 @@ fn the_top_switcher_reaches_every_workspace_and_is_stable_across_switches() {
         first_strip,
         "switching never reorders the switcher"
     );
-
-    // `[` goes the other way from wherever we are.
-    let here = app.model().workspace_id.clone();
-    let out = app.on_key(key(KeyCode::Char('[')));
-    run_action(&mut app, &store, &terminals, out);
-    let back = app.model().workspace_id.clone();
-    let out = app.on_key(key(KeyCode::Char(']')));
-    run_action(&mut app, &store, &terminals, out);
-    assert_eq!(app.model().workspace_id, here, "] undoes [ ({back:?})");
 }
 
 #[test]
@@ -681,8 +692,8 @@ fn the_open_prompt_lists_recent_workspaces_takes_pasted_paths_and_refuses_empty_
     let mut app = WorkbenchApp::new();
     app.set_model(model(&store, &terminals));
 
-    // W opens the prompt; recents are listed newest first.
-    assert_eq!(app.on_key(key(KeyCode::Char('W'))), KeyOutcome::Handled);
+    // ctrl+b w opens the workspace picker; recents are listed newest first.
+    assert_eq!(prefix_then(&mut app, 'w'), KeyOutcome::Handled);
     let (text, _) = render(&mut app, 140, 34);
     assert!(text.contains("Open workspace"), "{text}");
     let recent_a = text
@@ -711,7 +722,7 @@ fn the_open_prompt_lists_recent_workspaces_takes_pasted_paths_and_refuses_empty_
     );
 
     // A pasted path lands in the prompt (newline dropped) and opens.
-    app.on_key(key(KeyCode::Char('W')));
+    prefix_then(&mut app, 'w');
     assert_eq!(
         app.on_paste(&format!("{}\n", f.repo_a.display())),
         KeyOutcome::Handled
@@ -723,7 +734,7 @@ fn the_open_prompt_lists_recent_workspaces_takes_pasted_paths_and_refuses_empty_
     assert!(reply["message"].as_str().unwrap().starts_with("opened"));
 
     // Esc cancels and Ctrl-U clears.
-    app.on_key(key(KeyCode::Char('N')));
+    prefix_shift(&mut app, 'n');
     app.on_key(key(KeyCode::Char('x')));
     app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
     assert_eq!(app.on_key(key(KeyCode::Enter)), KeyOutcome::Handled);
@@ -746,26 +757,26 @@ fn remove_acts_on_the_selected_project_and_never_fires_without_one() {
 
     let mut app = WorkbenchApp::new();
 
-    // All projects: R explains instead of sending an empty request.
     nav.select_all().unwrap();
     app.set_model(model(&store, &terminals));
-    assert_eq!(app.on_key(key(KeyCode::Char('R'))), KeyOutcome::Handled);
+    assert_eq!(
+        app.on_key(key(KeyCode::Char('R'))),
+        KeyOutcome::Ignored,
+        "legacy direct keys are gone"
+    );
     assert_eq!(nav.folders(&ws).unwrap().len(), 2, "nothing removed");
-    let (text, _) = render(&mut app, 140, 30);
-    assert!(text.contains("not a composition"), "explained: {text}");
-    // A and S need a workspace too.
-    assert_eq!(app.on_key(key(KeyCode::Char('A'))), KeyOutcome::Handled);
-    assert_eq!(app.on_key(key(KeyCode::Char('S'))), KeyOutcome::Handled);
-    let (text, _) = render(&mut app, 140, 30);
-    assert!(!text.contains("Add project:") && !text.contains("Save As:"));
 
-    // Workspace selected, cursor on the first row: R removes that project
-    // from the composition only.
+    // Workspace selected, cursor on the first row: remove drops that project
+    // from the composition only (host action, not a legacy key).
     nav.select(&ws).unwrap();
     app.set_model(model(&store, &terminals));
     let project = app.model().worktrees[0].project_id.clone();
     let repos_before = count(&store, "projects");
-    let out = app.on_key(key(KeyCode::Char('R')));
+    let out = KeyOutcome::Action(WorkbenchAction::Workspace {
+        action: "remove".into(),
+        value: None,
+        project_id: Some(project.clone()),
+    });
     let reply = run_action(&mut app, &store, &terminals, out);
     let left: Vec<String> = nav
         .folders(&ws)

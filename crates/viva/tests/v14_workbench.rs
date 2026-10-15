@@ -246,9 +246,6 @@ fn workbench_spans_projects_tasks_worktrees_with_real_git_facts() {
     // branch and the honest dirty state).
     let mut app = WorkbenchApp::new();
     app.set_model(model.clone());
-    app.on_key(ratatui::crossterm::event::KeyEvent::from(
-        ratatui::crossterm::event::KeyCode::Char('1'),
-    ));
     let view = render(&mut app, 240, 24);
     assert!(view.contains("agent/ship-workbench"));
     assert!(view.contains("clean"));

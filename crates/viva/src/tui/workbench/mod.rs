@@ -21,6 +21,7 @@
 //! - Quit is a detach: worktree contents and records are left exactly as
 //!   they are, nothing is re-run when the client reattaches.
 
+mod keybindings;
 mod polling;
 pub mod scenes;
 pub mod terminal_view;
@@ -395,6 +396,12 @@ pub struct WorkbenchApp {
     mouse_action: Option<WorkbenchAction>,
     pane_geometry: Vec<(String, Rect)>,
     scroll_offsets: std::collections::HashMap<String, usize>,
+    /// Herdr-style prefix mode: `ctrl+b` then one action key.
+    prefix_pending: bool,
+    show_key_help: bool,
+    sidebar_collapsed: bool,
+    copy_mode: bool,
+    resize_mode: bool,
 }
 
 impl WorkbenchApp {
@@ -409,7 +416,7 @@ impl WorkbenchApp {
             snapshots: std::collections::HashMap::new(),
             terminal_mode: None,
             diff_view: None,
-            status_line: "1 spaces · 2 agents · 3 tasks · Enter/o shell · p pi · d diff · f files · D cleanup · h handoff · g auto-pull · | - split · x close · z zoom · Ctrl+arrows panes · q detach".into(),
+            status_line: "ctrl+b prefix · Enter opens · j/k navigate lists · h/j/k/l panes · mouse focuses sidebar".into(),
             quit_requested: false,
             layout_dirty: false,
             file_panel: None,
@@ -433,7 +440,12 @@ impl WorkbenchApp {
             sidebar_hits:vec![],
             mouse_action:None,
             pane_geometry:vec![],
-            scroll_offsets:std::collections::HashMap::new(),
+            scroll_offsets: std::collections::HashMap::new(),
+            prefix_pending: false,
+            show_key_help: false,
+            sidebar_collapsed: false,
+            copy_mode: false,
+            resize_mode: false,
         }
     }
 
@@ -1116,13 +1128,314 @@ impl WorkbenchApp {
         self.focus = Focus::Panes;
         self.terminal_mode = Some(terminal_id.into());
         self.status_line =
-            "terminal focused · Ctrl+] navigation · Esc CLI · Shift+PgUp/wheel history · classic keys; no graphics"
+            "terminal · ctrl+b prefix · Esc to CLI · shift+PgUp scrollback · click sidebar to release"
                 .into();
     }
 
     pub fn leave_terminal_mode(&mut self) {
         self.terminal_mode = None;
+        self.copy_mode = false;
+        self.prefix_pending = false;
         self.status_line = "terminal released".into();
+    }
+
+    fn clear_prefix(&mut self) {
+        self.prefix_pending = false;
+    }
+
+    fn arm_prefix(&mut self) {
+        self.prefix_pending = true;
+        self.set_status("prefix mode · ? help · next key is a workbench action");
+    }
+
+    fn switch_tab_index(&mut self, index: usize) -> KeyOutcome {
+        let tabs = self
+            .scenes
+            .scenes
+            .get(&self.scenes.selected)
+            .map(|s| {
+                s.tabs
+                    .iter()
+                    .filter(|t| !t.hidden)
+                    .map(|t| t.id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if tabs.is_empty() {
+            return KeyOutcome::Ignored;
+        }
+        let i = index.min(tabs.len().saturating_sub(1));
+        self.switch_tab(&tabs[i]);
+        KeyOutcome::Handled
+    }
+
+    fn apply_prefix_action(&mut self, action: keybindings::PrefixAction) -> KeyOutcome {
+        use keybindings::PrefixAction;
+        match action {
+            PrefixAction::ShowHelp => {
+                self.show_key_help = !self.show_key_help;
+                KeyOutcome::Handled
+            }
+            PrefixAction::Detach => {
+                self.quit_requested = true;
+                KeyOutcome::QuitRequested
+            }
+            PrefixAction::NewTab => KeyOutcome::Action(WorkbenchAction::NewTab),
+            PrefixAction::SplitVertical => KeyOutcome::Action(WorkbenchAction::SplitRight),
+            PrefixAction::SplitHorizontal => KeyOutcome::Action(WorkbenchAction::SplitBelow),
+            PrefixAction::FocusPaneLeft => self
+                .move_pane_focus(Direction::Left)
+                .then_some(())
+                .map_or(KeyOutcome::Ignored, |_| KeyOutcome::Handled),
+            PrefixAction::FocusPaneDown => self
+                .move_pane_focus(Direction::Down)
+                .then_some(())
+                .map_or(KeyOutcome::Ignored, |_| KeyOutcome::Handled),
+            PrefixAction::FocusPaneUp => self
+                .move_pane_focus(Direction::Up)
+                .then_some(())
+                .map_or(KeyOutcome::Ignored, |_| KeyOutcome::Handled),
+            PrefixAction::FocusPaneRight => self
+                .move_pane_focus(Direction::Right)
+                .then_some(())
+                .map_or(KeyOutcome::Ignored, |_| KeyOutcome::Handled),
+            PrefixAction::WorkspacePicker => {
+                self.workspace_prompt = Some(WorkspacePrompt {
+                    action: "open",
+                    text: String::new(),
+                    pick: None,
+                });
+                KeyOutcome::Handled
+            }
+            PrefixAction::NewWorkspace => {
+                self.workspace_prompt = Some(WorkspacePrompt {
+                    action: "new",
+                    text: String::new(),
+                    pick: None,
+                });
+                KeyOutcome::Handled
+            }
+            PrefixAction::RenameWorkspace => {
+                self.set_status(
+                    "rename workspace: not implemented yet (herdr parity pending backend)",
+                );
+                KeyOutcome::Handled
+            }
+            PrefixAction::CloseWorkspace => {
+                self.set_status(
+                    "close workspace: not implemented yet (herdr parity pending backend)",
+                );
+                KeyOutcome::Handled
+            }
+            PrefixAction::Goto => {
+                self.focus = Focus::Worktrees;
+                self.selected = 0;
+                self.set_status("goto: pick a space in the sidebar (↑↓ · Enter)");
+                KeyOutcome::Handled
+            }
+            PrefixAction::ToggleSidebar => {
+                self.sidebar_collapsed = !self.sidebar_collapsed;
+                self.layout_dirty = true;
+                KeyOutcome::Handled
+            }
+            PrefixAction::NextTab => self.cycle_tab_relative(1),
+            PrefixAction::PreviousTab => self.cycle_tab_relative(-1),
+            PrefixAction::SwitchTab1 => self.switch_tab_index(0),
+            PrefixAction::SwitchTab2 => self.switch_tab_index(1),
+            PrefixAction::SwitchTab3 => self.switch_tab_index(2),
+            PrefixAction::SwitchTab4 => self.switch_tab_index(3),
+            PrefixAction::SwitchTab5 => self.switch_tab_index(4),
+            PrefixAction::SwitchTab6 => self.switch_tab_index(5),
+            PrefixAction::SwitchTab7 => self.switch_tab_index(6),
+            PrefixAction::SwitchTab8 => self.switch_tab_index(7),
+            PrefixAction::SwitchTab9 => self.switch_tab_index(8),
+            PrefixAction::RenameTab => {
+                self.tab_prompt = Some(String::new());
+                KeyOutcome::Handled
+            }
+            PrefixAction::CloseTab => {
+                self.close_tab();
+                KeyOutcome::Handled
+            }
+            PrefixAction::CyclePaneNext => {
+                self.cycle_pane();
+                KeyOutcome::Handled
+            }
+            PrefixAction::CyclePanePrevious => {
+                let leaves = self.grid.leaves();
+                if leaves.len() < 2 {
+                    return KeyOutcome::Ignored;
+                }
+                let index = leaves
+                    .iter()
+                    .position(|c| *c == self.pane_focus)
+                    .unwrap_or(0);
+                self.pane_focus = leaves[(index + leaves.len() - 1) % leaves.len()].clone();
+                self.focus = Focus::Panes;
+                self.layout_dirty = true;
+                KeyOutcome::Handled
+            }
+            PrefixAction::ClosePane => {
+                self.close_pane();
+                KeyOutcome::Handled
+            }
+            PrefixAction::Zoom => {
+                self.toggle_zoom();
+                KeyOutcome::Handled
+            }
+            PrefixAction::ResizeMode => {
+                self.resize_mode = !self.resize_mode;
+                self.set_status(if self.resize_mode {
+                    "resize mode · drag dividers · prefix+r to exit"
+                } else {
+                    "resize mode off"
+                });
+                KeyOutcome::Handled
+            }
+            PrefixAction::CopyMode => {
+                if self.terminal_mode.is_some() {
+                    self.copy_mode = !self.copy_mode;
+                    self.set_status(if self.copy_mode {
+                        "copy mode · j/k scroll · Esc exits copy"
+                    } else {
+                        "copy mode off"
+                    });
+                } else {
+                    self.set_status("copy mode needs a focused terminal pane");
+                }
+                KeyOutcome::Handled
+            }
+            PrefixAction::SwapPaneLeft => self.swap_pane(Direction::Left),
+            PrefixAction::SwapPaneDown => self.swap_pane(Direction::Down),
+            PrefixAction::SwapPaneUp => self.swap_pane(Direction::Up),
+            PrefixAction::SwapPaneRight => self.swap_pane(Direction::Right),
+        }
+    }
+
+    fn cycle_tab_relative(&mut self, delta: i32) -> KeyOutcome {
+        let tabs = self
+            .scenes
+            .scenes
+            .get(&self.scenes.selected)
+            .map(|s| {
+                s.tabs
+                    .iter()
+                    .filter(|t| !t.hidden)
+                    .map(|t| t.id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if tabs.is_empty() {
+            return KeyOutcome::Ignored;
+        }
+        let current = self.scenes.scenes[&self.scenes.selected].active.clone();
+        let i = tabs.iter().position(|t| t == &current).unwrap_or(0);
+        let len = tabs.len() as i32;
+        let j = ((i as i32 + delta).rem_euclid(len)) as usize;
+        self.switch_tab(&tabs[j]);
+        KeyOutcome::Handled
+    }
+
+    fn swap_pane(&mut self, direction: Direction) -> KeyOutcome {
+        let area = self.last_pane_area.unwrap_or(PANE_REF_AREA);
+        if self
+            .grid
+            .swap_with_neighbor(area, &self.pane_focus, direction)
+        {
+            self.layout_dirty = true;
+            KeyOutcome::Handled
+        } else {
+            KeyOutcome::Ignored
+        }
+    }
+
+    fn handle_prefix_follow(&mut self, key: KeyEvent) -> KeyOutcome {
+        self.clear_prefix();
+        if let Some(action) = keybindings::match_prefix_follow(key) {
+            self.apply_prefix_action(action)
+        } else {
+            self.set_status("unknown prefix key");
+            KeyOutcome::Ignored
+        }
+    }
+
+    fn on_navigation_surface_key(&mut self, key: KeyEvent) -> KeyOutcome {
+        use ratatui::crossterm::event::KeyModifiers;
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+        {
+            self.quit_requested = true;
+            return KeyOutcome::QuitRequested;
+        }
+        if keybindings::is_prefix(key) {
+            self.arm_prefix();
+            return KeyOutcome::Handled;
+        }
+        if self.prefix_pending {
+            return self.handle_prefix_follow(key);
+        }
+        if self.show_key_help && matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
+            self.show_key_help = false;
+            return KeyOutcome::Handled;
+        }
+        if self.focus == Focus::Panes {
+            if matches!(key.code, KeyCode::Tab) {
+                self.cycle_pane();
+                return KeyOutcome::Handled;
+            }
+            if let Some(nav) = keybindings::match_direct_pane_nav(key) {
+                let direction = match nav {
+                    keybindings::DirectPaneNav::Left => Direction::Left,
+                    keybindings::DirectPaneNav::Down => Direction::Down,
+                    keybindings::DirectPaneNav::Up => Direction::Up,
+                    keybindings::DirectPaneNav::Right => Direction::Right,
+                };
+                return if self.move_pane_focus(direction) {
+                    KeyOutcome::Handled
+                } else {
+                    KeyOutcome::Ignored
+                };
+            }
+            if matches!(key.code, KeyCode::Enter) {
+                if let PaneContent::Terminal(id) = &self.pane_focus {
+                    self.enter_terminal_mode(id.clone());
+                    return KeyOutcome::Handled;
+                }
+            }
+        }
+        if matches!(
+            self.focus,
+            Focus::Worktrees | Focus::Terminals | Focus::Tasks
+        ) {
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') if self.row_count() > 0 => {
+                    self.selected = (self.selected + 1).min(self.row_count() - 1);
+                    return KeyOutcome::Handled;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.selected = self.selected.saturating_sub(1);
+                    return KeyOutcome::Handled;
+                }
+                KeyCode::Enter if self.focus == Focus::Terminals => {
+                    return match self.selected_terminal() {
+                        Some(id) => KeyOutcome::Action(WorkbenchAction::EnterTerminal(id)),
+                        None => KeyOutcome::Ignored,
+                    };
+                }
+                KeyCode::Enter if self.focus == Focus::Worktrees => {
+                    return match self.selected_worktree() {
+                        Some(id) => KeyOutcome::Action(WorkbenchAction::SelectWorktree(id)),
+                        None => KeyOutcome::Ignored,
+                    };
+                }
+                KeyCode::Tab => {
+                    self.cycle_pane();
+                    return KeyOutcome::Handled;
+                }
+                _ => {}
+            }
+        }
+        KeyOutcome::Ignored
     }
 
     fn row_count(&self) -> usize {
@@ -1378,21 +1691,36 @@ impl WorkbenchApp {
                     self.diff_scroll = self.diff_scroll.saturating_add(20);
                     KeyOutcome::Handled
                 }
-                KeyCode::Char('q') | KeyCode::Char('Q') => {
-                    self.quit_requested = true;
-                    KeyOutcome::QuitRequested
-                }
                 _ => KeyOutcome::Ignored,
             };
         }
-        // Ctrl+] is the explicit outer prefix; Esc and other common CLI keys
-        // are forwarded according to this terminal's modes.
         if self.terminal_mode.is_some() {
-            if key.modifiers.contains(KeyModifiers::CONTROL)
-                && matches!(key.code, KeyCode::Char(']') | KeyCode::Char('5'))
-            {
-                self.leave_terminal_mode();
+            if keybindings::is_prefix(key) {
+                self.arm_prefix();
                 return KeyOutcome::Handled;
+            }
+            if self.prefix_pending {
+                return self.handle_prefix_follow(key);
+            }
+            if self.copy_mode {
+                return match key.code {
+                    KeyCode::Esc => {
+                        self.copy_mode = false;
+                        self.set_status("copy mode off");
+                        KeyOutcome::Handled
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        let id = self.terminal_mode.clone().unwrap();
+                        self.scroll_terminal(id, -1);
+                        KeyOutcome::Handled
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        let id = self.terminal_mode.clone().unwrap();
+                        self.scroll_terminal(id, 1);
+                        KeyOutcome::Handled
+                    }
+                    _ => KeyOutcome::Ignored,
+                };
             }
             if key.modifiers.contains(KeyModifiers::SHIFT)
                 && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
@@ -1412,299 +1740,7 @@ impl WorkbenchApp {
                 }
             };
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
-        {
-            self.quit_requested = true;
-            return KeyOutcome::QuitRequested;
-        }
-        // Pane-grid movement (S2): Ctrl+Arrows. The browser pane
-        // participates like any other leaf.
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            let direction = match key.code {
-                KeyCode::Left => Some(Direction::Left),
-                KeyCode::Right => Some(Direction::Right),
-                KeyCode::Up => Some(Direction::Up),
-                KeyCode::Down => Some(Direction::Down),
-                _ => None,
-            };
-            if let Some(direction) = direction {
-                return if self.move_pane_focus(direction) {
-                    KeyOutcome::Handled
-                } else {
-                    KeyOutcome::Ignored
-                };
-            }
-        }
-        match key.code {
-            KeyCode::Char('q') | KeyCode::Char('Q') => {
-                self.quit_requested = true;
-                KeyOutcome::QuitRequested
-            }
-            KeyCode::Char('0') => {
-                self.select_worktree(FLOATING.into());
-                self.focus = Focus::Panes;
-                KeyOutcome::Handled
-            }
-            // Sidebar sections (herdr order: spaces, agents, tasks).
-            KeyCode::Char('1') => {
-                self.focus = Focus::Worktrees;
-                self.selected = 0;
-                KeyOutcome::Handled
-            }
-            KeyCode::Char('2') => {
-                self.focus = Focus::Terminals;
-                self.selected = 0;
-                KeyOutcome::Handled
-            }
-            KeyCode::Char('3') => {
-                self.focus = Focus::Tasks;
-                self.selected = 0;
-                KeyOutcome::Handled
-            }
-            KeyCode::Tab => {
-                if self.pane_focus == PaneContent::Browser {
-                    self.focus = match self.focus {
-                        Focus::Worktrees => Focus::Terminals,
-                        Focus::Terminals => Focus::Tasks,
-                        Focus::Tasks | Focus::Panes => Focus::Worktrees,
-                    };
-                    self.selected = 0;
-                } else {
-                    self.cycle_pane();
-                }
-                KeyOutcome::Handled
-            }
-            KeyCode::Down | KeyCode::Char('j') if self.row_count() > 0 => {
-                self.selected = (self.selected + 1).min(self.row_count() - 1);
-                KeyOutcome::Handled
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.selected = self.selected.saturating_sub(1);
-                KeyOutcome::Handled
-            }
-            KeyCode::Enter if self.focus == Focus::Terminals => match self.selected_terminal() {
-                Some(id) => KeyOutcome::Action(WorkbenchAction::EnterTerminal(id)),
-                None => KeyOutcome::Ignored,
-            },
-            // Enter on a space row opens a shell at that worktree.
-            KeyCode::Enter if self.focus == Focus::Worktrees => match self.selected_worktree() {
-                Some(id) => KeyOutcome::Action(WorkbenchAction::SelectWorktree(id)),
-                None => KeyOutcome::Ignored,
-            },
-            KeyCode::Char('s') if self.focus == Focus::Terminals => {
-                match self.selected_terminal() {
-                    Some(id) => KeyOutcome::Action(WorkbenchAction::StopTerminal(id)),
-                    None => KeyOutcome::Ignored,
-                }
-            }
-            KeyCode::Char('f') if self.focus == Focus::Worktrees => {
-                match self.selected_worktree() {
-                    Some(id) => KeyOutcome::Action(WorkbenchAction::BrowseFiles(id)),
-                    None => KeyOutcome::Ignored,
-                }
-            }
-            KeyCode::Char('D') if self.focus == Focus::Worktrees => {
-                match self.selected_worktree() {
-                    Some(id) => {
-                        if self.cleanup_armed.as_deref() == Some(id.as_str()) {
-                            self.cleanup_armed = None;
-                            KeyOutcome::Action(WorkbenchAction::CleanupWorktree(id.clone()))
-                        } else {
-                            self.cleanup_armed = Some(id.clone());
-                            let path = self
-                                .model
-                                .worktrees
-                                .iter()
-                                .find(|w| w.worktree_id == id)
-                                .map(|w| w.path.clone())
-                                .unwrap_or_default();
-                            self.set_status(format!("confirm: remove {path}? press D again"));
-                            KeyOutcome::Handled
-                        }
-                    }
-                    None => KeyOutcome::Ignored,
-                }
-            }
-            KeyCode::Char('h') if self.focus == Focus::Worktrees => {
-                match self.selected_worktree() {
-                    Some(id) => {
-                        self.handoff_picker = Some(HandoffPicker {
-                            worktree_id: id,
-                            agents: crate::harness::capabilities::handoff_targets(),
-                            selected: 0,
-                        });
-                        KeyOutcome::Handled
-                    }
-                    None => KeyOutcome::Ignored,
-                }
-            }
-            // `g` flips a workspace-wide switch: keep it deliberate by
-            // binding it to the worktrees list (QA F8).
-            KeyCode::Char('g') if self.focus == Focus::Worktrees => {
-                KeyOutcome::Action(WorkbenchAction::ToggleAutoPull)
-            }
-            KeyCode::Char('d') if self.focus == Focus::Worktrees => {
-                match self.selected_worktree() {
-                    Some(id) => KeyOutcome::Action(WorkbenchAction::ShowDiff(id)),
-                    None => KeyOutcome::Ignored,
-                }
-            }
-            KeyCode::Char('|') => KeyOutcome::Action(WorkbenchAction::SplitRight),
-            KeyCode::Char('-') => KeyOutcome::Action(WorkbenchAction::SplitBelow),
-            KeyCode::Char('x') if matches!(self.pane_focus, PaneContent::Terminal(_)) => {
-                self.close_pane();
-                KeyOutcome::Handled
-            }
-            KeyCode::Char('z') => {
-                self.toggle_zoom();
-                KeyOutcome::Handled
-            }
-            // Enter on a focused terminal pane: keyboard forwarding.
-            KeyCode::Enter if matches!(self.pane_focus, PaneContent::Terminal(_)) => {
-                let id = match &self.pane_focus {
-                    PaneContent::Terminal(id) => id.clone(),
-                    _ => unreachable!("guarded above"),
-                };
-                self.enter_terminal_mode(id);
-                KeyOutcome::Handled
-            }
-            // `o` on a space row: open a shell at that worktree.
-            KeyCode::Char('o') if self.focus == Focus::Worktrees => {
-                match self.selected_worktree() {
-                    Some(id) => KeyOutcome::Action(WorkbenchAction::OpenWorktreeShell(id)),
-                    None => KeyOutcome::Ignored,
-                }
-            }
-            KeyCode::Char('p') if self.focus == Focus::Worktrees => {
-                match self.selected_worktree() {
-                    Some(id) => KeyOutcome::Action(WorkbenchAction::OpenPiHarness(id)),
-                    None => KeyOutcome::Ignored,
-                }
-            }
-            // `w` on a task row: create the task's worktree (server-side
-            // V08 policy; removal stays a human-authorized action).
-            KeyCode::Char('w') if self.focus == Focus::Tasks => {
-                match self.model.tasks.get(self.selected) {
-                    Some(task) => KeyOutcome::Action(WorkbenchAction::CreateTaskWorktree(
-                        task.task_id.clone(),
-                    )),
-                    None => KeyOutcome::Ignored,
-                }
-            }
-            KeyCode::Char('!') => {
-                self.global_attention = !self.global_attention;
-                self.focus = Focus::Terminals;
-                self.selected = 0;
-                KeyOutcome::Handled
-            }
-            KeyCode::Char('t') => {
-                self.terminal_picker = Some(0);
-                KeyOutcome::Handled
-            }
-            KeyCode::Char('n') => KeyOutcome::Action(WorkbenchAction::NewTab),
-            KeyCode::Char('T') => {
-                self.tab_prompt = Some(String::new());
-                KeyOutcome::Handled
-            }
-            KeyCode::Char('X') => {
-                self.close_tab();
-                KeyOutcome::Handled
-            }
-            KeyCode::Char(',' | '.') => {
-                let tabs = self
-                    .scenes
-                    .scenes
-                    .get(&self.scenes.selected)
-                    .map(|s| {
-                        s.tabs
-                            .iter()
-                            .filter(|t| !t.hidden)
-                            .map(|t| t.id.clone())
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                if !tabs.is_empty() {
-                    let current = self.scenes.scenes[&self.scenes.selected].active.clone();
-                    let i = tabs.iter().position(|t| t == &current).unwrap_or(0);
-                    let j = if key.code == KeyCode::Char('.') {
-                        (i + 1) % tabs.len()
-                    } else {
-                        (i + tabs.len() - 1) % tabs.len()
-                    };
-                    self.switch_tab(&tabs[j]);
-                }
-                KeyOutcome::Handled
-            }
-            KeyCode::Char(c @ ('W' | 'N' | 'A' | 'S')) => {
-                if c == 'A' && self.model.workspace_id.is_none() {
-                    self.set_status("open or create a workspace first (W / N), then add projects");
-                    return KeyOutcome::Handled;
-                }
-                if c == 'S' && self.model.workspace_id.is_none() {
-                    self.set_status(
-                        "select a workspace to save (All projects is not a composition)",
-                    );
-                    return KeyOutcome::Handled;
-                }
-                let action = match c {
-                    'W' => "open",
-                    'N' => "new",
-                    'A' => "add",
-                    _ => "save",
-                };
-                self.workspace_prompt = Some(WorkspacePrompt {
-                    action,
-                    text: String::new(),
-                    pick: None,
-                });
-                KeyOutcome::Handled
-            }
-            KeyCode::Char(c @ ('[' | ']')) => {
-                // Stable order (creation), with "All projects" in front:
-                // switching never reorders the switcher.
-                let order = self.switcher_order();
-                if order.len() < 2 {
-                    return KeyOutcome::Ignored;
-                }
-                let i = order
-                    .iter()
-                    .position(|w| *w == self.model.workspace_id)
-                    .unwrap_or(0);
-                let next = if c == ']' {
-                    (i + 1) % order.len()
-                } else {
-                    (i + order.len() - 1) % order.len()
-                };
-                KeyOutcome::Action(Self::select_workspace(order[next].clone()))
-            }
-            KeyCode::Char('R') => {
-                if self.model.workspace_id.is_none() {
-                    self.set_status(
-                        "All projects is not a composition; select a workspace to remove from",
-                    );
-                    return KeyOutcome::Handled;
-                }
-                let project = (self.focus == Focus::Worktrees)
-                    .then(|| self.model.worktrees.get(self.selected))
-                    .flatten()
-                    .map(|w| w.project_id.clone())
-                    .filter(|p| !p.is_empty());
-                match project {
-                    Some(project_id) => KeyOutcome::Action(WorkbenchAction::Workspace {
-                        action: "remove".into(),
-                        value: None,
-                        project_id: Some(project_id),
-                    }),
-                    None => {
-                        self.set_status("select a project's row in the spaces list, then R");
-                        KeyOutcome::Handled
-                    }
-                }
-            }
-            KeyCode::Char('r') => KeyOutcome::Action(WorkbenchAction::Refresh),
-            _ => KeyOutcome::Ignored,
-        }
+        self.on_navigation_surface_key(key)
     }
 
     /// Handle one mouse event (herdr-parity interaction). Left button
@@ -1921,10 +1957,10 @@ impl WorkbenchApp {
         // herdr hides the sidebar on narrow terminals; so do we. The
         // user-chosen width applies, clamped so the pane grid keeps a
         // usable minimum.
-        let sidebar_width = if main.width >= 60 {
-            self.sidebar_width.min(main.width.saturating_sub(20))
-        } else {
+        let sidebar_width = if self.sidebar_collapsed || main.width < 60 {
             0
+        } else {
+            self.sidebar_width.min(main.width.saturating_sub(20))
         };
         let columns =
             Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(0)]).split(main);
@@ -1946,10 +1982,7 @@ impl WorkbenchApp {
             }
         }
         if self.tab_hits.is_empty() {
-            frame.render_widget(
-                Paragraph::new(" 0 Unassigned · n New tab · o New shell · t All terminals"),
-                right[0],
-            );
+            frame.render_widget(Paragraph::new(" 0 Unassigned · ctrl+b c new tab"), right[0]);
         }
         let pane_area = right[1];
         self.last_pane_area = Some(pane_area);
@@ -2049,6 +2082,9 @@ impl WorkbenchApp {
         }
         if self.handoff_picker.is_some() {
             self.draw_handoff_picker(frame);
+        }
+        if self.show_key_help {
+            self.draw_key_help(frame, main, &palette);
         }
         self.draw_status_bar(frame, rows[2], &palette);
         if let Some(selected) = self.terminal_picker {
@@ -2160,11 +2196,11 @@ impl WorkbenchApp {
                 ratatui::style::Style::new().fg(palette.subtext0),
             )),
             Line::from(Span::styled(
-                "o/Enter opens a worktree shell · 1 spaces · 2 agents · 3 tasks",
+                "Enter opens · ctrl+b prefix · click sidebar sections",
                 ratatui::style::Style::new().fg(palette.overlay0),
             )),
             Line::from(Span::styled(
-                "| split · - split below · z zoom · q detach",
+                "ctrl+b ? help · v/− split · z zoom · q detach",
                 ratatui::style::Style::new().fg(palette.overlay0),
             )),
         ];
@@ -2325,6 +2361,38 @@ impl WorkbenchApp {
         }
     }
 
+    fn draw_key_help(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        let lines: Vec<Line> = std::iter::once(Line::from(Span::styled(
+            " Workbench keys (herdr defaults) ",
+            ratatui::style::Style::new()
+                .fg(palette.text)
+                .bg(palette.panel_bg)
+                .bold(),
+        )))
+        .chain(keybindings::help_lines().iter().map(|line| {
+            Line::from(Span::styled(
+                *line,
+                ratatui::style::Style::new().fg(palette.subtext0),
+            ))
+        }))
+        .chain([Line::from(Span::styled(
+            " Esc or ctrl+b ? closes this help ",
+            ratatui::style::Style::new().fg(palette.overlay0),
+        ))])
+        .collect();
+        let height = (lines.len() as u16).min(area.height.saturating_sub(2));
+        let popup = centered(area, area.width.saturating_sub(4).max(40), height + 2);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(ratatui::style::Style::new().fg(palette.accent)),
+            ),
+            popup,
+        );
+    }
+
     fn draw_status_bar(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
         // The version badge reserves its columns at the right edge first
         // (dim, unobtrusive provenance); the hints budget shrinks around
@@ -2347,8 +2415,17 @@ impl WorkbenchApp {
             (area, Rect::new(area.x, area.y, 0, area.height))
         };
         let mut spans: Vec<Span> = Vec::new();
+        if self.prefix_pending {
+            spans.push(Self::chip(" PREFIX ", palette.peach, palette));
+        }
         if self.terminal_mode.is_some() {
             spans.push(Self::chip(" TERMINAL ", palette.accent, palette));
+        }
+        if self.copy_mode {
+            spans.push(Self::chip(" COPY ", palette.yellow, palette));
+        }
+        if self.resize_mode {
+            spans.push(Self::chip(" RESIZE ", palette.yellow, palette));
         }
         if self.zoomed {
             spans.push(Self::chip(" ZOOM ", palette.accent, palette));
@@ -3991,49 +4068,45 @@ mod tests {
     }
 
     #[test]
-    fn o_on_worktree_is_the_explicit_new_shell_action() {
+    fn prefix_opens_new_tab_and_split_actions() {
         let mut app = WorkbenchApp::new();
         app.set_model(sample());
+        let prefix = KeyEvent::new(
+            KeyCode::Char('b'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        );
+        assert_eq!(app.on_key(prefix), KeyOutcome::Handled);
         assert_eq!(
-            app.on_key(KeyEvent::from(KeyCode::Char('o'))),
-            KeyOutcome::Action(WorkbenchAction::OpenWorktreeShell("wt1".into()))
+            app.on_key(KeyEvent::from(KeyCode::Char('c'))),
+            KeyOutcome::Action(WorkbenchAction::NewTab)
+        );
+        assert_eq!(app.on_key(prefix), KeyOutcome::Handled);
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('v'))),
+            KeyOutcome::Action(WorkbenchAction::SplitRight)
         );
     }
 
     #[test]
-    fn sidebar_sections_switch_and_render_facts() {
+    fn sidebar_renders_worktree_facts_and_prefix_toggles_it() {
         let mut app = WorkbenchApp::new();
         app.set_model(sample());
-
-        // Spaces is the first section; the worktree is a tree child row
-        // with its real state beside it.
         assert_eq!(app.focus(), Focus::Worktrees);
         let view = render(&mut app, 100, 24);
         assert!(view.contains("agent/feat-x"), "{view}");
         assert!(view.contains("dirty"), "real dirty state is a fact: {view}");
         assert!(view.contains("└─"), "tree glyphs group worktrees: {view}");
-
-        assert_eq!(
-            app.on_key(KeyEvent::from(KeyCode::Char('2'))),
-            KeyOutcome::Handled
+        let prefix = KeyEvent::new(
+            KeyCode::Char('b'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
         );
-        assert_eq!(app.focus(), Focus::Terminals);
-        let agents = render(&mut app, 100, 24);
+        app.on_key(prefix);
+        app.on_key(KeyEvent::from(KeyCode::Char('b')));
+        let collapsed = render(&mut app, 100, 24);
         assert!(
-            !agents.contains("user_shell"),
-            "ordinary shell is not an agent row"
+            !collapsed.contains("agent/feat-x"),
+            "collapsed sidebar hides list rows: {collapsed}"
         );
-        assert!(app.agent_rows().is_empty());
-
-        assert_eq!(
-            app.on_key(KeyEvent::from(KeyCode::Char('3'))),
-            KeyOutcome::Handled
-        );
-        assert!(render(&mut app, 100, 24).contains("ship the workbench"));
-
-        // Tab cycles the sections and wraps back to spaces.
-        app.on_key(KeyEvent::from(KeyCode::Tab));
-        assert_eq!(app.focus(), Focus::Worktrees);
     }
 
     #[test]
@@ -4052,12 +4125,6 @@ mod tests {
     fn terminal_mode_forwards_bytes_and_esc_reaches_cli() {
         let mut app = WorkbenchApp::new();
         app.set_model(sample());
-        app.on_key(KeyEvent::from(KeyCode::Char('2')));
-        app.on_key(KeyEvent::from(KeyCode::Char('t')));
-        assert_eq!(
-            app.on_key(KeyEvent::from(KeyCode::Enter)),
-            KeyOutcome::Action(WorkbenchAction::EnterTerminal("term-1".into()))
-        );
         app.enter_terminal_mode("term-1");
 
         // Typing forwards real bytes; Ctrl-C forwards 0x03 to the child
@@ -4080,11 +4147,17 @@ mod tests {
             KeyOutcome::Forward(vec![27])
         );
         assert_eq!(app.terminal_mode(), Some("term-1"));
-        app.on_key(KeyEvent::new(
-            KeyCode::Char(']'),
+        let prefix = KeyEvent::new(
+            KeyCode::Char('b'),
             ratatui::crossterm::event::KeyModifiers::CONTROL,
-        ));
-        assert!(app.terminal_mode().is_none());
+        );
+        assert_eq!(app.on_key(prefix), KeyOutcome::Handled);
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('?'))),
+            KeyOutcome::Handled,
+            "prefix+? works while forwarding mode is active"
+        );
+        assert_eq!(app.terminal_mode(), Some("term-1"));
     }
 
     #[test]
@@ -4307,10 +4380,8 @@ mod tests {
         let mut app = WorkbenchApp::new();
         app.set_model(model);
         // Spaces section: unreadable tree shown as unknown.
-        assert!(render(&mut app, 100, 24).contains("unknown"));
-        // Agents section: unreadable wait state shown as unknown.
-        app.on_key(KeyEvent::from(KeyCode::Char('2')));
-        assert!(render(&mut app, 100, 24).contains("unknown"));
+        let view = render(&mut app, 100, 24);
+        assert!(view.contains("unknown"), "{view}");
     }
 
     #[test]
@@ -4680,53 +4751,31 @@ mod v15_tui_fix_tests {
         }
     }
 
-    /// QA F8: stale cleanup arming disarms on ANY key that is not the
-    /// confirming D (a later D on another row must never delete).
     #[test]
-    fn stale_cleanup_arming_disarms_on_any_other_key() {
+    fn prefix_goto_focuses_spaces_list() {
         let mut app = WorkbenchApp::new();
         app.set_model(sample());
-        app.on_key(KeyEvent::from(KeyCode::Char('1'))); // spaces (worktrees)
-        // Arm on the selected worktree row.
-        app.on_key(KeyEvent::from(KeyCode::Char('D')));
-        assert!(app.cleanup_armed.is_some(), "first D arms");
-        // Any unrelated key disarms.
-        app.on_key(KeyEvent::from(KeyCode::Char('r')));
-        assert!(app.cleanup_armed.is_none(), "stale arming disarmed");
+        app.on_key(KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(app.selected, 0);
+        let prefix = KeyEvent::new(
+            KeyCode::Char('b'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        );
+        app.on_key(prefix);
+        app.on_key(KeyEvent::from(KeyCode::Char('g')));
+        assert_eq!(app.focus(), Focus::Worktrees);
+        assert_eq!(app.selected, 0);
     }
 
-    /// QA F8: `g` is bound to the worktrees list — a global ambient
-    /// toggle for a workspace-wide switch was the review's concern.
     #[test]
-    fn auto_pull_toggle_requires_the_worktrees_focus() {
-        let mut app = WorkbenchApp::new();
-        app.set_model(sample());
-        app.on_key(KeyEvent::from(KeyCode::Char('2'))); // agents focus
-        assert_eq!(
-            app.on_key(KeyEvent::from(KeyCode::Char('g'))),
-            KeyOutcome::Ignored,
-            "g outside worktrees focus is ignored"
-        );
-        app.on_key(KeyEvent::from(KeyCode::Char('1'))); // spaces (worktrees) focus
-        assert_eq!(
-            app.on_key(KeyEvent::from(KeyCode::Char('g'))),
-            KeyOutcome::Action(WorkbenchAction::ToggleAutoPull)
-        );
-    }
-
-    /// QA F8: the status line advertises the V15 keys (f/D/h/g) so the
-    /// features are discoverable (QA round-2 F12).
-    #[test]
-    fn status_line_advertises_v15_keys() {
+    fn chrome_advertises_herdr_prefix_keys() {
         let mut app = WorkbenchApp::new();
         let backend = TestBackend::new(200, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         terminal.draw(|f| app.draw(f)).expect("draw");
         let view = terminal.backend().to_string();
-        assert!(view.contains("f files"), "{view}");
-        assert!(view.contains("D cleanup"), "{view}");
-        assert!(view.contains("h handoff"), "{view}");
-        assert!(view.contains("g auto-pull"), "{view}");
+        assert!(view.contains("ctrl+b"), "{view}");
+        assert!(view.contains("prefix"), "{view}");
     }
 
     // -- mouse: divider drags, pane clicks, sidebar resize (herdr parity) --
