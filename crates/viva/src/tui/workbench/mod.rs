@@ -5,7 +5,9 @@
 //! the CLIENT: facts arrive as `WorkbenchView` projections over the control
 //! channel, actions go back as requests, and `q` detaches while the server
 //! keeps every terminal running. The server side of the projections lives
-//! in [`assemble_view`], called by the server.
+//! in [`assemble_view`], called by the server. The scene / tab / pane tree
+//! lives there too: this client caches it, commits the tab it is looking
+//! at, and refreshes the other tabs from the server.
 //!
 //! Composition rules (this module only combines; the domains stay theirs):
 //! - Facts come from the existing registries (projects/tasks V02–V03,
@@ -24,6 +26,7 @@
 mod polling;
 pub mod scenes;
 pub mod terminal_view;
+pub mod tree;
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
@@ -241,10 +244,9 @@ pub enum WorkbenchAction {
     },
 }
 
-/// An in-progress mouse drag (herdr-parity interaction). A pane-split drag
-/// mutates the tree's ratio directly — the tree is client-side, so no
-/// server round-trip is needed; the existing `layout_dirty` → persistence
-/// flow saves the result.
+/// An in-progress mouse drag. A pane-split drag mutates the local ratio
+/// immediately. The layout save commits that tab's grid to the resident
+/// tree; other tabs stay as the server last recorded them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DragState {
     None,
@@ -683,6 +685,68 @@ impl WorkbenchApp {
         self.layout_dirty = false;
     }
 
+    /// Take a fresher server tree without jumping to the other client's tab.
+    /// The tab this client is looking at picks up that tab's latest grid,
+    /// focus and zoom. Sidebar width stays local.
+    pub fn adopt_shared_tree(&mut self, json: &str) {
+        let Ok(book) = serde_json::from_str::<SceneBook>(json) else {
+            return;
+        };
+        if !book.valid() {
+            return;
+        }
+        let selected = self.scenes.selected.clone();
+        let active = self
+            .scenes
+            .scenes
+            .get(&selected)
+            .map(|scene| scene.active.clone());
+        let prev_grid = self.grid.clone();
+        self.scenes = book;
+        if self.scenes.scenes.contains_key(&selected) {
+            self.scenes.selected = selected;
+            if let Some(active) = active {
+                if let Some(scene) = self.scenes.scenes.get_mut(&self.scenes.selected) {
+                    if scene.tabs.iter().any(|tab| tab.id == active && !tab.hidden) {
+                        scene.active = active;
+                    }
+                }
+            }
+        }
+        let tab = self
+            .scenes
+            .scenes
+            .get(&self.scenes.selected)
+            .and_then(|scene| {
+                scene
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id == scene.active && !tab.hidden)
+                    .cloned()
+            });
+        let Some(tab) = tab else {
+            self.load_scene();
+            return;
+        };
+        let grid_changed = tab.grid != prev_grid;
+        self.grid = tab.grid;
+        self.pane_focus = tab.focus;
+        self.zoomed = tab.zoom;
+        if grid_changed {
+            let live: std::collections::HashSet<String> =
+                self.terminal_leaves().into_iter().collect();
+            self.snapshots.retain(|id, _| live.contains(id));
+            if self
+                .terminal_mode
+                .as_ref()
+                .is_some_and(|id| !live.contains(id))
+            {
+                self.terminal_mode = None;
+            }
+            self.drag = DragState::None;
+        }
+    }
+
     /// The persisted layout payload: the pane tree plus the focused pane
     /// and the sidebar width (restored with a default when absent, so
     /// older saved layouts keep loading).
@@ -887,6 +951,7 @@ impl WorkbenchApp {
                 Scene {
                     active: tab.id.clone(),
                     tabs: vec![tab],
+                    ..Scene::default()
                 },
             );
             book.selected = key;
@@ -3400,6 +3465,58 @@ pub fn run_client(mut client: crate::server::Client) -> Result<()> {
     result
 }
 
+/// Commit the tab this client is looking at, then pull the shared tree.
+/// A refresh does not run before the first saved layout has been applied,
+/// and it does not steal this client's scene or tab selection.
+fn sync_shared_layout(
+    client: &mut crate::server::Client,
+    app: &mut WorkbenchApp,
+    seen: &mut Option<String>,
+    next_refresh: &mut std::time::Instant,
+    allow_refresh: bool,
+) {
+    let saved_this_pass = if app.layout_dirty() {
+        match client.call(crate::server::RequestKind::WorkbenchLayout {
+            layout_json: Some(app.serialize_layout()),
+        }) {
+            Ok(_) => {
+                app.clear_layout_dirty();
+                *seen = None;
+                true
+            }
+            Err(e) => {
+                app.set_status(format!("layout save pending: {e}"));
+                return;
+            }
+        }
+    } else {
+        false
+    };
+    if !allow_refresh {
+        return;
+    }
+    let now = std::time::Instant::now();
+    if !saved_this_pass && now < *next_refresh {
+        return;
+    }
+    *next_refresh = now + std::time::Duration::from_millis(250);
+    let Ok(value) = client.call(crate::server::RequestKind::WorkbenchLayout { layout_json: None })
+    else {
+        return;
+    };
+    let json = value
+        .get("layout")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    if json.as_ref() == seen.as_ref() {
+        return;
+    }
+    if let Some(json) = json.as_ref() {
+        app.adopt_shared_tree(json);
+    }
+    *seen = json;
+}
+
 fn run_client_inner(client: &mut crate::server::Client) -> Result<()> {
     use ratatui::crossterm::event::{self, Event, KeyEventKind};
     let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
@@ -3412,6 +3529,9 @@ fn run_client_inner(client: &mut crate::server::Client) -> Result<()> {
         .call(crate::server::RequestKind::WorkbenchLayout { layout_json: None })
         .ok()
         .and_then(|v| v.get("layout").and_then(|v| v.as_str()).map(str::to_string));
+    let mut seen_layout = None;
+    let mut holding_initial_layout = saved_layout.is_some();
+    let mut next_refresh = std::time::Instant::now();
     loop {
         while let Ok(result) = polling.models.try_recv() {
             match result {
@@ -3424,6 +3544,8 @@ fn run_client_inner(client: &mut crate::server::Client) -> Result<()> {
                     app.set_model(model);
                     if let Some(json) = saved_layout.take() {
                         app.restore_layout(&json, &known);
+                        seen_layout = Some(json);
+                        holding_initial_layout = false;
                     }
                 }
                 Err(e) => app.set_status(format!("view failed: {e}")),
@@ -3455,14 +3577,13 @@ fn run_client_inner(client: &mut crate::server::Client) -> Result<()> {
         if !event::poll(std::time::Duration::from_millis(32))
             .map_err(|e| crate::foundation::Error::Io(std::io::Error::other(e.to_string())))?
         {
-            if app.layout_dirty() {
-                match client.call(crate::server::RequestKind::WorkbenchLayout {
-                    layout_json: Some(app.serialize_layout()),
-                }) {
-                    Ok(_) => app.clear_layout_dirty(),
-                    Err(e) => app.set_status(format!("layout save pending: {e}")),
-                }
-            }
+            sync_shared_layout(
+                client,
+                &mut app,
+                &mut seen_layout,
+                &mut next_refresh,
+                !holding_initial_layout,
+            );
             continue;
         }
         let event = event::read()
@@ -3522,18 +3643,14 @@ fn run_client_inner(client: &mut crate::server::Client) -> Result<()> {
             }
             _ => {}
         }
-        // Persist pane-tree changes so the next attach restores them.
-        if app.layout_dirty() {
-            let payload = app.serialize_layout();
-            if client
-                .call(crate::server::RequestKind::WorkbenchLayout {
-                    layout_json: Some(payload),
-                })
-                .is_ok()
-            {
-                app.clear_layout_dirty();
-            }
-        }
+        // Commit the viewed tab, then pick up other clients' tabs.
+        sync_shared_layout(
+            client,
+            &mut app,
+            &mut seen_layout,
+            &mut next_refresh,
+            !holding_initial_layout,
+        );
     }
     Ok(())
 }
@@ -4967,6 +5084,63 @@ mod v15_tui_fix_tests {
         app.on_mouse(mouse_up(69, 10));
         app.on_mouse(mouse_down(69, 10));
         assert!(matches!(app.grid, PaneNode::Split { ratio: 50, .. }));
+    }
+
+    #[test]
+    fn adopt_shared_tree_keeps_this_clients_tab_and_takes_the_other_tabs_edit() {
+        let mut app = WorkbenchApp::new();
+        app.sidebar_width = 31;
+        app.select_worktree("a".into());
+        app.new_tab("local".into());
+        let local_id = {
+            let saved: serde_json::Value = serde_json::from_str(&app.serialize_layout()).unwrap();
+            saved["scenes"]["a"]["active"].as_str().unwrap().to_string()
+        };
+        let mut server: SceneBook = serde_json::from_str(&app.serialize_layout()).unwrap();
+        let extra = TabView::new("from-the-other-client".into());
+        let extra_id = extra.id.clone();
+        server.scenes.get_mut("a").unwrap().tabs.push(extra);
+        server.sidebar = 18;
+        let local = server
+            .scenes
+            .get_mut("a")
+            .unwrap()
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == local_id)
+            .unwrap();
+        local.zoom = true;
+        local.grid = PaneNode::split_new(
+            PaneContent::Browser,
+            SplitAxis::Horizontal,
+            PaneContent::Terminal("t9".into()),
+        );
+        app.clear_layout_dirty();
+        app.adopt_shared_tree(&serde_json::to_string(&server).unwrap());
+        assert_eq!(app.selected_scene(), "a");
+        assert_eq!(app.sidebar_width, 31, "sidebar width stays on this client");
+        assert!(app.zoomed(), "the viewed tab picks up the server zoom");
+        assert_eq!(
+            app.terminal_leaves(),
+            vec!["t9".to_string()],
+            "the viewed tab picks up the server split"
+        );
+        let saved: serde_json::Value = serde_json::from_str(&app.serialize_layout()).unwrap();
+        let names: Vec<_> = saved["scenes"]["a"]["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tab| tab["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"from-the-other-client"), "{names:?}");
+        assert!(
+            saved["scenes"]["a"]["tabs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tab| tab["id"] == extra_id)
+        );
+        assert!(!app.layout_dirty());
     }
 
     #[test]
