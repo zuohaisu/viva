@@ -4368,8 +4368,10 @@ mod tests {
 
     #[test]
     fn kitty_disambiguate_forwards_ctrl_c_and_ctrl_bracket_still_releases() {
-        let mut app = WorkbenchApp::new();
-        app.attach_terminal("t1".into());
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let ctrl = ratatui::crossterm::event::KeyModifiers::CONTROL;
+        let mut app = app_with_terminal_pane();
+        app.pane_focus = PaneContent::Terminal("t1".into());
         app.enter_terminal_mode("t1");
         app.set_snapshot(
             "t1",
@@ -4379,17 +4381,25 @@ mod tests {
             }),
         );
         assert_eq!(
-            app.on_key(KeyEvent::new(
-                KeyCode::Char('c'),
-                ratatui::crossterm::event::KeyModifiers::CONTROL,
-            )),
+            app.on_key(KeyEvent::new(KeyCode::Char('c'), ctrl)),
             KeyOutcome::Forward(b"\x1b[99;5u".to_vec())
         );
-        app.on_key(KeyEvent::new(
-            KeyCode::Char(']'),
-            ratatui::crossterm::event::KeyModifiers::CONTROL,
-        ));
-        assert!(app.terminal_mode().is_none());
+        assert_eq!(
+            app.on_key(KeyEvent::new(KeyCode::Char(']'), ctrl)),
+            KeyOutcome::Forward(b"\x1b[93;5u".to_vec()),
+            "Ctrl+] forwards as Kitty CSI u; workbench prefix is ctrl+b on main"
+        );
+        assert_eq!(app.terminal_mode(), Some("t1"));
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 5,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        });
+        assert!(
+            app.terminal_mode().is_none(),
+            "switching pane focus releases terminal forwarding on main"
+        );
     }
 
     fn app_with_terminal_pane() -> WorkbenchApp {
