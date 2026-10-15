@@ -54,6 +54,12 @@ pub fn draw(frame: &mut Frame, area: Rect, view: &ScreenView, cursor: bool) {
     }
 }
 pub fn key(key: KeyEvent, modes: &InputModes) -> Option<Vec<u8>> {
+    // Kitty-requested events, and every release, are encoded by the
+    // protocol. A release the program did not ask for is dropped here,
+    // before the legacy encoder can turn it into a press.
+    if modes.kitty_flags != 0 || key.kind == ratatui::crossterm::event::KeyEventKind::Release {
+        return crate::terminal::keyboard::encode(key, modes);
+    }
     let m = key.modifiers;
     let modifier = 1
         + u8::from(m.contains(KeyModifiers::SHIFT))
@@ -250,6 +256,37 @@ mod tests {
             .is_none()
         );
         assert!(mouse(event, Rect::new(10, 5, 30, 20), &InputModes::default()).is_none());
+    }
+
+    #[test]
+    fn kitty_flags_change_the_bytes_sent_to_the_pty() {
+        let modes = InputModes {
+            kitty_flags: 1,
+            application_cursor: true,
+            ..InputModes::default()
+        };
+        assert_eq!(
+            key(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                &modes
+            ),
+            Some(b"\x1b[99;5u".to_vec())
+        );
+        assert_eq!(
+            key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), &modes),
+            Some(b"\x1b[D".to_vec())
+        );
+        assert!(
+            key(
+                KeyEvent::new_with_kind(
+                    KeyCode::Left,
+                    KeyModifiers::NONE,
+                    ratatui::crossterm::event::KeyEventKind::Release,
+                ),
+                &InputModes::default(),
+            )
+            .is_none()
+        );
     }
     #[test]
     fn styled_wide_cells_and_cursor_reach_ratatui() {

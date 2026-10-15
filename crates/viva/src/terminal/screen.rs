@@ -22,6 +22,10 @@ pub struct InputModes {
     pub alternate: bool,
     pub mouse_mode: u8,
     pub mouse_encoding: u8,
+    /// Kitty keyboard progressive-enhancement flags for the screen that
+    /// produced this snapshot. Zero means legacy key encoding.
+    #[serde(default)]
+    pub kitty_flags: u16,
 }
 fn color(c: vt100::Color) -> u32 {
     match c {
@@ -88,6 +92,7 @@ pub fn project(screen: &vt100::Screen, offset: usize, retained: usize) -> Screen
             alternate: screen.alternate_screen(),
             mouse_mode,
             mouse_encoding,
+            kitty_flags: 0,
         },
         scrollback_offset: offset,
         retained,
@@ -95,19 +100,85 @@ pub fn project(screen: &vt100::Screen, offset: usize, retained: usize) -> Screen
 }
 /// Terminal queries handled by the emulator callback; replies are bounded and
 /// written to this session's PTY, never to the physical outer terminal.
-#[derive(Default)]
+///
+/// Kitty keyboard state and OSC 52 clipboard text live here too. Clipboard
+/// text is queued only in memory until [`super::osc52::publish`] hands it
+/// to the system pasteboard; it is not copied into `bytes`.
 pub struct Replies {
     pub bytes: Vec<u8>,
+    kitty: super::keyboard::KittyKeyboard,
+    osc52_enabled: bool,
+    clipboard: Vec<String>,
 }
+
+impl Replies {
+    pub(crate) fn with_osc52(enabled: bool) -> Self {
+        Self {
+            bytes: Vec::new(),
+            kitty: super::keyboard::KittyKeyboard::default(),
+            osc52_enabled: enabled,
+            clipboard: Vec::new(),
+        }
+    }
+
+    pub(crate) fn kitty_flags(&self, alternate: bool) -> u16 {
+        self.kitty.flags(alternate)
+    }
+
+    pub(crate) fn kitty_restore(&self, alternate: bool) -> Vec<u8> {
+        self.kitty.restore_bytes(alternate)
+    }
+
+    /// Clipboard texts to publish. A disabled session drops them here so
+    /// they are never written anywhere.
+    pub(crate) fn take_clipboard(&mut self) -> Vec<String> {
+        if !self.osc52_enabled {
+            self.clipboard.clear();
+            Vec::new()
+        } else {
+            std::mem::take(&mut self.clipboard)
+        }
+    }
+}
+
+impl Default for Replies {
+    fn default() -> Self {
+        Self::with_osc52(super::osc52::enabled_from_env())
+    }
+}
+
 impl vt100::Callbacks for Replies {
+    fn copy_to_clipboard(&mut self, _: &mut vt100::Screen, ty: &[u8], data: &[u8]) {
+        if !self.osc52_enabled || !super::osc52::system_clipboard_selector(ty) {
+            return;
+        }
+        if let Some(text) = super::osc52::decode_clipboard(data) {
+            self.clipboard.push(text);
+        }
+    }
+
+    fn paste_from_clipboard(&mut self, _: &mut vt100::Screen, _: &[u8]) {
+        // The pane is not given the host clipboard. The query is ignored
+        // and nothing about it is logged.
+    }
+
     fn unhandled_csi(
         &mut self,
         screen: &mut vt100::Screen,
         i1: Option<u8>,
-        _: Option<u8>,
+        i2: Option<u8>,
         params: &[&[u16]],
         c: char,
     ) {
+        if c == 'u' {
+            let alternate = screen.alternate_screen();
+            if let Some(reply) = self.kitty.handle(alternate, i1, i2, params) {
+                if self.bytes.len() + reply.len() <= 4096 {
+                    self.bytes.extend(reply);
+                }
+            }
+            return;
+        }
         let p = params.first().and_then(|p| p.first()).copied().unwrap_or(0);
         let reply = match (c, p, i1) {
             ('n', 5, None) => Some("\x1b[0n".into()),
