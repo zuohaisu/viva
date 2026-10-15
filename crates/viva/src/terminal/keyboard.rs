@@ -1,7 +1,8 @@
 //! Kitty keyboard protocol for bytes written into the PTY.
 //!
 //! The program opts in with `CSI =/>/</? u`. Flags this terminal cannot
-//! honor (alternate-key reporting) are dropped and are not reported back.
+//! honor (alternate-key reporting, press/repeat/release event types on the
+//! macOS host path) are dropped and are not reported back.
 //! A key event whose unshifted identity is not in the host event is dropped
 //! too — it is never replaced with a guessed legacy byte.
 
@@ -23,7 +24,7 @@ pub(crate) const REPORT_ALL: u16 = 8;
 pub(crate) const REPORT_TEXT: u16 = 16;
 
 const ALTERNATE_KEYS: u16 = 4;
-const SUPPORTED: u16 = DISAMBIGUATE | REPORT_EVENTS | REPORT_ALL | REPORT_TEXT;
+const SUPPORTED: u16 = DISAMBIGUATE | REPORT_ALL | REPORT_TEXT;
 const STACK_LIMIT: usize = 16;
 
 #[derive(Debug, Clone, Default)]
@@ -720,9 +721,11 @@ mod tests {
         assert_eq!(flags_of(b"\x1b[=1u"), DISAMBIGUATE);
         // Alternate-key reporting is not honored and is not advertised.
         assert_eq!(flags_of(b"\x1b[=5u"), DISAMBIGUATE);
+        // Press/repeat/release reporting needs host release events; not advertised.
+        assert_eq!(flags_of(b"\x1b[=2u"), 0);
         assert_eq!(
             flags_of(b"\x1b[=27u"),
-            DISAMBIGUATE | REPORT_EVENTS | REPORT_ALL | REPORT_TEXT
+            DISAMBIGUATE | REPORT_ALL | REPORT_TEXT
         );
         // Report-all implies disambiguate. Text without report-all is dropped.
         assert_eq!(flags_of(b"\x1b[=8u"), DISAMBIGUATE | REPORT_ALL);
@@ -737,16 +740,17 @@ mod tests {
         parser.process(b"\x1b[=1u\x1b[=2;2u");
         assert_eq!(
             parser.callbacks().kitty_flags(false),
-            DISAMBIGUATE | REPORT_EVENTS
+            DISAMBIGUATE,
+            "report-events bit is not stored"
         );
         parser.process(b"\x1b[=7;4u");
         assert_eq!(
             parser.callbacks().kitty_flags(false),
-            DISAMBIGUATE | REPORT_EVENTS,
+            DISAMBIGUATE,
             "an unknown mode is ignored"
         );
         parser.process(b"\x1b[=1;3u");
-        assert_eq!(parser.callbacks().kitty_flags(false), REPORT_EVENTS);
+        assert_eq!(parser.callbacks().kitty_flags(false), 0);
     }
 
     #[test]
@@ -768,7 +772,7 @@ mod tests {
         parser.process(b"\x1b[=1u\x1b[>2u\x1b[<u");
         assert_eq!(parser.callbacks().kitty_flags(false), 0);
         parser.process(b"\x1b[=1u\x1b[>2u\x1b[>3u\x1b[<1u");
-        assert_eq!(parser.callbacks().kitty_flags(false), REPORT_EVENTS);
+        assert_eq!(parser.callbacks().kitty_flags(false), 0);
     }
 
     #[test]
@@ -780,7 +784,7 @@ mod tests {
             crate::terminal::screen::Replies::with_osc52(false),
         );
         parser.process(b"\x1b[=1u\x1b[?1049h\x1b[=2u");
-        assert_eq!(parser.callbacks().kitty_flags(true), REPORT_EVENTS);
+        assert_eq!(parser.callbacks().kitty_flags(true), 0);
         assert_eq!(parser.callbacks().kitty_flags(false), DISAMBIGUATE);
         let restore = parser.callbacks().kitty_restore(true);
         let mut adopted = vt100::Parser::new_with_callbacks(
@@ -791,7 +795,7 @@ mod tests {
         );
         adopted.process(b"\x1b[?1049h");
         adopted.process(&restore);
-        assert_eq!(adopted.callbacks().kitty_flags(true), REPORT_EVENTS);
+        assert_eq!(adopted.callbacks().kitty_flags(true), 0);
     }
 
     #[test]
@@ -867,7 +871,7 @@ mod tests {
 
     #[test]
     fn report_all_and_event_types_use_the_protocol_form() {
-        let all = modes(REPORT_ALL | REPORT_TEXT | REPORT_EVENTS);
+        let all = modes(REPORT_ALL | REPORT_TEXT);
         assert_eq!(
             encode(press(KeyCode::Char('a'), KeyModifiers::NONE), &all),
             Some(b"\x1b[97;1;97u".to_vec())
@@ -891,52 +895,22 @@ mod tests {
             ),
             Some(b"\x1b[97;9u".to_vec())
         );
-        let events = modes(DISAMBIGUATE | REPORT_EVENTS);
+        let disambiguate = modes(DISAMBIGUATE);
+        assert!(
+            encode(
+                kind(KeyCode::Left, KeyModifiers::NONE, KeyEventKind::Release),
+                &disambiguate
+            )
+            .is_none(),
+            "release events are dropped when report-events is not advertised"
+        );
         assert_eq!(
             encode(
                 kind(KeyCode::Left, KeyModifiers::NONE, KeyEventKind::Repeat),
-                &events
+                &disambiguate
             ),
-            Some(b"\x1b[1;1:2D".to_vec())
-        );
-        assert_eq!(
-            encode(
-                kind(KeyCode::Left, KeyModifiers::NONE, KeyEventKind::Release),
-                &events
-            ),
-            Some(b"\x1b[1;1:3D".to_vec())
-        );
-        assert!(
-            encode(
-                kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Release),
-                &events
-            )
-            .is_none()
-        );
-        assert!(
-            encode(
-                kind(
-                    KeyCode::Char('a'),
-                    KeyModifiers::NONE,
-                    KeyEventKind::Release
-                ),
-                &events
-            )
-            .is_none()
-        );
-        assert!(
-            encode(
-                kind(KeyCode::Left, KeyModifiers::NONE, KeyEventKind::Release),
-                &modes(DISAMBIGUATE)
-            )
-            .is_none()
-        );
-        assert_eq!(
-            encode(
-                kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Release),
-                &modes(REPORT_ALL | REPORT_EVENTS)
-            ),
-            Some(b"\x1b[13;1:3u".to_vec())
+            encode(press(KeyCode::Left, KeyModifiers::NONE), &disambiguate),
+            "repeat is encoded as a press when event types are unsupported"
         );
         let keypad = KeyEvent::new_with_kind_and_state(
             KeyCode::Char('0'),
