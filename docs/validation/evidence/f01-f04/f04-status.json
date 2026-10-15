@@ -1,15 +1,20 @@
 {
-  "adapter": "/Users/hzuo/orca/workspaces/viva/dev5/extensions/pi/memory/memory_adapter.py",
-  "adapter_present": true,
-  "agent_dir": "/Users/hzuo/.hermes/hermes-agent",
-  "agent_dir_present": true,
-  "db_path": "/var/folders/8k/cz3lc7yd3dq6gbdx5dbf_j8h0000gn/T/tmp.ClXCX6AgOS/memory.db",
+  "storage": "native",
+  "database": "<VIVA_HOME>/viva.db",
   "probe": {
-    "error": null,
-    "facts_total": 1,
-    "hrr": "active",
     "ok": true,
-    "state": "fetched"
-  },
-  "python": "/Users/hzuo/.hermes/hermes-agent/venv/bin/python"
+    "state": "ready",
+    "storage": "native",
+    "facts_total": 1,
+    "legacy_hermes_links": 0,
+    "native_links": 1,
+    "hrr": {
+      "dim": 1024,
+      "rerank_weights": {
+        "fts": 0.4,
+        "jaccard": 0.3,
+        "hrr": 0.3
+      }
+    }
+  }
 }

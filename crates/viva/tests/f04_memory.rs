@@ -106,6 +106,112 @@ fn cli_memory_works_without_hermes_or_python() {
 }
 
 #[test]
+fn cli_memory_status_probe_archive_restore_without_hermes() {
+    let home = TempDir::new().unwrap();
+    init_home(home.path());
+    let member = MemberId::new();
+    let mid = member.as_str();
+
+    let (ok, stdout, stderr) = run_viva(
+        home.path(),
+        &[
+            "memory",
+            "remember",
+            "--member",
+            mid,
+            "--content",
+            EN_FACT,
+            "--source",
+            "cli five-command acceptance",
+        ],
+    );
+    assert!(ok, "remember: {stderr}\n{stdout}");
+    let link: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let fact_id = link["fact_id"].as_str().unwrap();
+
+    let (ok, stdout, stderr) = run_viva(
+        home.path(),
+        &["memory", "probe", "--member", mid, "--entity", "release"],
+    );
+    assert!(ok, "probe: {stderr}");
+    let probe: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(probe["state"], "fetched");
+
+    let (ok, stdout, stderr) = run_viva(home.path(), &["memory", "status"]);
+    assert!(ok, "status: {stderr}");
+    let status: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(status["storage"], "native");
+    assert_eq!(status["probe"]["state"], "ready");
+    assert_eq!(status["probe"]["facts_total"], 1);
+    assert_eq!(status["probe"]["legacy_hermes_links"], 0);
+
+    let (ok, stdout, stderr) = run_viva(
+        home.path(),
+        &[
+            "grant",
+            "--member",
+            mid,
+            "--action",
+            "maintain_knowledge",
+            "--mode",
+            "ACT_WITH_APPROVAL",
+        ],
+    );
+    assert!(ok, "grant: {stderr}");
+    let grant: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let grant_id = grant["grant_id"].as_str().unwrap();
+
+    let (ok, _, stderr) = run_viva(
+        home.path(),
+        &[
+            "memory",
+            "archive",
+            "--fact",
+            fact_id,
+            "--member",
+            mid,
+            "--grant",
+            grant_id,
+            "--reason",
+            "acceptance archive",
+        ],
+    );
+    assert!(ok, "archive: {stderr}");
+
+    let (ok, stdout, _) = run_viva(
+        home.path(),
+        &[
+            "memory",
+            "search",
+            "--member",
+            mid,
+            "--query",
+            "release train",
+        ],
+    );
+    assert!(ok);
+    let body: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(body["facts"].as_array().unwrap().is_empty());
+
+    let (ok, _, stderr) = run_viva(
+        home.path(),
+        &[
+            "memory",
+            "restore",
+            "--fact",
+            fact_id,
+            "--member",
+            mid,
+            "--grant",
+            grant_id,
+            "--reason",
+            "acceptance restore",
+        ],
+    );
+    assert!(ok, "restore: {stderr}");
+}
+
+#[test]
 fn chinese_trigram_substring_and_two_char_fallback() {
     let home = TempDir::new().unwrap();
     init_home(home.path());

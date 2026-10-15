@@ -19,16 +19,12 @@ brief, and offers controlled actions through the `viva` CLI.
 - **External memory tools (F04, issue #26)**: `viva_memory_search`
   (read-only recall scoped to this session's member) and
   `viva_memory_remember` (an explicit write that always records provenance)
-  go through `viva memory`, Viva's link layer over the real Holographic
-  store (see [memory/README.md](memory/README.md)). The store is the
-  user's local Hermes checkout, which Viva does not ship; without it every
-  call returns `unavailable`. Recall and writes happen only when a tool is
-  called; nothing is recalled or written automatically. Since #101 they
-  register against the real Pi API; of all the tools, only `viva_status`
-  and `viva_task_brief` have been exercised end to end in real Pi so
-  far. Real-provider tests are pending
-  independent re-verification, and no memory backend has been chosen as the
-  default.
+  go through `viva memory` into Viva's native store and link layer (see
+  [memory/README.md](memory/README.md)). No Hermes checkout or Python is
+  required. Recall and writes happen only when a tool is called; nothing is
+  recalled or written automatically. Since #101 they register against the
+  real Pi API; of all the tools, only `viva_status` and `viva_task_brief`
+  have been exercised end to end in real Pi so far.
 - **Explicit handoff**: `viva_handoff` records a member-reported
   summary for the current task. It is stored as a fact ("member X reported
   this"), never as a completion verdict and never as acceptance PASS.
