@@ -35,8 +35,8 @@ mod protocol;
 pub use client::{Client, restart_server, restart_server_with};
 pub use handoff::{HandoffEntry, HandoffManifest};
 pub use protocol::{
-    MAX_MESSAGE_BYTES, PROTOCOL_VERSION, Request, RequestKind, Response, new_request, read_message,
-    round_trip, with_grant, write_message,
+    MAX_MESSAGE_BYTES, PROTOCOL_VERSION, Request, RequestKind, Response, WorkbenchTreeOp,
+    new_request, read_message, round_trip, with_grant, write_message,
 };
 
 use std::os::fd::RawFd;
@@ -210,6 +210,8 @@ pub struct Shared {
     /// record a false "orphaned" recovery for a terminal this server
     /// stopped itself.
     watchers: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    /// The scene / tab / pane tree. Clients render it; they do not own it.
+    tree: Mutex<WorkbenchTree>,
 }
 
 /// A claimed, running server.
@@ -268,6 +270,7 @@ impl Host {
             "INSERT INTO hosts(host_id, pid, started_at) VALUES (?1, ?2, ?3)",
             rusqlite::params![host_id, std::process::id() as i64, utc_now()],
         )?;
+        let tree = load_workbench_tree(&store);
 
         let listener = UnixListener::bind(&socket_path)?;
         let shared = Arc::new(Shared {
@@ -290,6 +293,7 @@ impl Host {
             gh_bin: Mutex::new(None),
             sync_in_flight: AtomicBool::new(false),
             watchers: Mutex::new(Vec::new()),
+            tree: Mutex::new(tree),
         });
         Ok(Self { shared, listener })
     }
@@ -806,6 +810,7 @@ fn handle_request(shared: Arc<Shared>, request: &Request) -> Result<serde_json::
         RequestKind::WorkbenchLayout { layout_json } => {
             workbench_layout(&shared, layout_json.as_deref())
         }
+        RequestKind::WorkbenchTree { op } => workbench_tree(&shared, op),
         RequestKind::TerminalOpenInWorktree { worktree_id } => {
             terminal_open_in_worktree(&shared, worktree_id)
         }
@@ -907,6 +912,9 @@ const SOCKET_CONTROL_ACTION: &str = "terminal_control";
 /// member-attributed. Read-only kinds and the OS-authenticated owner path
 /// (no member attribution) are not gated beyond grant validation below.
 fn is_member_gated_kind(kind: &RequestKind) -> bool {
+    if let RequestKind::WorkbenchTree { op } = kind {
+        return op.changes_state();
+    }
     matches!(
         kind,
         RequestKind::Dispatch { .. }
@@ -1324,37 +1332,250 @@ fn workbench_view(shared: Arc<Shared>) -> Result<serde_json::Value> {
     serde_json::to_value(&model).map_err(|e| Error::Validation(format!("view: {e}")))
 }
 
-/// The pane-layout preference store (QA F5): the client persists its pane
-/// tree so a later attach rebuilds the same view. A UI preference in
-/// settings - bounded, validated as JSON, never a Viva fact.
-fn workbench_layout(shared: &Shared, layout_json: Option<&str>) -> Result<serde_json::Value> {
-    let store = shared.store.lock().expect("store");
-    match layout_json {
-        Some(json) => {
-            if json.len() > 64 * 1024 {
-                return Err(Error::Validation("layout exceeds the 64 KiB bound".into()));
+/// In-memory scene tree plus any stored JSON the server has not adopted.
+struct WorkbenchTree {
+    book: crate::tui::workbench::scenes::SceneBook,
+    /// A stored payload that is not a scene book. `GET` returns it until a
+    /// real tree write replaces it.
+    unmanaged: Option<String>,
+    stored: bool,
+}
+
+const LAYOUT_MAX_BYTES: usize = 64 * 1024;
+
+fn write_layout(conn: &rusqlite::Connection, json: &str) -> Result<()> {
+    if json.len() > LAYOUT_MAX_BYTES {
+        return Err(Error::Validation("layout exceeds the 64 KiB bound".into()));
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO settings(key,value) SELECT 'workbench_layout_legacy',value \
+         FROM settings WHERE key='workbench_layout' AND json_extract(value,'$.version') IS NULL",
+        [],
+    )?;
+    conn.execute(
+        "INSERT INTO settings(key, value) VALUES ('workbench_layout', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [json],
+    )?;
+    Ok(())
+}
+
+fn terminal_scene_map(store: &Store) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let Ok(mut stmt) = store.connection().prepare(
+        "SELECT terminal_id, worktree_id FROM launch_specs \
+         WHERE terminal_id IS NOT NULL AND worktree_id IS NOT NULL \
+         ORDER BY created_at",
+    ) else {
+        return out;
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }) else {
+        return out;
+    };
+    for row in rows.flatten() {
+        out.insert(row.0, row.1);
+    }
+    out
+}
+
+fn scene_for_terminal<'a>(map: &'a std::collections::BTreeMap<String, String>, id: &str) -> String {
+    map.get(id)
+        .cloned()
+        .unwrap_or_else(|| crate::tui::workbench::scenes::FLOATING.into())
+}
+
+/// Load the persisted layout into the resident tree. A version-2 book is
+/// the tree. An older `{grid, focus}` payload is migrated once and written
+/// back. Anything else is kept verbatim so a later read still returns it.
+fn load_workbench_tree(store: &Store) -> WorkbenchTree {
+    let saved: Option<String> = store
+        .connection()
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'workbench_layout'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    let Some(saved) = saved.filter(|value| !value.is_empty()) else {
+        return WorkbenchTree {
+            book: crate::tui::workbench::scenes::SceneBook::default(),
+            unmanaged: None,
+            stored: false,
+        };
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&saved) else {
+        return WorkbenchTree {
+            book: crate::tui::workbench::scenes::SceneBook::default(),
+            unmanaged: Some(saved),
+            stored: true,
+        };
+    };
+    let map = terminal_scene_map(store);
+    match crate::tui::workbench::tree::import_stored(&value, |id| scene_for_terminal(&map, id)) {
+        Ok(Some(book)) => {
+            if value.get("version").is_none() {
+                if let Ok(json) = serde_json::to_string(&book) {
+                    let _ = write_layout(store.connection(), &json);
+                }
             }
-            // Must parse: a layout the client cannot restore is junk.
-            serde_json::from_str::<serde_json::Value>(json)
-                .map_err(|e| Error::Validation(format!("layout is not valid JSON: {e}")))?;
-            store.connection().execute("INSERT OR IGNORE INTO settings(key,value) SELECT 'workbench_layout_legacy',value FROM settings WHERE key='workbench_layout' AND json_extract(value,'$.version') IS NULL",[])?;
-            store.connection().execute(
-                "INSERT INTO settings(key, value) VALUES ('workbench_layout', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                [json],
-            )?;
-            Ok(serde_json::json!({ "saved": true }))
+            WorkbenchTree {
+                book,
+                unmanaged: None,
+                stored: true,
+            }
+        }
+        _ => WorkbenchTree {
+            book: crate::tui::workbench::scenes::SceneBook::default(),
+            unmanaged: Some(saved),
+            stored: true,
+        },
+    }
+}
+
+fn layout_response(tree: &WorkbenchTree) -> Result<serde_json::Value> {
+    if let Some(raw) = &tree.unmanaged {
+        return Ok(serde_json::json!({ "layout": raw }));
+    }
+    if !tree.stored {
+        return Ok(serde_json::json!({ "layout": serde_json::Value::Null }));
+    }
+    Ok(serde_json::json!({ "layout": serde_json::to_string(&tree.book)? }))
+}
+
+/// The pane layout, now the resident scene tree (QA F5, viva 0.3.8).
+/// A version-2 write merges the tab that client is looking at. Other tabs
+/// stay as the server has them, so two workbenches do not clobber each
+/// other. Older layout JSON is migrated on the way in.
+fn workbench_layout(shared: &Shared, layout_json: Option<&str>) -> Result<serde_json::Value> {
+    let Some(json) = layout_json else {
+        let tree = shared.tree.lock().expect("scene tree");
+        return layout_response(&tree);
+    };
+    if json.len() > LAYOUT_MAX_BYTES {
+        return Err(Error::Validation("layout exceeds the 64 KiB bound".into()));
+    }
+    let value: serde_json::Value = serde_json::from_str(json)
+        .map_err(|e| Error::Validation(format!("layout is not valid JSON: {e}")))?;
+    let map = {
+        let store = shared.store.lock().expect("store");
+        terminal_scene_map(&store)
+    };
+    let imported =
+        crate::tui::workbench::tree::import_stored(&value, |id| scene_for_terminal(&map, id))?;
+    let mut tree = shared.tree.lock().expect("scene tree");
+    match imported {
+        Some(book) if value.get("version").is_some() => {
+            if tree.stored && tree.unmanaged.is_none() {
+                let mut next = tree.book.clone();
+                crate::tui::workbench::tree::merge_client_book(&mut next, &book)?;
+                let saved = serde_json::to_string(&next)?;
+                let store = shared.store.lock().expect("store");
+                write_layout(store.connection(), &saved)?;
+                drop(store);
+                tree.book = next;
+            } else {
+                let saved = serde_json::to_string(&book)?;
+                let store = shared.store.lock().expect("store");
+                write_layout(store.connection(), &saved)?;
+                drop(store);
+                tree.book = book;
+            }
+            tree.unmanaged = None;
+            tree.stored = true;
+        }
+        Some(book) => {
+            if tree.unmanaged.is_some() || !tree.stored {
+                let saved = serde_json::to_string(&book)?;
+                let store = shared.store.lock().expect("store");
+                write_layout(store.connection(), &saved)?;
+                drop(store);
+                tree.book = book;
+                tree.unmanaged = None;
+                tree.stored = true;
+            }
         }
         None => {
-            let saved: Option<String> = store
-                .connection()
-                .query_row(
-                    "SELECT value FROM settings WHERE key = 'workbench_layout'",
-                    [],
-                    |row| row.get(0),
-                )
-                .ok();
-            Ok(serde_json::json!({ "layout": saved }))
+            let store = shared.store.lock().expect("store");
+            write_layout(store.connection(), json)?;
+            drop(store);
+            tree.unmanaged = Some(json.to_string());
+            tree.stored = true;
+        }
+    }
+    Ok(serde_json::json!({ "saved": true }))
+}
+
+/// Scene / tab / pane operations. Tree edits are persisted. Closing a pane
+/// only changes the tree — the PTY keeps running until an explicit stop.
+fn workbench_tree(shared: &Shared, op: &WorkbenchTreeOp) -> Result<serde_json::Value> {
+    match op {
+        WorkbenchTreeOp::List => {
+            let tree = shared.tree.lock().expect("scene tree");
+            let mut body = serde_json::json!({ "tree": tree.book });
+            if let Some(raw) = &tree.unmanaged {
+                body["unmanaged_layout"] = serde_json::Value::String(raw.clone());
+            }
+            Ok(body)
+        }
+        WorkbenchTreeOp::PaneSnapshot {
+            scene_id,
+            tab_id,
+            pane_id,
+        } => {
+            let terminal_id = {
+                let tree = shared.tree.lock().expect("scene tree");
+                crate::tui::workbench::tree::resolve_pane_terminal(
+                    &tree.book,
+                    scene_id.as_deref(),
+                    tab_id.as_deref(),
+                    pane_id,
+                )?
+            };
+            let snapshot = terminal_snapshot(shared, &terminal_id)?;
+            Ok(serde_json::json!({
+                "pane_id": pane_id,
+                "terminal_id": terminal_id,
+                "snapshot": snapshot,
+            }))
+        }
+        WorkbenchTreeOp::PaneInput {
+            scene_id,
+            tab_id,
+            pane_id,
+            bytes_hex,
+        } => {
+            let terminal_id = {
+                let tree = shared.tree.lock().expect("scene tree");
+                crate::tui::workbench::tree::resolve_pane_terminal(
+                    &tree.book,
+                    scene_id.as_deref(),
+                    tab_id.as_deref(),
+                    pane_id,
+                )?
+            };
+            let written = terminal_input(shared, &terminal_id, bytes_hex)?;
+            Ok(serde_json::json!({
+                "pane_id": pane_id,
+                "terminal_id": terminal_id,
+                "written": written["written"],
+            }))
+        }
+        other => {
+            let mut tree = shared.tree.lock().expect("scene tree");
+            let mut next = tree.book.clone();
+            if !crate::tui::workbench::tree::apply(&mut next, other)? {
+                return Ok(serde_json::json!({ "tree": tree.book }));
+            }
+            let saved = serde_json::to_string(&next)?;
+            let store = shared.store.lock().expect("store");
+            write_layout(store.connection(), &saved)?;
+            drop(store);
+            tree.book = next;
+            tree.unmanaged = None;
+            tree.stored = true;
+            Ok(serde_json::json!({ "tree": serde_json::from_str::<serde_json::Value>(&saved)? }))
         }
     }
 }

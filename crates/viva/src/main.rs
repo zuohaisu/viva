@@ -63,6 +63,7 @@ fn run(args: &[String]) -> Result<()> {
             cmd_workbench()
         }
         Some("terminal") => cmd_terminal(args.get(1..).unwrap_or(&[])),
+        Some("scene") => cmd_scene(args.get(1..).unwrap_or(&[])),
         Some("agent") => cmd_agent(args.get(1..).unwrap_or(&[])),
         Some("events") => cmd_events(args.get(1..).unwrap_or(&[])),
         Some("sync") => cmd_sync(args.get(1..).unwrap_or(&[])),
@@ -451,6 +452,270 @@ fn cmd_terminal(args: &[String]) -> Result<()> {
     }
 }
 
+fn cmd_scene(args: &[String]) -> Result<()> {
+    let home = viva::foundation::paths::viva_home(None);
+    viva::foundation::paths::ensure_private_dir(&home)?;
+    let (member, grant, args) = split_member_grant(args)?;
+    let op = parse_scene_op(&args)?;
+    let mut client = viva::server::Client::ensure_server(&home)?;
+    let mut request = viva::server::new_request(viva::server::RequestKind::WorkbenchTree { op });
+    request.member = member;
+    request.grant = grant;
+    let response = client.call_request(request)?;
+    println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
+}
+
+fn split_member_grant(args: &[String]) -> Result<(Option<String>, Option<String>, Vec<String>)> {
+    let mut member = None;
+    let mut grant = None;
+    let mut rest = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--member" | "--grant" => {
+                let flag = args[i].as_str();
+                i += 1;
+                let value = args
+                    .get(i)
+                    .ok_or_else(|| Error::Validation(format!("flag {flag} needs a value")))?;
+                if flag == "--member" {
+                    member = Some(value.clone());
+                } else {
+                    grant = Some(value.clone());
+                }
+            }
+            other => rest.push(other.to_string()),
+        }
+        i += 1;
+    }
+    Ok((member, grant, rest))
+}
+
+fn scene_flags(args: &[String]) -> Result<std::collections::HashMap<String, String>> {
+    let mut flags = std::collections::HashMap::new();
+    let mut i = 0;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        if !flag.starts_with("--") {
+            return Err(Error::Validation(format!(
+                "unexpected argument `{flag}` (see `viva help`)"
+            )));
+        }
+        i += 1;
+        let value = args
+            .get(i)
+            .ok_or_else(|| Error::Validation(format!("flag {flag} needs a value")))?;
+        flags.insert(flag.trim_start_matches("--").to_string(), value.clone());
+        i += 1;
+    }
+    Ok(flags)
+}
+
+fn flag<'a>(flags: &'a std::collections::HashMap<String, String>, name: &str) -> Result<&'a str> {
+    flags
+        .get(name)
+        .map(String::as_str)
+        .ok_or_else(|| Error::Validation(format!("scene needs --{name}")))
+}
+
+fn opt_flag(flags: &std::collections::HashMap<String, String>, name: &str) -> Option<String> {
+    flags.get(name).cloned()
+}
+
+fn parse_direction(text: &str) -> Result<String> {
+    match text {
+        "right" | "r" => Ok("right".into()),
+        "down" | "d" => Ok("down".into()),
+        other => Err(Error::Validation(format!(
+            "direction `{other}` must be right or down"
+        ))),
+    }
+}
+
+fn parse_path(text: &str) -> Result<Vec<bool>> {
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    text.split(',')
+        .map(|part| match part.trim() {
+            "0" => Ok(false),
+            "1" => Ok(true),
+            other => Err(Error::Validation(format!(
+                "path step `{other}` must be 0 or 1"
+            ))),
+        })
+        .collect()
+}
+
+fn parse_on(text: &str) -> Result<bool> {
+    match text {
+        "true" | "on" | "1" => Ok(true),
+        "false" | "off" | "0" => Ok(false),
+        other => Err(Error::Validation(format!(
+            "--on `{other}` must be true or false"
+        ))),
+    }
+}
+
+fn parse_scene_op(args: &[String]) -> Result<viva::server::WorkbenchTreeOp> {
+    use viva::server::WorkbenchTreeOp;
+    let usage = "scene needs list | create | rename | close | focus | tab | pane (see `viva help`)";
+    match args.first().map(String::as_str) {
+        Some("list") => {
+            if args.len() != 1 {
+                return Err(Error::Validation("scene list takes no arguments".into()));
+            }
+            Ok(WorkbenchTreeOp::List)
+        }
+        Some("create") => {
+            let flags = scene_flags(&args[1..])?;
+            Ok(WorkbenchTreeOp::CreateScene {
+                id: opt_flag(&flags, "id"),
+                name: opt_flag(&flags, "name").unwrap_or_default(),
+            })
+        }
+        Some("rename") => {
+            let flags = scene_flags(&args[1..])?;
+            Ok(WorkbenchTreeOp::RenameScene {
+                id: flag(&flags, "id")?.to_string(),
+                name: flag(&flags, "name")?.to_string(),
+            })
+        }
+        Some("close") => {
+            let flags = scene_flags(&args[1..])?;
+            Ok(WorkbenchTreeOp::CloseScene {
+                id: flag(&flags, "id")?.to_string(),
+            })
+        }
+        Some("focus") => {
+            let flags = scene_flags(&args[1..])?;
+            Ok(WorkbenchTreeOp::FocusScene {
+                id: flag(&flags, "id")?.to_string(),
+            })
+        }
+        Some("tab") => parse_tab_op(&args[1..]),
+        Some("pane") => parse_pane_op(&args[1..]),
+        _ => Err(Error::Validation(usage.into())),
+    }
+}
+
+fn parse_tab_op(args: &[String]) -> Result<viva::server::WorkbenchTreeOp> {
+    use viva::server::WorkbenchTreeOp;
+    let flags = scene_flags(args.get(1..).unwrap_or(&[]))?;
+    match args.first().map(String::as_str) {
+        Some("create") => Ok(WorkbenchTreeOp::CreateTab {
+            scene_id: opt_flag(&flags, "scene"),
+            name: flag(&flags, "name")?.to_string(),
+        }),
+        Some("rename") => Ok(WorkbenchTreeOp::RenameTab {
+            scene_id: opt_flag(&flags, "scene"),
+            tab_id: flag(&flags, "id")?.to_string(),
+            name: flag(&flags, "name")?.to_string(),
+        }),
+        Some("close") => Ok(WorkbenchTreeOp::CloseTab {
+            scene_id: opt_flag(&flags, "scene"),
+            tab_id: flag(&flags, "id")?.to_string(),
+        }),
+        Some("focus") => Ok(WorkbenchTreeOp::FocusTab {
+            scene_id: opt_flag(&flags, "scene"),
+            tab_id: flag(&flags, "id")?.to_string(),
+        }),
+        _ => Err(Error::Validation(
+            "scene tab needs create | rename | close | focus".into(),
+        )),
+    }
+}
+
+fn parse_pane_op(args: &[String]) -> Result<viva::server::WorkbenchTreeOp> {
+    use viva::server::WorkbenchTreeOp;
+    let flags = scene_flags(args.get(1..).unwrap_or(&[]))?;
+    let scene_id = opt_flag(&flags, "scene");
+    let tab_id = opt_flag(&flags, "tab");
+    match args.first().map(String::as_str) {
+        Some("create") => Ok(WorkbenchTreeOp::CreatePane {
+            scene_id,
+            tab_id,
+            terminal_id: opt_flag(&flags, "terminal"),
+            direction: opt_flag(&flags, "direction")
+                .map(|value| parse_direction(&value))
+                .transpose()?,
+        }),
+        Some("rename") => Ok(WorkbenchTreeOp::RenamePane {
+            scene_id,
+            tab_id,
+            pane_id: flag(&flags, "id")?.to_string(),
+            name: flag(&flags, "name")?.to_string(),
+        }),
+        Some("close") => Ok(WorkbenchTreeOp::ClosePane {
+            scene_id,
+            tab_id,
+            pane_id: flag(&flags, "id")?.to_string(),
+        }),
+        Some("focus") => Ok(WorkbenchTreeOp::FocusPane {
+            scene_id,
+            tab_id,
+            pane_id: flag(&flags, "id")?.to_string(),
+        }),
+        Some("split") => Ok(WorkbenchTreeOp::Split {
+            scene_id,
+            tab_id,
+            pane_id: opt_flag(&flags, "pane"),
+            direction: parse_direction(flag(&flags, "direction")?)?,
+            terminal_id: opt_flag(&flags, "terminal"),
+        }),
+        Some("zoom") => Ok(WorkbenchTreeOp::Zoom {
+            scene_id,
+            tab_id,
+            on: opt_flag(&flags, "on")
+                .map(|value| parse_on(&value))
+                .transpose()?,
+        }),
+        Some("resize") => {
+            let ratio: u16 = flag(&flags, "ratio")?
+                .parse()
+                .map_err(|_| Error::Validation("--ratio must be a number".into()))?;
+            Ok(WorkbenchTreeOp::Resize {
+                scene_id,
+                tab_id,
+                path: opt_flag(&flags, "path")
+                    .map(|value| parse_path(&value))
+                    .transpose()?
+                    .unwrap_or_default(),
+                ratio,
+            })
+        }
+        Some("input") => {
+            let text = opt_flag(&flags, "text");
+            let hex = opt_flag(&flags, "hex");
+            let bytes_hex = match (text, hex) {
+                (Some(text), None) => viva::server::hex_encode(text.as_bytes()),
+                (None, Some(hex)) => hex,
+                _ => {
+                    return Err(Error::Validation(
+                        "pane input needs exactly one of --text or --hex".into(),
+                    ));
+                }
+            };
+            Ok(WorkbenchTreeOp::PaneInput {
+                scene_id,
+                tab_id,
+                pane_id: flag(&flags, "id")?.to_string(),
+                bytes_hex,
+            })
+        }
+        Some("snapshot") => Ok(WorkbenchTreeOp::PaneSnapshot {
+            scene_id,
+            tab_id,
+            pane_id: flag(&flags, "id")?.to_string(),
+        }),
+        _ => Err(Error::Validation(
+            "scene pane needs create | rename | close | focus | split | zoom | resize | input | snapshot"
+                .into(),
+        )),
+    }
+}
+
 fn print_usage() {
     println!(
         "viva — local-first personal AI collaboration system
@@ -522,6 +787,27 @@ USAGE:
 
     viva terminal resize <terminal-id> --cols N --rows N
         Resize one terminal's PTY.
+
+    viva scene list
+    viva scene create [--id <id>] [--name <name>] | rename --id <id> --name <name>
+        | close --id <id> | focus --id <id>
+    viva scene tab create [--scene <id>] --name <name>
+        | rename --id <tab> --name <name> [--scene <id>]
+        | close --id <tab> [--scene <id>] | focus --id <tab> [--scene <id>]
+    viva scene pane create [--scene <id>] [--tab <id>] [--terminal <id>]
+        [--direction right|down]
+        | rename --id <pane> --name <name> [--scene <id>] [--tab <id>]
+        | close --id <pane> [--scene <id>] [--tab <id>]
+        | focus --id <pane> [--scene <id>] [--tab <id>]
+        | split --direction right|down [--terminal <id>] [--pane <id>]
+          [--scene <id>] [--tab <id>]
+        | zoom [--on true|false] [--scene <id>] [--tab <id>]
+        | resize --ratio <10-90> [--path 0,1] [--scene <id>] [--tab <id>]
+        | input --id <pane> (--text <text> | --hex <hex>)
+        | snapshot --id <pane>
+        List and edit the resident scene/tab/pane tree. Closing a pane does
+        not stop its terminal. --member and --grant follow the socket rules.
+        Two clients share the tree; a later focus or size wins for that tab.
 
     viva stop-terminal <terminal-id>
         Stop one terminal (its process group only).
