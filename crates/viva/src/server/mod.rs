@@ -1605,12 +1605,13 @@ fn pane_opened_event(
         } => ("overlay", scene_id.as_deref(), tab_id.as_deref()),
         WorkbenchTreeOp::CreateTab { scene_id, .. } => ("tab", scene_id.as_deref(), None),
         WorkbenchTreeOp::Zoom {
-            scene_id,
-            tab_id,
-            ..
+            scene_id, tab_id, ..
         } => {
-            if !crate::tui::workbench::tree::tab_is_zoomed(book, scene_id.as_deref(), tab_id.as_deref())
-            {
+            if !crate::tui::workbench::tree::tab_is_zoomed(
+                book,
+                scene_id.as_deref(),
+                tab_id.as_deref(),
+            ) {
                 return None;
             }
             ("zoomed", scene_id.as_deref(), tab_id.as_deref())

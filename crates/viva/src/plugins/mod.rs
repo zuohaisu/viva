@@ -90,9 +90,7 @@ pub fn reject_remote_source(raw: &str) -> Result<()> {
         ));
     }
     let lower = trimmed.to_ascii_lowercase();
-    let remote = lower.contains("://")
-        || lower.starts_with("git@")
-        || lower.contains("herdr.dev");
+    let remote = lower.contains("://") || lower.starts_with("git@") || lower.contains("herdr.dev");
     if remote {
         return Err(Error::Validation(
             "plugin install only accepts a local directory; URLs and marketplace endpoints are refused"
