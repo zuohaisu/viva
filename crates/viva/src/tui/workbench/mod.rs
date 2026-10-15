@@ -325,6 +325,9 @@ impl WorkspacePrompt {
 /// How many recent workspaces the open prompt lists.
 const RECENT_LIMIT: usize = 8;
 
+const DEFAULT_STATUS_HINT: &str =
+    "ctrl+b prefix · Enter opens · j/k navigate lists · h/j/k/l panes · mouse focuses sidebar";
+
 /// The workbench application state. Pure view state + explicit caches;
 /// drive it with [`WorkbenchApp::on_key`], the setters, and [`Self::draw`].
 pub struct WorkbenchApp {
@@ -416,7 +419,7 @@ impl WorkbenchApp {
             snapshots: std::collections::HashMap::new(),
             terminal_mode: None,
             diff_view: None,
-            status_line: "ctrl+b prefix · Enter opens · j/k navigate lists · h/j/k/l panes · mouse focuses sidebar".into(),
+            status_line: DEFAULT_STATUS_HINT.into(),
             quit_requested: false,
             layout_dirty: false,
             file_panel: None,
@@ -432,14 +435,14 @@ impl WorkbenchApp {
             last_divider_click: None,
             workspace_prompt: None,
             workspace_hits: vec![],
-            scenes:SceneBook::default(),
-            tab_prompt:None,
-            tab_hits:vec![],
-            terminal_picker:None,
-            global_attention:false,
-            sidebar_hits:vec![],
-            mouse_action:None,
-            pane_geometry:vec![],
+            scenes: SceneBook::default(),
+            tab_prompt: None,
+            tab_hits: vec![],
+            terminal_picker: None,
+            global_attention: false,
+            sidebar_hits: vec![],
+            mouse_action: None,
+            pane_geometry: vec![],
             scroll_offsets: std::collections::HashMap::new(),
             prefix_pending: false,
             show_key_help: false,
@@ -736,7 +739,7 @@ impl WorkbenchApp {
         self.load_scene();
         self.layout_dirty = true;
         self.set_status(
-            "existing scene · n new tab · o new shell · t all terminals · no process started",
+            "existing scene · ctrl+b c new tab · no process started until you open a shell",
         );
     }
     pub fn selected_scene(&self) -> &str {
@@ -1141,6 +1144,9 @@ impl WorkbenchApp {
 
     fn clear_prefix(&mut self) {
         self.prefix_pending = false;
+        if self.status_line.starts_with("prefix mode") {
+            self.status_line = DEFAULT_STATUS_HINT.into();
+        }
     }
 
     fn arm_prefix(&mut self) {
@@ -1286,7 +1292,7 @@ impl WorkbenchApp {
             PrefixAction::ResizeMode => {
                 self.resize_mode = !self.resize_mode;
                 self.set_status(if self.resize_mode {
-                    "resize mode · drag dividers · prefix+r to exit"
+                    "resize mode · drag dividers only · prefix+r to exit (keyboard resize n/a)"
                 } else {
                     "resize mode off"
                 });
@@ -2347,7 +2353,7 @@ impl WorkbenchApp {
             self.workspace_hits.push((id.clone(), rect));
             x += w + 1;
         }
-        let hint = " [ ] switch · W open · N new · A add · R remove · S save as · r rescan";
+        let hint = " ctrl+b w open · shift+n new workspace · click tabs to switch";
         let room = area.right().saturating_sub(x);
         if room > 12 {
             let shown: String = hint.chars().take(room as usize).collect();
@@ -4065,6 +4071,25 @@ mod tests {
         app.select_worktree("wt1".into());
         assert_eq!(app.selected_scene(), "wt1");
         assert_eq!(app.terminal_leaves(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn prefix_shift_rename_tab_matches_uppercase_terminal_events() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        let prefix = KeyEvent::new(
+            KeyCode::Char('b'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        );
+        app.on_key(prefix);
+        assert_eq!(
+            app.on_key(KeyEvent::new(
+                KeyCode::Char('T'),
+                ratatui::crossterm::event::KeyModifiers::SHIFT,
+            )),
+            KeyOutcome::Handled,
+        );
+        assert!(app.tab_prompt.is_some());
     }
 
     #[test]

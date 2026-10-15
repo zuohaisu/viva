@@ -28,7 +28,7 @@ fn run(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         // Bare `viva` IS the workbench: attach as a client of the resident
         // server (auto-starting one when none runs). The TUI is a
-        // detachable view now — `q` detaches, the server keeps every
+        // detachable view now — ctrl+b q detaches, the server keeps every
         // terminal alive (ADR 0012 / issue #43). Usage: `viva help`.
         None => cmd_workbench(),
         Some("help" | "--help" | "-h") => {
@@ -108,14 +108,14 @@ fn require_interactive_terminal() -> Result<()> {
 /// `viva workbench` — the interactive parallel-development workbench, run
 /// as a CLIENT of the resident server. If no healthy server answers,
 /// one is spawned detached first (its own process group, log in
-/// `server.log`). `q` detaches the client; the server keeps every terminal
+/// `server.log`). `ctrl+b q` detaches the client; the server keeps every terminal
 /// running until an explicit `viva shutdown` (ADR 0012, issue #43).
 fn cmd_workbench() -> Result<()> {
     require_interactive_terminal()?;
     let home = viva::foundation::paths::viva_home(None);
     let client = viva::server::Client::ensure_server(&home)?;
     eprintln!(
-        "workbench: attached to the resident server — `q` detaches, \
+        "workbench: attached to the resident server — ctrl+b q detaches, \
          the server keeps running (`viva shutdown` stops it); home {}",
         home.display()
     );
@@ -459,7 +459,7 @@ USAGE:
     viva
         Attach the interactive parallel-development workbench to the
         resident server (one is spawned detached when none runs).
-        `q` detaches the client; the server keeps every terminal running.
+        ctrl+b q detaches the client; the server keeps every terminal running.
 
     viva help
         Print this usage text.

@@ -98,7 +98,10 @@ fn prefix_then(app: &mut WorkbenchApp, c: char) -> KeyOutcome {
 
 fn prefix_shift(app: &mut WorkbenchApp, c: char) -> KeyOutcome {
     app.on_key(prefix_b());
-    app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT))
+    app.on_key(KeyEvent::new(
+        KeyCode::Char(c.to_ascii_uppercase()),
+        KeyModifiers::SHIFT,
+    ))
 }
 
 /// Two repositories under unrelated parents, repo-b with one linked

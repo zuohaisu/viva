@@ -53,47 +53,72 @@ pub enum PrefixAction {
     CopyMode,
 }
 
+/// Crossterm on Unix reports Shift+letter as `Char('T')` + SHIFT, not
+/// `Char('t')` + SHIFT — normalize to lowercase + a shift flag.
+fn letter_binding(key: KeyEvent) -> Option<(char, bool)> {
+    let KeyCode::Char(c) = key.code else {
+        return None;
+    };
+    if !c.is_ascii_alphabetic() {
+        return None;
+    }
+    let lower = c.to_ascii_lowercase();
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT) || c.is_ascii_uppercase();
+    Some((lower, shift))
+}
+
 pub fn match_prefix_follow(key: KeyEvent) -> Option<PrefixAction> {
-    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-    match (shift, key.code) {
-        (false, KeyCode::Char('?')) => Some(PrefixAction::ShowHelp),
-        (false, KeyCode::Char('c')) => Some(PrefixAction::NewTab),
-        (false, KeyCode::Char('v')) => Some(PrefixAction::SplitVertical),
-        (false, KeyCode::Char('-')) => Some(PrefixAction::SplitHorizontal),
-        (false, KeyCode::Char('h')) => Some(PrefixAction::FocusPaneLeft),
-        (false, KeyCode::Char('j')) => Some(PrefixAction::FocusPaneDown),
-        (false, KeyCode::Char('k')) => Some(PrefixAction::FocusPaneUp),
-        (false, KeyCode::Char('l')) => Some(PrefixAction::FocusPaneRight),
-        (false, KeyCode::Char('w')) => Some(PrefixAction::WorkspacePicker),
-        (false, KeyCode::Char('q')) => Some(PrefixAction::Detach),
-        (false, KeyCode::Char('n')) => Some(PrefixAction::NextTab),
-        (false, KeyCode::Char('p')) => Some(PrefixAction::PreviousTab),
-        (false, KeyCode::Char('1')) => Some(PrefixAction::SwitchTab1),
-        (false, KeyCode::Char('2')) => Some(PrefixAction::SwitchTab2),
-        (false, KeyCode::Char('3')) => Some(PrefixAction::SwitchTab3),
-        (false, KeyCode::Char('4')) => Some(PrefixAction::SwitchTab4),
-        (false, KeyCode::Char('5')) => Some(PrefixAction::SwitchTab5),
-        (false, KeyCode::Char('6')) => Some(PrefixAction::SwitchTab6),
-        (false, KeyCode::Char('7')) => Some(PrefixAction::SwitchTab7),
-        (false, KeyCode::Char('8')) => Some(PrefixAction::SwitchTab8),
-        (false, KeyCode::Char('9')) => Some(PrefixAction::SwitchTab9),
-        (false, KeyCode::Char('x')) => Some(PrefixAction::ClosePane),
-        (false, KeyCode::Char('z')) => Some(PrefixAction::Zoom),
-        (false, KeyCode::Char('r')) => Some(PrefixAction::ResizeMode),
-        (false, KeyCode::Char('g')) => Some(PrefixAction::Goto),
-        (false, KeyCode::Char('b')) => Some(PrefixAction::ToggleSidebar),
-        (false, KeyCode::Tab) => Some(PrefixAction::CyclePaneNext),
-        (false, KeyCode::Char('[')) => Some(PrefixAction::CopyMode),
-        (true, KeyCode::Char('t')) => Some(PrefixAction::RenameTab),
-        (true, KeyCode::Char('x')) => Some(PrefixAction::CloseTab),
-        (true, KeyCode::Char('n')) => Some(PrefixAction::NewWorkspace),
-        (true, KeyCode::Char('w')) => Some(PrefixAction::RenameWorkspace),
-        (true, KeyCode::Char('d')) => Some(PrefixAction::CloseWorkspace),
-        (true, KeyCode::Char('h')) => Some(PrefixAction::SwapPaneLeft),
-        (true, KeyCode::Char('j')) => Some(PrefixAction::SwapPaneDown),
-        (true, KeyCode::Char('k')) => Some(PrefixAction::SwapPaneUp),
-        (true, KeyCode::Char('l')) => Some(PrefixAction::SwapPaneRight),
-        (true, KeyCode::Tab) => Some(PrefixAction::CyclePanePrevious),
+    if key.code == KeyCode::BackTab {
+        return Some(PrefixAction::CyclePanePrevious);
+    }
+    if key.code == KeyCode::Tab && !key.modifiers.contains(KeyModifiers::SHIFT) {
+        return Some(PrefixAction::CyclePaneNext);
+    }
+
+    if let Some(action) = match key.code {
+        KeyCode::Char('?') => Some(PrefixAction::ShowHelp),
+        KeyCode::Char('-') => Some(PrefixAction::SplitHorizontal),
+        KeyCode::Char('[') => Some(PrefixAction::CopyMode),
+        KeyCode::Char('1') => Some(PrefixAction::SwitchTab1),
+        KeyCode::Char('2') => Some(PrefixAction::SwitchTab2),
+        KeyCode::Char('3') => Some(PrefixAction::SwitchTab3),
+        KeyCode::Char('4') => Some(PrefixAction::SwitchTab4),
+        KeyCode::Char('5') => Some(PrefixAction::SwitchTab5),
+        KeyCode::Char('6') => Some(PrefixAction::SwitchTab6),
+        KeyCode::Char('7') => Some(PrefixAction::SwitchTab7),
+        KeyCode::Char('8') => Some(PrefixAction::SwitchTab8),
+        KeyCode::Char('9') => Some(PrefixAction::SwitchTab9),
+        _ => None,
+    } {
+        return Some(action);
+    }
+
+    let (ch, shift) = letter_binding(key)?;
+    match (shift, ch) {
+        (false, 'c') => Some(PrefixAction::NewTab),
+        (false, 'v') => Some(PrefixAction::SplitVertical),
+        (false, 'h') => Some(PrefixAction::FocusPaneLeft),
+        (false, 'j') => Some(PrefixAction::FocusPaneDown),
+        (false, 'k') => Some(PrefixAction::FocusPaneUp),
+        (false, 'l') => Some(PrefixAction::FocusPaneRight),
+        (false, 'w') => Some(PrefixAction::WorkspacePicker),
+        (false, 'q') => Some(PrefixAction::Detach),
+        (false, 'n') => Some(PrefixAction::NextTab),
+        (false, 'p') => Some(PrefixAction::PreviousTab),
+        (false, 'x') => Some(PrefixAction::ClosePane),
+        (false, 'z') => Some(PrefixAction::Zoom),
+        (false, 'r') => Some(PrefixAction::ResizeMode),
+        (false, 'g') => Some(PrefixAction::Goto),
+        (false, 'b') => Some(PrefixAction::ToggleSidebar),
+        (true, 't') => Some(PrefixAction::RenameTab),
+        (true, 'x') => Some(PrefixAction::CloseTab),
+        (true, 'n') => Some(PrefixAction::NewWorkspace),
+        (true, 'w') => Some(PrefixAction::RenameWorkspace),
+        (true, 'd') => Some(PrefixAction::CloseWorkspace),
+        (true, 'h') => Some(PrefixAction::SwapPaneLeft),
+        (true, 'j') => Some(PrefixAction::SwapPaneDown),
+        (true, 'k') => Some(PrefixAction::SwapPaneUp),
+        (true, 'l') => Some(PrefixAction::SwapPaneRight),
         _ => None,
     }
 }
@@ -128,4 +153,39 @@ pub fn help_lines() -> &'static [&'static str] {
         "w workspace picker · shift+n new · shift+w rename · shift+d close · g goto · b sidebar",
         "x close pane · z zoom · r resize · [ copy · shift+h/j/k/l swap",
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn shift_letter_bindings_match_real_terminal_events() {
+        let shift = KeyModifiers::SHIFT;
+        assert_eq!(
+            match_prefix_follow(KeyEvent::new(KeyCode::Char('T'), shift)),
+            Some(PrefixAction::RenameTab)
+        );
+        assert_eq!(
+            match_prefix_follow(KeyEvent::new(KeyCode::Char('X'), shift)),
+            Some(PrefixAction::CloseTab)
+        );
+        assert_eq!(
+            match_prefix_follow(KeyEvent::new(KeyCode::Char('N'), shift)),
+            Some(PrefixAction::NewWorkspace)
+        );
+        assert_eq!(
+            match_prefix_follow(KeyEvent::new(KeyCode::Char('H'), shift)),
+            Some(PrefixAction::SwapPaneLeft)
+        );
+    }
+
+    #[test]
+    fn shift_tab_is_back_tab_on_real_terminals() {
+        assert_eq!(
+            match_prefix_follow(KeyEvent::new(KeyCode::BackTab, KeyModifiers::empty())),
+            Some(PrefixAction::CyclePanePrevious)
+        );
+    }
 }
