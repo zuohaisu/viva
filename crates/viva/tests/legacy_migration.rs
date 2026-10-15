@@ -281,8 +281,8 @@ fn upgrade_renames_everything_and_keeps_every_row() {
                     "schema_migrations must not shrink"
                 );
                 assert!(
-                    after[table].len() - rows.len() <= 1,
-                    "only expected pending domain migrations (memory v3) may append rows"
+                    after[table].len() - rows.len() <= 2,
+                    "only expected pending domain migrations (memory v3, host v4) may append rows"
                 );
             } else {
                 assert_eq!(after[table].len(), rows.len(), "row count of {table}");

@@ -195,6 +195,13 @@ pub enum RequestKind {
         /// Viva never schedules a recovery for an unknown time.
         #[serde(default)]
         reset_at: Option<String>,
+        /// Native session reference saved for a later resume. A pointer
+        /// only: reporting it does not complete a task or write memory.
+        #[serde(default)]
+        native_session: Option<String>,
+        /// The command that would reopen that session. Stored, never run.
+        #[serde(default)]
+        resume_command: Option<String>,
     },
     /// Submit agent content for the self-model container's intake (S4):
     /// what ran, which summaries formed, which tasks were done. Viva
