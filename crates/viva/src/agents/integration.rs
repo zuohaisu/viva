@@ -408,7 +408,7 @@ mod tests {
         let body = fs::read_to_string(&path).expect("read");
         assert!(body.contains(MARKER));
         assert!(!body.contains("herdr"));
-        assert_eq!(status("pi", home).expect("status").installed, true);
+        assert!(status("pi", home).expect("status").installed);
 
         install("pi", home).expect("second install refreshes the same file");
         assert!(sibling.exists(), "a neighbouring extension stays");
@@ -417,7 +417,7 @@ mod tests {
         assert!(!removed.installed);
         assert!(!path.exists());
         assert!(sibling.exists());
-        assert_eq!(status("pi", home).expect("status").installed, false);
+        assert!(!status("pi", home).expect("status").installed);
         uninstall("pi", home).expect("uninstall is fine when the file is already gone");
     }
 

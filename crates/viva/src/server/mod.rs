@@ -902,8 +902,10 @@ fn handle_request(shared: Arc<Shared>, request: &Request) -> Result<serde_json::
             status,
             detail,
             reset_at.as_deref(),
-            native_session.as_deref(),
-            resume_command.as_deref(),
+            ReportedSession {
+                native_session: native_session.as_deref(),
+                resume_command: resume_command.as_deref(),
+            },
         ),
         RequestKind::AgentContentSubmit {
             terminal_id,
@@ -1871,6 +1873,11 @@ fn seed_agent_identification(shared: &Shared, terminal_id: &TerminalId, argv: &[
 /// member attribution + a live grant carrying `agent_report` (the socket
 /// gate enforces that before this handler runs). The report is audited;
 /// it describes the agent's state and never completes a task.
+struct ReportedSession<'a> {
+    native_session: Option<&'a str>,
+    resume_command: Option<&'a str>,
+}
+
 fn agent_report(
     shared: &Shared,
     terminal_id: &str,
@@ -1878,16 +1885,15 @@ fn agent_report(
     status: &str,
     detail: &str,
     reset_at: Option<&str>,
-    native_session: Option<&str>,
-    resume_command: Option<&str>,
+    session: ReportedSession<'_>,
 ) -> Result<serde_json::Value> {
     let terminal_id = TerminalId::from_str(terminal_id)?;
     let status = crate::agents::AgentStatus::parse(status)?;
     if agent.trim().is_empty() {
         return Err(Error::Validation("agent name must not be empty".into()));
     }
-    let native_session = optional_session_field("native session", native_session)?;
-    let resume_command = optional_session_field("resume command", resume_command)?;
+    let native_session = optional_session_field("native session", session.native_session)?;
+    let resume_command = optional_session_field("resume command", session.resume_command)?;
     // A report about a terminal this server hosts: identity checks out.
     shared
         .terminals
