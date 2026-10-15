@@ -245,12 +245,13 @@ fn network_failure_and_corrupt_checksum_leave_old_binary_intact() {
         url(&format!("{ARCHIVE_NAME}.sha256")),
         format!("{}  {ARCHIVE_NAME}\n", "0".repeat(64)).into_bytes(),
     );
+    let err = fixture
+        .run(false)
+        .expect_err("corrupt checksum must abort before replacing the binary");
+    let msg = err.to_string().to_lowercase();
     assert!(
-        fixture
-            .run(false)
-            .unwrap_err()
-            .to_string()
-            .contains("checksum mismatch")
+        msg.contains("checksum") && msg.contains("mismatch"),
+        "expected a checksum mismatch error, got: {msg}"
     );
     fixture.unchanged();
 }

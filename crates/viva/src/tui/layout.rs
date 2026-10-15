@@ -461,6 +461,21 @@ impl PaneNode {
     /// The geometric neighbor of the focused leaf in `direction`: among all
     /// leaves whose rect touches the focused rect across that direction's
     /// edge, the one with the largest overlap along the shared edge wins.
+    /// Exchange the focused leaf's content with its geometric neighbor.
+    pub fn swap_with_neighbor(
+        &mut self,
+        area: Rect,
+        focus: &PaneContent,
+        direction: Direction,
+    ) -> bool {
+        let Some(neighbor) = self.neighbor(area, focus, direction) else {
+            return false;
+        };
+        let here = focus.clone();
+        let there = neighbor.clone();
+        self.replace(&here, there.clone()) && self.replace(&there, here)
+    }
+
     pub fn neighbor(
         &self,
         area: Rect,
