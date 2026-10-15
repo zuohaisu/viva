@@ -64,6 +64,7 @@ fn run(args: &[String]) -> Result<()> {
         }
         Some("terminal") => cmd_terminal(args.get(1..).unwrap_or(&[])),
         Some("scene") => cmd_scene(args.get(1..).unwrap_or(&[])),
+        Some("plugin") => cmd_plugin(args.get(1..).unwrap_or(&[])),
         Some("agent") => cmd_agent(args.get(1..).unwrap_or(&[])),
         Some("events") => cmd_events(args.get(1..).unwrap_or(&[])),
         Some("sync") => cmd_sync(args.get(1..).unwrap_or(&[])),
@@ -452,6 +453,47 @@ fn cmd_terminal(args: &[String]) -> Result<()> {
     }
 }
 
+fn cmd_plugin(args: &[String]) -> Result<()> {
+    let home = viva::foundation::paths::viva_home(None);
+    viva::foundation::paths::ensure_private_dir(&home)?;
+    match args.first().map(String::as_str) {
+        Some("install") => {
+            if args.len() != 2 {
+                return Err(Error::Validation(
+                    "usage: viva plugin install <directory>".into(),
+                ));
+            }
+            let bin = std::env::current_exe().map_err(|err| {
+                Error::Validation(format!("cannot locate the viva binary: {err}"))
+            })?;
+            let info = viva::plugins::install(&home, &args[1], &bin)?;
+            println!("{}", serde_json::to_string_pretty(&info)?);
+            Ok(())
+        }
+        Some("uninstall") => {
+            if args.len() != 2 {
+                return Err(Error::Validation(
+                    "usage: viva plugin uninstall <id>".into(),
+                ));
+            }
+            viva::plugins::uninstall(&home, &args[1])?;
+            println!("{}", serde_json::json!({ "uninstalled": args[1] }));
+            Ok(())
+        }
+        Some("list") => {
+            if args.len() != 1 {
+                return Err(Error::Validation("usage: viva plugin list".into()));
+            }
+            let listed = viva::plugins::list(&home)?;
+            println!("{}", serde_json::to_string_pretty(&listed)?);
+            Ok(())
+        }
+        _ => Err(Error::Validation(
+            "plugin needs install <directory> | uninstall <id> | list".into(),
+        )),
+    }
+}
+
 fn cmd_scene(args: &[String]) -> Result<()> {
     let home = viva::foundation::paths::viva_home(None);
     viva::foundation::paths::ensure_private_dir(&home)?;
@@ -808,6 +850,21 @@ USAGE:
         List and edit the resident scene/tab/pane tree. Closing a pane does
         not stop its terminal. --member and --grant follow the socket rules.
         Two clients share the tree; a later focus or size wins for that tab.
+
+    viva plugin install <directory>
+        Install a plugin from a local directory that contains
+        viva-plugin.json, and start its entry process. URLs, herdr.dev,
+        and marketplace endpoints are refused. The process receives
+        pane.opened and popup events on a private socket and operates
+        panes with `viva scene`. A member still needs a live grant.
+        Protected actions (merge, approve, push to a protected branch,
+        self-authorize) are refused. popup is not a pane and has no pane id.
+
+    viva plugin uninstall <id>
+        Stop that plugin process and remove the installed copy.
+
+    viva plugin list
+        List installed plugins.
 
     viva stop-terminal <terminal-id>
         Stop one terminal (its process group only).

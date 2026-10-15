@@ -515,6 +515,9 @@ impl Host {
                         .stop(&entry.terminal_id, StopPolicy::default(), Some(&store));
             }
             drop(store);
+            // Plugin processes are not terminals. A full shutdown stops
+            // them; a live handoff leaves them running with the new host.
+            crate::plugins::stop_installed(&shared.home);
         }
         // Join watchers WITHOUT holding the store lock: each watcher needs
         // it to record its exit. A watcher cannot hang: the stop above made
@@ -1380,7 +1383,7 @@ fn terminal_scene_map(store: &Store) -> std::collections::BTreeMap<String, Strin
     out
 }
 
-fn scene_for_terminal<'a>(map: &'a std::collections::BTreeMap<String, String>, id: &str) -> String {
+fn scene_for_terminal(map: &std::collections::BTreeMap<String, String>, id: &str) -> String {
     map.get(id)
         .cloned()
         .unwrap_or_else(|| crate::tui::workbench::scenes::FLOATING.into())
@@ -1575,9 +1578,54 @@ fn workbench_tree(shared: &Shared, op: &WorkbenchTreeOp) -> Result<serde_json::V
             tree.book = next;
             tree.unmanaged = None;
             tree.stored = true;
-            Ok(serde_json::json!({ "tree": serde_json::from_str::<serde_json::Value>(&saved)? }))
+            let body =
+                serde_json::json!({ "tree": serde_json::from_str::<serde_json::Value>(&saved)? });
+            let event = pane_opened_event(other, &tree.book);
+            drop(tree);
+            if let Some(event) = event {
+                crate::plugins::publish(&shared.home, &event);
+            }
+            Ok(body)
         }
     }
+}
+
+/// A pane-opening tree edit, told to installed plugins as `pane.opened`.
+/// Popup is not a tree edit and is not emitted here.
+fn pane_opened_event(
+    op: &WorkbenchTreeOp,
+    book: &crate::tui::workbench::scenes::SceneBook,
+) -> Option<serde_json::Value> {
+    let (open, scene_id, tab_id) = match op {
+        WorkbenchTreeOp::Split {
+            scene_id, tab_id, ..
+        } => ("split", scene_id.as_deref(), tab_id.as_deref()),
+        WorkbenchTreeOp::CreatePane {
+            scene_id, tab_id, ..
+        } => ("overlay", scene_id.as_deref(), tab_id.as_deref()),
+        WorkbenchTreeOp::CreateTab { scene_id, .. } => ("tab", scene_id.as_deref(), None),
+        WorkbenchTreeOp::Zoom {
+            scene_id,
+            tab_id,
+            on,
+            ..
+        } => {
+            if *on == Some(false) {
+                return None;
+            }
+            ("zoomed", scene_id.as_deref(), tab_id.as_deref())
+        }
+        _ => return None,
+    };
+    let (scene_id, tab_id, pane_id) =
+        crate::tui::workbench::tree::focused_pane(book, scene_id, tab_id)?;
+    Some(serde_json::json!({
+        "type": "pane.opened",
+        "open": open,
+        "pane_id": pane_id,
+        "scene_id": scene_id,
+        "tab_id": tab_id,
+    }))
 }
 
 /// The real bounded diff of one worktree against HEAD (served over the
