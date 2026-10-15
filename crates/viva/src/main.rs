@@ -611,14 +611,14 @@ USAGE:
 
     viva memory remember --member <id> [--project <id>] --content <text>
                          --source <provenance> [--category <c>] [--tags <t>]
-        Write one fact through the real provider with mandatory provenance.
+        Write one native fact with mandatory provenance.
 
     viva memory archive|restore --fact <id> --reason <text>
         Exit paths over Viva's link layer. Nothing here deletes.
 
     viva memory status
-        Report which store/checkout Viva is wired to — from a real
-        adapter round trip, not file existence.
+        Report native memory in the Viva store (fact counts and any
+        legacy Hermes link rows kept for provenance only).
 
     viva harness matrix
         Cross-harness capability matrix (launch / interactive / status /
@@ -1686,26 +1686,13 @@ fn cmd_memory(args: &[String]) -> Result<()> {
             Ok(())
         }
         Some("status") => {
-            let config = viva::memory::AdapterConfig::from_env();
-            // A real probe, not a file-existence promise: run the adapter's
-            // status command (read-only) and report what actually answered.
-            let probe = match service.probe_adapter_status() {
-                Ok(answer) => answer,
-                Err(err) => serde_json::json!({
-                    "ok": false,
-                    "state": "unavailable",
-                    "error": err.to_string(),
-                }),
-            };
+            let home = viva_home(None);
+            let probe = service.native_status()?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
-                    "python": config.python.display().to_string(),
-                    "adapter": config.adapter_script.display().to_string(),
-                    "adapter_present": config.adapter_script.is_file(),
-                    "agent_dir": config.agent_dir.display().to_string(),
-                    "agent_dir_present": config.agent_dir.is_dir(),
-                    "db_path": config.db_path.display().to_string(),
+                    "storage": "native",
+                    "database": database_path(&home).display().to_string(),
                     "probe": probe,
                 }))?
             );

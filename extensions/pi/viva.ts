@@ -57,12 +57,15 @@ export default function viva(pi: PiHost): void {
     try {
       const status = await runEnvelope(env, ["memory", "status"]);
       const text = typeof status === "string" ? status : JSON.stringify(status);
-      if (text.toLowerCase().includes("unavailable") || text.toLowerCase().includes("not configured")) {
+      if (
+        text.toLowerCase().includes("\"ok\": false") ||
+        text.toLowerCase().includes("unavailable")
+      ) {
         lines.push(
-          "External memory: not connected on this machine — recall/remember tools will report unavailable until a store is wired.",
+          "External memory: not ready on this machine — run `viva init` if this home is new.",
         );
       } else {
-        lines.push(`External memory: ${text.trim()}`);
+        lines.push(`External memory (native): ${text.trim()}`);
       }
     } catch {
       lines.push(

@@ -2,17 +2,13 @@
 //! and Viva's per-member link / usage / exit layer.
 //!
 //! Legacy Hermes rows stay in `memory_links` as `legacy_hermes` and never
-//! participate in retrieval. A thin Python adapter remains for `status`
-//! only until the second migration slice (#131).
+//! participate in retrieval (#131 removed the Python Hermes adapter).
 
 mod entity;
 mod hash;
 pub mod hrr;
 pub mod migrate;
 mod retrieval;
-
-use std::path::PathBuf;
-use std::process::Command;
 
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -171,101 +167,45 @@ pub struct UsageRecord {
     pub used_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AdapterConfig {
-    pub python: PathBuf,
-    pub adapter_script: PathBuf,
-    pub agent_dir: PathBuf,
-    pub db_path: PathBuf,
-}
-
-impl AdapterConfig {
-    pub fn from_env() -> Self {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let env_path = |key: &str, default: &str| -> PathBuf {
-            std::env::var(key)
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from(default.replace('~', &home)))
-        };
-        let agent_dir = env_path("VIVA_HERMES_AGENT", "~/.hermes/hermes-agent");
-        let python = match std::env::var("VIVA_MEMORY_PYTHON") {
-            Ok(pinned) => PathBuf::from(pinned),
-            Err(_) => {
-                let venv_python = agent_dir.join("venv").join("bin").join("python");
-                if venv_python.is_file() {
-                    venv_python
-                } else {
-                    PathBuf::from("python3")
-                }
-            }
-        };
-        Self {
-            python,
-            adapter_script: resolve_adapter_script(),
-            agent_dir,
-            db_path: std::env::var_os("VIVA_MEMORY_DB")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    if std::env::var("VIVA_HOME").is_ok_and(|v| !v.is_empty()) {
-                        crate::foundation::paths::viva_home(None).join("memory_store.db")
-                    } else {
-                        PathBuf::from(home).join(".hermes/memory_store.db")
-                    }
-                }),
-        }
-    }
-}
-
-fn resolve_adapter_script() -> PathBuf {
-    let relative = PathBuf::from("extensions/pi/memory/memory_adapter.py");
-    if let Ok(from_env) = std::env::var("VIVA_MEMORY_ADAPTER") {
-        return PathBuf::from(from_env);
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        for dir in exe.ancestors().skip(1) {
-            let candidate = dir.join(&relative);
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
-    }
-    let dev_checkout = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../extensions/pi/memory/memory_adapter.py");
-    if dev_checkout.is_file() {
-        return dev_checkout;
-    }
-    relative
-}
-
 pub struct MemoryService<'a> {
     store: &'a Store,
-    adapter: AdapterConfig,
 }
 
 impl<'a> MemoryService<'a> {
     pub fn new(store: &'a Store) -> Self {
-        Self {
-            store,
-            adapter: AdapterConfig::from_env(),
-        }
+        Self { store }
     }
 
-    pub fn with_adapter(store: &'a Store, adapter: AdapterConfig) -> Self {
-        Self { store, adapter }
-    }
-
-    pub fn adapter_config(&self) -> &AdapterConfig {
-        &self.adapter
-    }
-
-    pub fn probe_adapter_status(&self) -> Result<serde_json::Value> {
-        let answer = self.run_adapter(json!({ "command": "status" }))?;
+    /// Read-only snapshot for `viva memory status` — native facts in the Viva store.
+    pub fn native_status(&self) -> Result<serde_json::Value> {
+        let conn = self.store.connection();
+        let facts_total: i64 =
+            conn.query_row("SELECT COUNT(*) FROM memory_facts", [], |r| r.get(0))?;
+        let legacy_hermes_links: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memory_links WHERE storage_origin = 'legacy_hermes'",
+            [],
+            |r| r.get(0),
+        )?;
+        let native_links: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memory_links WHERE storage_origin = 'native'",
+            [],
+            |r| r.get(0),
+        )?;
         Ok(json!({
-            "ok": answer.ok,
-            "state": answer.state,
-            "error": answer.error,
-            "hrr": answer.hrr,
-            "facts_total": answer.facts_total,
+            "ok": true,
+            "state": "ready",
+            "storage": "native",
+            "facts_total": facts_total,
+            "legacy_hermes_links": legacy_hermes_links,
+            "native_links": native_links,
+            "hrr": {
+                "dim": HRR_DIM,
+                "rerank_weights": {
+                    "fts": retrieval::FTS_WEIGHT,
+                    "jaccard": retrieval::JACCARD_WEIGHT,
+                    "hrr": retrieval::HRR_WEIGHT,
+                }
+            }
         }))
     }
 
@@ -799,53 +739,6 @@ impl<'a> MemoryService<'a> {
         )?;
         Ok(())
     }
-
-    fn run_adapter(&self, request: serde_json::Value) -> Result<AdapterAnswer> {
-        let script = &self.adapter.adapter_script;
-        if !script.is_file() {
-            return Ok(unavailable_answer(format!(
-                "memory adapter script not found at {}",
-                script.display()
-            )));
-        }
-        let command = request
-            .get("command")
-            .and_then(|c| c.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let args: Vec<String> = vec![
-            script.display().to_string(),
-            command.clone(),
-            "--agent-dir".into(),
-            self.adapter.agent_dir.display().to_string(),
-            "--db".into(),
-            self.adapter.db_path.display().to_string(),
-        ];
-        if command == "status" {
-            // status only
-        } else {
-            return Err(Error::Validation(format!(
-                "native memory no longer invokes adapter command `{command}`"
-            )));
-        }
-        let output = match Command::new(&self.adapter.python).args(&args).output() {
-            Ok(output) => output,
-            Err(err) => {
-                return Ok(unavailable_answer(format!(
-                    "memory adapter could not run ({}): {err}",
-                    self.adapter.python.display()
-                )));
-            }
-        };
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        match serde_json::from_str::<AdapterAnswer>(stdout.trim()) {
-            Ok(answer) => Ok(answer),
-            Err(err) => Ok(unavailable_answer(format!(
-                "memory adapter answer unparseable: {err}; stdout: {}",
-                stdout.chars().take(512).collect::<String>()
-            ))),
-        }
-    }
 }
 
 fn map_fact_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<retrieval::CandidateFact> {
@@ -894,27 +787,6 @@ fn parse_link_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryLink> {
         archived_at: row.get(8)?,
         archived_reason: row.get(9)?,
     })
-}
-
-#[derive(Debug, Deserialize)]
-struct AdapterAnswer {
-    ok: bool,
-    state: String,
-    #[serde(default)]
-    error: Option<String>,
-    #[serde(default)]
-    hrr: Option<String>,
-    #[serde(default)]
-    facts_total: Option<i64>,
-}
-
-fn unavailable_answer(reason: String) -> AdapterAnswer {
-    serde_json::from_value(json!({
-        "ok": false,
-        "state": "unavailable",
-        "error": reason,
-    }))
-    .expect("static unavailable shape")
 }
 
 use std::str::FromStr as _;

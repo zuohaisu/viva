@@ -1,71 +1,70 @@
-# External memory integration (F04, issue #26)
+# External memory (F04, native storage)
 
-Viva adds member/project scope, provenance and
-recoverable exit on top of the **real Holographic memory already running
-on this machine**. Nothing here re-implements FTS, HRR or storage.
+Viva stores durable facts in its own SQLite database (memory domain v3).
+Member/project scope, provenance, usage evidence, and recoverable archive
+live in Viva's link layer on top of those native facts. No Hermes checkout
+and no Python runtime are required for recall or writes.
 
-## The implementation Viva verified and reuses
+## What Viva stores
 
-Verified on 2026-09-29 against the machine's actual installation:
-
-| What | Value |
-| --- | --- |
-| Checkout | `~/.hermes/hermes-agent` (bundled plugin, **not** the handoff or community package) |
-| Version | `v0.21.4+canary.20260926T065603Z-131-g1c535d9689` (commit `1c535d9689…`) |
-| Interface | `HolographicMemoryProvider(config={"db_path": …})` → `initialize(session_id=…)` → `handle_tool_call("fact_store", {action, …})` |
-| Store | SQLite `memory_store.db` (tables `facts`, `entities`, `fact_entities`, `facts_fts`, `memory_banks`) |
-| Interpreter | the checkout's own venv python (the plugin package imports YAML tooling a bare system python lacks) |
-| Deployment note | the user's cron runs a bidirectional content-merge sync to a second machine every 24 h — the store is live, treat it with care |
-
-This resolves the "which variant" question the research doc
-(https://github.com/zuohaisu/viva/wiki/Research-Hermes-Holographic-Memory)
-left open: the
-user runs the **bundled** provider from a canary checkout, newer than the
-research snapshot.
-
-## What Viva adds (the verified gaps)
-
-The bundled schema has no member/project scoping, no provenance and no
-recoverable exit (`remove_fact` is a physical SQL DELETE). Viva's Rust
-layer (`crates/viva/src/memory/`) adds exactly those, on its own tables:
-
-- `memory_links` — which fact belongs to which member (and optional
-  project), with a mandatory `source`. Search answers only the viewer's
-  own, active, linked facts; unclaimable hits are counted, not mixed in.
-- `memory_usages` — every recall leaves who asked, what was asked, when.
-  Reuse claims cite these rows.
-- Archive/restore — status flips with recorded reasons. The physical
-  delete of the provider is **never exposed**: archive is the exit, and
-  it is recoverable.
-
-## Calling convention
-
-The Rust host spawns `extensions/pi/memory/memory_adapter.py` with the
-interpreter and paths from `AdapterConfig::from_env()`:
-
-| Env | Default | Meaning |
+| Layer | Tables | Role |
 | --- | --- | --- |
-| `VIVA_MEMORY_PYTHON` | `python3` | interpreter (use the checkout's `venv/bin/python` for the real plugin) |
-| `VIVA_HERMES_AGENT` | `~/.hermes/hermes-agent` | the checkout whose bundled provider is imported |
-| `VIVA_MEMORY_DB` | `VIVA_HOME/memory_store.db` when `VIVA_HOME` is set; otherwise `~/.hermes/memory_store.db` | Explicit override always wins; the resolved path is **always passed explicitly** to the adapter. Set `VIVA_MEMORY_DB` to opt into the existing Hermes store from an isolated Viva home. |
-| `VIVA_MEMORY_ADAPTER` | `extensions/pi/memory/memory_adapter.py` | adapter script path |
+| Native facts | `memory_facts`, `memory_facts_fts`, `memory_entities`, … | Content, FTS5 trigram index, minimal HRR vectors (1024-dim), dedupe by content hash |
+| Links | `memory_links` | Which fact belongs to which member (optional project), mandatory `source`, `storage_origin` (`native` or `legacy_hermes`) |
+| Usage | `memory_usages` | Every recall records viewer, query, timestamp |
+| Exit | link status | Archive/restore with reasons; no physical delete of facts |
 
-CLI: `viva memory search | remember | archive | restore | status`.
+Legacy rows imported from the old Hermes adapter remain in `memory_links` with
+`storage_origin = legacy_hermes`. They are counted in `viva memory status` but
+never participate in `search` or `probe`.
 
-## Safety rules baked in
+## CLI
 
-- **Fail closed on the store path.** The adapter refuses to run without
-  an explicit `--db`; the provider's own default is the user's real
-  store, and a silent default once wrote a development test fact there
-  (2026-09-29, removed within minutes, before any sync — recorded here
-  as the reason the guard exists).
-- **Tests never touch the real store.** The Rust integration tests
-  (`crates/viva/tests/f04_memory.rs`) use a temp db and skip honestly
-  when the checkout is absent (CI).
-- **No delete.** Not in the adapter, not in the Rust layer, not in the
-  Pi extension.
-- **Unavailable ≠ empty.** A store that cannot be reached answers
-  `unavailable` with a reason; nothing pretends to have remembered.
-- **Known retrieval boundary (verified):** recall is FTS-gated — exact
-  terms and full CJK runs match; paraphrases and partial CJK substrings
-  do not. Viva reports this honestly instead of faking recall.
+`viva memory search | probe | link | remember | archive | restore | status`
+
+All commands read and write through the Viva home database (`viva init`).
+
+## Content hash (native dedupe)
+
+Fact bodies are deduplicated with SHA-256 over **NFC-normalized, trim-normalized**
+text, encoded as lowercase hex (`crates/viva/src/memory/hash.rs`).
+
+## Provenance source strings
+
+Every write requires a non-empty `source`. For facts written in Viva, use a
+human-readable attribution (for example `chat by Samuel (task task-1)`).
+
+For a future Hermes import (not implemented in this slice), document facts with:
+
+```text
+hermes:<absolute path to memory_store.db>#<numeric fact_id>
+```
+
+Example: `hermes:/Users/me/.hermes/memory_store.db#42`
+
+## Retrieval
+
+Hybrid rerank within the member/project scope: FTS trigram (weight **0.4**),
+Jaccard overlap ( **0.3** ), HRR similarity ( **0.3** ). Short queries use a
+deterministic substring fallback. Trust scores below **0.3** are filtered at
+the FTS stage.
+
+## HRR port (MIT)
+
+Phase encoding, bind/bundle, and float32 blob serialization are ported from
+upstream Hermes Agent holographic memory (`plugins/memory/holographic`) at
+commit `6f7a799`. Copyright (c) Nous Research / Hermes Agent contributors,
+SPDX-License-Identifier: MIT. See `crates/viva/src/memory/hrr.rs`.
+
+Research background:
+[Research-Hermes-Holographic-Memory](https://github.com/zuohaisu/viva/wiki/Research-Hermes-Holographic-Memory).
+
+## Safety rules
+
+- **Tests use isolated homes.** Integration tests (`crates/viva/tests/f04_memory.rs`)
+  run the real `viva` binary with a temp `VIVA_HOME` — no Hermes, no Python.
+- **No delete.** Archive is the exit path; restore is supported for native links.
+- **Unavailable ≠ empty.** Operational errors surface as validation or I/O failures;
+  an empty search means nothing matched in scope, not a missing backend.
+- **Legacy boundary.** `legacy_hermes` links cannot be linked, archived, or restored
+  through native exit paths.

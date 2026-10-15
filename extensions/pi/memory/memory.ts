@@ -27,9 +27,8 @@ export function registerMemoryTools(pi: PiHost, env: VivaEnv): void {
     name: "viva_memory_search",
     label: "Viva memory search",
     description:
-      "Search the Viva-linked external memory (Holographic) for facts linked to this " +
-      "session's member. Read-only; recalls carry their provenance, and an unreachable " +
-      "store is reported as unavailable.",
+      "Search Viva's native external memory for facts linked to this session's member. " +
+      "Read-only; recalls carry their provenance.",
     parameters: Type.Object(
       {
         query: Type.String({
