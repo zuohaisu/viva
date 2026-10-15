@@ -695,8 +695,11 @@ fn the_open_prompt_lists_recent_workspaces_takes_pasted_paths_and_refuses_empty_
     let mut app = WorkbenchApp::new();
     app.set_model(model(&store, &terminals));
 
-    // ctrl+b w opens the workspace picker; recents are listed newest first.
+    // ctrl+b w enters navigate; `/` opens the path prompt. Recents are
+    // listed newest first, including a .code-workspace path.
     assert_eq!(prefix_then(&mut app, 'w'), KeyOutcome::Handled);
+    assert!(app.navigate_mode());
+    assert_eq!(app.on_key(key(KeyCode::Char('/'))), KeyOutcome::Handled);
     let (text, _) = render(&mut app, 140, 34);
     assert!(text.contains("Open workspace"), "{text}");
     let recent_a = text
@@ -726,6 +729,7 @@ fn the_open_prompt_lists_recent_workspaces_takes_pasted_paths_and_refuses_empty_
 
     // A pasted path lands in the prompt (newline dropped) and opens.
     prefix_then(&mut app, 'w');
+    app.on_key(key(KeyCode::Char('/')));
     assert_eq!(
         app.on_paste(&format!("{}\n", f.repo_a.display())),
         KeyOutcome::Handled
