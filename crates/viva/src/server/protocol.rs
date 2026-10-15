@@ -132,11 +132,20 @@ pub enum RequestKind {
         worktree_id: String,
     },
     /// The workbench pane-layout preference (issue #43 AC2, QA F5):
-    /// `Some` saves the serialized layout, `None` returns the saved JSON
-    /// (null when none was saved). A UI preference, not a Viva fact.
+    /// `Some` saves a layout, `None` returns the saved JSON (null when
+    /// none was saved). A version-2 scene book is merged into the
+    /// server-owned tree: the tab the client is looking at takes the
+    /// later focus and pane sizes, and other tabs are left alone. Older
+    /// `{grid, focus}` JSON is migrated on read.
     WorkbenchLayout {
         #[serde(default)]
         layout_json: Option<String>,
+    },
+    /// Server-owned scene / tab / pane tree. List and pane snapshot are
+    /// reads. Pane input writes that pane's PTY. Every other op edits the
+    /// shared tree. Closing a pane does not stop its PTY.
+    WorkbenchTree {
+        op: WorkbenchTreeOp,
     },
     /// Open an interactive shell at a worktree's path (the workbench
     /// "open" action). The terminal is a user_shell owned by the server,
@@ -288,6 +297,145 @@ pub enum RequestKind {
     RecoveryCancel {
         plan_id: i64,
     },
+}
+
+/// One edit of the resident scene / tab / pane tree.
+///
+/// Pane ids are `browser` or a terminal id. Split directions are `right`
+/// (side by side) and `down` (stacked). Resize ratios are the first
+/// child's percent (10..=90); `path` is the descent to that split
+/// (`false` = first child, `true` = second).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum WorkbenchTreeOp {
+    List,
+    CreateScene {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        name: String,
+    },
+    RenameScene {
+        id: String,
+        name: String,
+    },
+    CloseScene {
+        id: String,
+    },
+    FocusScene {
+        id: String,
+    },
+    CreateTab {
+        #[serde(default)]
+        scene_id: Option<String>,
+        name: String,
+    },
+    RenameTab {
+        #[serde(default)]
+        scene_id: Option<String>,
+        tab_id: String,
+        name: String,
+    },
+    CloseTab {
+        #[serde(default)]
+        scene_id: Option<String>,
+        tab_id: String,
+    },
+    FocusTab {
+        #[serde(default)]
+        scene_id: Option<String>,
+        tab_id: String,
+    },
+    CreatePane {
+        #[serde(default)]
+        scene_id: Option<String>,
+        #[serde(default)]
+        tab_id: Option<String>,
+        #[serde(default)]
+        terminal_id: Option<String>,
+        #[serde(default)]
+        direction: Option<String>,
+    },
+    RenamePane {
+        #[serde(default)]
+        scene_id: Option<String>,
+        #[serde(default)]
+        tab_id: Option<String>,
+        pane_id: String,
+        name: String,
+    },
+    ClosePane {
+        #[serde(default)]
+        scene_id: Option<String>,
+        #[serde(default)]
+        tab_id: Option<String>,
+        pane_id: String,
+    },
+    FocusPane {
+        #[serde(default)]
+        scene_id: Option<String>,
+        #[serde(default)]
+        tab_id: Option<String>,
+        pane_id: String,
+    },
+    Split {
+        #[serde(default)]
+        scene_id: Option<String>,
+        #[serde(default)]
+        tab_id: Option<String>,
+        #[serde(default)]
+        pane_id: Option<String>,
+        direction: String,
+        #[serde(default)]
+        terminal_id: Option<String>,
+    },
+    Zoom {
+        #[serde(default)]
+        scene_id: Option<String>,
+        #[serde(default)]
+        tab_id: Option<String>,
+        #[serde(default)]
+        on: Option<bool>,
+    },
+    Resize {
+        #[serde(default)]
+        scene_id: Option<String>,
+        #[serde(default)]
+        tab_id: Option<String>,
+        #[serde(default)]
+        path: Vec<bool>,
+        ratio: u16,
+    },
+    PaneInput {
+        #[serde(default)]
+        scene_id: Option<String>,
+        #[serde(default)]
+        tab_id: Option<String>,
+        pane_id: String,
+        bytes_hex: String,
+    },
+    PaneSnapshot {
+        #[serde(default)]
+        scene_id: Option<String>,
+        #[serde(default)]
+        tab_id: Option<String>,
+        pane_id: String,
+    },
+}
+
+impl WorkbenchTreeOp {
+    /// Member-attributed calls that change something need a live grant.
+    pub fn changes_state(&self) -> bool {
+        !matches!(self, Self::List | Self::PaneSnapshot { .. })
+    }
+
+    /// Edits the scene tree. Pane input writes a PTY and leaves the tree.
+    pub fn edits_tree(&self) -> bool {
+        !matches!(
+            self,
+            Self::List | Self::PaneInput { .. } | Self::PaneSnapshot { .. }
+        )
+    }
 }
 
 fn default_cols() -> u16 {

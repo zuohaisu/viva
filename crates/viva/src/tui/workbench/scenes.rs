@@ -22,6 +22,10 @@ pub struct TabView {
     /// Closed leaves remain navigable. They do not render or stop their sessions.
     #[serde(default)]
     pub closed: Vec<String>,
+    /// Display names for pane ids (`browser` or a terminal id). Closing a
+    /// pane never removes the name's terminal.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pane_names: BTreeMap<String, String>,
 }
 impl TabView {
     pub fn new(name: String) -> Self {
@@ -33,11 +37,15 @@ impl TabView {
             zoom: false,
             hidden: false,
             closed: vec![],
+            pane_names: BTreeMap::new(),
         }
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Scene {
+    /// Display name. The map key stays the scene id (often a worktree id).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
     pub active: String,
     pub tabs: Vec<TabView>,
 }
@@ -109,12 +117,17 @@ impl SceneBook {
         self.version == 2
             && self.scenes.len() <= MAX_SCENES
             && self.scenes.values().all(|s| {
-                s.tabs.len() <= MAX_TABS
+                s.name.len() <= 256
+                    && s.tabs.len() <= MAX_TABS
                     && (s.tabs.iter().any(|t| t.id == s.active && !t.hidden)
                         || (s.active.is_empty() && s.tabs.iter().all(|t| t.hidden)))
                     && s.tabs.iter().all(|t| {
                         ids.insert(t.id.clone())
                             && t.name.len() <= 256
+                            && t.pane_names.len() <= 64
+                            && t.pane_names
+                                .iter()
+                                .all(|(k, v)| k.len() <= 256 && v.len() <= 256)
                             && node(&t.grid, 0)
                             && t.grid.leaves().len() <= MAX_PANES
                             && t.closed.len() <= 256
