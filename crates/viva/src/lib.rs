@@ -16,6 +16,7 @@ pub mod foundation;
 pub mod git;
 pub mod harness;
 pub mod knowledge;
+pub mod machines;
 pub mod maintenance;
 pub mod members;
 pub mod memory;

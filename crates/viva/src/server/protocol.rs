@@ -297,6 +297,17 @@ pub enum RequestKind {
     RecoveryCancel {
         plan_id: i64,
     },
+    /// Workspaces and agents of this server, without git or network probes.
+    /// Another machine's workbench asks for this over SSH.
+    MachineProjection,
+    /// Reconnect each saved machine. One failure keeps that machine's last
+    /// snapshot and does not drop the others.
+    MachineRefresh,
+    /// Run one request on a saved machine. This server's socket stays put.
+    MachineForward {
+        id: String,
+        kind: Box<RequestKind>,
+    },
 }
 
 /// One edit of the resident scene / tab / pane tree.

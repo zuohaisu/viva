@@ -25,6 +25,12 @@ fn main() -> ExitCode {
 }
 
 fn run(args: &[String]) -> Result<()> {
+    let (machine, args) = peel_machine_flag(args)?;
+    let _machine = if let Some(id) = machine {
+        Some(arm_machine(&id, &args)?)
+    } else {
+        None
+    };
     match args.first().map(String::as_str) {
         // Bare `viva` IS the workbench: attach as a client of the resident
         // server (auto-starting one when none runs). The TUI is a
@@ -45,8 +51,9 @@ fn run(args: &[String]) -> Result<()> {
             "start" | "server" | "server-restart" | "status" | "dispatch" | "terminals"
             | "stop-terminal" | "result" | "shutdown" | "pause" | "resume" | "brief"
             | "create-task" | "create-project" | "grant" | "handoff",
-        ) => cmd_control(args),
+        ) => cmd_control(&args),
         Some("workspace") => cmd_workspace(args.get(1..).unwrap_or(&[])),
+        Some("machine") => cmd_machine(args.get(1..).unwrap_or(&[])),
         Some("open") => {
             // `viva open <path>` = open the workspace, then the workbench.
             // The tty gate comes first so a failing call never leaves a
@@ -746,7 +753,23 @@ USAGE:
                     refresh]
         Compose workspaces without the TUI (owner only). `save` writes a
         `.code-workspace` file that VS Code opens; only its `folders` list
-        changes. Removing a folder never deletes files or stops processes.
+        changes.         Removing a folder never deletes files or stops processes.
+
+    viva machine add --target <user@host> [--label <name>] [--id <id>]
+                     [--session <name>]
+    viva machine list
+    viva machine rename <id> <label>
+    viva machine disable <id> | enable <id> | remove <id>
+    viva machine bridge --session <name>
+        Save an SSH machine: id, label, target, remote session, enabled.
+        Passwords, private keys, and agent tickets stay with OpenSSH.
+        `bridge` is what SSH runs on the remote machine to reach that
+        session's socket. A missing `viva` there fails; nothing is copied
+        or installed.
+
+    viva --machine <id> <command>
+        Send <command> to that machine's viva server. This computer's
+        default socket is unchanged. The workbench always stays here.
 
     viva update [--check] [--no-restart]
         Upgrade to the latest stable version (GitHub Release or global npm).
@@ -1283,6 +1306,7 @@ fn cmd_control_status(home: &std::path::Path) -> Result<()> {
     let request = viva::server::new_request(viva::server::RequestKind::Status);
     match viva::server::send_request(home, request) {
         Ok(response) => print_response(&response),
+        Err(live_err) if viva::machines::invocation_target().is_some() => Err(live_err),
         Err(live_err) => {
             // Read-only status is answerable offline by design; say both
             // facts plainly.
@@ -2440,6 +2464,165 @@ fn workspace_call(args: &[String]) -> Result<serde_json::Value> {
     })
 }
 
+fn peel_machine_flag(args: &[String]) -> Result<(Option<String>, Vec<String>)> {
+    let mut machine = None;
+    let mut rest = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--machine" {
+            if machine.is_some() {
+                return Err(Error::Validation("--machine was given twice".into()));
+            }
+            let id = args.get(i + 1).ok_or_else(|| {
+                Error::Validation("--machine needs the id from `viva machine list`".into())
+            })?;
+            if id.starts_with('-') {
+                return Err(Error::Validation("--machine needs an id".into()));
+            }
+            machine = Some(id.clone());
+            i += 2;
+            continue;
+        }
+        rest.push(args[i].clone());
+        i += 1;
+    }
+    Ok((machine, rest))
+}
+
+fn arm_machine(id: &str, args: &[String]) -> Result<viva::machines::InvocationGuard> {
+    match args.first().map(String::as_str) {
+        None | Some("workbench" | "open") => {
+            return Err(Error::Validation(
+                "the workbench always uses this computer's socket; remote machines stay in the sidebar, and --machine is only for an explicit command".into(),
+            ));
+        }
+        Some("machine") => {
+            return Err(Error::Validation(
+                "machine catalog commands always use this computer; omit --machine".into(),
+            ));
+        }
+        Some("init" | "doctor" | "update" | "server" | "start" | "server-restart") => {
+            return Err(Error::Validation(
+                "--machine does not change this computer's socket and does not install or start viva on the remote; omit --machine for this command".into(),
+            ));
+        }
+        _ => {}
+    }
+    let home = viva_home(None);
+    let record = viva::machines::require(&home, id)?;
+    if !record.enabled {
+        return Err(Error::Validation(format!(
+            "machine {} is disabled; input is refused",
+            record.label
+        )));
+    }
+    Ok(viva::machines::InvocationGuard::arm(record))
+}
+
+fn cmd_machine(args: &[String]) -> Result<()> {
+    let home = viva_home(None);
+    match args.first().map(String::as_str) {
+        Some("list") | None => {
+            let machines = viva::machines::load(&home)?;
+            println!("{}", serde_json::to_string_pretty(&machines)?);
+            Ok(())
+        }
+        Some("add") => {
+            let mut target = None;
+            let mut label = None;
+            let mut id = None;
+            let mut session = None;
+            let mut i = 1;
+            while i < args.len() {
+                let flag = args[i].as_str();
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| Error::Validation(format!("{flag} needs a value")))?;
+                match flag {
+                    "--target" => target = Some(value.clone()),
+                    "--label" => label = Some(value.clone()),
+                    "--id" => id = Some(value.clone()),
+                    "--session" => session = Some(value.clone()),
+                    other => {
+                        return Err(Error::Validation(format!(
+                            "unknown machine add flag `{other}`"
+                        )));
+                    }
+                }
+                i += 2;
+            }
+            let target = target.ok_or_else(|| {
+                Error::Validation("machine add needs --target <user@host>".into())
+            })?;
+            let record = viva::machines::add(
+                &home,
+                id.as_deref(),
+                label.as_deref(),
+                &target,
+                session.as_deref(),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&record)?);
+            Ok(())
+        }
+        Some("rename") => {
+            let id = args
+                .get(1)
+                .ok_or_else(|| Error::Validation("machine rename needs <id> <label>".into()))?;
+            let label = args
+                .get(2)
+                .ok_or_else(|| Error::Validation("machine rename needs <id> <label>".into()))?;
+            let record = viva::machines::rename(&home, id, label)?;
+            println!("{}", serde_json::to_string_pretty(&record)?);
+            Ok(())
+        }
+        Some("disable") => {
+            let id = args
+                .get(1)
+                .ok_or_else(|| Error::Validation("machine disable needs <id>".into()))?;
+            let record = viva::machines::set_enabled(&home, id, false)?;
+            println!("{}", serde_json::to_string_pretty(&record)?);
+            Ok(())
+        }
+        Some("enable") => {
+            let id = args
+                .get(1)
+                .ok_or_else(|| Error::Validation("machine enable needs <id>".into()))?;
+            let record = viva::machines::set_enabled(&home, id, true)?;
+            println!("{}", serde_json::to_string_pretty(&record)?);
+            Ok(())
+        }
+        Some("remove") => {
+            let id = args
+                .get(1)
+                .ok_or_else(|| Error::Validation("machine remove needs <id>".into()))?;
+            viva::machines::remove(&home, id)?;
+            println!("{{\"removed\":\"{id}\"}}");
+            Ok(())
+        }
+        Some("bridge") => {
+            let mut session = None;
+            let mut i = 1;
+            while i < args.len() {
+                if args[i] == "--session" {
+                    session = Some(args.get(i + 1).ok_or_else(|| {
+                        Error::Validation("machine bridge needs --session <name>".into())
+                    })?);
+                    i += 2;
+                    continue;
+                }
+                return Err(Error::Validation(format!(
+                    "unknown machine bridge flag `{}`",
+                    args[i]
+                )));
+            }
+            viva::machines::run_bridge(session.map(String::as_str).unwrap_or("default"))
+        }
+        Some(other) => Err(Error::Validation(format!(
+            "unknown machine command `{other}` (add, list, rename, disable, enable, remove)"
+        ))),
+    }
+}
+
 /// `viva workspace [list|open|new|select|add|remove|save|refresh] [value]`.
 fn cmd_workspace(args: &[String]) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&workspace_call(args)?)?);
@@ -2464,5 +2647,21 @@ mod cli_arg_tests {
         assert_eq!((since, limit), (0, 100));
         // Unknown flags still fail loudly.
         assert!(parse_events_args(&["--bogus".to_string()]).is_err());
+    }
+
+    #[test]
+    fn machine_flag_is_removed_without_eating_the_command() {
+        let args: Vec<String> = ["--machine", "lab", "status"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (id, rest) = peel_machine_flag(&args).unwrap();
+        assert_eq!(id.as_deref(), Some("lab"));
+        assert_eq!(rest, vec!["status".to_string()]);
+        let (id, rest) =
+            peel_machine_flag(&["status".into(), "--machine".into(), "other".into()]).unwrap();
+        assert_eq!(id.as_deref(), Some("other"));
+        assert_eq!(rest, vec!["status".to_string()]);
+        assert!(peel_machine_flag(&["--machine".into()]).is_err());
     }
 }

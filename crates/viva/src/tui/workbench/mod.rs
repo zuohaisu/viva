@@ -164,6 +164,10 @@ pub struct WorkbenchModel {
     /// V15-4: a human summary of the last sync cycle.
     #[serde(default)]
     pub sync_note: Option<String>,
+    /// This computer plus each saved SSH machine. Empty for older views.
+    /// The sidebar projects these rows; it does not add a key set.
+    #[serde(default)]
+    pub machines: Vec<crate::machines::MachineView>,
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +239,12 @@ pub enum WorkbenchAction {
     /// V15-4: toggle the auto_pull switch.
     ToggleAutoPull,
     SelectWorktree(String),
+    /// Workspace or agent on a saved machine. The local socket is not retargeted.
+    UseMachine {
+        machine_id: String,
+        workspace_id: Option<String>,
+        terminal_id: Option<String>,
+    },
     NewTab,
     Workspace {
         action: String,
@@ -378,6 +388,25 @@ struct DragSelect {
     moved: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MachineSpace {
+    machine_id: String,
+    label: String,
+    connected: bool,
+    enabled: bool,
+    workspace_id: String,
+    name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MachineAgent {
+    machine_id: String,
+    label: String,
+    connected: bool,
+    terminal_id: String,
+    name: String,
+}
+
 /// The workbench application state. Pure view state + explicit caches;
 /// drive it with [`WorkbenchApp::on_key`], the setters, and [`Self::draw`].
 pub struct WorkbenchApp {
@@ -395,6 +424,8 @@ pub struct WorkbenchApp {
     snapshots: std::collections::HashMap<String, TerminalSnapshot>,
     /// When set: keyboard bytes forward to this terminal; Esc releases.
     terminal_mode: Option<String>,
+    /// Set when `terminal_mode` belongs to a remote machine. Local panes leave this empty.
+    remote_terminal: Option<(String, String)>,
     diff_view: Option<String>,
     status_line: String,
     quit_requested: bool,
@@ -485,6 +516,7 @@ impl WorkbenchApp {
             zoomed: false,
             snapshots: std::collections::HashMap::new(),
             terminal_mode: None,
+            remote_terminal: None,
             diff_view: None,
             status_line: DEFAULT_STATUS_HINT.into(),
             quit_requested: false,
@@ -639,6 +671,23 @@ impl WorkbenchApp {
         {
             self.set_status(model.workspace_diagnostics.join(" · "));
         }
+        if let Some((machine, _)) = self.remote_terminal.clone() {
+            let usable = model
+                .machines
+                .iter()
+                .any(|view| view.id == machine && view.connected && view.enabled);
+            if !usable {
+                let label = model
+                    .machines
+                    .iter()
+                    .find(|view| view.id == machine)
+                    .map(|view| view.label.clone())
+                    .unwrap_or(machine);
+                self.terminal_mode = None;
+                self.remote_terminal = None;
+                self.set_status(format!("{label} is disconnected; input is refused"));
+            }
+        }
         self.model = model;
         self.clamp_selection();
     }
@@ -788,6 +837,9 @@ impl WorkbenchApp {
         }
         if self.terminal_mode.is_none() {
             return KeyOutcome::Ignored;
+        }
+        if self.blocked_remote() {
+            return KeyOutcome::Handled;
         }
         if text.len() > 64 * 1024 {
             self.set_status("paste exceeds 64 KiB; nothing sent");
@@ -1388,12 +1440,14 @@ impl WorkbenchApp {
     /// [`WorkbenchAction::EnterTerminal`]).
     pub fn enter_terminal_mode(&mut self, terminal_id: impl Into<String>) {
         self.focus = Focus::Panes;
+        self.remote_terminal = None;
         self.terminal_mode = Some(terminal_id.into());
         self.status_line = "terminal · only the prefix key is intercepted".into();
     }
 
     pub fn leave_terminal_mode(&mut self) {
         self.terminal_mode = None;
+        self.remote_terminal = None;
         self.copy_mode = false;
         self.prefix_pending = false;
         self.status_line = "terminal released".into();
@@ -1994,16 +2048,10 @@ impl WorkbenchApp {
                     return KeyOutcome::Handled;
                 }
                 KeyCode::Enter if self.focus == Focus::Terminals => {
-                    return match self.selected_terminal() {
-                        Some(id) => KeyOutcome::Action(WorkbenchAction::EnterTerminal(id)),
-                        None => KeyOutcome::Ignored,
-                    };
+                    return self.activate_agent();
                 }
                 KeyCode::Enter if self.focus == Focus::Worktrees => {
-                    return match self.selected_worktree() {
-                        Some(id) => KeyOutcome::Action(WorkbenchAction::SelectWorktree(id)),
-                        None => KeyOutcome::Ignored,
-                    };
+                    return self.activate_space();
                 }
                 KeyCode::Tab => {
                     self.cycle_pane();
@@ -2015,11 +2063,22 @@ impl WorkbenchApp {
         KeyOutcome::Ignored
     }
 
+    fn enter_remote_terminal(&mut self, machine_id: String, terminal_id: String) {
+        self.focus = Focus::Panes;
+        self.terminal_mode = Some(terminal_id.clone());
+        self.remote_terminal = Some((machine_id, terminal_id));
+        self.copy_mode = false;
+        self.prefix_pending = false;
+        self.status_line =
+            "remote terminal · keys go to that machine · this computer's socket is unchanged"
+                .into();
+    }
+
     fn row_count(&self) -> usize {
         match self.focus {
-            Focus::Worktrees => self.model.worktrees.len(),
+            Focus::Worktrees => self.model.worktrees.len() + self.machine_workspaces().len(),
             Focus::Tasks => self.model.tasks.len(),
-            Focus::Terminals => self.agent_rows().len(),
+            Focus::Terminals => self.agent_rows().len() + self.machine_agents().len(),
             Focus::Panes => 0,
         }
     }
@@ -2060,6 +2119,136 @@ impl WorkbenchApp {
             .worktrees
             .get(self.selected)
             .map(|w| w.worktree_id.clone())
+    }
+
+    fn machine_workspaces(&self) -> Vec<MachineSpace> {
+        let mut rows = Vec::new();
+        for machine in &self.model.machines {
+            for workspace in &machine.workspaces {
+                rows.push(MachineSpace {
+                    machine_id: machine.id.clone(),
+                    label: machine.label.clone(),
+                    connected: machine.connected && machine.enabled,
+                    enabled: machine.enabled,
+                    workspace_id: workspace.workspace_id.clone(),
+                    name: workspace.name.clone(),
+                });
+            }
+        }
+        rows
+    }
+
+    fn machine_agents(&self) -> Vec<MachineAgent> {
+        let mut rows = Vec::new();
+        for machine in &self.model.machines {
+            if machine.id == crate::machines::LOCAL_MACHINE_ID {
+                continue;
+            }
+            for agent in &machine.agents {
+                rows.push(MachineAgent {
+                    machine_id: machine.id.clone(),
+                    label: machine.label.clone(),
+                    connected: machine.connected && machine.enabled,
+                    terminal_id: agent.terminal_id.clone(),
+                    name: agent.name.clone(),
+                });
+            }
+        }
+        rows
+    }
+
+    fn machine_workspace_row(&self, selected: usize) -> Option<MachineSpace> {
+        let offset = selected.checked_sub(self.model.worktrees.len())?;
+        self.machine_workspaces().get(offset).cloned()
+    }
+
+    fn machine_agent_row(&self, selected: usize) -> Option<MachineAgent> {
+        let offset = selected.checked_sub(self.agent_rows().len())?;
+        self.machine_agents().get(offset).cloned()
+    }
+
+    fn machine_accepts_input(&self, id: &str) -> bool {
+        self.model
+            .machines
+            .iter()
+            .any(|machine| machine.id == id && machine.connected && machine.enabled)
+    }
+
+    /// Drop remote keyboard forwarding when that machine can no longer take input.
+    fn blocked_remote(&mut self) -> bool {
+        let Some((machine, _)) = self.remote_terminal.clone() else {
+            return false;
+        };
+        if self.machine_accepts_input(&machine) {
+            return false;
+        }
+        let label = self
+            .model
+            .machines
+            .iter()
+            .find(|view| view.id == machine)
+            .map(|view| view.label.clone())
+            .unwrap_or(machine);
+        self.terminal_mode = None;
+        self.remote_terminal = None;
+        self.set_status(format!("{label} is disconnected; input is refused"));
+        true
+    }
+
+    fn activate_space(&mut self) -> KeyOutcome {
+        if let Some(row) = self.machine_workspace_row(self.selected) {
+            if row.machine_id == crate::machines::LOCAL_MACHINE_ID {
+                return KeyOutcome::Action(WorkbenchAction::Workspace {
+                    action: "select".into(),
+                    value: Some(row.workspace_id),
+                    project_id: None,
+                });
+            }
+            if !row.connected {
+                let why = if row.enabled {
+                    "disconnected"
+                } else {
+                    "disabled"
+                };
+                self.set_status(format!("{} is {why}; input is refused", row.label));
+                return KeyOutcome::Handled;
+            }
+            return KeyOutcome::Action(WorkbenchAction::UseMachine {
+                machine_id: row.machine_id,
+                workspace_id: Some(row.workspace_id),
+                terminal_id: None,
+            });
+        }
+        match self.selected_worktree() {
+            Some(id) => KeyOutcome::Action(WorkbenchAction::SelectWorktree(id)),
+            None => KeyOutcome::Ignored,
+        }
+    }
+
+    fn activate_agent(&mut self) -> KeyOutcome {
+        if let Some(row) = self.machine_agent_row(self.selected) {
+            if !row.connected {
+                self.set_status(format!("{} is disconnected; input is refused", row.label));
+                return KeyOutcome::Handled;
+            }
+            return KeyOutcome::Action(WorkbenchAction::UseMachine {
+                machine_id: row.machine_id,
+                workspace_id: None,
+                terminal_id: Some(row.terminal_id),
+            });
+        }
+        match self.selected_terminal() {
+            Some(id) => KeyOutcome::Action(WorkbenchAction::EnterTerminal(id)),
+            None => KeyOutcome::Ignored,
+        }
+    }
+
+    fn activate_space_or_agent(&mut self) -> KeyOutcome {
+        match self.focus {
+            Focus::Worktrees => self.activate_space(),
+            Focus::Terminals => self.activate_agent(),
+            Focus::Tasks | Focus::Panes => KeyOutcome::Ignored,
+        }
     }
 
     /// Handle one key event.
@@ -2334,6 +2523,9 @@ impl WorkbenchApp {
             };
         }
         if self.navigate || self.terminal_mode.is_some() || self.copy_mode || self.resize_mode {
+            if self.terminal_mode.is_some() && self.blocked_remote() {
+                return KeyOutcome::Handled;
+            }
             if self.keymap.is_prefix(key) {
                 self.arm_prefix();
                 return KeyOutcome::Handled;
@@ -2775,12 +2967,9 @@ impl WorkbenchApp {
             self.leave_terminal_mode();
             self.focus = focus;
             self.selected = index;
-            self.mouse_action = match focus {
-                Focus::Worktrees => self
-                    .selected_worktree()
-                    .map(WorkbenchAction::SelectWorktree),
-                Focus::Terminals => self.selected_terminal().map(WorkbenchAction::EnterTerminal),
-                Focus::Tasks | Focus::Panes => None,
+            self.mouse_action = match self.activate_space_or_agent() {
+                KeyOutcome::Action(action) => Some(action),
+                _ => None,
             };
             return;
         }
@@ -3761,6 +3950,7 @@ impl WorkbenchApp {
                 ));
             }
         }
+        self.append_machine_spaces(&mut lines, width, palette);
 
         let agent_start = lines.len();
         // -- agents --
@@ -3840,6 +4030,7 @@ impl WorkbenchApp {
                 Some((Focus::Terminals, index)),
             ));
         }
+        self.append_machine_agents(&mut lines, width, palette);
 
         let task_start = lines.len();
         // -- tasks --
@@ -3924,6 +4115,103 @@ impl WorkbenchApp {
                     .set_style(ratatui::style::Style::new().fg(palette.surface_dim));
             }
         }
+    }
+
+    fn append_machine_spaces(
+        &self,
+        lines: &mut Vec<(Line<'static>, Option<(Focus, usize)>)>,
+        width: usize,
+        palette: &Palette,
+    ) {
+        let mut index = self.model.worktrees.len();
+        for machine in &self.model.machines {
+            lines.push((self.machine_header(machine, width, palette), None));
+            for workspace in &machine.workspaces {
+                let selected = self.focus == Focus::Worktrees && self.selected == index;
+                let style =
+                    self.machine_style(machine.connected && machine.enabled, palette.text, palette);
+                lines.push((
+                    Self::row(
+                        vec![Span::styled(
+                            fit(&format!("└─ {}", workspace.name), width.saturating_sub(1)),
+                            style,
+                        )],
+                        selected,
+                        width,
+                        palette,
+                    ),
+                    Some((Focus::Worktrees, index)),
+                ));
+                index += 1;
+            }
+        }
+    }
+
+    fn append_machine_agents(
+        &self,
+        lines: &mut Vec<(Line<'static>, Option<(Focus, usize)>)>,
+        width: usize,
+        palette: &Palette,
+    ) {
+        let mut index = self.agent_rows().len();
+        for machine in &self.model.machines {
+            if machine.id == crate::machines::LOCAL_MACHINE_ID {
+                continue;
+            }
+            lines.push((self.machine_header(machine, width, palette), None));
+            for agent in &machine.agents {
+                let selected = self.focus == Focus::Terminals && self.selected == index;
+                let live = machine.connected && machine.enabled;
+                lines.push((
+                    Self::row(
+                        vec![Span::styled(
+                            fit(&format!("└─ {}", agent.name), width.saturating_sub(1)),
+                            self.machine_style(live, palette.text, palette),
+                        )],
+                        selected,
+                        width,
+                        palette,
+                    ),
+                    Some((Focus::Terminals, index)),
+                ));
+                index += 1;
+            }
+        }
+    }
+
+    fn machine_header(
+        &self,
+        machine: &crate::machines::MachineView,
+        width: usize,
+        palette: &Palette,
+    ) -> Line<'static> {
+        let state = if machine.connected {
+            String::new()
+        } else if machine.enabled {
+            " disconnected".into()
+        } else {
+            " disabled".into()
+        };
+        let text = format!(" {}{state}", machine.label);
+        Self::row(
+            vec![Span::styled(
+                fit(&text, width.saturating_sub(1)),
+                self.machine_style(machine.connected && machine.enabled, palette.text, palette)
+                    .bold(),
+            )],
+            false,
+            width,
+            palette,
+        )
+    }
+
+    fn machine_style(
+        &self,
+        live: bool,
+        color: ratatui::style::Color,
+        palette: &Palette,
+    ) -> ratatui::style::Style {
+        ratatui::style::Style::new().fg(if live { color } else { palette.overlay0 })
     }
 
     /// Worktrees grouped under their project's name, as (name, indices
@@ -4484,6 +4772,7 @@ impl<'a> WorkbenchStore<'a> {
             attention,
             auto_pull: false,
             sync_note: None,
+            machines: vec![],
         })
     }
 
@@ -4801,7 +5090,9 @@ fn run_client_inner(client: &mut crate::server::Client) -> Result<()> {
             Event::Paste(text) => {
                 if let KeyOutcome::Forward(bytes) = app.on_paste(&text) {
                     if let Some(id) = app.terminal_mode().map(str::to_string) {
-                        if let Err(e) = polling.send(id, bytes) {
+                        if let Err(e) =
+                            deliver_terminal_bytes(client, &mut app, &polling, &id, bytes)
+                        {
                             app.set_status(e);
                         }
                     }
@@ -4810,7 +5101,7 @@ fn run_client_inner(client: &mut crate::server::Client) -> Result<()> {
             Event::Resize(_, _) => {}
             Event::Mouse(mouse) => {
                 if let Some((id, bytes)) = app.terminal_mouse(mouse) {
-                    if let Err(e) = polling.send(id, bytes) {
+                    if let Err(e) = deliver_terminal_bytes(client, &mut app, &polling, &id, bytes) {
                         app.set_status(e);
                     }
                 } else {
@@ -5109,7 +5400,102 @@ fn apply_client_action(
             app.set_status(format!("worktree created for task {task_id}: {path}"));
             Ok(())
         }
+        WorkbenchAction::UseMachine {
+            machine_id,
+            workspace_id,
+            terminal_id,
+        } => {
+            let Some(machine) = app
+                .model
+                .machines
+                .iter()
+                .find(|machine| machine.id == machine_id)
+                .cloned()
+            else {
+                app.set_status(format!("machine {machine_id} is not in the sidebar"));
+                return Ok(());
+            };
+            if !machine.connected || !machine.enabled {
+                let why = if machine.enabled {
+                    "disconnected"
+                } else {
+                    "disabled"
+                };
+                app.set_status(format!("{} is {why}; input is refused", machine.label));
+                return Ok(());
+            }
+            if machine_id == crate::machines::LOCAL_MACHINE_ID {
+                if let Some(id) = workspace_id {
+                    return apply_client_action(
+                        client,
+                        app,
+                        WorkbenchAction::Workspace {
+                            action: "select".into(),
+                            value: Some(id),
+                            project_id: None,
+                        },
+                    );
+                }
+                if let Some(id) = terminal_id {
+                    app.enter_terminal_mode(id);
+                }
+                return Ok(());
+            }
+            if let Some(id) = workspace_id {
+                client.call(crate::server::RequestKind::MachineForward {
+                    id: machine_id.clone(),
+                    kind: Box::new(crate::server::RequestKind::Workspace {
+                        action: "select".into(),
+                        value: Some(id),
+                        project_id: None,
+                    }),
+                })?;
+                app.set_status(format!("machine {}: workspace selected", machine.label));
+                return Ok(());
+            }
+            if let Some(id) = terminal_id {
+                app.enter_remote_terminal(machine_id, id);
+                return Ok(());
+            }
+            Ok(())
+        }
     }
+}
+
+fn deliver_terminal_bytes(
+    client: &mut crate::server::Client,
+    app: &mut WorkbenchApp,
+    polling: &polling::Polling,
+    id: &str,
+    bytes: Vec<u8>,
+) -> std::result::Result<(), String> {
+    if let Some((machine, terminal)) = app.remote_terminal.clone() {
+        if terminal == id {
+            if !app.machine_accepts_input(&machine) {
+                let label = app
+                    .model
+                    .machines
+                    .iter()
+                    .find(|view| view.id == machine)
+                    .map(|view| view.label.clone())
+                    .unwrap_or(machine);
+                app.terminal_mode = None;
+                app.remote_terminal = None;
+                return Err(format!("{label} is disconnected; input is refused"));
+            }
+            return client
+                .call(crate::server::RequestKind::MachineForward {
+                    id: machine,
+                    kind: Box::new(crate::server::RequestKind::TerminalInput {
+                        terminal_id: terminal,
+                        bytes_hex: crate::server::hex_encode(&bytes),
+                    }),
+                })
+                .map(|_| ())
+                .map_err(|err| err.to_string());
+        }
+    }
+    polling.send(id.to_string(), bytes)
 }
 
 /// Spawn a shell next to the focused pane: same worktree when the focused
@@ -5242,6 +5628,7 @@ mod tests {
             workspaces: vec![],
             workspace_id: None,
             workspace_diagnostics: vec![],
+            machines: vec![],
         }
     }
 
@@ -5257,6 +5644,141 @@ mod tests {
         app.select_worktree("wt1".into());
         assert_eq!(app.selected_scene(), "wt1");
         assert_eq!(app.terminal_leaves(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn disconnected_machine_stays_dim_while_the_other_still_accepts_input() {
+        use crate::agents::AgentSessionRow;
+        use crate::machines::{LOCAL_MACHINE_ID, MachineView};
+        use crate::workspaces::navigation::WorkspaceRow;
+
+        let workspace = |id: &str, name: &str| WorkspaceRow {
+            workspace_id: id.into(),
+            name: name.into(),
+            source_path: None,
+            opened_at: String::new(),
+        };
+        let agent = |id: &str, name: &str| AgentSessionRow {
+            terminal_id: id.into(),
+            tool: "pi".into(),
+            name: name.into(),
+            worktree_id: None,
+            location: name.into(),
+            live: Some(true),
+            records: vec![],
+            stale: false,
+            in_workspace: true,
+            report_capability: "report:unverified".into(),
+        };
+        let machine =
+            |id: &str, label: &str, connected: bool, ws: &str, agent_name: &str| MachineView {
+                id: id.into(),
+                label: label.into(),
+                ssh_target: if id == LOCAL_MACHINE_ID {
+                    String::new()
+                } else {
+                    format!("{id}-host")
+                },
+                remote_session: "default".into(),
+                enabled: true,
+                connected,
+                error: if connected {
+                    None
+                } else {
+                    Some("connection closed".into())
+                },
+                workspaces: vec![workspace(&format!("{id}-ws"), ws)],
+                agents: vec![agent(&format!("{id}-term"), agent_name)],
+                workspace_id: Some(format!("{id}-ws")),
+            };
+        let mut model = sample();
+        model.machines = vec![
+            machine(LOCAL_MACHINE_ID, "local", true, "homews", "homeag"),
+            machine("lab", "Lab", false, "labws", "labag"),
+            machine("other", "Other", true, "otherws", "otherag"),
+        ];
+        let mut app = WorkbenchApp::new();
+        app.set_model(model);
+        let view = render(&mut app, 120, 48);
+        assert!(view.contains("labws"), "{view}");
+        assert!(view.contains("disconnected"), "{view}");
+        assert!(view.contains("otherws"), "{view}");
+        assert!(view.contains("homews"), "{view}");
+
+        // The local worktree is still the first row.
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Enter)),
+            KeyOutcome::Action(WorkbenchAction::SelectWorktree("wt1".into()))
+        );
+        // worktree, homews, labws.
+        app.on_key(KeyEvent::from(KeyCode::Down));
+        app.on_key(KeyEvent::from(KeyCode::Down));
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Enter)),
+            KeyOutcome::Handled
+        );
+        let refused = render(&mut app, 120, 48);
+        assert!(refused.contains("input is refused"), "{refused}");
+        app.on_key(KeyEvent::from(KeyCode::Down));
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Enter)),
+            KeyOutcome::Action(WorkbenchAction::UseMachine {
+                machine_id: "other".into(),
+                workspace_id: Some("other-ws".into()),
+                terminal_id: None,
+            })
+        );
+
+        let _ = render(&mut app, 120, 48);
+        let click = |x: u16, y: u16| {
+            use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: x,
+                row: y,
+                modifiers: ratatui::crossterm::event::KeyModifiers::empty(),
+            }
+        };
+        let lab_agent = app
+            .sidebar_hits
+            .iter()
+            .find(|(focus, index, _)| *focus == Focus::Terminals && *index == 0)
+            .map(|(_, _, rect)| *rect)
+            .expect("lab agent row");
+        app.on_mouse(click(lab_agent.x, lab_agent.y));
+        assert!(app.take_mouse_action().is_none());
+        let refused_agent = render(&mut app, 120, 48);
+        assert!(
+            refused_agent.contains("input is refused"),
+            "{refused_agent}"
+        );
+        let other_agent = app
+            .sidebar_hits
+            .iter()
+            .find(|(focus, index, _)| *focus == Focus::Terminals && *index == 1)
+            .map(|(_, _, rect)| *rect)
+            .expect("other agent row");
+        app.on_mouse(click(other_agent.x, other_agent.y));
+        assert_eq!(
+            app.take_mouse_action(),
+            Some(WorkbenchAction::UseMachine {
+                machine_id: "other".into(),
+                workspace_id: None,
+                terminal_id: Some("other-term".into()),
+            })
+        );
+
+        app.enter_remote_terminal("lab".into(), "lab-term".into());
+        let mut disconnected = app.model().clone();
+        for machine in &mut disconnected.machines {
+            if machine.id == "lab" {
+                machine.connected = false;
+            }
+        }
+        app.set_model(disconnected);
+        assert!(app.terminal_mode().is_none());
+        let dropped = render(&mut app, 120, 48);
+        assert!(dropped.contains("input is refused"), "{dropped}");
     }
 
     #[test]
@@ -6421,6 +6943,7 @@ mod v15_tui_fix_tests {
             workspaces: vec![],
             workspace_id: None,
             workspace_diagnostics: vec![],
+            machines: vec![],
         }
     }
 
