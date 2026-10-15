@@ -92,8 +92,7 @@ pub fn reject_remote_source(raw: &str) -> Result<()> {
     let lower = trimmed.to_ascii_lowercase();
     let remote = lower.contains("://")
         || lower.starts_with("git@")
-        || lower.contains("herdr.dev")
-        || lower.contains("marketplace");
+        || lower.contains("herdr.dev");
     if remote {
         return Err(Error::Validation(
             "plugin install only accepts a local directory; URLs and marketplace endpoints are refused"
@@ -183,13 +182,13 @@ pub fn uninstall(home: &Path, id: &str) -> Result<()> {
         });
     };
     let record = records.remove(index);
+    write_registry(home, &records)?;
     stop_record(&record);
     let _ = fs::remove_file(socket_path(home, id));
     let dest = install_dir(home, id);
     if dest.exists() {
         fs::remove_dir_all(&dest)?;
     }
-    write_registry(home, &records)?;
     Ok(())
 }
 
@@ -574,7 +573,7 @@ fn reject_remote_text(value: &str) -> Result<()> {
 
 fn looks_remote(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
-    lower.contains("://") || lower.contains("herdr.dev") || lower.contains("marketplace")
+    lower.contains("://") || lower.starts_with("git@") || lower.contains("herdr.dev")
 }
 
 fn is_secret_name(name: &str) -> bool {
@@ -701,6 +700,7 @@ mod tests {
             assert!(!text.contains(secret), "{text}");
         }
         assert!(reject_remote_source("/tmp/my-plugin").is_ok());
+        assert!(reject_remote_source("/tmp/marketplace-demo").is_ok());
     }
 
     #[test]

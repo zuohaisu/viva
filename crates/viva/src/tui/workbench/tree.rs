@@ -784,6 +784,31 @@ pub fn focused_pane(
     Some((scene_key.to_string(), tab.id.clone(), pane_id))
 }
 
+/// Whether the tab is zoomed after a tree edit. Used for plugin `pane.opened`
+/// events when zoom is toggled with `on: None`.
+pub fn tab_is_zoomed(
+    book: &SceneBook,
+    scene_id: Option<&str>,
+    tab_id: Option<&str>,
+) -> bool {
+    let scene_key = scene_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .unwrap_or(book.selected.as_str());
+    let Some(scene) = book.scenes.get(scene_key) else {
+        return false;
+    };
+    let tab_key = tab_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .unwrap_or(scene.active.as_str());
+    scene
+        .tabs
+        .iter()
+        .find(|tab| tab.id == tab_key)
+        .is_some_and(|tab| tab.zoom)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

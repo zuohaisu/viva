@@ -1607,10 +1607,10 @@ fn pane_opened_event(
         WorkbenchTreeOp::Zoom {
             scene_id,
             tab_id,
-            on,
             ..
         } => {
-            if *on == Some(false) {
+            if !crate::tui::workbench::tree::tab_is_zoomed(book, scene_id.as_deref(), tab_id.as_deref())
+            {
                 return None;
             }
             ("zoomed", scene_id.as_deref(), tab_id.as_deref())
