@@ -1380,7 +1380,7 @@ fn terminal_scene_map(store: &Store) -> std::collections::BTreeMap<String, Strin
     out
 }
 
-fn scene_for_terminal<'a>(map: &'a std::collections::BTreeMap<String, String>, id: &str) -> String {
+fn scene_for_terminal(map: &std::collections::BTreeMap<String, String>, id: &str) -> String {
     map.get(id)
         .cloned()
         .unwrap_or_else(|| crate::tui::workbench::scenes::FLOATING.into())
