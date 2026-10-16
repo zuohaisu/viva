@@ -168,6 +168,12 @@ fn forgotten_skill_returns_via_restore_or_use_without_second_initial() {
     );
     let exec = ExecutionId::new();
     svc.get_body(&member, &skill_id, &exec, 0.25).expect("use");
+    let (ok, stdout, stderr) = run_viva(home.path(), &["skill", "weekly"]);
+    assert!(ok, "weekly after use-restore: {stderr}");
+    assert!(
+        stdout.contains("used_after_forgotten") || stdout.contains("restored"),
+        "weekly must list restore after forgotten skill read: {stdout}"
+    );
     let uses = svc.used_in_for_member_skill(&member, &skill_id).unwrap();
     let initial = uses.iter().filter(|u| u.note == "initial_on_join").count();
     assert_eq!(initial, 1);
@@ -180,7 +186,11 @@ fn forgotten_skill_returns_via_restore_or_use_without_second_initial() {
     let skill2 = register_team_skill(&store, dir.path(), "fmt", "format code");
     svc.claim(&other, &skill2, None).expect("claim other");
     svc.mark_forgotten(&other, &skill2).expect("forget other");
+    let (ok, _, stderr) = run_viva(home.path(), &["skill", "weekly"]);
+    assert!(ok, "baseline weekly other: {stderr}");
     svc.restore_manual(&other, &skill2).expect("manual restore");
+    svc.restore_manual(&other, &skill2)
+        .expect("idempotent restore");
     let uses2 = svc.used_in_for_member_skill(&other, &skill2).unwrap();
     assert_eq!(
         uses2.iter().filter(|u| u.note == "initial_on_join").count(),

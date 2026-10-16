@@ -183,7 +183,7 @@ impl<'a> SkillSetService<'a> {
             return match existing.state {
                 MembershipState::Active => Ok(existing),
                 MembershipState::Forgotten => {
-                    self.restore_membership(member, skill_id, "claimed_after_use", false)?;
+                    self.restore_membership(member, skill_id, "claimed_after_use")?;
                     self.membership(member, skill_id)?
                         .ok_or_else(|| Error::Validation("restore left no membership row".into()))
                 }
@@ -218,7 +218,7 @@ impl<'a> SkillSetService<'a> {
             )?;
             self.append_event(member, skill_id, "restored", None, json!({"manual": true}))?;
         } else {
-            self.restore_membership(member, skill_id, "manual_restore", true)?;
+            self.restore_membership(member, skill_id, "manual_restore")?;
         }
         self.membership(member, skill_id)?
             .ok_or_else(|| Error::Validation("restore left no membership row".into()))
@@ -236,7 +236,7 @@ impl<'a> SkillSetService<'a> {
             if existing.state == MembershipState::Active {
                 return Ok(existing);
             }
-            self.restore_membership(target, skill_id, "sync_reactivate", false)?;
+            self.restore_membership(target, skill_id, "sync_reactivate")?;
         } else {
             let now = utc_now();
             self.store.connection().execute(
@@ -318,7 +318,7 @@ impl<'a> SkillSetService<'a> {
             })?;
         if let Some(m) = self.membership(member, skill_id)? {
             if m.state == MembershipState::Forgotten {
-                self.restore_membership(member, skill_id, "used_after_forgotten", false)?;
+                self.restore_membership(member, skill_id, "used_after_forgotten")?;
             }
         } else {
             return Err(Error::Validation(format!(
@@ -457,17 +457,20 @@ impl<'a> SkillSetService<'a> {
         })
     }
 
-    fn restore_membership(
-        &self,
-        member: &MemberId,
-        skill_id: &str,
-        reason: &str,
-        emit_restored_event: bool,
-    ) -> Result<()> {
+    fn restore_membership(&self, member: &MemberId, skill_id: &str, reason: &str) -> Result<()> {
+        let Some(existing) = self.membership(member, skill_id)? else {
+            return Err(Error::NotFound {
+                entity: "member skill membership",
+                id: format!("{}:{skill_id}", member.as_str()),
+            });
+        };
+        if existing.state == MembershipState::Active {
+            return Ok(());
+        }
         let n = self.store.connection().execute(
             "UPDATE member_skill_memberships
              SET membership_state = 'active', forgotten_at = NULL
-             WHERE member_id = ?1 AND skill_id = ?2",
+             WHERE member_id = ?1 AND skill_id = ?2 AND membership_state = 'forgotten'",
             rusqlite::params![member.as_str(), skill_id],
         )?;
         if n == 0 {
@@ -476,15 +479,13 @@ impl<'a> SkillSetService<'a> {
                 id: format!("{}:{skill_id}", member.as_str()),
             });
         }
-        if emit_restored_event {
-            self.append_event(
-                member,
-                skill_id,
-                "restored",
-                None,
-                json!({"reason": reason}),
-            )?;
-        }
+        self.append_event(
+            member,
+            skill_id,
+            "restored",
+            None,
+            json!({"reason": reason}),
+        )?;
         Ok(())
     }
 
