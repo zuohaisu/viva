@@ -2064,6 +2064,18 @@ impl WorkbenchApp {
 
     /// Handle one key event.
     pub fn on_key(&mut self, key: KeyEvent) -> KeyOutcome {
+        use ratatui::crossterm::event::KeyEventKind;
+        // Releases never drive workbench shortcuts. In a terminal pane they
+        // are forwarded only when the program asked for key-release events.
+        if key.kind == KeyEventKind::Release {
+            if self.terminal_mode.is_none() {
+                return KeyOutcome::Ignored;
+            }
+            return match terminal_view::key(key, &self.input_modes()) {
+                Some(bytes) => KeyOutcome::Forward(bytes),
+                None => KeyOutcome::Ignored,
+            };
+        }
         if let Some(index) = &mut self.terminal_picker {
             match key.code {
                 KeyCode::Esc => self.terminal_picker = None,
@@ -4687,7 +4699,7 @@ fn sync_shared_layout(
 }
 
 fn run_client_inner(client: &mut crate::server::Client) -> Result<()> {
-    use ratatui::crossterm::event::{self, Event, KeyEventKind};
+    use ratatui::crossterm::event::{self, Event};
     let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
     let mut terminal = ratatui::Terminal::new(backend)
         .map_err(|e| crate::foundation::Error::Io(std::io::Error::other(e.to_string())))?;
@@ -4762,32 +4774,30 @@ fn run_client_inner(client: &mut crate::server::Client) -> Result<()> {
         match event {
             // Key handling is the existing flow; mouse events feed the
             // drag/click layer (herdr parity). Everything else is dropped.
-            Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
-                match app.on_key(key) {
-                    // Detach, not shutdown: the resident server keeps running.
-                    KeyOutcome::QuitRequested => {
-                        if app.layout_dirty() {
-                            client.call(crate::server::RequestKind::WorkbenchLayout {
-                                layout_json: Some(app.serialize_layout()),
-                            })?;
-                        }
-                        break;
+            Event::Key(key) => match app.on_key(key) {
+                // Detach, not shutdown: the resident server keeps running.
+                KeyOutcome::QuitRequested => {
+                    if app.layout_dirty() {
+                        client.call(crate::server::RequestKind::WorkbenchLayout {
+                            layout_json: Some(app.serialize_layout()),
+                        })?;
                     }
-                    KeyOutcome::Action(action) => {
-                        if let Err(err) = apply_client_action(client, &mut app, action) {
-                            app.set_status(format!("action failed: {err}"));
-                        }
-                    }
-                    KeyOutcome::Forward(bytes) => {
-                        if let Some(id) = app.terminal_mode().map(str::to_string) {
-                            if let Err(e) = polling.send(id, bytes) {
-                                app.set_status(e);
-                            }
-                        }
-                    }
-                    KeyOutcome::Handled | KeyOutcome::Ignored => {}
+                    break;
                 }
-            }
+                KeyOutcome::Action(action) => {
+                    if let Err(err) = apply_client_action(client, &mut app, action) {
+                        app.set_status(format!("action failed: {err}"));
+                    }
+                }
+                KeyOutcome::Forward(bytes) => {
+                    if let Some(id) = app.terminal_mode().map(str::to_string) {
+                        if let Err(e) = polling.send(id, bytes) {
+                            app.set_status(e);
+                        }
+                    }
+                }
+                KeyOutcome::Handled | KeyOutcome::Ignored => {}
+            },
             Event::Paste(text) => {
                 if let KeyOutcome::Forward(bytes) = app.on_paste(&text) {
                     if let Some(id) = app.terminal_mode().map(str::to_string) {
@@ -5440,6 +5450,42 @@ mod tests {
         assert_eq!(
             app.on_paste("line1\nline2"),
             KeyOutcome::Forward(b"\x1b[200~line1\nline2\x1b[201~".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_disambiguate_forwards_ctrl_c_and_ctrl_bracket_still_releases() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let ctrl = ratatui::crossterm::event::KeyModifiers::CONTROL;
+        let mut app = app_with_terminal_pane();
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.enter_terminal_mode("t1");
+        app.set_snapshot(
+            "t1",
+            snapshot_with_modes(crate::terminal::screen::InputModes {
+                kitty_flags: 1,
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            app.on_key(KeyEvent::new(KeyCode::Char('c'), ctrl)),
+            KeyOutcome::Forward(b"\x1b[99;5u".to_vec())
+        );
+        assert_eq!(
+            app.on_key(KeyEvent::new(KeyCode::Char(']'), ctrl)),
+            KeyOutcome::Forward(b"\x1b[93;5u".to_vec()),
+            "Ctrl+] forwards as Kitty CSI u; workbench prefix is ctrl+b on main"
+        );
+        assert_eq!(app.terminal_mode(), Some("t1"));
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 5,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        });
+        assert!(
+            app.terminal_mode().is_none(),
+            "switching pane focus releases terminal forwarding on main"
         );
     }
 

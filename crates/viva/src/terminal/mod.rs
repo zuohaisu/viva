@@ -8,6 +8,8 @@
 //! worktree may host many purpose-terminals; switching or stopping one
 //! never touches its neighbors.
 
+pub(crate) mod keyboard;
+mod osc52;
 mod pty;
 pub mod screen;
 mod session;

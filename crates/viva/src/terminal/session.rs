@@ -187,6 +187,9 @@ impl Default for StopPolicy {
 pub struct DiskLog {
     file: Mutex<std::fs::File>,
     redactor: Mutex<ByteRedactor>,
+    /// OSC 52 payloads are removed before the redactor sees them, so a
+    /// clipboard write never lands in the transcript.
+    osc52: Mutex<super::osc52::Osc52Stripper>,
     written: AtomicU64,
     max_bytes: Option<u64>,
     truncated: AtomicBool,
@@ -208,6 +211,7 @@ impl DiskLog {
         Ok(Self {
             file: Mutex::new(file),
             redactor: Mutex::new(ByteRedactor::new(secrets)),
+            osc52: Mutex::new(super::osc52::Osc52Stripper::default()),
             written: AtomicU64::new(0),
             max_bytes,
             truncated: AtomicBool::new(false),
@@ -228,7 +232,8 @@ impl DiskLog {
                 return;
             }
         }
-        let safe = self.redactor.lock().expect("log redactor").push(bytes);
+        let stripped = self.osc52.lock().expect("osc52 stripper").push(bytes);
+        let safe = self.redactor.lock().expect("log redactor").push(&stripped);
         let mut file = self.file.lock().expect("log file");
         if std::io::Write::write_all(&mut *file, &safe).is_err() {
             // A failing (slow/full) disk must not take the session down;
@@ -245,7 +250,11 @@ impl DiskLog {
     }
 
     fn finish(&self) {
-        let tail = self.redactor.lock().expect("log redactor").flush();
+        let stripped = self.osc52.lock().expect("osc52 stripper").flush();
+        let mut redactor = self.redactor.lock().expect("log redactor");
+        let mut tail = redactor.push(&stripped);
+        tail.extend(redactor.flush());
+        drop(redactor);
         if !tail.is_empty() {
             let mut file = self.file.lock().expect("log file");
             let _ = std::io::Write::write_all(&mut *file, &tail);
@@ -460,6 +469,7 @@ impl TerminalHandle {
         );
         parser.process(screen);
         parser.process(pending);
+        super::osc52::publish(parser.callbacks_mut().take_clipboard());
         parser.callbacks_mut().bytes.clear();
         let shared = Arc::new(SessionShared {
             parser: Mutex::new(parser),
@@ -617,6 +627,9 @@ impl TerminalHandle {
             lines.extend(view.lines.into_iter().take(rows as usize - lines.len()));
             view.lines = lines;
         }
+        view.modes.kitty_flags = parser
+            .callbacks()
+            .kitty_flags(parser.screen().alternate_screen());
         let screen = Some(view);
         parser.screen_mut().set_scrollback(0);
         drop(parser);
@@ -650,7 +663,10 @@ impl TerminalHandle {
     /// partially received escape sequence remain untouched.
     pub fn formatted_screen(&self) -> Vec<u8> {
         let parser = self.shared.parser.lock().expect("pty parser");
-        super::screen::formatted_screen_of(&parser)
+        let mut bytes = super::screen::formatted_screen_of(&parser);
+        let alternate = parser.screen().alternate_screen();
+        bytes.extend(parser.callbacks().kitty_restore(alternate));
+        bytes
     }
 
     /// The handoff's pending byte sequence: the trailing unfinished
@@ -662,7 +678,7 @@ impl TerminalHandle {
     pub fn pending_tail(&self) -> Vec<u8> {
         let tail = self.shared.tail.lock().expect("tail ring");
         let unfinished = super::screen::unfinished_tail_len(&tail);
-        tail[tail.len() - unfinished..].to_vec()
+        super::osc52::strip_unfinished_clipboard(&tail[tail.len() - unfinished..])
     }
     pub fn pid(&self) -> Option<u32> {
         self.pid
@@ -901,6 +917,7 @@ fn spawn_reader(
                     if let Ok(mut parser) = shared.parser.lock() {
                         parser.process(&buf[..n]);
                         let replies = std::mem::take(&mut parser.callbacks_mut().bytes);
+                        let clipboard = parser.callbacks_mut().take_clipboard();
                         drop(parser);
                         if !replies.is_empty() {
                             if let Ok(mut writer) = shared.writer.lock() {
@@ -908,6 +925,7 @@ fn spawn_reader(
                                 let _ = writer.flush();
                             }
                         }
+                        super::osc52::publish(clipboard);
                     }
                     // Raw-tail ring (live handoff): keep the newest
                     // TAIL_BOUND consumed bytes for the pending-sequence
@@ -1157,5 +1175,37 @@ mod zombie_adoption_tests {
         );
         drop(master);
         drop(dir);
+    }
+}
+
+#[cfg(test)]
+mod osc52_log_tests {
+    use super::*;
+
+    #[test]
+    fn osc52_text_is_not_written_to_the_disk_log() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("term.log");
+        let log = DiskLog::create(&path, vec!["other-secret".into()], None).expect("log");
+        let secret = "viva-osc52-secret";
+        let payload = "dml2YS1vc2M1Mi1zZWNyZXQ=";
+        assert_eq!(
+            super::super::osc52::decode_clipboard(payload.as_bytes()).as_deref(),
+            Some(secret)
+        );
+        let mut raw = b"before ".to_vec();
+        raw.extend(format!("\x1b]52;c;{payload}\x07").into_bytes());
+        raw.extend(b" after other-secret");
+        let mid = raw.len() / 2;
+        log.write_raw(&raw[..mid]);
+        log.write_raw(&raw[mid..]);
+        log.finish();
+        let text = std::fs::read_to_string(&path).expect("read log");
+        assert!(text.contains("before"), "{text}");
+        assert!(text.contains("after"), "{text}");
+        assert!(text.contains("[REDACTED]"), "{text}");
+        assert!(!text.contains(secret), "{text}");
+        assert!(!text.contains(payload), "{text}");
+        assert!(!text.contains("other-secret"), "{text}");
     }
 }
