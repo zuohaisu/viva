@@ -76,11 +76,6 @@ fn has_emphasis_markers(content: &str, source: &str) -> bool {
 }
 
 pub fn evaluate_admission(content: &str, source: &str, hints: AdmissionHints) -> AdmissionDecision {
-    if let Some(reason) = looks_like_dynamic_fact(content) {
-        return AdmissionDecision::Reject {
-            reasons: vec![reason],
-        };
-    }
     let trimmed = content.trim();
     if trimmed.len() < 12 {
         return AdmissionDecision::Reject {
@@ -88,8 +83,17 @@ pub fn evaluate_admission(content: &str, source: &str, hints: AdmissionHints) ->
         };
     }
 
+    let emphasized = hints.explicit_emphasis || has_emphasis_markers(content, source);
+    if let Some(reason) = looks_like_dynamic_fact(content) {
+        if !emphasized {
+            return AdmissionDecision::Reject {
+                reasons: vec![reason],
+            };
+        }
+    }
+
     let mut signals = Vec::new();
-    if hints.explicit_emphasis || has_emphasis_markers(content, source) {
+    if emphasized {
         signals.push(AdmissionSignal::Emphasis);
     }
     if hints.similar_prior_count >= 1 {
@@ -133,6 +137,19 @@ mod tests {
     fn admits_explicit_emphasis() {
         let d = evaluate_admission(
             "We chose independent QA before merge for TFHS delivery",
+            "chat",
+            AdmissionHints {
+                explicit_emphasis: true,
+                ..Default::default()
+            },
+        );
+        assert!(matches!(d, AdmissionDecision::Admit { .. }));
+    }
+
+    #[test]
+    fn explicit_emphasis_overrides_issue_open_heuristic() {
+        let d = evaluate_admission(
+            "We decided to keep the issue of cache invalidation strategy open for next quarter review",
             "chat",
             AdmissionHints {
                 explicit_emphasis: true,

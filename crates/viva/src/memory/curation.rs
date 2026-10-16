@@ -74,7 +74,7 @@ impl<'a> MemoryService<'a> {
             candidate_ids: Vec::new(),
         };
         for proposal in proposals {
-            let remember = self.remember_with_options(
+            let proposed = self.remember_with_options(
                 member,
                 project,
                 &proposal.content,
@@ -87,10 +87,12 @@ impl<'a> MemoryService<'a> {
                 Some(&proposal.summary),
             )?;
             outcome.proposed += 1;
-            outcome.candidate_ids.push(remember.candidate_id);
-            match remember.decision {
-                AdmissionDecision::Admit { .. } => outcome.admitted += 1,
-                AdmissionDecision::Reject { .. } => outcome.rejected += 1,
+            outcome.candidate_ids.push(proposed.candidate_id.clone());
+            let admitted = self.admit_candidate(&proposed.candidate_id)?;
+            match admitted.decision {
+                Some(AdmissionDecision::Admit { .. }) => outcome.admitted += 1,
+                Some(AdmissionDecision::Reject { .. }) => outcome.rejected += 1,
+                None => {}
             }
         }
         Ok(outcome)

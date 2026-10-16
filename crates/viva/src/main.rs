@@ -2316,6 +2316,11 @@ fn cmd_memory(args: &[String]) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
+        Some("admit") => {
+            let result = service.admit_candidate(&require("--candidate")?)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
         Some("curate") => {
             let member_id = viva::foundation::ids::MemberId::from_str(&require("--member")?)?;
             let project = get("--project")
@@ -2380,7 +2385,7 @@ fn cmd_memory(args: &[String]) -> Result<()> {
             Ok(())
         }
         _ => Err(Error::Validation(
-            "memory needs search | probe | link | remember | curate | record-use | archive | restore | status".into(),
+            "memory needs search | probe | link | remember | admit | curate | record-use | archive | restore | status".into(),
         )),
     }
 }

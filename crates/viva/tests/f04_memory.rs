@@ -51,7 +51,7 @@ fn remember_emphasis(
     content: &str,
     source: &str,
 ) -> viva::memory::MemoryLink {
-    service
+    let proposed = service
         .remember_with_options(
             member,
             project,
@@ -64,9 +64,25 @@ fn remember_emphasis(
             None,
             None,
         )
-        .expect("remember")
+        .expect("propose");
+    assert_eq!(proposed.candidate_status, "proposed");
+    service
+        .admit_candidate(&proposed.candidate_id)
+        .expect("admit")
         .link
         .expect("admitted link")
+}
+
+fn run_remember_admit_cli(home: &Path, mid: &str, extra: &[&str]) -> (bool, String, String) {
+    let mut remember_args = vec!["memory", "remember", "--member", mid, "--emphasis"];
+    remember_args.extend_from_slice(extra);
+    let (ok, stdout, stderr) = run_viva(home, &remember_args);
+    if !ok {
+        return (ok, stdout, stderr);
+    }
+    let body: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let candidate_id = body["candidate_id"].as_str().unwrap();
+    run_viva(home, &["memory", "admit", "--candidate", candidate_id])
 }
 
 fn fact_id_from_remember_stdout(stdout: &str) -> String {
@@ -107,21 +123,12 @@ fn cli_memory_works_without_hermes_or_python() {
     init_home(home.path());
     let member = MemberId::new();
     let mid = member.as_str();
-    let (ok, stdout, stderr) = run_viva(
+    let (ok, stdout, stderr) = run_remember_admit_cli(
         home.path(),
-        &[
-            "memory",
-            "remember",
-            "--member",
-            mid,
-            "--content",
-            EN_FACT,
-            "--source",
-            "f04 native acceptance",
-            "--emphasis",
-        ],
+        mid,
+        &["--content", EN_FACT, "--source", "f04 native acceptance"],
     );
-    assert!(ok, "remember: {stderr}\n{stdout}");
+    assert!(ok, "remember+admit: {stderr}\n{stdout}");
     let fact_id = fact_id_from_remember_stdout(&stdout);
     assert!(fact_id.starts_with("nf-"));
 
@@ -149,21 +156,17 @@ fn cli_memory_status_probe_archive_restore_without_hermes() {
     let member = MemberId::new();
     let mid = member.as_str();
 
-    let (ok, stdout, stderr) = run_viva(
+    let (ok, stdout, stderr) = run_remember_admit_cli(
         home.path(),
+        mid,
         &[
-            "memory",
-            "remember",
-            "--member",
-            mid,
             "--content",
             EN_FACT,
             "--source",
             "cli five-command acceptance",
-            "--emphasis",
         ],
     );
-    assert!(ok, "remember: {stderr}\n{stdout}");
+    assert!(ok, "remember+admit: {stderr}\n{stdout}");
     let fact_id = fact_id_from_remember_stdout(&stdout);
 
     let (ok, stdout, stderr) = run_viva(
@@ -254,19 +257,10 @@ fn chinese_trigram_substring_and_two_char_fallback() {
     init_home(home.path());
     let member = MemberId::new();
     let mid = member.as_str();
-    let (ok, _, stderr) = run_viva(
+    let (ok, _, stderr) = run_remember_admit_cli(
         home.path(),
-        &[
-            "memory",
-            "remember",
-            "--member",
-            mid,
-            "--content",
-            CN_FACT,
-            "--source",
-            "cn write",
-            "--emphasis",
-        ],
+        mid,
+        &["--content", CN_FACT, "--source", "cn write"],
     );
     assert!(ok, "remember cn: {stderr}");
 
@@ -293,19 +287,10 @@ fn chinese_trigram_substring_and_two_char_fallback() {
         "two-char query uses fallback; this content has no 记忆"
     );
 
-    let (ok, _, stderr) = run_viva(
+    let (ok, _, stderr) = run_remember_admit_cli(
         home.path(),
-        &[
-            "memory",
-            "remember",
-            "--member",
-            mid,
-            "--content",
-            "团队记忆：每周五复盘",
-            "--source",
-            "two-char",
-            "--emphasis",
-        ],
+        mid,
+        &["--content", "团队记忆：每周五复盘", "--source", "two-char"],
     );
     assert!(ok, "remember two-char fixture: {stderr}");
     let (ok, stdout, _) = run_viva(

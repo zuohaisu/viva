@@ -93,12 +93,26 @@ export function registerMemoryTools(pi: PiHost, env: VivaEnv): void {
         content,
         "--source",
         source,
+        "--emphasis",
       ];
       if (params.project_id) {
         cliArgs.push("--project", params.project_id);
       }
       try {
-        return toolSuccess(await runEnvelope(env, cliArgs));
+        const proposed = await runEnvelope(env, cliArgs);
+        const candidateId =
+          typeof proposed === "object" &&
+          proposed !== null &&
+          "candidate_id" in proposed &&
+          typeof (proposed as { candidate_id: unknown }).candidate_id === "string"
+            ? (proposed as { candidate_id: string }).candidate_id
+            : null;
+        if (!candidateId) {
+          return toolSuccess(proposed);
+        }
+        return toolSuccess(
+          await runEnvelope(env, ["memory", "admit", "--candidate", candidateId]),
+        );
       } catch (err) {
         return toolFailure(`memory write refused: ${String(err)}`);
       }

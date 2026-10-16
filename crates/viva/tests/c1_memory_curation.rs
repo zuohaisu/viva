@@ -36,57 +36,37 @@ fn store_v4() -> Store {
     Store::open_in_memory(&registry).expect("store")
 }
 
-#[test]
-fn admission_rejects_one_off_and_dynamic_pr_facts() {
-    let store = store_v4();
-    let service = MemoryService::new(&store);
-    let member = MemberId::new();
-    let thin = service.remember_with_options(
-        &member,
-        None,
-        "just once",
-        "chat",
-        "general",
-        "",
-        KnowledgeKind::PersonalMemory,
-        false,
-        None,
-        None,
-    );
-    assert!(matches!(
-        thin.unwrap().decision,
-        AdmissionDecision::Reject { .. }
-    ));
-
-    let dynamic = service.remember_with_options(
-        &member,
-        None,
-        "For the record PR #99 has been merged into main yesterday",
-        "chat",
-        "general",
-        "",
-        KnowledgeKind::PersonalMemory,
-        true,
-        None,
-        None,
-    );
-    assert!(matches!(
-        dynamic.unwrap().decision,
-        AdmissionDecision::Reject { .. }
-    ));
+fn propose_and_admit(
+    service: &MemoryService,
+    member: &MemberId,
+    project: Option<&ProjectId>,
+    content: &str,
+    source: &str,
+    kind: KnowledgeKind,
+    emphasis: bool,
+) -> viva::memory::RememberResult {
+    let proposed = service
+        .remember_with_options(
+            member, project, content, source, "general", "", kind, emphasis, None, None,
+        )
+        .expect("propose");
+    assert_eq!(proposed.candidate_status, "proposed");
+    service
+        .admit_candidate(&proposed.candidate_id)
+        .expect("admit")
 }
 
 #[test]
-fn search_does_not_write_execution_usage() {
+fn remember_creates_proposed_before_admission() {
     let store = store_v4();
     let service = MemoryService::new(&store);
     let member = MemberId::new();
-    let remembered = service
+    let proposed = service
         .remember_with_options(
             &member,
             None,
-            "Haisu emphasized: independent QA must precede merge for Viva delivery",
-            "emphasis test",
+            "Haisu emphasized: always run fmt before pushing memory changes",
+            "chat",
             "general",
             "",
             KnowledgeKind::PersonalMemory,
@@ -94,7 +74,103 @@ fn search_does_not_write_execution_usage() {
             None,
             None,
         )
+        .expect("propose");
+    assert_eq!(proposed.candidate_status, "proposed");
+    assert!(proposed.decision.is_none());
+    let status: String = store
+        .connection()
+        .query_row(
+            "SELECT status FROM memory_candidates WHERE candidate_id = ?1",
+            [&proposed.candidate_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "proposed");
+}
+
+#[test]
+fn admission_rejects_one_off_and_dynamic_pr_facts() {
+    let store = store_v4();
+    let service = MemoryService::new(&store);
+    let member = MemberId::new();
+    let thin = service
+        .remember_with_options(
+            &member,
+            None,
+            "just once",
+            "chat",
+            "general",
+            "",
+            KnowledgeKind::PersonalMemory,
+            false,
+            None,
+            None,
+        )
+        .expect("propose");
+    let thin_admit = service.admit_candidate(&thin.candidate_id).expect("admit");
+    assert!(matches!(
+        thin_admit.decision,
+        Some(AdmissionDecision::Reject { .. })
+    ));
+
+    let dynamic = service
+        .remember_with_options(
+            &member,
+            None,
+            "For the record PR #99 has been merged into main yesterday",
+            "chat",
+            "general",
+            "",
+            KnowledgeKind::PersonalMemory,
+            false,
+            None,
+            None,
+        )
+        .expect("propose");
+    let dynamic_admit = service
+        .admit_candidate(&dynamic.candidate_id)
         .expect("admit");
+    assert!(matches!(
+        dynamic_admit.decision,
+        Some(AdmissionDecision::Reject { .. })
+    ));
+}
+
+#[test]
+fn explicit_emphasis_admits_decision_about_open_issue() {
+    let store = store_v4();
+    let service = MemoryService::new(&store);
+    let member = MemberId::new();
+    let admitted = propose_and_admit(
+        &service,
+        &member,
+        None,
+        "We decided to keep the issue of cache invalidation strategy open for next quarter review",
+        "chat",
+        KnowledgeKind::PersonalMemory,
+        true,
+    );
+    assert!(matches!(
+        admitted.decision,
+        Some(AdmissionDecision::Admit { .. })
+    ));
+    assert!(admitted.fact_id.is_some());
+}
+
+#[test]
+fn search_does_not_write_execution_usage() {
+    let store = store_v4();
+    let service = MemoryService::new(&store);
+    let member = MemberId::new();
+    let remembered = propose_and_admit(
+        &service,
+        &member,
+        None,
+        "Haisu emphasized: independent QA must precede merge for Viva delivery",
+        "emphasis test",
+        KnowledgeKind::PersonalMemory,
+        true,
+    );
     let fact_id = remembered.fact_id.expect("fact");
 
     let _ = service
@@ -132,35 +208,25 @@ fn team_knowledge_visible_across_members_personal_isolated() {
     let bob = MemberId::new();
     let team_fact = "Team policy: always run cargo test before opening a Resident memory PR";
 
-    service
-        .remember_with_options(
-            &alice,
-            None,
-            team_fact,
-            "alice session",
-            "general",
-            "",
-            KnowledgeKind::TeamKnowledge,
-            true,
-            None,
-            None,
-        )
-        .expect("team write");
+    propose_and_admit(
+        &service,
+        &alice,
+        None,
+        team_fact,
+        "alice session",
+        KnowledgeKind::TeamKnowledge,
+        true,
+    );
 
-    service
-        .remember_with_options(
-            &alice,
-            None,
-            "Alice personal note: prefers morning deep work before meetings",
-            "alice",
-            "general",
-            "",
-            KnowledgeKind::PersonalMemory,
-            true,
-            None,
-            None,
-        )
-        .expect("personal write");
+    propose_and_admit(
+        &service,
+        &alice,
+        None,
+        "Alice personal note: prefers morning deep work before meetings",
+        "alice",
+        KnowledgeKind::PersonalMemory,
+        true,
+    );
 
     let filter = RecallFilter::default();
     let bob_team = service
@@ -184,6 +250,43 @@ fn team_knowledge_visible_across_members_personal_isolated() {
 }
 
 #[test]
+fn kind_upgrade_personal_to_team_on_same_content() {
+    let store = store_v4();
+    let service = MemoryService::new(&store);
+    let alice = MemberId::new();
+    let content = "Shared norm: document admission gate outcomes in GitHub issue comments";
+
+    propose_and_admit(
+        &service,
+        &alice,
+        None,
+        content,
+        "first",
+        KnowledgeKind::PersonalMemory,
+        true,
+    );
+    propose_and_admit(
+        &service,
+        &alice,
+        None,
+        content,
+        "second",
+        KnowledgeKind::TeamKnowledge,
+        true,
+    );
+
+    let scope: String = store
+        .connection()
+        .query_row(
+            "SELECT link_scope FROM memory_links WHERE member_id = ?1 LIMIT 1",
+            [alice.as_str()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(scope, "team");
+}
+
+#[test]
 fn curate_session_proposes_and_admits_with_emphasis() {
     let store = store_v4();
     let service = MemoryService::new(&store);
@@ -204,20 +307,15 @@ fn project_knowledge_requires_project_scope() {
     let service = MemoryService::new(&store);
     let member = MemberId::new();
     let project = ProjectId::new();
-    service
-        .remember_with_options(
-            &member,
-            Some(&project),
-            "Project rule: recall tests must scope-filter before FTS ranking",
-            "spec",
-            "general",
-            "",
-            KnowledgeKind::ProjectKnowledge,
-            true,
-            None,
-            None,
-        )
-        .expect("project knowledge");
+    propose_and_admit(
+        &service,
+        &member,
+        Some(&project),
+        "Project rule: recall tests must scope-filter before FTS ranking",
+        "spec",
+        KnowledgeKind::ProjectKnowledge,
+        true,
+    );
 
     let filter = RecallFilter {
         include_personal: false,
