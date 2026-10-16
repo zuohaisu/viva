@@ -18,7 +18,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -251,6 +251,25 @@ test("the session_start handler tells the user who the member is, at the real 'i
     assert.match(notices[0]?.message ?? "", /you are Samuel \(member mem-1\)/);
     assert.match(notices[0]?.message ?? "", /Current task: task-1/);
   });
+});
+
+test("session_start links the Pi session id when Viva passed an execution", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "viva-link-"));
+  const log = join(dir, "args.txt");
+  const bin = fakeViva(`#!/bin/sh\necho "$@" >> ${JSON.stringify(log).slice(1, -1)}\necho '{"ok":true}'\n`);
+  await withEnv({ ...BASE_ENV, VIVA_BIN: bin, VIVA_EXECUTION_ID: "exec-abc" }, async () => {
+    const fake = createFakePi();
+    viva(fake.host);
+    await emit(fake, "session_start", { type: "session_start", reason: "startup" }, {
+      ui: { notify() {} },
+      sessionManager: { getSessionId: () => "pi-session-9" },
+    });
+  });
+  const text = readFileSync(log, "utf8");
+  assert.match(text, /experience link/);
+  assert.match(text, /--harness pi/);
+  assert.match(text, /--session pi-session-9/);
+  assert.match(text, /--execution exec-abc/);
 });
 
 test("the extension stays inert without Viva context", () => {
