@@ -1,10 +1,14 @@
 //! Optional per-agent integrations.
 //!
-//! `install` writes one file at that agent's documented config location.
-//! `uninstall` deletes that file when it is the file Viva wrote, and leaves
-//! every other file alone. The hook reports status, a native session
-//! reference, and a resume command through `viva agent report`. It does
-//! not complete tasks, write QA, or promote anything into memory.
+//! `install` writes that agent's documented config location. A file the
+//! agent already uses is merged: Viva adds its own hooks and leaves every
+//! other key in place. `uninstall` removes only those hooks. The file is
+//! deleted only when nothing else remains. A neighbouring file is never
+//! touched, and a directory is never removed.
+//!
+//! The hook reports status, a native session reference, and a resume
+//! command through `viva agent report`. It does not complete tasks, write
+//! QA, or promote anything into memory.
 //!
 //! The file bodies are compiled in. Nothing is downloaded.
 
@@ -24,7 +28,8 @@ const MARKER: &str = "viva-integration";
 /// Python the hook runs. It reads the agent's JSON on stdin and reports
 /// only when `VIVA_TERMINAL_ID` is set (a pane Viva spawned). No single
 /// quotes: the command wraps this in `exec("""...""")`.
-const REPORT_PY: &str = r#"import json,os,sys,subprocess
+const REPORT_PY: &str = r#"# viva-integration
+import json,os,sys,subprocess
 status,agent,prefix=sys.argv[1:4]
 raw=sys.stdin.read()
 data={}
@@ -62,21 +67,18 @@ pub fn install(name: &str, home: &Path) -> Result<IntegrationStatus> {
     require_macos()?;
     let spec = spec_for(name)?;
     let path = home.join(spec.relative);
-    if path.exists() && !is_ours(&path)? {
-        return Err(Error::Validation(format!(
-            "refusing to replace {} (not a Viva integration file)",
-            path.display()
-        )));
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&path, spec.body)?;
+    ensure_parent(&path)?;
+    let detail = match spec.layout {
+        Layout::Exclusive => install_exclusive(&path, &spec.body)?,
+        Layout::Json => install_json(&path, &spec.body)?,
+        Layout::Toml => install_toml(&path, &spec.body)?,
+        Layout::Yaml => install_yaml(&path)?,
+    };
     Ok(IntegrationStatus {
         name: spec.name.to_string(),
         installed: true,
         path: path.display().to_string(),
-        detail: "wrote the Viva integration file".into(),
+        detail,
     })
 }
 
@@ -92,18 +94,21 @@ pub fn uninstall(name: &str, home: &Path) -> Result<IntegrationStatus> {
             detail: "already absent".into(),
         });
     }
-    if !is_ours(&path)? {
-        return Err(Error::Validation(format!(
-            "refusing to delete {} (not a Viva integration file)",
-            path.display()
-        )));
-    }
-    fs::remove_file(&path)?;
+    let (removed_file, detail) = match spec.layout {
+        Layout::Exclusive => uninstall_exclusive(&path)?,
+        Layout::Json => uninstall_json(&path)?,
+        Layout::Toml => uninstall_toml(&path)?,
+        Layout::Yaml => uninstall_yaml(&path)?,
+    };
     Ok(IntegrationStatus {
         name: spec.name.to_string(),
         installed: false,
         path: path.display().to_string(),
-        detail: "deleted the Viva integration file".into(),
+        detail: if removed_file {
+            format!("{detail} The file was removed because nothing else was in it.")
+        } else {
+            detail
+        },
     })
 }
 
@@ -131,7 +136,7 @@ pub fn status(name: &str, home: &Path) -> Result<IntegrationStatus> {
         name: spec.name.to_string(),
         installed: false,
         path: path.display().to_string(),
-        detail: "a different file is at the integration path; Viva will not change it".into(),
+        detail: "not installed".into(),
     })
 }
 
@@ -148,10 +153,23 @@ fn is_ours(path: &Path) -> Result<bool> {
     Ok(text.contains(MARKER))
 }
 
+#[derive(Clone, Copy)]
+enum Layout {
+    /// A file named for Viva. The whole file is the integration.
+    Exclusive,
+    /// A JSON config the agent already loads. Hooks are merged in.
+    Json,
+    /// A TOML config the agent already loads. Hook tables are appended.
+    Toml,
+    /// A YAML config the agent already loads. Hook lines are inserted.
+    Yaml,
+}
+
 struct Spec {
     name: &'static str,
     relative: &'static str,
     body: String,
+    layout: Layout,
 }
 
 fn spec_for(name: &str) -> Result<Spec> {
@@ -166,35 +184,505 @@ fn spec_for(name: &str) -> Result<Spec> {
             SUPPORTED.join(", ")
         )));
     };
-    let (relative, body) = match name {
-        "pi" => (".pi/agent/extensions/viva-status.ts", pi_body()),
+    let (relative, body, layout) = match name {
+        "pi" => (
+            ".pi/agent/extensions/viva-status.ts",
+            pi_body(),
+            Layout::Exclusive,
+        ),
         "claude" => (
             ".claude/settings.json",
             hook_json("claude", "claude --resume", HookShape::Claude),
+            Layout::Json,
         ),
         "codex" => (
             ".codex/hooks.json",
             hook_json("codex", "codex resume", HookShape::Codex),
+            Layout::Json,
         ),
-        "opencode" => (".config/opencode/plugins/viva.js", opencode_body()),
-        "kimi" => (".kimi-code/config.toml", kimi_toml()),
+        "opencode" => (
+            ".config/opencode/plugins/viva.js",
+            opencode_body(),
+            Layout::Exclusive,
+        ),
+        "kimi" => (".kimi-code/config.toml", kimi_toml(), Layout::Toml),
         "qodercli" => (
             ".qoder/settings.json",
             hook_json("qodercli", "qodercli --resume", HookShape::Claude),
+            Layout::Json,
         ),
-        "cursor" => (".cursor/hooks.json", cursor_json()),
+        "cursor" => (".cursor/hooks.json", cursor_json(), Layout::Json),
         "grok" => (
             ".grok/hooks/viva.json",
             hook_json("grok", "grok -r", HookShape::Grok),
+            Layout::Json,
         ),
-        "hermes" => (".hermes/config.yaml", hermes_yaml()),
+        "hermes" => (".hermes/config.yaml", hermes_yaml(), Layout::Yaml),
         _ => unreachable!("supported name"),
     };
     Ok(Spec {
         name,
         relative,
         body,
+        layout,
     })
+}
+
+fn ensure_parent(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+fn install_exclusive(path: &Path, body: &str) -> Result<String> {
+    if path.exists() && !is_ours(path)? {
+        return Err(Error::Validation(format!(
+            "refusing to replace {} (not a Viva integration file)",
+            path.display()
+        )));
+    }
+    fs::write(path, body)?;
+    Ok("wrote the Viva integration file".into())
+}
+
+fn uninstall_exclusive(path: &Path) -> Result<(bool, String)> {
+    if !is_ours(path)? {
+        return Err(Error::Validation(format!(
+            "refusing to change {} (it has no Viva integration); the file was left as it is",
+            path.display()
+        )));
+    }
+    fs::remove_file(path)?;
+    Ok((true, "removed the Viva integration file.".into()))
+}
+
+fn install_json(path: &Path, body: &str) -> Result<String> {
+    let incoming = parse_json_object(body, path)?;
+    let mut doc = read_json_object(path)?;
+    strip_viva_json(&mut doc);
+    merge_json(&mut doc, &incoming);
+    write_json(path, &doc)?;
+    Ok("merged the Viva hooks into the existing file".into())
+}
+
+fn uninstall_json(path: &Path) -> Result<(bool, String)> {
+    let text = fs::read_to_string(path)?;
+    if !text.contains(MARKER) {
+        return Err(refuse_unmarked(path));
+    }
+    let mut doc = parse_json_object(&text, path)?;
+    strip_viva_json(&mut doc);
+    if json_is_disposable(&doc) {
+        fs::remove_file(path)?;
+        Ok((true, "removed the Viva hooks.".into()))
+    } else {
+        write_json(path, &doc)?;
+        Ok((
+            false,
+            "removed the Viva hooks and left the rest of the file in place".into(),
+        ))
+    }
+}
+
+fn install_toml(path: &Path, block: &str) -> Result<String> {
+    let existing = read_if_present(path)?;
+    let mut kept = strip_toml(&existing);
+    append_block(&mut kept, block);
+    fs::write(path, kept)?;
+    Ok("merged the Viva hooks into the existing file".into())
+}
+
+fn uninstall_toml(path: &Path) -> Result<(bool, String)> {
+    let text = fs::read_to_string(path)?;
+    if !text.contains(MARKER) {
+        return Err(refuse_unmarked(path));
+    }
+    finish_text_removal(path, &strip_toml(&text))
+}
+
+fn install_yaml(path: &Path) -> Result<String> {
+    let existing = read_if_present(path)?;
+    let cleaned = remove_marker_lines(&existing);
+    let working = quote_double(&report_command("working", "hermes", "hermes --resume"));
+    let done = quote_double(&report_command("done", "hermes", "hermes --resume"));
+    let next = if yaml_has_root_key(&cleaned, "hooks") {
+        let with_working =
+            insert_yaml_item(&cleaned, "pre_llm_call", &format!("- command: {working}"));
+        insert_yaml_item(
+            &with_working,
+            "post_llm_call",
+            &format!("- command: {done}"),
+        )
+    } else {
+        let mut out = cleaned;
+        append_block(&mut out, &hermes_yaml());
+        out
+    };
+    fs::write(path, next)?;
+    Ok("merged the Viva hooks into the existing file".into())
+}
+
+fn uninstall_yaml(path: &Path) -> Result<(bool, String)> {
+    let text = fs::read_to_string(path)?;
+    if !text.contains(MARKER) {
+        return Err(refuse_unmarked(path));
+    }
+    let kept = prune_empty_hook_keys(&remove_marker_lines(&text));
+    finish_text_removal(path, &kept)
+}
+
+fn refuse_unmarked(path: &Path) -> Error {
+    Error::Validation(format!(
+        "refusing to change {} (it has no Viva integration); the file was left as it is",
+        path.display()
+    ))
+}
+
+fn read_if_present(path: &Path) -> Result<String> {
+    if path.exists() {
+        Ok(fs::read_to_string(path)?)
+    } else {
+        Ok(String::new())
+    }
+}
+
+fn append_block(kept: &mut String, block: &str) {
+    if !kept.trim().is_empty() {
+        if !kept.ends_with('\n') {
+            kept.push('\n');
+        }
+        if !kept.ends_with("\n\n") {
+            kept.push('\n');
+        }
+    } else {
+        kept.clear();
+    }
+    kept.push_str(block.trim_end());
+    kept.push('\n');
+}
+
+fn finish_text_removal(path: &Path, kept: &str) -> Result<(bool, String)> {
+    if kept.trim().is_empty() {
+        fs::remove_file(path)?;
+        Ok((true, "removed the Viva hooks.".into()))
+    } else {
+        let mut body = kept.trim_end().to_string();
+        body.push('\n');
+        fs::write(path, body)?;
+        Ok((
+            false,
+            "removed the Viva hooks and left the rest of the file in place".into(),
+        ))
+    }
+}
+
+fn read_json_object(path: &Path) -> Result<serde_json::Value> {
+    if !path.exists() {
+        return Ok(serde_json::json!({}));
+    }
+    let text = fs::read_to_string(path)?;
+    parse_json_object(&text, path)
+}
+
+fn parse_json_object(text: &str, path: &Path) -> Result<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|_| {
+        Error::Validation(format!(
+            "refusing to edit {} (not valid JSON); Viva will not replace it",
+            path.display()
+        ))
+    })?;
+    if !value.is_object() {
+        return Err(Error::Validation(format!(
+            "refusing to edit {} (not a JSON object); Viva will not replace it",
+            path.display()
+        )));
+    }
+    Ok(value)
+}
+
+fn write_json(path: &Path, value: &serde_json::Value) -> Result<()> {
+    let mut text = serde_json::to_string_pretty(value)?;
+    text.push('\n');
+    fs::write(path, text)?;
+    Ok(())
+}
+
+fn json_is_disposable(value: &serde_json::Value) -> bool {
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    obj.is_empty() || (obj.len() == 1 && obj.contains_key("version"))
+}
+
+fn strip_viva_json(value: &mut serde_json::Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    if obj
+        .get("viva_integration")
+        .and_then(|item| item.as_str())
+        .is_some_and(|text| text.contains(MARKER))
+    {
+        obj.remove("viva_integration");
+    }
+    if let Some(hooks) = obj.get_mut("hooks") {
+        strip_hooks_value(hooks);
+        let empty = match hooks {
+            serde_json::Value::Object(map) => map.is_empty(),
+            serde_json::Value::Array(items) => items.is_empty(),
+            _ => false,
+        };
+        if empty {
+            obj.remove("hooks");
+        }
+    }
+}
+
+fn strip_hooks_value(hooks: &mut serde_json::Value) {
+    match hooks {
+        serde_json::Value::Object(map) => {
+            let keys: Vec<String> = map.keys().cloned().collect();
+            for key in keys {
+                if let Some(serde_json::Value::Array(items)) = map.get_mut(&key) {
+                    filter_hook_list(items);
+                }
+                let empty = map
+                    .get(&key)
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(Vec::is_empty);
+                if empty {
+                    map.remove(&key);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => filter_hook_list(items),
+        _ => {}
+    }
+}
+
+fn filter_hook_list(items: &mut Vec<serde_json::Value>) {
+    items.retain_mut(|item| !drop_hook_item(item));
+}
+
+fn drop_hook_item(item: &mut serde_json::Value) -> bool {
+    if item
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|command| command.contains(MARKER))
+    {
+        return true;
+    }
+    let marked = item
+        .get("hooks")
+        .is_some_and(|nested| nested.to_string().contains(MARKER));
+    let Some(nested) = item.get_mut("hooks") else {
+        return false;
+    };
+    strip_hooks_value(nested);
+    marked && hooks_empty(nested)
+}
+
+fn hooks_empty(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Array(items) => items.is_empty(),
+        serde_json::Value::Object(map) => map.is_empty(),
+        _ => false,
+    }
+}
+
+fn merge_json(dst: &mut serde_json::Value, src: &serde_json::Value) {
+    let (Some(dst_obj), Some(src_obj)) = (dst.as_object_mut(), src.as_object()) else {
+        return;
+    };
+    if let Some(version) = src_obj.get("version") {
+        dst_obj.entry("version").or_insert_with(|| version.clone());
+    }
+    if let Some(src_hooks) = src_obj.get("hooks") {
+        let dst_hooks = dst_obj.entry("hooks").or_insert_with(|| match src_hooks {
+            serde_json::Value::Object(_) => serde_json::json!({}),
+            _ => serde_json::json!([]),
+        });
+        merge_hooks(dst_hooks, src_hooks);
+    }
+}
+
+fn merge_hooks(dst: &mut serde_json::Value, src: &serde_json::Value) {
+    match (dst, src) {
+        (serde_json::Value::Object(dst_map), serde_json::Value::Object(src_map)) => {
+            for (event, src_items) in src_map {
+                let dst_items = dst_map
+                    .entry(event.clone())
+                    .or_insert_with(|| serde_json::json!([]));
+                let Some(dst_arr) = dst_items.as_array_mut() else {
+                    continue;
+                };
+                let Some(src_arr) = src_items.as_array() else {
+                    continue;
+                };
+                dst_arr.extend(src_arr.iter().cloned());
+            }
+        }
+        (serde_json::Value::Array(dst_arr), serde_json::Value::Array(src_arr)) => {
+            dst_arr.extend(src_arr.iter().cloned());
+        }
+        _ => {}
+    }
+}
+
+fn strip_toml(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut drop = vec![false; lines.len()];
+    let mut index = 0;
+    while index < lines.len() {
+        let trimmed = lines[index].trim();
+        if trimmed == format!("# {MARKER}") || trimmed == MARKER {
+            drop[index] = true;
+            index += 1;
+            continue;
+        }
+        if toml_header(lines[index]) {
+            let mut end = index + 1;
+            while end < lines.len() && !toml_header(lines[end]) {
+                end += 1;
+            }
+            if lines[index..end].iter().any(|line| line.contains(MARKER)) {
+                for slot in drop.iter_mut().take(end).skip(index) {
+                    *slot = true;
+                }
+            }
+            index = end;
+            continue;
+        }
+        index += 1;
+    }
+    let mut out = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        if drop[index] {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if out.trim().is_empty() {
+        String::new()
+    } else {
+        out
+    }
+}
+
+fn toml_header(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    !line.starts_with([' ', '\t']) && trimmed.starts_with('[')
+}
+
+fn remove_marker_lines(text: &str) -> String {
+    let mut out = String::new();
+    for line in text.lines() {
+        if line.contains(MARKER) {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+fn yaml_has_root_key(text: &str, key: &str) -> bool {
+    text.lines()
+        .any(|line| leading_spaces(line) == 0 && line.trim() == format!("{key}:"))
+}
+
+fn prune_empty_hook_keys(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut drop = vec![false; lines.len()];
+    mark_empty_keys(&lines, &mut drop, &["pre_llm_call:", "post_llm_call:"]);
+    mark_empty_keys(&lines, &mut drop, &["hooks:"]);
+    let mut out = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        if drop[index] {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if out.trim().is_empty() {
+        String::new()
+    } else {
+        out
+    }
+}
+
+fn mark_empty_keys(lines: &[&str], drop: &mut [bool], keys: &[&str]) {
+    for index in 0..lines.len() {
+        if drop[index] || !keys.contains(&lines[index].trim()) {
+            continue;
+        }
+        if !has_child(lines, drop, index) {
+            drop[index] = true;
+        }
+    }
+}
+
+fn has_child(lines: &[&str], drop: &[bool], index: usize) -> bool {
+    let indent = leading_spaces(lines[index]);
+    lines
+        .iter()
+        .enumerate()
+        .skip(index + 1)
+        .find_map(|(next, line)| {
+            if drop[next] || line.trim().is_empty() || line.trim_start().starts_with('#') {
+                return None;
+            }
+            Some(leading_spaces(line) > indent)
+        })
+        .unwrap_or(false)
+}
+
+fn leading_spaces(line: &str) -> usize {
+    line.chars().take_while(|ch| *ch == ' ').count()
+}
+
+fn insert_yaml_item(text: &str, key: &str, item_body: &str) -> String {
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let Some(hooks_at) = lines
+        .iter()
+        .position(|line| leading_spaces(line) == 0 && line.trim() == "hooks:")
+    else {
+        return text.to_string();
+    };
+    let key_at = lines
+        .iter()
+        .enumerate()
+        .skip(hooks_at + 1)
+        .find_map(|(index, line)| {
+            if line.trim().is_empty() || line.trim_start().starts_with('#') {
+                return None;
+            }
+            if leading_spaces(line) == 0 {
+                return Some(None);
+            }
+            if line.trim() == format!("{key}:") {
+                Some(Some(index))
+            } else {
+                None
+            }
+        });
+    match key_at {
+        Some(Some(key_at)) => {
+            let indent = " ".repeat(leading_spaces(&lines[key_at]) + 2);
+            lines.insert(key_at + 1, format!("{indent}{item_body}"));
+        }
+        _ => {
+            lines.insert(hooks_at + 1, format!("  {key}:"));
+            lines.insert(hooks_at + 2, format!("    {item_body}"));
+        }
+    }
+    let mut out = lines.join("\n");
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 #[derive(Clone, Copy)]
@@ -422,29 +910,136 @@ mod tests {
     }
 
     #[test]
-    fn a_foreign_config_is_not_replaced_or_deleted() {
+    fn install_merges_claude_settings_and_uninstall_keeps_user_keys() {
         let dir = tempfile::tempdir().expect("temp");
         let home = dir.path();
         let path = home.join(".claude/settings.json");
         fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
         fs::write(&path, "{\n  \"permissions\": {}\n}\n").expect("user settings");
 
-        let err = install("claude", home).expect_err("must refuse");
-        assert!(
-            err.to_string().contains("not a Viva integration file"),
-            "{err}"
-        );
-        assert_eq!(
-            fs::read_to_string(&path).expect("unchanged"),
-            "{\n  \"permissions\": {}\n}\n"
-        );
-        let err = uninstall("claude", home).expect_err("must refuse delete");
-        assert!(
-            err.to_string().contains("not a Viva integration file"),
-            "{err}"
-        );
-        assert!(path.exists());
+        install("claude", home).expect("merge");
+        let merged: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("json");
+        assert!(merged.get("permissions").is_some());
+        assert!(merged.to_string().contains(MARKER));
+        let first_hooks = merged["hooks"].to_string();
+
+        install("claude", home).expect("second install refreshes hooks");
+        let again: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("json");
+        assert_eq!(again["permissions"], merged["permissions"]);
+        assert_eq!(again["hooks"].to_string(), first_hooks);
+
+        let mut edited = again;
+        edited["custom"] = serde_json::json!("keep-me");
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&edited).expect("encode"),
+        )
+        .expect("user edit");
+
+        uninstall("claude", home).expect("uninstall");
+        assert!(path.exists(), "settings.json stays when the user has keys");
+        assert!(path.parent().expect("parent").exists());
+        let kept: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("json");
+        assert_eq!(kept["permissions"], serde_json::json!({}));
+        assert_eq!(kept["custom"], "keep-me");
+        assert!(kept.get("hooks").is_none());
+        assert!(!kept.to_string().contains(MARKER));
         assert!(!status("claude", home).expect("status").installed);
+    }
+
+    #[test]
+    fn uninstall_leaves_a_user_hook_and_refuses_an_unmarked_or_invalid_file() {
+        let dir = tempfile::tempdir().expect("temp");
+        let home = dir.path();
+        let path = home.join(".qoder/settings.json");
+        fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+        fs::write(
+            &path,
+            r#"{"permissions":{"allow":["Read"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo stay"}]}]}}"#,
+        )
+        .expect("user settings");
+
+        install("qodercli", home).expect("merge");
+        uninstall("qodercli", home).expect("uninstall");
+        let kept: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("json");
+        assert_eq!(kept["permissions"]["allow"][0], "Read");
+        assert!(kept["hooks"]["Stop"].to_string().contains("echo stay"));
+        assert!(!kept.to_string().contains(MARKER));
+
+        let unmarked = home.join(".claude/settings.json");
+        fs::create_dir_all(unmarked.parent().expect("parent")).expect("dirs");
+        fs::write(&unmarked, "{\"permissions\":{\"keep\":true}}\n").expect("plain");
+        let err = uninstall("claude", home).expect_err("no marker");
+        assert!(err.to_string().contains("left as it is"), "{err}");
+        assert_eq!(
+            fs::read_to_string(&unmarked).expect("unchanged"),
+            "{\"permissions\":{\"keep\":true}}\n"
+        );
+
+        fs::write(&unmarked, "{not json\n").expect("broken");
+        let err = install("claude", home).expect_err("invalid json");
+        assert!(err.to_string().contains("not valid JSON"), "{err}");
+        assert_eq!(
+            fs::read_to_string(&unmarked).expect("unchanged"),
+            "{not json\n"
+        );
+
+        let cursor = home.join(".cursor/hooks.json");
+        fs::create_dir_all(cursor.parent().expect("parent")).expect("dirs");
+        fs::write(
+            &cursor,
+            r#"{"version":1,"hooks":{"stop":[{"command":"echo stay"}]}}"#,
+        )
+        .expect("user hooks");
+        install("cursor", home).expect("merge");
+        uninstall("cursor", home).expect("uninstall");
+        let kept: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&cursor).expect("read")).expect("json");
+        assert_eq!(kept["version"], 1);
+        assert!(kept["hooks"]["stop"].to_string().contains("echo stay"));
+        assert!(!kept.to_string().contains(MARKER));
+    }
+
+    #[test]
+    fn shared_toml_and_yaml_keep_user_lines() {
+        let dir = tempfile::tempdir().expect("temp");
+        let home = dir.path();
+        let kimi = home.join(".kimi-code/config.toml");
+        fs::create_dir_all(kimi.parent().expect("parent")).expect("dirs");
+        fs::write(&kimi, "model = \"kimi-k2\"\n").expect("user toml");
+        install("kimi", home).expect("merge");
+        assert!(
+            fs::read_to_string(&kimi)
+                .expect("read")
+                .contains("PermissionRequest")
+        );
+        uninstall("kimi", home).expect("uninstall");
+        let kept = fs::read_to_string(&kimi).expect("kept");
+        assert!(kept.contains("model = \"kimi-k2\""));
+        assert!(!kept.contains("PermissionRequest"));
+        assert!(!kept.contains(MARKER));
+
+        let hermes = home.join(".hermes/config.yaml");
+        fs::create_dir_all(hermes.parent().expect("parent")).expect("dirs");
+        fs::write(
+            &hermes,
+            "model: hermes\nhooks:\n  pre_tool_call:\n    - command: \"echo stay\"\n",
+        )
+        .expect("user yaml");
+        install("hermes", home).expect("merge");
+        let merged = fs::read_to_string(&hermes).expect("read");
+        assert!(merged.contains("pre_llm_call"));
+        assert!(merged.contains("echo stay"));
+        uninstall("hermes", home).expect("uninstall");
+        let kept = fs::read_to_string(&hermes).expect("kept");
+        assert!(kept.contains("model: hermes"));
+        assert!(kept.contains("echo stay"));
+        assert!(!kept.contains(MARKER));
+        assert!(!kept.contains("pre_llm_call"));
     }
 
     #[test]
