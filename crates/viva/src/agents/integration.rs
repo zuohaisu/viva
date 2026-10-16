@@ -177,7 +177,7 @@ fn spec_for(name: &str) -> Result<Spec> {
             hook_json("codex", "codex resume", HookShape::Codex),
         ),
         "opencode" => (".config/opencode/plugins/viva.js", opencode_body()),
-        "kimi" => (".kimi/config.toml", kimi_toml()),
+        "kimi" => (".kimi-code/config.toml", kimi_toml()),
         "qodercli" => (
             ".qoder/settings.json",
             hook_json("qodercli", "qodercli --resume", HookShape::Claude),
@@ -318,7 +318,7 @@ fn kimi_toml() -> String {
     let done = quote_double(&report_command("done", "kimi", "kimi --resume"));
     let blocked = quote_double(&report_command("blocked", "kimi", "kimi --resume"));
     format!(
-        "# {MARKER}\n[[hooks]]\nevent = \"Stop\"\ncommand = {done}\n\n[[hooks]]\nevent = \"Notification\"\nmatcher = \"permission_prompt\"\ncommand = {blocked}\n"
+        "# {MARKER}\n[[hooks]]\nevent = \"Stop\"\ncommand = {done}\n\n[[hooks]]\nevent = \"PermissionRequest\"\ncommand = {blocked}\n"
     )
 }
 
@@ -463,6 +463,19 @@ mod tests {
         }
         let err = install("amp", home).expect_err("unsupported");
         assert!(err.to_string().contains("not supported"), "{err}");
+    }
+
+    #[test]
+    fn kimi_integration_uses_the_official_config_path_and_permission_request() {
+        let dir = tempfile::tempdir().expect("temp");
+        let home = dir.path();
+        let installed = install("kimi", home).expect("install");
+        let path = PathBuf::from(&installed.path);
+        assert!(path.ends_with(".kimi-code/config.toml"));
+        let body = fs::read_to_string(&path).expect("read");
+        assert!(body.contains("PermissionRequest"));
+        assert!(!body.contains("permission_prompt"));
+        uninstall("kimi", home).expect("uninstall");
     }
 
     #[test]

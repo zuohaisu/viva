@@ -203,26 +203,7 @@ fn cmd_integration(args: &[String]) -> Result<()> {
     let action = args.first().map(String::as_str).ok_or_else(|| {
         Error::Validation("integration needs install | uninstall | status".into())
     })?;
-    let name = args
-        .iter()
-        .skip(1)
-        .find(|arg| !arg.starts_with("--"))
-        .cloned()
-        .ok_or_else(|| Error::Validation("integration needs an agent name".into()))?;
-    let mut root: Option<String> = None;
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--root" {
-            root = Some(
-                args.get(i + 1)
-                    .cloned()
-                    .ok_or_else(|| Error::Validation("--root needs a directory".into()))?,
-            );
-            i += 2;
-            continue;
-        }
-        i += 1;
-    }
+    let (name, root) = parse_integration_name_and_root(&args[1..])?;
     let home = match root {
         Some(path) => std::path::PathBuf::from(path),
         None => std::env::var_os("HOME")
@@ -242,6 +223,37 @@ fn cmd_integration(args: &[String]) -> Result<()> {
     };
     println!("{}", serde_json::to_string_pretty(&status)?);
     Ok(())
+}
+
+/// Positional agent name plus optional `--root`, in any order after the action.
+fn parse_integration_name_and_root(args: &[String]) -> Result<(String, Option<String>)> {
+    let mut name: Option<String> = None;
+    let mut root: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--root" {
+            root = Some(
+                args.get(i + 1)
+                    .cloned()
+                    .ok_or_else(|| Error::Validation("--root needs a directory".into()))?,
+            );
+            i += 2;
+            continue;
+        }
+        if args[i].starts_with("--") {
+            i += 1;
+            continue;
+        }
+        if name.is_some() {
+            return Err(Error::Validation(
+                "integration accepts only one agent name".into(),
+            ));
+        }
+        name = Some(args[i].clone());
+        i += 1;
+    }
+    let name = name.ok_or_else(|| Error::Validation("integration needs an agent name".into()))?;
+    Ok((name, root))
 }
 
 /// `viva events [--since <seq>] [--limit <n>]` — the durable event feed
@@ -2594,5 +2606,26 @@ mod cli_arg_tests {
         assert_eq!((since, limit), (0, 100));
         // Unknown flags still fail loudly.
         assert!(parse_events_args(&["--bogus".to_string()]).is_err());
+    }
+
+    #[test]
+    fn integration_root_may_appear_before_agent_name() {
+        let (name, root) = parse_integration_name_and_root(&[
+            "--root".to_string(),
+            "/tmp/home".to_string(),
+            "pi".to_string(),
+        ])
+        .expect("parse");
+        assert_eq!(name, "pi");
+        assert_eq!(root.as_deref(), Some("/tmp/home"));
+
+        let (name, root) = parse_integration_name_and_root(&[
+            "pi".to_string(),
+            "--root".to_string(),
+            "/tmp/home".to_string(),
+        ])
+        .expect("parse");
+        assert_eq!(name, "pi");
+        assert_eq!(root.as_deref(), Some("/tmp/home"));
     }
 }
