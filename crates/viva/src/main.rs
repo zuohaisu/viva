@@ -1433,6 +1433,9 @@ fn cmd_control_start(home: &std::path::Path, resume: bool) -> Result<()> {
         return Ok(());
     }
     let host = viva::server::Host::open(home)?;
+    // The previous process is gone. Restore the layout with new shells.
+    // `server --resume` does not reach here; that path keeps live processes.
+    viva::server::restore_workspace(&host.shared())?;
     eprintln!(
         "server {} active (pid {}) — home {}",
         host.shared().host_id,

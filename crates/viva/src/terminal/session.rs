@@ -352,6 +352,18 @@ impl TerminalHandle {
         owner: &TerminalOwner,
         disk_log: Option<Arc<DiskLog>>,
     ) -> Result<Self> {
+        Self::spawn_showing(spec, owner, disk_log, Vec::new())
+    }
+
+    /// [`Self::spawn`] with plain-text lines shown above the live grid.
+    /// Used when a dead server restores a pane and screen history matches
+    /// the layout. The lines are not a process to resume.
+    pub fn spawn_showing(
+        spec: &TerminalSpec,
+        owner: &TerminalOwner,
+        disk_log: Option<Arc<DiskLog>>,
+        history: Vec<String>,
+    ) -> Result<Self> {
         spec.validate()?;
         let (master, slave_fd) = OwnedMaster::open(spec)?;
         // SAFETY: open returned a fresh slave fd owned by this caller.
@@ -381,7 +393,7 @@ impl TerminalHandle {
             }),
             total_output_bytes: AtomicU64::new(0),
             eof_seen: AtomicBool::new(false),
-            history: Vec::new(),
+            history,
             tail: Mutex::new(Vec::new()),
             reader_detached: AtomicBool::new(false),
             reader_gone: AtomicBool::new(false),

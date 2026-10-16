@@ -31,6 +31,7 @@
 mod client;
 mod handoff;
 mod protocol;
+mod restore;
 
 pub use client::{Client, restart_server, restart_server_with};
 pub use handoff::{HandoffEntry, HandoffManifest};
@@ -38,6 +39,7 @@ pub use protocol::{
     MACHINE_REFRESH_TIMEOUT, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, Request, RequestKind, Response,
     WorkbenchTreeOp, new_request, read_message, round_trip, with_grant, write_message,
 };
+pub use restore::restore_workspace;
 
 use std::os::fd::RawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -109,9 +111,9 @@ CREATE TABLE recovery_plans (
 "#;
 
 /// The host v4 slice: a native session pointer per terminal and agent.
-/// This is the reference TFHS-72 can resume from. It is not a task
-/// result, a QA verdict, or a memory fact, and Viva never runs the
-/// stored command.
+/// After the server process itself exits, issue #154 may run `resume_command`
+/// to reopen that agent's own session. That run is not a task result, a
+/// QA verdict, or a memory fact, and it does not re-run a finished execution.
 pub const HOST_V4_SQL: &str = r#"
 CREATE TABLE agent_native_sessions (
     terminal_id    TEXT NOT NULL,
@@ -237,6 +239,11 @@ pub struct Shared {
     watchers: Mutex<Vec<std::thread::JoinHandle<()>>>,
     /// The scene / tab / pane tree. Clients render it; they do not own it.
     tree: Mutex<WorkbenchTree>,
+    /// Panes kept after a dead-server restore that could not start a process.
+    pane_errors: Mutex<std::collections::BTreeMap<String, String>>,
+    /// Last time pane screen history was written. History stays off until
+    /// `pane_screen_history` is set, so this is usually unused.
+    history_flushed_at: Mutex<Option<Instant>>,
 }
 
 /// A claimed, running server.
@@ -295,7 +302,7 @@ impl Host {
             "INSERT INTO hosts(host_id, pid, started_at) VALUES (?1, ?2, ?3)",
             rusqlite::params![host_id, std::process::id() as i64, utc_now()],
         )?;
-        let tree = load_workbench_tree(&store);
+        let tree = load_workbench_tree(&store, home, &host_id);
 
         let listener = UnixListener::bind(&socket_path)?;
         let shared = Arc::new(Shared {
@@ -320,6 +327,8 @@ impl Host {
             machines: crate::machines::MachineCache::default(),
             watchers: Mutex::new(Vec::new()),
             tree: Mutex::new(tree),
+            pane_errors: Mutex::new(std::collections::BTreeMap::new()),
+            history_flushed_at: Mutex::new(None),
         });
         Ok(Self { shared, listener })
     }
@@ -484,6 +493,7 @@ impl Host {
             if shared.stopping.load(Ordering::SeqCst) {
                 break;
             }
+            restore::maybe_flush_screen_history(&shared);
             sweep_recovery_plans(&shared);
             match listener.accept() {
                 Ok((stream, _)) => {
@@ -533,6 +543,7 @@ impl Host {
         let transferred = shared.transferred.load(Ordering::SeqCst);
         let mut terminal_count = 0usize;
         if !transferred {
+            let _ = restore::flush_screen_history(shared);
             let store = shared.store.lock().expect("store");
             let terminals = shared.terminals.list();
             terminal_count = terminals.len();
@@ -781,6 +792,9 @@ fn handle_request(shared: Arc<Shared>, request: &Request) -> Result<serde_json::
             terminal_id,
             scrollback,
         } => {
+            if let Some(snapshot) = restore::error_snapshot(&shared, terminal_id) {
+                return Ok(serde_json::to_value(snapshot)?);
+            }
             let id = TerminalId::from_str(terminal_id)?;
             let handle = shared
                 .terminals
@@ -1173,6 +1187,9 @@ fn terminal_create(
         None,
         Some(&store),
     )?;
+    if let Some(text) = cwd.to_str() {
+        restore::remember_pane_cwd(store.connection(), &terminal_id.to_string(), text)?;
+    }
     seed_agent_identification(shared, &terminal_id, argv);
     Ok(serde_json::json!({
         "terminal_id": terminal_id.to_string(),
@@ -1188,6 +1205,9 @@ fn terminal_resize(
     cols: u16,
     rows: u16,
 ) -> Result<serde_json::Value> {
+    if restore::error_snapshot(shared, terminal_id).is_some() {
+        return Ok(serde_json::json!({"resized": true, "cols": cols, "rows": rows}));
+    }
     let terminal_id = TerminalId::from_str(terminal_id)?;
     let handle = shared
         .terminals
@@ -1545,7 +1565,7 @@ fn scene_for_terminal(map: &std::collections::BTreeMap<String, String>, id: &str
 /// Load the persisted layout into the resident tree. A version-2 book is
 /// the tree. An older `{grid, focus}` payload is migrated once and written
 /// back. Anything else is kept verbatim so a later read still returns it.
-fn load_workbench_tree(store: &Store) -> WorkbenchTree {
+fn load_workbench_tree(store: &Store, home: &Path, host_id: &str) -> WorkbenchTree {
     let saved: Option<String> = store
         .connection()
         .query_row(
@@ -1562,6 +1582,7 @@ fn load_workbench_tree(store: &Store) -> WorkbenchTree {
         };
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&saved) else {
+        restore::note_corrupt_snapshot(store, home, host_id, "workbench_layout", saved.as_bytes());
         return WorkbenchTree {
             book: crate::tui::workbench::scenes::SceneBook::default(),
             unmanaged: Some(saved),
@@ -1570,6 +1591,20 @@ fn load_workbench_tree(store: &Store) -> WorkbenchTree {
     };
     let map = terminal_scene_map(store);
     match crate::tui::workbench::tree::import_stored(&value, |id| scene_for_terminal(&map, id)) {
+        Err(_) => {
+            restore::note_corrupt_snapshot(
+                store,
+                home,
+                host_id,
+                "workbench_layout",
+                saved.as_bytes(),
+            );
+            WorkbenchTree {
+                book: crate::tui::workbench::scenes::SceneBook::default(),
+                unmanaged: Some(saved),
+                stored: true,
+            }
+        }
         Ok(Some(book)) => {
             if value.get("version").is_none() {
                 if let Ok(json) = serde_json::to_string(&book) {
@@ -1672,6 +1707,11 @@ fn workbench_tree(shared: &Shared, op: &WorkbenchTreeOp) -> Result<serde_json::V
             let mut body = serde_json::json!({ "tree": tree.book });
             if let Some(raw) = &tree.unmanaged {
                 body["unmanaged_layout"] = serde_json::Value::String(raw.clone());
+            }
+            drop(tree);
+            let errors = shared.pane_errors.lock().expect("pane errors");
+            if !errors.is_empty() {
+                body["pane_errors"] = serde_json::json!(&*errors);
             }
             Ok(body)
         }
@@ -1808,9 +1848,10 @@ fn terminal_open_in_worktree(shared: &Shared, worktree_id: &str) -> Result<serde
         let store = shared.store.lock().expect("store");
         let project = crate::projects::ProjectRegistry::new(&store)
             .require(&crate::foundation::ids::ProjectId::from_str(pid)?)?;
+        let cwd = project.repo_path.clone();
         let spec = crate::terminal::TerminalSpec::new(
             vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())],
-            project.repo_path,
+            cwd.clone(),
         )?;
         let (id, handle) = shared.terminals.spawn(
             spec,
@@ -1820,6 +1861,9 @@ fn terminal_open_in_worktree(shared: &Shared, worktree_id: &str) -> Result<serde
             None,
             Some(&store),
         )?;
+        if let Some(text) = cwd.to_str() {
+            restore::remember_pane_cwd(store.connection(), &id.to_string(), text)?;
+        }
         return Ok(serde_json::json!({"terminal_id":id.to_string(),"pid":handle.pid()}));
     }
     let worktree_id = WorktreeId::from_str(worktree_id)?;
@@ -1847,6 +1891,9 @@ fn terminal_open_in_worktree(shared: &Shared, worktree_id: &str) -> Result<serde
         None,
         Some(&store),
     )?;
+    if let Some(text) = path.to_str() {
+        restore::remember_pane_cwd(store.connection(), &terminal_id.to_string(), text)?;
+    }
     Ok(serde_json::json!({
         "terminal_id": terminal_id.to_string(),
         "pid": handle.pid(),
@@ -1920,6 +1967,9 @@ fn harness_open_in_worktree(
         Some(&store),
     )?;
     seed_agent_identification(shared, &terminal_id, std::slice::from_ref(&spec.name));
+    if let Some(text) = spec.cwd.to_str() {
+        restore::remember_pane_cwd(store.connection(), &terminal_id.to_string(), text)?;
+    }
     Ok(serde_json::json!({
         "terminal_id": terminal_id.to_string(),
         "pid": handle.pid(),
@@ -2743,6 +2793,8 @@ pub fn resume_server(home: &Path) -> Result<()> {
         ));
     }
     let host = Host::open(home)?;
+    // Adopt the transferred processes. Do not start replacement shells —
+    // that path is only for a server whose process had already exited.
     {
         let shared = host.shared();
         let store = shared.store.lock().expect("store");
@@ -3056,6 +3108,9 @@ fn dispatch(
         }
     };
     seed_agent_identification(shared, &terminal_id, argv);
+    if let Some(text) = cwd.to_str() {
+        restore::remember_pane_cwd(store.connection(), &terminal_id.to_string(), text)?;
+    }
     let pid = handle.pid().unwrap_or(0) as i64;
     tasks.confirm_launch(request_key, pid, handle.pid_start_marker.clone())?;
 
@@ -3152,6 +3207,9 @@ fn terminal_list(shared: &Shared) -> Result<serde_json::Value> {
 }
 
 fn terminal_snapshot(shared: &Shared, terminal_id: &str) -> Result<serde_json::Value> {
+    if let Some(snapshot) = restore::error_snapshot(shared, terminal_id) {
+        return Ok(serde_json::to_value(snapshot)?);
+    }
     let terminal_id = TerminalId::from_str(terminal_id)?;
     let handle = shared
         .terminals
@@ -4081,6 +4139,9 @@ fn agent_handoff(
         None,
         Some(&store),
     )?;
+    if let Some(text) = record.worktree_path.to_str() {
+        restore::remember_pane_cwd(store.connection(), &terminal_id.to_string(), text)?;
+    }
     seed_agent_identification(shared, &terminal_id, std::slice::from_ref(&to_agent));
     // Bracketed paste (QA round 5 F7): multi-line briefs would otherwise
     // be submitted line-by-line by TUI agents (each newline = one submit).
