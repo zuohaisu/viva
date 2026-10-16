@@ -730,6 +730,24 @@ impl<'a> Navigation<'a> {
             .collect())
     }
 
+    pub fn rename(&self, id: &str, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::Validation("workspace name must not be empty".into()));
+        }
+        let updated = self.store.connection().execute(
+            "UPDATE workspaces SET display_name=?2 WHERE workspace_id=?1",
+            rusqlite::params![id, name],
+        )?;
+        if updated == 0 {
+            return Err(Error::NotFound {
+                entity: "workspace",
+                id: id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     pub fn create(&self, name: &str) -> Result<String> {
         let w = WorkspaceRegistry::new(self.store).create(name)?;
         self.store.connection().execute(
@@ -1232,10 +1250,22 @@ impl<'a> Navigation<'a> {
                 self.rescan(&id)?;
                 format!("rescanned {}", self.name_of(&id)?)
             }
+            "rename" => {
+                let id = current()?;
+                let name = need()?;
+                self.rename(&id, name)?;
+                format!("renamed workspace to {name}")
+            }
+            "close" => {
+                let id = current()?;
+                let name = self.name_of(&id)?;
+                self.select_all()?;
+                format!("closed workspace {name}; nothing was deleted")
+            }
             "list" => String::new(),
             _ => {
                 return Err(Error::Validation(
-                    "workspace action: open | new | select | add | remove | save | refresh | list"
+                    "workspace action: open | new | select | add | remove | save | refresh | rename | close | list"
                         .into(),
                 ));
             }
