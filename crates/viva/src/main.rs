@@ -82,6 +82,7 @@ fn run(args: &[String]) -> Result<()> {
         Some("data") => cmd_data(args.get(1..).unwrap_or(&[])),
         Some("tools") => cmd_tools(args.get(1..).unwrap_or(&[])),
         Some("memory") => cmd_memory(args.get(1..).unwrap_or(&[])),
+        Some("skill") => cmd_skill(args.get(1..).unwrap_or(&[])),
         Some("harness") => cmd_harness(args.get(1..).unwrap_or(&[])),
         Some("workflow") => cmd_workflow(args.get(1..).unwrap_or(&[])),
         Some("maintenance") => cmd_maintenance(args.get(1..).unwrap_or(&[])),
@@ -1055,6 +1056,19 @@ USAGE:
         the locate → act → verify chain under the given task-scoped grant.
         Read-only inspections; evidence rows are recorded either way.
 
+    viva skill create --name <text> --body-file <path> (--execution <id> | --manual)
+    viva skill write --skill <id> --body-file <path> (--execution <id> | --manual)
+    viva skill get --skill <id>
+    viva skill versions --skill <id>
+    viva skill version-get --skill <id> --version <n>
+    viva skill rollback <skill> <version>
+    viva skill project --skill <id> --out <path>
+        Team skill bodies with append-only versions (#140). Every write
+        records version, time, operator and source execution (or Haisu
+        manual). Rollback copies an older version forward; history stays.
+        `get` and `project` read the current version for callbacks and
+        member projection.
+
     viva memory search --member <id> [--project <id>] --query <text>
         Search the linked external memory for one member's scope
         (read-only). Unavailable stores say so; unclaimable hits are
@@ -1994,6 +2008,171 @@ fn cmd_control_grant(args: &[String]) -> Result<()> {
     let grant = engine.issue_root_grant(member, task, vec![action], mode, expires)?;
     println!("{}", serde_json::to_string_pretty(&grant)?);
     Ok(())
+}
+
+/// `viva skill …` — team skill bodies with append-only versioning (#140).
+fn cmd_skill(args: &[String]) -> Result<()> {
+    use std::str::FromStr as _;
+
+    let mut named: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut positional: Vec<String> = Vec::new();
+    let mut manual = false;
+    let mut i = 0;
+    while i < args.len() {
+        let token = args[i].as_str();
+        if token.starts_with("--") {
+            if token == "--manual" {
+                manual = true;
+                i += 1;
+                continue;
+            }
+            i += 1;
+            let value = args
+                .get(i)
+                .cloned()
+                .ok_or_else(|| Error::Validation(format!("flag {token} needs a value")))?;
+            named.insert(token.to_string(), value);
+            i += 1;
+        } else {
+            positional.push(args[i].clone());
+            i += 1;
+        }
+    }
+    let get = |key: &str| named.get(&format!("--{key}")).cloned();
+    let require = |key: &str| -> Result<String> {
+        get(key).ok_or_else(|| Error::Validation(format!("skill needs --{key}")))
+    };
+    let body_from_flags = || -> Result<String> {
+        if let Some(path) = get("body-file") {
+            return std::fs::read_to_string(&path)
+                .map_err(|e| Error::Validation(format!("could not read --body-file {path}: {e}")));
+        }
+        get("body")
+            .ok_or_else(|| Error::Validation("skill write needs --body-file or --body".into()))
+    };
+    let source_from_flags = || -> Result<viva::skills::SkillBodySource> {
+        let execution = get("execution");
+        if manual && execution.is_some() {
+            return Err(Error::Validation(
+                "Haisu manual edits use --manual only; do not pass --execution".into(),
+            ));
+        }
+        if manual {
+            return Ok(viva::skills::SkillBodySource::HaisuManual);
+        }
+        if let Some(id) = execution {
+            if id.trim().is_empty() {
+                return Err(Error::Validation(
+                    "execution-sourced writes need a non-empty --execution".into(),
+                ));
+            }
+            return Ok(viva::skills::SkillBodySource::Execution {
+                execution_id: viva::foundation::ids::ExecutionId::from_str(&id)?,
+            });
+        }
+        Err(Error::Validation(
+            "skill writes need --execution <id> or --manual for Haisu edits".into(),
+        ))
+    };
+
+    let store = open_store()?;
+    let skills = viva::skills::SkillBodyStore::new(&store);
+    match positional.first().map(String::as_str) {
+        Some("create") => {
+            let name = require("name")?;
+            let body = body_from_flags()?;
+            let source = source_from_flags()?;
+            let current = skills.create(name, body, source)?;
+            println!("{}", serde_json::to_string_pretty(&current)?);
+            Ok(())
+        }
+        Some("write") => {
+            let skill_id = require("skill")?;
+            let body = body_from_flags()?;
+            let source = source_from_flags()?;
+            let current = skills.write_body(
+                &skill_id,
+                body,
+                viva::skills::SkillBodyWriteKind::Modify,
+                source,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&current)?);
+            Ok(())
+        }
+        Some("get") => {
+            let skill_id = require("skill")?;
+            match skills.current_body(&skill_id)? {
+                Some(current) => println!("{}", serde_json::to_string_pretty(&current)?),
+                None => {
+                    return Err(Error::NotFound {
+                        entity: "team_skill",
+                        id: skill_id,
+                    });
+                }
+            }
+            Ok(())
+        }
+        Some("versions") => {
+            let skill_id = require("skill")?;
+            let versions = skills.list_versions(&skill_id)?;
+            println!("{}", serde_json::to_string_pretty(&versions)?);
+            Ok(())
+        }
+        Some("version-get") => {
+            let skill_id = require("skill")?;
+            let version: u32 = require("version")?
+                .parse()
+                .map_err(|_| Error::Validation("--version must be a number".into()))?;
+            match skills.version_body(&skill_id, version)? {
+                Some(row) => println!("{}", serde_json::to_string_pretty(&row)?),
+                None => {
+                    return Err(Error::NotFound {
+                        entity: "skill_body_version",
+                        id: format!("{skill_id}@{version}"),
+                    });
+                }
+            }
+            Ok(())
+        }
+        Some("rollback") => {
+            let skill_id = positional
+                .get(1)
+                .cloned()
+                .or_else(|| get("skill"))
+                .ok_or_else(|| {
+                    Error::Validation("skill rollback needs <skill> <version>".into())
+                })?;
+            let version_text = positional
+                .get(2)
+                .cloned()
+                .or_else(|| get("version"))
+                .ok_or_else(|| {
+                    Error::Validation("skill rollback needs <skill> <version>".into())
+                })?;
+            let version: u32 = version_text
+                .parse()
+                .map_err(|_| Error::Validation("rollback version must be a number".into()))?;
+            let current = skills.rollback(&skill_id, version)?;
+            println!("{}", serde_json::to_string_pretty(&current)?);
+            Ok(())
+        }
+        Some("project") => {
+            let skill_id = require("skill")?;
+            let dest = require("out")?;
+            skills.write_current_projection_file(&skill_id, std::path::Path::new(&dest))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "skill_id": skill_id,
+                    "projected_to": dest,
+                }))?
+            );
+            Ok(())
+        }
+        _ => Err(Error::Validation(
+            "skill needs create | write | get | versions | version-get | rollback | project".into(),
+        )),
+    }
 }
 
 /// `viva memory …` (F04) — Viva's namespace/audit layer over the
