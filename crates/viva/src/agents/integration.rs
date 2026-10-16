@@ -260,8 +260,25 @@ fn uninstall_exclusive(path: &Path) -> Result<(bool, String)> {
 fn install_json(path: &Path, body: &str) -> Result<String> {
     let incoming = parse_json_object(body, path)?;
     let mut doc = read_json_object(path)?;
+    if let Some(hooks) = doc.get("hooks") {
+        if !hooks.is_object() && !hooks.is_array() {
+            return Err(Error::Validation(format!(
+                "refusing to edit {} (hooks is not an object or array); Viva will not replace it",
+                path.display()
+            )));
+        }
+    }
     strip_viva_json(&mut doc);
     merge_json(&mut doc, &incoming);
+    if !serde_json::to_string(&doc)
+        .map_err(|_| Error::Validation("internal JSON encode failed".into()))?
+        .contains(MARKER)
+    {
+        return Err(Error::Validation(format!(
+            "refusing to edit {} (Viva hooks could not be merged); the file was left unchanged",
+            path.display()
+        )));
+    }
     write_json(path, &doc)?;
     Ok("merged the Viva hooks into the existing file".into())
 }
@@ -303,23 +320,10 @@ fn uninstall_toml(path: &Path) -> Result<(bool, String)> {
 
 fn install_yaml(path: &Path) -> Result<String> {
     let existing = read_if_present(path)?;
-    let cleaned = remove_marker_lines(&existing);
-    let working = quote_double(&report_command("working", "hermes", "hermes --resume"));
-    let done = quote_double(&report_command("done", "hermes", "hermes --resume"));
-    let next = if yaml_has_root_key(&cleaned, "hooks") {
-        let with_working =
-            insert_yaml_item(&cleaned, "pre_llm_call", &format!("- command: {working}"));
-        insert_yaml_item(
-            &with_working,
-            "post_llm_call",
-            &format!("- command: {done}"),
-        )
-    } else {
-        let mut out = cleaned;
-        append_block(&mut out, &hermes_yaml());
-        out
-    };
-    fs::write(path, next)?;
+    let mut doc = parse_yaml_mapping(&existing, path)?;
+    strip_viva_yaml(&mut doc, path)?;
+    merge_hermes_viva_hooks(&mut doc, path)?;
+    write_yaml(path, &doc)?;
     Ok("merged the Viva hooks into the existing file".into())
 }
 
@@ -328,8 +332,18 @@ fn uninstall_yaml(path: &Path) -> Result<(bool, String)> {
     if !text.contains(MARKER) {
         return Err(refuse_unmarked(path));
     }
-    let kept = prune_empty_hook_keys(&remove_marker_lines(&text));
-    finish_text_removal(path, &kept)
+    let mut doc = parse_yaml_mapping(&text, path)?;
+    strip_viva_yaml(&mut doc, path)?;
+    if yaml_is_disposable(&doc) {
+        fs::remove_file(path)?;
+        Ok((true, "removed the Viva hooks.".into()))
+    } else {
+        write_yaml(path, &doc)?;
+        Ok((
+            false,
+            "removed the Viva hooks and left the rest of the file in place".into(),
+        ))
+    }
 }
 
 fn refuse_unmarked(path: &Path) -> Error {
@@ -409,10 +423,7 @@ fn write_json(path: &Path, value: &serde_json::Value) -> Result<()> {
 }
 
 fn json_is_disposable(value: &serde_json::Value) -> bool {
-    let Some(obj) = value.as_object() else {
-        return false;
-    };
-    obj.is_empty() || (obj.len() == 1 && obj.contains_key("version"))
+    value.as_object().is_some_and(|obj| obj.is_empty())
 }
 
 fn strip_viva_json(value: &mut serde_json::Value) {
@@ -576,113 +587,153 @@ fn toml_header(line: &str) -> bool {
     !line.starts_with([' ', '\t']) && trimmed.starts_with('[')
 }
 
-fn remove_marker_lines(text: &str) -> String {
-    let mut out = String::new();
-    for line in text.lines() {
-        if line.contains(MARKER) {
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
+fn parse_yaml_mapping(text: &str, path: &Path) -> Result<serde_yaml::Value> {
+    if text.trim().is_empty() {
+        return Ok(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
     }
-    out
-}
-
-fn yaml_has_root_key(text: &str, key: &str) -> bool {
-    text.lines()
-        .any(|line| leading_spaces(line) == 0 && line.trim() == format!("{key}:"))
-}
-
-fn prune_empty_hook_keys(text: &str) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut drop = vec![false; lines.len()];
-    mark_empty_keys(&lines, &mut drop, &["pre_llm_call:", "post_llm_call:"]);
-    mark_empty_keys(&lines, &mut drop, &["hooks:"]);
-    let mut out = String::new();
-    for (index, line) in lines.iter().enumerate() {
-        if drop[index] {
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
+    let value: serde_yaml::Value = serde_yaml::from_str(text).map_err(|_| {
+        Error::Validation(format!(
+            "refusing to edit {} (not valid YAML); Viva will not replace it",
+            path.display()
+        ))
+    })?;
+    if !value.is_mapping() {
+        return Err(Error::Validation(format!(
+            "refusing to edit {} (not a YAML mapping); Viva will not replace it",
+            path.display()
+        )));
     }
-    if out.trim().is_empty() {
-        String::new()
-    } else {
-        out
-    }
+    Ok(value)
 }
 
-fn mark_empty_keys(lines: &[&str], drop: &mut [bool], keys: &[&str]) {
-    for index in 0..lines.len() {
-        if drop[index] || !keys.contains(&lines[index].trim()) {
-            continue;
+fn write_yaml(path: &Path, value: &serde_yaml::Value) -> Result<()> {
+    let text = serde_yaml::to_string(value).map_err(|_| {
+        Error::Validation(format!(
+            "refusing to write {} (could not encode YAML); the file was left unchanged",
+            path.display()
+        ))
+    })?;
+    serde_yaml::from_str::<serde_yaml::Value>(&text).map_err(|_| {
+        Error::Validation(format!(
+            "refusing to write {} (produced invalid YAML); the file was left unchanged",
+            path.display()
+        ))
+    })?;
+    fs::write(path, format!("{text}\n"))?;
+    Ok(())
+}
+
+fn yaml_is_disposable(value: &serde_yaml::Value) -> bool {
+    value.as_mapping().is_some_and(|map| map.is_empty())
+}
+
+fn hooks_mapping_mut<'a>(
+    root: &'a mut serde_yaml::Mapping,
+    path: &Path,
+) -> Result<&'a mut serde_yaml::Mapping> {
+    match root.get_mut("hooks") {
+        None => {
+            root.insert(
+                serde_yaml::Value::String("hooks".into()),
+                serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+            );
         }
-        if !has_child(lines, drop, index) {
-            drop[index] = true;
+        Some(value) if value.is_mapping() => {}
+        Some(_) => {
+            return Err(Error::Validation(format!(
+                "refusing to edit {} (hooks is not a YAML mapping); Viva will not replace it",
+                path.display()
+            )));
         }
     }
+    Ok(root
+        .get_mut("hooks")
+        .and_then(serde_yaml::Value::as_mapping_mut)
+        .expect("hooks mapping was just inserted"))
 }
 
-fn has_child(lines: &[&str], drop: &[bool], index: usize) -> bool {
-    let indent = leading_spaces(lines[index]);
-    lines
-        .iter()
-        .enumerate()
-        .skip(index + 1)
-        .find_map(|(next, line)| {
-            if drop[next] || line.trim().is_empty() || line.trim_start().starts_with('#') {
-                return None;
-            }
-            Some(leading_spaces(line) > indent)
-        })
-        .unwrap_or(false)
-}
-
-fn leading_spaces(line: &str) -> usize {
-    line.chars().take_while(|ch| *ch == ' ').count()
-}
-
-fn insert_yaml_item(text: &str, key: &str, item_body: &str) -> String {
-    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
-    let Some(hooks_at) = lines
-        .iter()
-        .position(|line| leading_spaces(line) == 0 && line.trim() == "hooks:")
-    else {
-        return text.to_string();
+fn strip_viva_yaml(value: &mut serde_yaml::Value, path: &Path) -> Result<()> {
+    let Some(root) = value.as_mapping_mut() else {
+        return Ok(());
     };
-    let key_at = lines
-        .iter()
-        .enumerate()
-        .skip(hooks_at + 1)
-        .find_map(|(index, line)| {
-            if line.trim().is_empty() || line.trim_start().starts_with('#') {
-                return None;
-            }
-            if leading_spaces(line) == 0 {
-                return Some(None);
-            }
-            if line.trim() == format!("{key}:") {
-                Some(Some(index))
-            } else {
-                None
-            }
-        });
-    match key_at {
-        Some(Some(key_at)) => {
-            let indent = " ".repeat(leading_spaces(&lines[key_at]) + 2);
-            lines.insert(key_at + 1, format!("{indent}{item_body}"));
-        }
-        _ => {
-            lines.insert(hooks_at + 1, format!("  {key}:"));
-            lines.insert(hooks_at + 2, format!("    {item_body}"));
+    let Some(hooks) = root.get_mut("hooks") else {
+        return Ok(());
+    };
+    if !hooks.is_mapping() {
+        return Err(Error::Validation(format!(
+            "refusing to edit {} (hooks is not a YAML mapping); Viva will not replace it",
+            path.display()
+        )));
+    }
+    let hooks = hooks.as_mapping_mut().expect("mapping");
+    for key in ["pre_llm_call", "post_llm_call"] {
+        let Some(list) = hooks.get_mut(key) else {
+            continue;
+        };
+        filter_yaml_hook_list(list);
+        let empty = list.as_sequence().is_some_and(|seq| seq.is_empty());
+        if empty {
+            hooks.remove(serde_yaml::Value::String(key.into()));
         }
     }
-    let mut out = lines.join("\n");
-    if !out.ends_with('\n') {
-        out.push('\n');
+    if hooks.is_empty() {
+        root.remove(serde_yaml::Value::String("hooks".into()));
     }
-    out
+    Ok(())
+}
+
+fn filter_yaml_hook_list(list: &mut serde_yaml::Value) {
+    let Some(seq) = list.as_sequence_mut() else {
+        return;
+    };
+    seq.retain(|item| {
+        !item
+            .get("command")
+            .and_then(serde_yaml::Value::as_str)
+            .is_some_and(|command| command.contains(MARKER))
+    });
+}
+
+fn merge_hermes_viva_hooks(value: &mut serde_yaml::Value, path: &Path) -> Result<()> {
+    let Some(root) = value.as_mapping_mut() else {
+        return Err(Error::Validation(format!(
+            "refusing to edit {} (not a YAML mapping); Viva will not replace it",
+            path.display()
+        )));
+    };
+    let hooks = hooks_mapping_mut(root, path)?;
+    let working = report_command("working", "hermes", "hermes --resume");
+    let done = report_command("done", "hermes", "hermes --resume");
+    append_yaml_hook(hooks, "pre_llm_call", &working);
+    append_yaml_hook(hooks, "post_llm_call", &done);
+    let encoded = serde_yaml::to_string(value).map_err(|_| {
+        Error::Validation(format!(
+            "refusing to edit {} (Viva hooks could not be merged); the file was left unchanged",
+            path.display()
+        ))
+    })?;
+    if !encoded.contains(MARKER) {
+        return Err(Error::Validation(format!(
+            "refusing to edit {} (Viva hooks could not be merged); the file was left unchanged",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn append_yaml_hook(hooks: &mut serde_yaml::Mapping, key: &str, command: &str) {
+    let entry = hooks
+        .entry(serde_yaml::Value::String(key.into()))
+        .or_insert_with(|| serde_yaml::Value::Sequence(vec![]));
+    let Some(seq) = entry.as_sequence_mut() else {
+        return;
+    };
+    let mut item = serde_yaml::Mapping::new();
+    item.insert(
+        serde_yaml::Value::String("command".into()),
+        serde_yaml::Value::String(command.into()),
+    );
+    seq.push(serde_yaml::Value::Mapping(item));
 }
 
 #[derive(Clone, Copy)]
@@ -988,6 +1039,17 @@ mod tests {
             "{not json\n"
         );
 
+        fs::write(&unmarked, "{\"hooks\":\"oops\"}\n").expect("bad hooks type");
+        let err = install("claude", home).expect_err("hooks not object");
+        assert!(
+            err.to_string().contains("hooks is not an object or array"),
+            "{err}"
+        );
+        assert_eq!(
+            fs::read_to_string(&unmarked).expect("unchanged"),
+            "{\"hooks\":\"oops\"}\n"
+        );
+
         let cursor = home.join(".cursor/hooks.json");
         fs::create_dir_all(cursor.parent().expect("parent")).expect("dirs");
         fs::write(
@@ -1002,6 +1064,15 @@ mod tests {
         assert_eq!(kept["version"], 1);
         assert!(kept["hooks"]["stop"].to_string().contains("echo stay"));
         assert!(!kept.to_string().contains(MARKER));
+
+        fs::write(&cursor, "{\"version\":1}\n").expect("version only");
+        install("cursor", home).expect("merge");
+        uninstall("cursor", home).expect("uninstall");
+        assert!(cursor.exists(), "version-only cursor file stays");
+        let kept: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&cursor).expect("read")).expect("json");
+        assert_eq!(kept["version"], 1);
+        assert!(kept.get("hooks").is_none());
     }
 
     #[test]
@@ -1040,6 +1111,50 @@ mod tests {
         assert!(kept.contains("echo stay"));
         assert!(!kept.contains(MARKER));
         assert!(!kept.contains("pre_llm_call"));
+    }
+
+    #[test]
+    fn hermes_yaml_merge_handles_nonstandard_user_layouts() {
+        let dir = tempfile::tempdir().expect("temp");
+        let home = dir.path();
+        let hermes = home.join(".hermes/config.yaml");
+        fs::create_dir_all(hermes.parent().expect("parent")).expect("dirs");
+
+        fs::write(
+            &hermes,
+            "model: hermes\nhooks:\n    pre_tool_call:\n        - command: \"echo stay\"\n",
+        )
+        .expect("four-space hooks");
+        install("hermes", home).expect("merge");
+        let merged: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(&hermes).expect("read")).expect("parse");
+        let hooks = merged["hooks"].as_mapping().expect("hooks map");
+        assert!(hooks.contains_key(serde_yaml::Value::String("pre_tool_call".into())));
+        assert!(hooks.contains_key(serde_yaml::Value::String("pre_llm_call".into())));
+        uninstall("hermes", home).expect("uninstall");
+        let kept: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(&hermes).expect("read")).expect("parse");
+        assert_eq!(kept["model"], "hermes");
+        assert!(
+            kept["hooks"]["pre_tool_call"].as_sequence().expect("seq")[0]["command"]
+                .as_str()
+                .is_some_and(|c| c.contains("echo stay"))
+        );
+
+        fs::write(&hermes, "model: hermes\nhooks: {}\n").expect("flow hooks");
+        install("hermes", home).expect("merge empty hooks");
+        serde_yaml::from_str::<serde_yaml::Value>(&fs::read_to_string(&hermes).expect("read"))
+            .expect("valid yaml after install");
+        uninstall("hermes", home).expect("uninstall");
+        let kept: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(&hermes).expect("read")).expect("parse");
+        assert_eq!(kept["model"], "hermes");
+        assert!(!kept.to_string().contains(MARKER));
+        assert!(kept.get("hooks").is_none_or(|hooks| {
+            hooks.as_mapping().is_some_and(|map| {
+                !map.contains_key(serde_yaml::Value::String("pre_llm_call".into()))
+            })
+        }));
     }
 
     #[test]
