@@ -319,6 +319,7 @@ fn upgrade_renames_everything_and_keeps_every_row() {
                 let after_keys = migration_keys(&after[table]);
                 let appended: BTreeSet<_> = after_keys.difference(&before_keys).cloned().collect();
                 let expected: BTreeSet<(String, u32)> = BTreeSet::from([
+                    ("experience".into(), 1),
                     ("host".into(), 4),
                     ("memory".into(), 3),
                     ("memory".into(), 4),
