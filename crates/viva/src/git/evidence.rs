@@ -85,6 +85,21 @@ pub struct EvidenceRecord {
 #[derive(Default)]
 pub struct GhRunner {
     runner: CliRunner,
+    /// Override the `gh` executable (tests inject a fake binary here).
+    program: Option<String>,
+}
+
+impl GhRunner {
+    pub fn with_program(program: impl Into<String>) -> Self {
+        Self {
+            runner: CliRunner::default(),
+            program: Some(program.into()),
+        }
+    }
+
+    fn program(&self) -> &str {
+        self.program.as_deref().unwrap_or("gh")
+    }
 }
 
 impl std::fmt::Display for GhRejection {
@@ -135,7 +150,7 @@ impl GhRunner {
                 reason: rejection.to_string(),
             };
         }
-        match self.runner.run("gh", cwd, args) {
+        match self.runner.run(self.program(), cwd, args) {
             Ok(out) => match parse(&out.stdout) {
                 Ok(payload) => EvidenceState::Fetched {
                     payload,
@@ -203,7 +218,10 @@ impl GhRunner {
 
     /// `gh auth status` probe, for actionable preflight messages.
     pub fn auth_available(&self, cwd: &Path) -> bool {
-        matches!(self.runner.run("gh", cwd, &["auth", "status"]), Ok(out) if out.success())
+        matches!(
+            self.runner.run(self.program(), cwd, &["auth", "status"]),
+            Ok(out) if out.success()
+        )
     }
 }
 

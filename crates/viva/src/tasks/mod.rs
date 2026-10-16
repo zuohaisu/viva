@@ -29,12 +29,19 @@ use crate::foundation::store::{DOMAIN_TASKS_EXECUTIONS, MigrationRegistry, Store
 /// tables reference the foundation `executions` slice without
 /// altering it).
 pub fn register_migrations(registry: MigrationRegistry) -> MigrationRegistry {
-    registry.register(
-        DOMAIN_TASKS_EXECUTIONS,
-        1,
-        "tasks and executions v1",
-        TASKS_EXECUTIONS_V1_SQL,
-    )
+    registry
+        .register(
+            DOMAIN_TASKS_EXECUTIONS,
+            1,
+            "tasks and executions v1",
+            TASKS_EXECUTIONS_V1_SQL,
+        )
+        .register(
+            DOMAIN_TASKS_EXECUTIONS,
+            2,
+            "tasks blocked status",
+            TASKS_EXECUTIONS_V2_SQL,
+        )
 }
 
 pub const TASKS_EXECUTIONS_V1_SQL: &str = r#"
@@ -101,6 +108,27 @@ CREATE TABLE task_briefs (
 );
 "#;
 
+/// Allow `blocked` as a first-class task status (Resident C4 morning report).
+pub const TASKS_EXECUTIONS_V2_SQL: &str = r#"
+PRAGMA foreign_keys=OFF;
+CREATE TABLE tasks_new (
+    task_id             TEXT PRIMARY KEY,
+    goal                TEXT NOT NULL CHECK (length(trim(goal)) > 0),
+    constraints_json    TEXT NOT NULL DEFAULT '[]',
+    assignee_member_id  TEXT,
+    workspace_id        TEXT,
+    project_id          TEXT,
+    status              TEXT NOT NULL DEFAULT 'open'
+                        CHECK (status IN ('open', 'in_progress', 'done', 'cancelled', 'blocked')),
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL
+);
+INSERT INTO tasks_new SELECT * FROM tasks;
+DROP TABLE tasks;
+ALTER TABLE tasks_new RENAME TO tasks;
+PRAGMA foreign_keys=ON;
+"#;
+
 // ---------------------------------------------------------------------------
 // Task records
 // ---------------------------------------------------------------------------
@@ -125,6 +153,7 @@ pub enum TaskStatus {
     InProgress,
     Done,
     Cancelled,
+    Blocked,
 }
 
 impl TaskStatus {
@@ -134,6 +163,7 @@ impl TaskStatus {
             TaskStatus::InProgress => "in_progress",
             TaskStatus::Done => "done",
             TaskStatus::Cancelled => "cancelled",
+            TaskStatus::Blocked => "blocked",
         }
     }
 }
@@ -956,6 +986,53 @@ impl<'a> TaskRegistry<'a> {
     }
 
     /// The latest persisted brief for a task, if any (restart-safe read).
+    /// Set task status directly (coordinator / owner paths). Does not append
+    /// an outcome event — use [`Self::append_outcome`] for evidence-backed
+    /// transitions.
+    pub fn set_status(&self, task_id: &TaskId, status: TaskStatus) -> Result<()> {
+        self.require_task(task_id)?;
+        let now = utc_now();
+        let n = self.store.connection().execute(
+            "UPDATE tasks SET status = ?2, updated_at = ?3 WHERE task_id = ?1",
+            rusqlite::params![task_id.as_str(), status.as_str(), now],
+        )?;
+        if n == 0 {
+            return Err(Error::NotFound {
+                entity: "task",
+                id: task_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Record a coordinator correction or sourced experience on the task.
+    /// When member recall/remember (#117) is unavailable, the text lands in
+    /// `task_results` with provenance instead of the memory layer.
+    pub fn record_coordinator_note(
+        &self,
+        task_id: &TaskId,
+        text: impl Into<String>,
+        actor: impl Into<String>,
+        dedup_key: impl Into<String>,
+    ) -> Result<TaskOutcome> {
+        let text = text.into();
+        let actor = actor.into();
+        let dedup_key = dedup_key.into();
+        let _ = self.record_result(
+            task_id,
+            None,
+            ResultSource::User,
+            "coordinator_experience",
+            dedup_key,
+            serde_json::json!({
+                "text": text.clone(),
+                "source": "coordinator",
+                "remember_available": false,
+            }),
+        );
+        self.append_outcome(task_id, OutcomeKind::Corrected, text, actor)
+    }
+
     pub fn latest_brief(&self, task_id: &TaskId) -> Result<Option<serde_json::Value>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT brief_json FROM task_briefs WHERE task_id = ?1
@@ -975,6 +1052,7 @@ fn parse_task_status(status: &str) -> Result<TaskStatus> {
         "in_progress" => Ok(TaskStatus::InProgress),
         "done" => Ok(TaskStatus::Done),
         "cancelled" => Ok(TaskStatus::Cancelled),
+        "blocked" => Ok(TaskStatus::Blocked),
         other => Err(Error::Validation(format!(
             "tasks.status holds an unknown value `{other}`"
         ))),
