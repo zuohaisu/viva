@@ -75,6 +75,7 @@ fn run(args: &[String]) -> Result<()> {
         Some("data") => cmd_data(args.get(1..).unwrap_or(&[])),
         Some("tools") => cmd_tools(args.get(1..).unwrap_or(&[])),
         Some("memory") => cmd_memory(args.get(1..).unwrap_or(&[])),
+        Some("skill") => cmd_skill(args.get(1..).unwrap_or(&[])),
         Some("harness") => cmd_harness(args.get(1..).unwrap_or(&[])),
         Some("workflow") => cmd_workflow(args.get(1..).unwrap_or(&[])),
         Some("maintenance") => cmd_maintenance(args.get(1..).unwrap_or(&[])),
@@ -2128,6 +2129,117 @@ fn cmd_memory(args: &[String]) -> Result<()> {
         }
         _ => Err(Error::Validation(
             "memory needs search | probe | link | remember | archive | restore | status".into(),
+        )),
+    }
+}
+
+/// `viva skill …` — member skill sets: list, read, search, claim, sync,
+/// owner restore, and manual weekly summaries (issue #139).
+fn cmd_skill(args: &[String]) -> Result<()> {
+    use std::str::FromStr as _;
+
+    let mut named: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut i = 1;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        i += 1;
+        let value = args
+            .get(i)
+            .cloned()
+            .ok_or_else(|| Error::Validation(format!("flag {flag} needs a value")))?;
+        named.insert(flag.to_string(), value);
+        i += 1;
+    }
+    let get = |key: &str| named.get(&format!("--{key}")).cloned();
+    let require = |key: &str| -> Result<String> {
+        get(key).ok_or_else(|| Error::Validation(format!("skill needs --{key}")))
+    };
+
+    let store = open_store()?;
+    let service = viva::knowledge::SkillSetService::new(&store);
+    let knowledge = viva::knowledge::KnowledgeRegistry::new(&store);
+
+    match args.first().map(String::as_str) {
+        Some("list") => {
+            let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
+            let rows = service.list_member_skills(&member)?;
+            let mut out = Vec::new();
+            for m in rows {
+                if let Some(skill) = knowledge.skill(&m.skill_id)? {
+                    out.push(serde_json::json!({
+                        "membership": m,
+                        "skill": skill,
+                        "derived_from": service.skill_derived_from(&m.skill_id)?,
+                    }));
+                }
+            }
+            println!("{}", serde_json::to_string_pretty(&out)?);
+            Ok(())
+        }
+        Some("get") => {
+            let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
+            let skill_id = require("skill")?;
+            let execution = viva::foundation::ids::ExecutionId::from_str(&require("execution")?)?;
+            let read = service.get_body(&member, &skill_id, &execution, 1.0)?;
+            println!("{}", serde_json::to_string_pretty(&read)?);
+            Ok(())
+        }
+        Some("search") => {
+            let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
+            let query = require("query")?;
+            let team = get("team").is_some();
+            let hits = service.search(&member, &query, team)?;
+            println!("{}", serde_json::to_string_pretty(&hits)?);
+            Ok(())
+        }
+        Some("claim") => {
+            let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
+            let skill_id = require("skill")?;
+            let execution = get("execution")
+                .map(|e| viva::foundation::ids::ExecutionId::from_str(&e))
+                .transpose()?;
+            let membership = service.claim(&member, &skill_id, execution.as_ref())?;
+            println!("{}", serde_json::to_string_pretty(&membership)?);
+            Ok(())
+        }
+        Some("sync") => {
+            let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
+            let skill_id = require("skill")?;
+            let execution = get("execution")
+                .map(|e| viva::foundation::ids::ExecutionId::from_str(&e))
+                .transpose()?;
+            if let (Some(source), Some(title), Some(entry)) =
+                (get("derived-from"), get("title"), get("entry"))
+            {
+                let registration = service.sync_derived(
+                    &member,
+                    &source,
+                    title,
+                    std::path::PathBuf::from(entry),
+                    get("provenance").unwrap_or_else(|| "sync rewrite".into()),
+                    execution.as_ref(),
+                )?;
+                println!("{}", serde_json::to_string_pretty(&registration)?);
+            } else {
+                let membership = service.sync_existing(&member, &skill_id, execution.as_ref())?;
+                println!("{}", serde_json::to_string_pretty(&membership)?);
+            }
+            Ok(())
+        }
+        Some("restore") => {
+            let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
+            let skill_id = require("skill")?;
+            let membership = service.restore_manual(&member, &skill_id)?;
+            println!("{}", serde_json::to_string_pretty(&membership)?);
+            Ok(())
+        }
+        Some("weekly") => {
+            let report = service.weekly_report()?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        _ => Err(Error::Validation(
+            "skill needs list | get | search | claim | sync | restore | weekly".into(),
         )),
     }
 }
