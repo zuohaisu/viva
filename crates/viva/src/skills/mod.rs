@@ -12,8 +12,21 @@ use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{ExecutionId, utc_now};
 use crate::foundation::store::{DOMAIN_SKILLS, MigrationRegistry, Store};
 
+mod distill;
+
+pub use distill::{
+    DistillContext, DistillOutcome, DistillService, DistillTrigger, SKILLS_V2_DISTILL_SQL,
+};
+
 pub fn register_migrations(registry: MigrationRegistry) -> MigrationRegistry {
-    registry.register(DOMAIN_SKILLS, 1, "skills v1 body versions", SKILLS_V1_SQL)
+    registry
+        .register(DOMAIN_SKILLS, 1, "skills v1 body versions", SKILLS_V1_SQL)
+        .register(
+            DOMAIN_SKILLS,
+            2,
+            "skill distill tracking v2",
+            SKILLS_V2_DISTILL_SQL,
+        )
 }
 
 pub const SKILLS_V1_SQL: &str = r#"

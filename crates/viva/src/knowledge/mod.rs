@@ -818,6 +818,72 @@ impl<'a> KnowledgeRegistry<'a> {
         Ok(registration)
     }
 
+    /// Register a team skill index row with a caller-chosen id (issue #141
+    /// links `team_skills` bodies to member skill sets).
+    pub fn register_skill_with_id(
+        &self,
+        skill_id: &str,
+        title: impl Into<String>,
+        entry_path: impl Into<PathBuf>,
+        provenance: impl Into<String>,
+        owner: Option<MemberId>,
+        tags: Vec<String>,
+    ) -> Result<SkillRegistration> {
+        if skill_id.trim().is_empty() {
+            return Err(Error::Validation("skill_id must not be empty".into()));
+        }
+        if self.skill(skill_id)?.is_some() {
+            return Err(Error::Validation(format!(
+                "skill `{skill_id}` is already registered"
+            )));
+        }
+        let entry_path = entry_path.into();
+        if !entry_path.is_absolute() {
+            return Err(Error::Validation(format!(
+                "skill entry path must be absolute: {}",
+                entry_path.display()
+            )));
+        }
+        if !entry_path.is_file() {
+            return Err(Error::Validation(format!(
+                "skill entry file does not exist: {}",
+                entry_path.display()
+            )));
+        }
+        let item = self.record(
+            title,
+            Scope::Skill,
+            entry_path.clone(),
+            provenance,
+            owner,
+            None,
+            tags,
+            None,
+            ExternalState::None,
+        )?;
+        let registration = SkillRegistration {
+            skill_id: skill_id.to_string(),
+            item_id: item.item_id,
+            entry_path,
+            enabled: true,
+            registered_at: utc_now(),
+            disabled_at: None,
+        };
+        self.store.connection().execute(
+            "INSERT INTO skills(skill_id, item_id, entry_path, enabled, registered_at, disabled_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                registration.skill_id,
+                registration.item_id,
+                registration.entry_path.to_string_lossy().as_ref(),
+                registration.enabled as i64,
+                registration.registered_at,
+                registration.disabled_at,
+            ],
+        )?;
+        Ok(registration)
+    }
+
     /// Disable (or re-enable) a skill. Viva state only — the SKILL.md
     /// file on disk is untouched.
     pub fn set_skill_enabled(&self, skill_id: &str, enabled: bool) -> Result<()> {
