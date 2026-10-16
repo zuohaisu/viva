@@ -4,11 +4,19 @@
 //! Legacy Hermes rows stay in `memory_links` as `legacy_hermes` and never
 //! participate in retrieval (#131 removed the Python Hermes adapter).
 
+mod admission;
+mod curation;
 mod entity;
 mod hash;
 pub mod hrr;
 pub mod migrate;
+pub mod migrate_v4;
+mod recall;
 mod retrieval;
+
+pub use admission::{AdmissionDecision, AdmissionHints, evaluate_admission};
+pub use curation::{CurationOutcome, SessionTurn, proposals_from_turns};
+pub use recall::{FactLifecycle, KnowledgeKind, LinkScope, RecallFilter};
 
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -35,6 +43,12 @@ pub fn register_migrations(registry: MigrationRegistry) -> MigrationRegistry {
             3,
             "memory v3 native facts fts hrr",
             migrate::apply_memory_v3,
+        )
+        .register_fn(
+            DOMAIN_MEMORY,
+            4,
+            "memory v4 curation candidates lifecycle",
+            migrate_v4::apply_memory_v4,
         )
 }
 
@@ -113,11 +127,21 @@ pub struct MemoryLink {
     pub storage_origin: StorageOrigin,
     pub member_id: MemberId,
     pub project_id: Option<ProjectId>,
+    pub link_scope: LinkScope,
     pub source: String,
     pub status: LinkStatus,
     pub created_at: String,
     pub archived_at: Option<String>,
     pub archived_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RememberResult {
+    pub candidate_id: String,
+    pub candidate_status: String,
+    pub decision: Option<AdmissionDecision>,
+    pub link: Option<MemoryLink>,
+    pub fact_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,11 +163,14 @@ impl LinkStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecalledFact {
     pub fact_id: String,
+    pub summary: String,
     pub content: String,
     pub score: f64,
     pub trust: f64,
     pub member_id: MemberId,
     pub project_id: Option<ProjectId>,
+    pub knowledge_kind: String,
+    pub lifecycle_status: String,
     pub source: String,
 }
 
@@ -209,6 +236,8 @@ impl<'a> MemoryService<'a> {
         }))
     }
 
+    /// Creates a `proposed` candidate only (issue #116). Call [`Self::admit_candidate`]
+    /// to run the admission gate and materialize an admitted fact.
     pub fn remember(
         &self,
         member: &MemberId,
@@ -217,7 +246,35 @@ impl<'a> MemoryService<'a> {
         source: &str,
         category: &str,
         tags: &str,
-    ) -> Result<MemoryLink> {
+    ) -> Result<RememberResult> {
+        self.remember_with_options(
+            member,
+            project,
+            content,
+            source,
+            category,
+            tags,
+            KnowledgeKind::PersonalMemory,
+            false,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn remember_with_options(
+        &self,
+        member: &MemberId,
+        project: Option<&ProjectId>,
+        content: &str,
+        source: &str,
+        category: &str,
+        tags: &str,
+        kind: KnowledgeKind,
+        explicit_emphasis: bool,
+        provenance_json: Option<&str>,
+        summary: Option<&str>,
+    ) -> Result<RememberResult> {
         if content.trim().is_empty() {
             return Err(Error::Validation("memory content must not be empty".into()));
         }
@@ -227,15 +284,83 @@ impl<'a> MemoryService<'a> {
                     .into(),
             ));
         }
-        let hash = hash::content_hash(content);
-        if let Some(existing_id) = self.fact_id_for_hash(&hash)? {
-            return self.ensure_native_link(existing_id, member, project, source);
+        if matches!(kind, KnowledgeKind::ProjectKnowledge) && project.is_none() {
+            return Err(Error::Validation(
+                "project_knowledge requires --project".into(),
+            ));
         }
+
+        let summary = summary
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| content.chars().take(160).collect());
+        let provenance = provenance_json.unwrap_or("{}");
+        let v4 = self.memory_v4_enabled()?;
+        let candidate_id = format!("mc-{}", uuid::Uuid::new_v4().simple());
+        let now = utc_now();
+
+        if v4 {
+            let hints_json = serde_json::json!({
+                "explicit_emphasis": explicit_emphasis,
+                "category": category,
+                "tags": tags,
+            })
+            .to_string();
+            self.store.connection().execute(
+                "INSERT INTO memory_candidates(candidate_id, member_id, project_id, knowledge_kind,
+                    summary, content, source, provenance_json, status, admission_json,
+                    fact_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'proposed', ?9, NULL, ?10, ?10)",
+                rusqlite::params![
+                    candidate_id,
+                    member.as_str(),
+                    project.map(|p| p.as_str()),
+                    kind.as_str(),
+                    summary,
+                    content,
+                    source,
+                    provenance,
+                    hints_json,
+                    now,
+                ],
+            )?;
+            return Ok(RememberResult {
+                candidate_id,
+                candidate_status: "proposed".into(),
+                decision: None,
+                link: None,
+                fact_id: None,
+            });
+        }
+
+        // Pre-v4 stores: direct write (no candidate ledger).
+        let hash = hash::content_hash(content);
+        let link_scope = kind.link_scope();
+        if let Some(existing_id) = self.fact_id_for_hash(&hash)? {
+            let link = self.ensure_native_link_scoped(
+                existing_id.clone(),
+                member,
+                project,
+                source,
+                link_scope,
+                kind,
+            )?;
+            return Ok(RememberResult {
+                candidate_id,
+                candidate_status: "admitted".into(),
+                decision: Some(AdmissionDecision::Admit {
+                    signals: vec![admission::AdmissionSignal::Emphasis],
+                }),
+                fact_id: Some(existing_id),
+                link: Some(link),
+            });
+        }
+
         let fact_id = format!("nf-{}", uuid::Uuid::new_v4().simple());
         let entities = entity::extract_entities(content);
         let vector = hrr::encode_fact(content, &entities, HRR_DIM);
         let blob = hrr::phases_to_bytes(&vector, HRR_DIM);
-        let now = utc_now();
         let conn = self.store.connection();
         conn.execute(
             "INSERT INTO memory_facts(fact_id, content, content_hash, category, tags,
@@ -244,7 +369,147 @@ impl<'a> MemoryService<'a> {
             rusqlite::params![fact_id, content, hash, category, tags, now, blob],
         )?;
         self.attach_entities(&fact_id, &entities, &now)?;
-        self.insert_native_link(&fact_id, member, project, source)
+        let link = self.insert_native_link_scoped(&fact_id, member, project, source, link_scope)?;
+        Ok(RememberResult {
+            candidate_id,
+            candidate_status: "admitted".into(),
+            decision: Some(AdmissionDecision::Admit {
+                signals: vec![admission::AdmissionSignal::Emphasis],
+            }),
+            fact_id: Some(fact_id),
+            link: Some(link),
+        })
+    }
+
+    /// Run the admission gate on a `proposed` candidate and materialize facts when admitted.
+    pub fn admit_candidate(&self, candidate_id: &str) -> Result<RememberResult> {
+        if !self.memory_v4_enabled()? {
+            return Err(Error::Validation(
+                "admit_candidate requires memory v4 schema".into(),
+            ));
+        }
+        let row = self.load_proposed_candidate(candidate_id)?;
+        let hints_value: serde_json::Value =
+            serde_json::from_str(&row.hints_json).unwrap_or(json!({}));
+        let explicit_emphasis = hints_value
+            .get("explicit_emphasis")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let category = hints_value
+            .get("category")
+            .and_then(|v| v.as_str())
+            .unwrap_or("general");
+        let tags = hints_value
+            .get("tags")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let similar = self.count_similar_candidates_for_member(&row.content, &row.member_id)?;
+        let decision = evaluate_admission(
+            &row.content,
+            &row.source,
+            AdmissionHints {
+                explicit_emphasis,
+                similar_prior_count: similar,
+                marked_surprise: false,
+            },
+        );
+
+        let (status, admission_json) = match &decision {
+            AdmissionDecision::Admit { signals } => (
+                "admitted",
+                serde_json::to_string(signals).unwrap_or_else(|_| "[]".into()),
+            ),
+            AdmissionDecision::Reject { reasons } => (
+                "rejected",
+                serde_json::to_string(reasons).unwrap_or_else(|_| "[]".into()),
+            ),
+        };
+
+        if let AdmissionDecision::Reject { .. } = decision {
+            self.store.connection().execute(
+                "UPDATE memory_candidates SET status = ?2, admission_json = ?3, updated_at = ?4
+                 WHERE candidate_id = ?1",
+                rusqlite::params![candidate_id, status, admission_json, utc_now()],
+            )?;
+            return Ok(RememberResult {
+                candidate_id: candidate_id.to_string(),
+                candidate_status: status.to_string(),
+                decision: Some(decision),
+                link: None,
+                fact_id: None,
+            });
+        }
+
+        let member = row.member_id;
+        let project = row.project_id.as_ref();
+        let kind = row.kind;
+        let hash = hash::content_hash(&row.content);
+        let link_scope = kind.link_scope();
+        let now = utc_now();
+
+        let (fact_id, link) = if let Some(existing_id) = self.fact_id_for_hash(&hash)? {
+            let link = self.ensure_native_link_scoped(
+                existing_id.clone(),
+                &member,
+                project,
+                &row.source,
+                link_scope,
+                kind,
+            )?;
+            if link.link_scope == link_scope {
+                self.upgrade_fact_kind(&existing_id, kind)?;
+            }
+            (existing_id, link)
+        } else {
+            let fact_id = format!("nf-{}", uuid::Uuid::new_v4().simple());
+            let entities = entity::extract_entities(&row.content);
+            let vector = hrr::encode_fact(&row.content, &entities, HRR_DIM);
+            let blob = hrr::phases_to_bytes(&vector, HRR_DIM);
+            self.store.connection().execute(
+                "INSERT INTO memory_facts(fact_id, content, content_hash, category, tags,
+                    trust_score, created_at, updated_at, hrr_vector, summary, knowledge_kind,
+                    lifecycle_status, importance_reason, provenance_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1.0, ?6, ?6, ?7, ?8, ?9, 'active', ?10, ?11)",
+                rusqlite::params![
+                    fact_id,
+                    row.content,
+                    hash,
+                    category,
+                    tags,
+                    now,
+                    blob,
+                    row.summary,
+                    kind.as_str(),
+                    admission_json,
+                    row.provenance_json,
+                ],
+            )?;
+            self.attach_entities(&fact_id, &entities, &now)?;
+            let link = self.insert_native_link_scoped(
+                &fact_id,
+                &member,
+                project,
+                &row.source,
+                link_scope,
+            )?;
+            (fact_id, link)
+        };
+
+        self.store.connection().execute(
+            "UPDATE memory_candidates SET status = 'admitted', admission_json = ?2,
+                    fact_id = ?3, updated_at = ?4
+             WHERE candidate_id = ?1",
+            rusqlite::params![candidate_id, admission_json, fact_id, utc_now()],
+        )?;
+
+        Ok(RememberResult {
+            candidate_id: candidate_id.to_string(),
+            candidate_status: "admitted".into(),
+            decision: Some(decision),
+            fact_id: Some(fact_id),
+            link: Some(link),
+        })
     }
 
     pub fn link_fact(
@@ -291,15 +556,32 @@ impl<'a> MemoryService<'a> {
         query: &str,
         max_total_bytes: usize,
     ) -> Result<MemorySearch> {
+        self.search_filtered(
+            viewer,
+            project,
+            query,
+            max_total_bytes,
+            &RecallFilter::personal_member(),
+        )
+    }
+
+    pub fn search_filtered(
+        &self,
+        viewer: &MemberId,
+        project: Option<&ProjectId>,
+        query: &str,
+        max_total_bytes: usize,
+        filter: &RecallFilter,
+    ) -> Result<MemorySearch> {
         if query.trim().is_empty() {
             return Err(Error::Validation(
                 "memory search query must not be empty".into(),
             ));
         }
         let limit = 25usize;
-        let candidates = self.scoped_candidates(viewer, project, query, limit * 3)?;
+        let candidates = self.scoped_candidates(viewer, project, query, limit * 3, filter)?;
         let ranked = retrieval::rerank(query, candidates, limit);
-        self.pack_recall(viewer, project, query, ranked, max_total_bytes)
+        self.pack_recall(viewer, project, ranked, max_total_bytes, filter)
     }
 
     pub fn probe(
@@ -314,7 +596,8 @@ impl<'a> MemoryService<'a> {
                 "memory probe entity must not be empty".into(),
             ));
         }
-        let scoped = self.scoped_fact_rows(viewer, project)?;
+        let filter = RecallFilter::personal_member();
+        let scoped = self.scoped_fact_rows(viewer, project, &filter)?;
         let mut scored: Vec<(retrieval::CandidateFact, f64)> = Vec::new();
         for row in scoped {
             if let Some(sim) = retrieval::probe_score(entity, &row) {
@@ -331,7 +614,28 @@ impl<'a> MemoryService<'a> {
                 (c, score)
             })
             .collect();
-        self.pack_recall(viewer, project, entity, ranked, max_total_bytes)
+        self.pack_recall(viewer, project, ranked, max_total_bytes, &filter)
+    }
+
+    /// Record real execution usage (`used_in`); retrieval alone must not write this.
+    pub fn record_execution_usage(
+        &self,
+        fact_id: &str,
+        member: &MemberId,
+        execution_id: &str,
+        note: &str,
+    ) -> Result<()> {
+        if !self.memory_v4_enabled()? {
+            return Err(Error::Validation(
+                "execution usage requires memory v4 schema".into(),
+            ));
+        }
+        self.store.connection().execute(
+            "INSERT INTO memory_execution_usages(fact_ref, member_id, execution_id, note, used_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![fact_id, member.as_str(), execution_id, note, utc_now()],
+        )?;
+        Ok(())
     }
 
     pub fn archive(
@@ -418,6 +722,21 @@ impl<'a> MemoryService<'a> {
     }
 
     pub fn link_for(&self, fact_id: &str, member: &MemberId) -> Result<Option<MemoryLink>> {
+        if self.memory_v4_enabled()? {
+            let mut stmt = self.store.connection().prepare(
+                "SELECT link_id, fact_ref, storage_origin, member_id, project_id,
+                        COALESCE(link_scope, 'personal'), source, status,
+                        created_at, archived_at, archived_reason
+                 FROM memory_links WHERE fact_ref = ?1 AND member_id = ?2
+                 ORDER BY CASE storage_origin WHEN 'native' THEN 0 ELSE 1 END LIMIT 1",
+            )?;
+            let row = stmt
+                .query_row(rusqlite::params![fact_id, member.as_str()], |row| {
+                    parse_link_row_scoped(row)
+                })
+                .optional()?;
+            return Ok(row);
+        }
         let mut stmt = self.store.connection().prepare(
             "SELECT link_id, fact_ref, storage_origin, member_id, project_id, source, status,
                     created_at, archived_at, archived_reason
@@ -460,20 +779,44 @@ impl<'a> MemoryService<'a> {
         &self,
         viewer: &MemberId,
         project: Option<&ProjectId>,
-        query: &str,
         ranked: Vec<(retrieval::CandidateFact, f64)>,
         max_total_bytes: usize,
+        filter: &RecallFilter,
     ) -> Result<MemorySearch> {
         let mut facts = Vec::new();
         let mut used_bytes = 0usize;
         for (hit, score) in ranked {
-            let Some(link) = self.link_for(&hit.fact_id, viewer)? else {
+            let link = self.best_link_for_recall(&hit.fact_id, viewer, project, filter)?;
+            let Some(link) = link else {
                 continue;
             };
-            if link.status != LinkStatus::Active || link.project_id != project.cloned() {
+            if link.status != LinkStatus::Active {
+                continue;
+            }
+            if link.link_scope == LinkScope::Personal && link.project_id != project.cloned() {
                 continue;
             }
             if link.storage_origin != StorageOrigin::Native {
+                continue;
+            }
+            if !recall::scope_allowed(
+                filter,
+                link.link_scope,
+                viewer,
+                &link.member_id,
+                project,
+                link.project_id.as_ref(),
+            ) {
+                continue;
+            }
+            let lifecycle = FactLifecycle::parse(&hit.lifecycle_status);
+            if lifecycle == FactLifecycle::Superseded && !filter.include_superseded {
+                continue;
+            }
+            if lifecycle == FactLifecycle::Retracted && !filter.include_retracted {
+                continue;
+            }
+            if lifecycle == FactLifecycle::Archived {
                 continue;
             }
             let size = hit.content.len();
@@ -481,14 +824,16 @@ impl<'a> MemoryService<'a> {
                 continue;
             }
             used_bytes += size;
-            self.record_usage(&hit.fact_id, viewer, query)?;
             facts.push(RecalledFact {
                 fact_id: hit.fact_id,
+                summary: hit.summary.clone(),
                 content: hit.content,
                 score,
                 trust: hit.trust_score,
                 member_id: link.member_id,
                 project_id: link.project_id,
+                knowledge_kind: hit.knowledge_kind.clone(),
+                lifecycle_status: hit.lifecycle_status.clone(),
                 source: link.source,
             });
         }
@@ -504,8 +849,9 @@ impl<'a> MemoryService<'a> {
         project: Option<&ProjectId>,
         query: &str,
         candidate_limit: usize,
+        filter: &RecallFilter,
     ) -> Result<Vec<retrieval::CandidateFact>> {
-        let scoped = self.scoped_fact_rows(viewer, project)?;
+        let scoped = self.scoped_fact_rows(viewer, project, filter)?;
         if scoped.is_empty() {
             return Ok(Vec::new());
         }
@@ -553,6 +899,9 @@ impl<'a> MemoryService<'a> {
                         trust_score: row.get(4)?,
                         hrr_vector: row.get(5)?,
                         fts_rank: 0.0,
+                        summary: String::new(),
+                        knowledge_kind: "personal_memory".into(),
+                        lifecycle_status: "active".into(),
                     },
                     rank.abs(),
                 ))
@@ -564,8 +913,17 @@ impl<'a> MemoryService<'a> {
                 }
                 if !out.is_empty() {
                     let max_rank = raw_ranks.iter().copied().fold(1e-6f64, f64::max);
+                    let meta: std::collections::HashMap<_, _> = scoped
+                        .iter()
+                        .map(|f| (f.fact_id.clone(), f.clone()))
+                        .collect();
                     for (c, r) in out.iter_mut().zip(raw_ranks.iter()) {
                         c.fts_rank = r / max_rank;
+                        if let Some(full) = meta.get(&c.fact_id) {
+                            c.summary = full.summary.clone();
+                            c.knowledge_kind = full.knowledge_kind.clone();
+                            c.lifecycle_status = full.lifecycle_status.clone();
+                        }
                     }
                     out.truncate(candidate_limit);
                     return Ok(out);
@@ -589,26 +947,231 @@ impl<'a> MemoryService<'a> {
         &self,
         viewer: &MemberId,
         project: Option<&ProjectId>,
+        filter: &RecallFilter,
     ) -> Result<Vec<retrieval::CandidateFact>> {
-        let project_clause = if project.is_some() {
-            " AND l.project_id = ?2 "
+        if !self.memory_v4_enabled()? {
+            let project_clause = if project.is_some() {
+                " AND l.project_id = ?2 "
+            } else {
+                " AND l.project_id IS NULL "
+            };
+            let sql = format!(
+                "SELECT f.fact_id, f.content, f.category, f.tags, f.trust_score, f.hrr_vector
+                 FROM memory_links l
+                 JOIN memory_facts f ON f.fact_id = l.fact_ref
+                 WHERE l.member_id = ?1 AND l.status = 'active' AND l.storage_origin = 'native'
+                 {project_clause}"
+            );
+            let mut stmt = self.store.connection().prepare(&sql)?;
+            let rows = if let Some(p) = project {
+                stmt.query_map(rusqlite::params![viewer.as_str(), p.as_str()], map_fact_row)?
+            } else {
+                stmt.query_map([viewer.as_str()], map_fact_row)?
+            };
+            return rows.collect::<Result<Vec<_>, _>>().map_err(Into::into);
+        }
+
+        let mut allowed_ids: Vec<String> = Vec::new();
+        let mut stmt = self.store.connection().prepare(
+            "SELECT l.link_id, l.fact_ref, l.storage_origin, l.member_id, l.project_id,
+                    COALESCE(l.link_scope, 'personal'), l.source, l.status,
+                    l.created_at, l.archived_at, l.archived_reason
+             FROM memory_links l
+             WHERE l.status = 'active' AND l.storage_origin = 'native'",
+        )?;
+        let rows = stmt.query_map([], parse_link_row_scoped)?;
+        for link in rows.flatten() {
+            if recall::scope_allowed(
+                filter,
+                link.link_scope,
+                viewer,
+                &link.member_id,
+                project,
+                link.project_id.as_ref(),
+            ) {
+                allowed_ids.push(link.fact_id);
+            }
+        }
+        allowed_ids.sort();
+        allowed_ids.dedup();
+        if allowed_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = allowed_ids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let lifecycle_clause = if filter.include_superseded {
+            "f.lifecycle_status IN ('active', 'superseded')"
         } else {
-            " AND l.project_id IS NULL "
+            "f.lifecycle_status = 'active'"
         };
         let sql = format!(
-            "SELECT f.fact_id, f.content, f.category, f.tags, f.trust_score, f.hrr_vector
-             FROM memory_links l
-             JOIN memory_facts f ON f.fact_id = l.fact_ref
-             WHERE l.member_id = ?1 AND l.status = 'active' AND l.storage_origin = 'native'
-             {project_clause}"
+            "SELECT f.fact_id, f.content, f.category, f.tags, f.trust_score, f.hrr_vector,
+                    COALESCE(f.summary, ''), COALESCE(f.knowledge_kind, 'personal_memory'),
+                    COALESCE(f.lifecycle_status, 'active')
+             FROM memory_facts f
+             WHERE f.fact_id IN ({placeholders}) AND {lifecycle_clause}"
         );
         let mut stmt = self.store.connection().prepare(&sql)?;
-        let rows = if let Some(p) = project {
-            stmt.query_map(rusqlite::params![viewer.as_str(), p.as_str()], map_fact_row)?
-        } else {
-            stmt.query_map([viewer.as_str()], map_fact_row)?
-        };
+        let param_refs: Vec<&dyn rusqlite::ToSql> = allowed_ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::ToSql)
+            .collect();
+        let rows = stmt.query_map(param_refs.as_slice(), map_fact_row_v4)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    fn memory_v4_enabled(&self) -> Result<bool> {
+        let n: i64 = self.store.connection().query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'memory_candidates'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    fn count_similar_candidates_for_member(
+        &self,
+        content: &str,
+        member: &MemberId,
+    ) -> Result<usize> {
+        if !self.memory_v4_enabled()? {
+            return Ok(0);
+        }
+        let needle = content.chars().take(80).collect::<String>().to_lowercase();
+        if needle.len() < 20 {
+            return Ok(0);
+        }
+        let mut stmt = self.store.connection().prepare(
+            "SELECT content FROM memory_candidates
+             WHERE member_id = ?1 AND status IN ('proposed', 'admitted')",
+        )?;
+        let rows = stmt.query_map([member.as_str()], |row| row.get::<_, String>(0))?;
+        let mut count = 0usize;
+        for row in rows.flatten() {
+            if row.to_lowercase().contains(&needle) {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    fn load_proposed_candidate(&self, candidate_id: &str) -> Result<ProposedCandidate> {
+        let mut stmt = self.store.connection().prepare(
+            "SELECT candidate_id, member_id, project_id, knowledge_kind, summary, content,
+                    source, provenance_json, admission_json
+             FROM memory_candidates
+             WHERE candidate_id = ?1 AND status = 'proposed'",
+        )?;
+        stmt.query_row([candidate_id], |row| {
+            use std::str::FromStr as _;
+            let member: String = row.get(1)?;
+            let project: Option<String> = row.get(2)?;
+            let kind: String = row.get(3)?;
+            Ok(ProposedCandidate {
+                member_id: MemberId::from_str(&member).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?,
+                project_id: project
+                    .as_deref()
+                    .map(ProjectId::from_str)
+                    .transpose()
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?,
+                kind: KnowledgeKind::parse(&kind),
+                summary: row.get(4)?,
+                content: row.get(5)?,
+                source: row.get(6)?,
+                provenance_json: row.get(7)?,
+                hints_json: row.get(8)?,
+            })
+        })
+        .map_err(|_| Error::NotFound {
+            entity: "proposed memory candidate",
+            id: candidate_id.to_string(),
+        })
+    }
+
+    fn upgrade_fact_kind(&self, fact_id: &str, kind: KnowledgeKind) -> Result<()> {
+        if !self.memory_v4_enabled()? {
+            return Ok(());
+        }
+        self.store.connection().execute(
+            "UPDATE memory_facts SET knowledge_kind = ?2, updated_at = ?3 WHERE fact_id = ?1",
+            rusqlite::params![fact_id, kind.as_str(), utc_now()],
+        )?;
+        Ok(())
+    }
+
+    fn link_scope_rank(scope: LinkScope) -> u8 {
+        match scope {
+            LinkScope::Personal => 0,
+            LinkScope::Project => 1,
+            LinkScope::Team => 2,
+        }
+    }
+
+    fn best_link_for_recall(
+        &self,
+        fact_id: &str,
+        viewer: &MemberId,
+        project: Option<&ProjectId>,
+        filter: &RecallFilter,
+    ) -> Result<Option<MemoryLink>> {
+        let mut links = Vec::new();
+        if self.memory_v4_enabled()? {
+            let mut stmt = self.store.connection().prepare(
+                "SELECT link_id, fact_ref, storage_origin, member_id, project_id,
+                        COALESCE(link_scope, 'personal'), source, status,
+                        created_at, archived_at, archived_reason
+                 FROM memory_links
+                 WHERE fact_ref = ?1 AND storage_origin = 'native' AND status = 'active'",
+            )?;
+            for link in stmt.query_map([fact_id], parse_link_row_scoped)? {
+                links.push(link?);
+            }
+        } else {
+            let mut stmt = self.store.connection().prepare(
+                "SELECT link_id, fact_ref, storage_origin, member_id, project_id, source, status,
+                        created_at, archived_at, archived_reason
+                 FROM memory_links
+                 WHERE fact_ref = ?1 AND storage_origin = 'native' AND status = 'active'",
+            )?;
+            for link in stmt.query_map([fact_id], parse_link_row)? {
+                links.push(link?);
+            }
+        }
+        let mut best: Option<MemoryLink> = None;
+        for link in links {
+            if !recall::scope_allowed(
+                filter,
+                link.link_scope,
+                viewer,
+                &link.member_id,
+                project,
+                link.project_id.as_ref(),
+            ) {
+                continue;
+            }
+            let stop = link.link_scope == LinkScope::Personal && link.member_id == *viewer;
+            best = Some(link);
+            if stop {
+                break;
+            }
+        }
+        Ok(best)
     }
 
     fn fact_id_for_hash(&self, hash: &str) -> Result<Option<String>> {
@@ -647,12 +1210,14 @@ impl<'a> MemoryService<'a> {
         Ok(false)
     }
 
-    fn ensure_native_link(
+    fn ensure_native_link_scoped(
         &self,
         fact_id: String,
         member: &MemberId,
         project: Option<&ProjectId>,
         source: &str,
+        link_scope: LinkScope,
+        kind: KnowledgeKind,
     ) -> Result<MemoryLink> {
         if let Some(existing) = self.link_for(&fact_id, member)? {
             if existing.storage_origin == StorageOrigin::Native {
@@ -661,10 +1226,30 @@ impl<'a> MemoryService<'a> {
                         "memory link project does not match the existing association".into(),
                     ));
                 }
-                return Ok(existing);
+                if existing.link_scope == link_scope {
+                    return Ok(existing);
+                }
+                if Self::link_scope_rank(link_scope) > Self::link_scope_rank(existing.link_scope) {
+                    self.store.connection().execute(
+                        "UPDATE memory_links SET link_scope = ?3
+                         WHERE fact_ref = ?1 AND member_id = ?2 AND storage_origin = 'native'",
+                        rusqlite::params![fact_id, member.as_str(), link_scope.as_str(),],
+                    )?;
+                    self.upgrade_fact_kind(&fact_id, kind)?;
+                    return self
+                        .link_for(&fact_id, member)?
+                        .ok_or_else(|| Error::NotFound {
+                            entity: "memory link",
+                            id: fact_id.to_string(),
+                        });
+                }
+                return Err(Error::Validation(format!(
+                    "memory link scope {:?} cannot be narrowed to {:?}; archive the existing link first",
+                    existing.link_scope, link_scope
+                )));
             }
         }
-        self.insert_native_link(&fact_id, member, project, source)
+        self.insert_native_link_scoped(&fact_id, member, project, source, link_scope)
     }
 
     fn insert_native_link(
@@ -674,33 +1259,64 @@ impl<'a> MemoryService<'a> {
         project: Option<&ProjectId>,
         source: &str,
     ) -> Result<MemoryLink> {
+        self.insert_native_link_scoped(fact_id, member, project, source, LinkScope::Personal)
+    }
+
+    fn insert_native_link_scoped(
+        &self,
+        fact_id: &str,
+        member: &MemberId,
+        project: Option<&ProjectId>,
+        source: &str,
+        link_scope: LinkScope,
+    ) -> Result<MemoryLink> {
         let link = MemoryLink {
             link_id: format!("mlink-{}", uuid::Uuid::new_v4().simple()),
             fact_id: fact_id.to_string(),
             storage_origin: StorageOrigin::Native,
             member_id: member.clone(),
             project_id: project.cloned(),
+            link_scope,
             source: source.to_string(),
             status: LinkStatus::Active,
             created_at: utc_now(),
             archived_at: None,
             archived_reason: None,
         };
-        self.store.connection().execute(
-            "INSERT INTO memory_links(link_id, fact_ref, storage_origin, member_id, project_id,
-                                       source, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![
-                link.link_id,
-                link.fact_id,
-                link.storage_origin.as_str(),
-                link.member_id.as_str(),
-                link.project_id.as_ref().map(|p| p.as_str()),
-                link.source,
-                link.status.as_str(),
-                link.created_at,
-            ],
-        )?;
+        if self.memory_v4_enabled()? {
+            self.store.connection().execute(
+                "INSERT INTO memory_links(link_id, fact_ref, storage_origin, member_id, project_id,
+                    link_scope, source, status, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                rusqlite::params![
+                    link.link_id,
+                    link.fact_id,
+                    link.storage_origin.as_str(),
+                    link.member_id.as_str(),
+                    link.project_id.as_ref().map(|p| p.as_str()),
+                    link.link_scope.as_str(),
+                    link.source,
+                    link.status.as_str(),
+                    link.created_at,
+                ],
+            )?;
+        } else {
+            self.store.connection().execute(
+                "INSERT INTO memory_links(link_id, fact_ref, storage_origin, member_id, project_id,
+                                           source, status, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    link.link_id,
+                    link.fact_id,
+                    link.storage_origin.as_str(),
+                    link.member_id.as_str(),
+                    link.project_id.as_ref().map(|p| p.as_str()),
+                    link.source,
+                    link.status.as_str(),
+                    link.created_at,
+                ],
+            )?;
+        }
         Ok(link)
     }
 
@@ -730,15 +1346,17 @@ impl<'a> MemoryService<'a> {
         }
         Ok(())
     }
+}
 
-    fn record_usage(&self, fact_id: &str, member: &MemberId, query: &str) -> Result<()> {
-        self.store.connection().execute(
-            "INSERT INTO memory_usages(fact_ref, member_id, query, used_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![fact_id, member.as_str(), query, utc_now()],
-        )?;
-        Ok(())
-    }
+struct ProposedCandidate {
+    member_id: MemberId,
+    project_id: Option<ProjectId>,
+    kind: KnowledgeKind,
+    summary: String,
+    content: String,
+    source: String,
+    provenance_json: String,
+    hints_json: String,
 }
 
 fn map_fact_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<retrieval::CandidateFact> {
@@ -750,14 +1368,45 @@ fn map_fact_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<retrieval::Candidat
         trust_score: row.get(4)?,
         hrr_vector: row.get(5)?,
         fts_rank: 0.0,
+        summary: String::new(),
+        knowledge_kind: "personal_memory".into(),
+        lifecycle_status: "active".into(),
+    })
+}
+
+fn map_fact_row_v4(row: &rusqlite::Row<'_>) -> rusqlite::Result<retrieval::CandidateFact> {
+    Ok(retrieval::CandidateFact {
+        fact_id: row.get(0)?,
+        content: row.get(1)?,
+        category: row.get(2)?,
+        tags: row.get(3)?,
+        trust_score: row.get(4)?,
+        hrr_vector: row.get(5)?,
+        fts_rank: 0.0,
+        summary: row.get(6)?,
+        knowledge_kind: row.get(7)?,
+        lifecycle_status: row.get(8)?,
     })
 }
 
 fn parse_link_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryLink> {
+    parse_link_fields(row, false)
+}
+
+fn parse_link_row_scoped(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryLink> {
+    parse_link_fields(row, true)
+}
+
+fn parse_link_fields(row: &rusqlite::Row<'_>, scoped: bool) -> rusqlite::Result<MemoryLink> {
     use std::str::FromStr as _;
     let member: String = row.get(3)?;
     let project: Option<String> = row.get(4)?;
-    let status: String = row.get(6)?;
+    let (link_scope, source_idx, status_idx, created_idx) = if scoped {
+        (LinkScope::parse(row.get::<_, String>(5)?.as_str()), 6, 7, 8)
+    } else {
+        (LinkScope::Personal, 5, 6, 7)
+    };
+    let status: String = row.get(status_idx)?;
     let origin: String = row.get(2)?;
     Ok(MemoryLink {
         link_id: row.get(0)?,
@@ -777,15 +1426,16 @@ fn parse_link_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryLink> {
                     Box::new(e),
                 )
             })?,
-        source: row.get(5)?,
+        link_scope,
+        source: row.get(source_idx)?,
         status: match status.as_str() {
             "active" => LinkStatus::Active,
             "archived" => LinkStatus::Archived,
             other => panic!("memory_links.status holds `{other}`"),
         },
-        created_at: row.get(7)?,
-        archived_at: row.get(8)?,
-        archived_reason: row.get(9)?,
+        created_at: row.get(created_idx)?,
+        archived_at: row.get(created_idx + 1)?,
+        archived_reason: row.get(created_idx + 2)?,
     })
 }
 
@@ -802,6 +1452,7 @@ mod tests {
             .register(DOMAIN_MEMORY, 1, "memory v1", MEMORY_V1_SQL)
             .register(DOMAIN_MEMORY, 2, "memory v2", MEMORY_V2_SQL)
             .register_fn(DOMAIN_MEMORY, 3, "memory v3", migrate::apply_memory_v3)
+            .register_fn(DOMAIN_MEMORY, 4, "memory v4", migrate_v4::apply_memory_v4)
             .register(
                 DOMAIN_AUTHORITY,
                 1,
@@ -811,6 +1462,23 @@ mod tests {
             .freeze()
             .expect("registry");
         Store::open_in_memory(&registry).expect("store")
+    }
+
+    fn remember_test(service: &MemoryService<'_>, member: &MemberId, content: &str) -> Result<()> {
+        let proposed = service.remember_with_options(
+            member,
+            None,
+            content,
+            "test",
+            "general",
+            "",
+            KnowledgeKind::PersonalMemory,
+            true,
+            None,
+            None,
+        )?;
+        service.admit_candidate(&proposed.candidate_id)?;
+        Ok(())
     }
 
     #[test]
@@ -841,16 +1509,12 @@ mod tests {
         let service = MemoryService::new(&store);
         let member = MemberId::new();
         for i in 0..5 {
-            service
-                .remember(
-                    &member,
-                    None,
-                    &format!("needle marker fact number {i} for scope test"),
-                    "src",
-                    "general",
-                    "",
-                )
-                .unwrap();
+            remember_test(
+                &service,
+                &member,
+                &format!("needle marker fact number {i} for scope test"),
+            )
+            .unwrap();
         }
         let result = service
             .search(&member, None, "needle marker", 64 * 1024)

@@ -83,6 +83,7 @@ fn run(args: &[String]) -> Result<()> {
         Some("tools") => cmd_tools(args.get(1..).unwrap_or(&[])),
         Some("memory") => cmd_memory(args.get(1..).unwrap_or(&[])),
         Some("morning") => cmd_morning(args.get(1..).unwrap_or(&[])),
+        Some("experience") => cmd_experience(args.get(1..).unwrap_or(&[])),
         Some("skill") => cmd_skill(args.get(1..).unwrap_or(&[])),
         Some("harness") => cmd_harness(args.get(1..).unwrap_or(&[])),
         Some("workflow") => cmd_workflow(args.get(1..).unwrap_or(&[])),
@@ -1069,6 +1070,32 @@ USAGE:
         manual). Rollback copies an older version forward; history stays.
         `get` and `project` read the current version for callbacks and
         member projection.
+
+    viva experience scan [--claude-root <dir>] [--codex-root <dir>] [--pi-root <dir>]
+        Read Claude Code, Codex, and Pi session files into experience.
+        Sessions linked to an execution are attributed to that execution's
+        member. Others stay unassigned. The same turn range imports once.
+        Roots default to ~/.claude/projects, ~/.codex/sessions, and
+        ~/.pi/agent/sessions (or $PI_CODING_AGENT_DIR/sessions).
+
+    viva experience list --member <id>
+        List that member's Claude Code, Codex, and Pi sessions. Another
+        member's sessions are not included.
+
+    viva experience show --member <id> --harness <claude-code|codex|pi>
+                         --session <id>
+        Read one session's turns back. A different member gets not-found.
+
+    viva experience unassigned
+        List sessions that are not attributed to any member.
+
+    viva experience assign --member <id> --harness <name> --session <id>
+        Haisu's classification import: attach an unassigned session to a
+        member. Does not copy it into knowledge.
+
+    viva experience link --execution <id> --harness <name> --session <id>
+        Record that a Viva execution owns this harness session. The member
+        is read from the execution, not from the transcript.
 
     viva memory search --member <id> [--project <id>] --query <text>
         Search the linked external memory for one member's scope
@@ -2389,6 +2416,96 @@ fn cmd_skill(args: &[String]) -> Result<()> {
     }
 }
 
+/// `viva experience …` — collect Claude Code, Codex, and Pi session turns
+/// into member-scoped experience. A scan never writes knowledge.
+fn cmd_experience(args: &[String]) -> Result<()> {
+    use std::collections::HashMap;
+    use std::str::FromStr as _;
+
+    let mut positionals = Vec::new();
+    let mut named: HashMap<String, String> = HashMap::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if let Some(key) = arg.strip_prefix("--") {
+            let value = args
+                .get(i + 1)
+                .cloned()
+                .ok_or_else(|| Error::Validation(format!("flag --{key} needs a value")))?;
+            named.insert(key.to_string(), value);
+            i += 2;
+        } else {
+            positionals.push(arg.clone());
+            i += 1;
+        }
+    }
+    let get = |key: &str| named.get(key).cloned();
+    let require = |key: &str| -> Result<String> {
+        get(key).ok_or_else(|| Error::Validation(format!("experience needs --{key}")))
+    };
+    let home = viva_home(None);
+    ensure_private_dir(&home)?;
+    let store = open_store()?;
+    let service = viva::experience::ExperienceService::new(&store, &home);
+    match positionals.first().map(String::as_str) {
+        Some("scan") => {
+            let mut roots = viva::experience::HarnessRoots::default_roots();
+            if let Some(path) = get("claude-root") {
+                roots.claude_projects = std::path::PathBuf::from(path);
+            }
+            if let Some(path) = get("codex-root") {
+                roots.codex_sessions = std::path::PathBuf::from(path);
+            }
+            if let Some(path) = get("pi-root") {
+                roots.pi_sessions = std::path::PathBuf::from(path);
+            }
+            let secrets = viva::experience::load_redaction_secrets(&home);
+            let report = service.scan(&roots, &secrets)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        Some("list") => {
+            let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
+            let sessions = service.list(&member)?;
+            println!("{}", serde_json::to_string_pretty(&sessions)?);
+            Ok(())
+        }
+        Some("show") => {
+            let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
+            let detail = service.show(&member, &require("harness")?, &require("session")?)?;
+            println!("{}", serde_json::to_string_pretty(&detail)?);
+            Ok(())
+        }
+        Some("unassigned") => {
+            let sessions = service.unassigned()?;
+            println!("{}", serde_json::to_string_pretty(&sessions)?);
+            Ok(())
+        }
+        Some("assign") => {
+            let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
+            let secrets = viva::experience::load_redaction_secrets(&home);
+            let session = service.assign(
+                &member,
+                &require("harness")?,
+                &require("session")?,
+                &secrets,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&session)?);
+            Ok(())
+        }
+        Some("link") => {
+            let execution = viva::foundation::ids::ExecutionId::from_str(&require("execution")?)?;
+            let linked =
+                service.link_execution(&execution, &require("harness")?, &require("session")?)?;
+            println!("{}", serde_json::to_string_pretty(&linked)?);
+            Ok(())
+        }
+        _ => Err(Error::Validation(
+            "experience needs scan | list | show | unassigned | assign | link".into(),
+        )),
+    }
+}
+
 /// `viva memory …` (F04) — Viva's namespace/audit layer over the
 /// real external memory. Search/remember/archive all go through the
 /// Viva link layer: member scoping, provenance, usage evidence, and
@@ -2398,9 +2515,15 @@ fn cmd_memory(args: &[String]) -> Result<()> {
     use std::str::FromStr as _;
 
     let mut named: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut bool_flags: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut i = 1; // args[0] is the subcommand
     while i < args.len() {
         let flag = args[i].as_str();
+        if flag == "--emphasis" {
+            bool_flags.insert(flag.to_string());
+            i += 1;
+            continue;
+        }
         i += 1;
         let value = args
             .get(i)
@@ -2413,6 +2536,7 @@ fn cmd_memory(args: &[String]) -> Result<()> {
     let require = |key: &str| -> Result<String> {
         get(key).ok_or_else(|| Error::Validation(format!("memory needs --{key}")))
     };
+    let emphasis = bool_flags.contains("--emphasis");
 
     let store = open_store()?;
     let service = viva::memory::MemoryService::new(&store);
@@ -2500,15 +2624,60 @@ fn cmd_memory(args: &[String]) -> Result<()> {
             let project = get("--project")
                 .map(|p| viva::foundation::ids::ProjectId::from_str(&p))
                 .transpose()?;
-            let link = service.remember(
+            let kind = match get("--kind").unwrap_or_else(|| "personal_memory".into()).as_str() {
+                "project_knowledge" => viva::memory::KnowledgeKind::ProjectKnowledge,
+                "team_knowledge" => viva::memory::KnowledgeKind::TeamKnowledge,
+                _ => viva::memory::KnowledgeKind::PersonalMemory,
+            };
+            let result = service.remember_with_options(
                 &member_id,
                 project.as_ref(),
                 &require("--content")?,
                 &require("--source")?,
                 &get("--category").unwrap_or_else(|| "general".into()),
                 &get("--tags").unwrap_or_default(),
+                kind,
+                emphasis,
+                get("--provenance").as_deref(),
+                get("--summary").as_deref(),
             )?;
-            println!("{}", serde_json::to_string_pretty(&link)?);
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+        Some("admit") => {
+            let result = service.admit_candidate(&require("--candidate")?)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+        Some("curate") => {
+            let member_id = viva::foundation::ids::MemberId::from_str(&require("--member")?)?;
+            let project = get("--project")
+                .map(|p| viva::foundation::ids::ProjectId::from_str(&p))
+                .transpose()?;
+            let path = require("--turns-file")?;
+            let raw = std::fs::read_to_string(&path)?;
+            let turns: Vec<viva::memory::SessionTurn> = serde_json::from_str(&raw)
+                .map_err(|e| Error::Validation(format!("turns-file JSON: {e}")))?;
+            let provenance = get("--provenance").unwrap_or_else(|| "{}".into());
+            let outcome = service.curate_session(
+                &member_id,
+                project.as_ref(),
+                &turns,
+                &provenance,
+                emphasis,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+            Ok(())
+        }
+        Some("record-use") => {
+            let member_id = viva::foundation::ids::MemberId::from_str(&require("--member")?)?;
+            service.record_execution_usage(
+                &require("--fact")?,
+                &member_id,
+                &require("--execution")?,
+                &get("--note").unwrap_or_default(),
+            )?;
+            println!("{}", serde_json::json!({ "ok": true }));
             Ok(())
         }
         Some(cmd @ ("archive" | "restore")) => {
@@ -2544,7 +2713,7 @@ fn cmd_memory(args: &[String]) -> Result<()> {
             Ok(())
         }
         _ => Err(Error::Validation(
-            "memory needs search | probe | link | remember | archive | restore | status".into(),
+            "memory needs search | probe | link | remember | admit | curate | record-use | archive | restore | status".into(),
         )),
     }
 }

@@ -1,0 +1,40 @@
+ ▝▝   ▝▝   <scratch>/cc
+
+
+❯ Run the shell command: sleep 5 && echo hi > out.txt
+
+● Bash(sleep 5 && echo hi > out.txt)
+  ⎿  Created out.txt (+1 -0)
+      1 +hi
+  ⎿  (files that changed while this command ran, by the command or by another process; a convenience view, not a review or audit of the
+     command)
+
+  Read 1 file
+
+● The command ran: it waited 5 seconds and then created out.txt containing hi. I opened the file afterward to confirm. It's in scratch/cc,
+  the current working directory.
+
+✻ Churned for 13s · done 8:46 AM
+
+❯ Run the shell command: curl -s https://example.com -o page.html
+
+● Downloading example.com homepage to page.html
+  ⎿  $ curl -s https://example.com -o page.html; echo "exit=$?"; ls -l page.html
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command
+ Tip: auto mode handles these prompts for you — choose "switch to auto mode" below
+ Download example.com homepage to page.html
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ curl -s https://example.com -o page.html; echo "exit=$?"; ls -l page.html
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ This command requires approval
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for curl -s https://example.com -o page.html and "echo \"exit=$?\"" commands in
+      <scratch>/cc
+   3. Yes, and switch to auto mode · auto mode handles these prompts for you
+   4. No
+
+ Esc to cancel · Tab to amend

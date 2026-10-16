@@ -13,6 +13,7 @@ pub mod agents;
 pub mod authority;
 pub mod conversations;
 pub mod coordinator;
+pub mod experience;
 pub mod foundation;
 pub mod git;
 pub mod harness;

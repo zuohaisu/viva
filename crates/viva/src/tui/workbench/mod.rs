@@ -338,6 +338,7 @@ impl WorkspacePrompt {
 const RECENT_LIMIT: usize = 8;
 
 const DEFAULT_STATUS_HINT: &str = "";
+const STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MenuAction {
@@ -428,6 +429,9 @@ pub struct WorkbenchApp {
     remote_terminal: Option<(String, String)>,
     diff_view: Option<String>,
     status_line: String,
+    /// When `status_line` was set; it shows for [`STATUS_TTL`] (herdr's
+    /// toasts expire too).
+    status_at: Option<std::time::Instant>,
     quit_requested: bool,
     /// Set by every pane-tree mutation; the run loop persists the layout
     /// to the server (QA F5) when it sees the flag.
@@ -474,6 +478,7 @@ pub struct WorkbenchApp {
     scenes: SceneBook,
     tab_prompt: Option<String>,
     tab_hits: Vec<(String, Rect)>,
+    new_tab_hit: Option<Rect>,
     terminal_picker: Option<usize>,
     global_attention: bool,
     sidebar_hits: Vec<(Focus, usize, Rect)>,
@@ -523,6 +528,7 @@ impl WorkbenchApp {
             remote_terminal: None,
             diff_view: None,
             status_line: DEFAULT_STATUS_HINT.into(),
+            status_at: None,
             quit_requested: false,
             layout_dirty: false,
             file_panel: None,
@@ -541,6 +547,7 @@ impl WorkbenchApp {
             scenes: SceneBook::default(),
             tab_prompt: None,
             tab_hits: vec![],
+            new_tab_hit: None,
             terminal_picker: None,
             global_attention: false,
             sidebar_hits: vec![],
@@ -710,6 +717,14 @@ impl WorkbenchApp {
 
     pub fn set_status(&mut self, line: impl Into<String>) {
         self.status_line = line.into();
+        self.status_at = Some(std::time::Instant::now());
+    }
+
+    /// The status message, while it is still fresh.
+    fn live_status(&self) -> Option<&str> {
+        let fresh =
+            self.prefix_pending || self.status_at.is_some_and(|at| at.elapsed() < STATUS_TTL);
+        (fresh && !self.status_line.is_empty()).then_some(self.status_line.as_str())
     }
 
     pub fn set_snapshot(&mut self, terminal_id: impl Into<String>, snapshot: TerminalSnapshot) {
@@ -864,14 +879,7 @@ impl WorkbenchApp {
         ) {
             return None;
         }
-        if self.file_panel.is_some()
-            || self.diff_view.is_some()
-            || self.handoff_picker.is_some()
-            || self.workspace_prompt.is_some()
-            || self.tab_prompt.is_some()
-            || self.terminal_picker.is_some()
-            || !matches!(self.drag, DragState::None)
-        {
+        if self.modal_open() || !matches!(self.drag, DragState::None) {
             return None;
         }
         let (id, rect) = self
@@ -1447,7 +1455,6 @@ impl WorkbenchApp {
         self.focus = Focus::Panes;
         self.remote_terminal = None;
         self.terminal_mode = Some(terminal_id.into());
-        self.status_line = "terminal · only the prefix key is intercepted".into();
     }
 
     pub fn leave_terminal_mode(&mut self) {
@@ -1455,7 +1462,6 @@ impl WorkbenchApp {
         self.remote_terminal = None;
         self.copy_mode = false;
         self.prefix_pending = false;
-        self.status_line = "terminal released".into();
     }
 
     /// While keyboard-forwarding is active, keep the PTY target aligned with
@@ -1807,18 +1813,30 @@ impl WorkbenchApp {
 
     fn nudge_split(&mut self, delta: i16, horizontal: bool) -> KeyOutcome {
         let area = self.last_pane_area.unwrap_or(PANE_REF_AREA);
+        // The innermost split on this axis that holds the focused pane.
+        let focused = self
+            .grid
+            .render_layout(area)
+            .into_iter()
+            .find(|(content, _)| *content == self.pane_focus)
+            .map(|(_, rect)| rect);
         let Some(hit) = self
             .grid
             .splits(area)
             .into_iter()
-            .find(|hit| horizontal == matches!(hit.axis, SplitAxis::Horizontal))
+            .filter(|hit| horizontal == matches!(hit.axis, SplitAxis::Horizontal))
+            .filter(|hit| focused.is_none_or(|rect| hit.area.intersection(rect) == rect))
+            .max_by_key(|hit| hit.path.len())
         else {
             return KeyOutcome::Ignored;
         };
-        let ratio = (hit.pos as i16).clamp(10, 90);
-        let _ = ratio;
-        let current = 50i16;
-        let next = (current + delta).clamp(10, 90) as u16;
+        let Some(current) = self.grid.ratio_at_path(&hit.path) else {
+            return KeyOutcome::Ignored;
+        };
+        let next = (current as i16 + delta).clamp(10, 90) as u16;
+        if next == current {
+            return KeyOutcome::Handled;
+        }
         if self.grid.set_ratio_at_path(&hit.path, next) {
             self.layout_dirty = true;
             self.queue_tree(crate::server::WorkbenchTreeOp::Resize {
@@ -2039,10 +2057,17 @@ impl WorkbenchApp {
                 return KeyOutcome::Handled;
             }
         }
-        if matches!(
-            self.focus,
-            Focus::Worktrees | Focus::Terminals | Focus::Tasks
-        ) {
+        // List movement takes plain keys only; Ctrl/Alt chords such as the
+        // retired Ctrl+Arrow are not UI actions.
+        let chord = key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        if !chord
+            && matches!(
+                self.focus,
+                Focus::Worktrees | Focus::Terminals | Focus::Tasks
+            )
+        {
             match key.code {
                 KeyCode::Down | KeyCode::Char('j') if self.row_count() > 0 => {
                     self.selected = (self.selected + 1).min(self.row_count() - 1);
@@ -2074,9 +2099,9 @@ impl WorkbenchApp {
         self.remote_terminal = Some((machine_id, terminal_id));
         self.copy_mode = false;
         self.prefix_pending = false;
-        self.status_line =
-            "remote terminal · keys go to that machine · this computer's socket is unchanged"
-                .into();
+        self.set_status(
+            "remote terminal · keys go to that machine · this computer's socket is unchanged",
+        );
     }
 
     fn row_count(&self) -> usize {
@@ -2258,7 +2283,7 @@ impl WorkbenchApp {
 
     /// Handle one key event.
     pub fn on_key(&mut self, key: KeyEvent) -> KeyOutcome {
-        use ratatui::crossterm::event::KeyEventKind;
+        use ratatui::crossterm::event::{KeyEventKind, KeyModifiers};
         // Releases never drive workbench shortcuts. In a terminal pane they
         // are forwarded only when the program asked for key-release events.
         if key.kind == KeyEventKind::Release {
@@ -2297,12 +2322,14 @@ impl WorkbenchApp {
             return KeyOutcome::Handled;
         }
         if let Some(text) = &mut self.tab_prompt {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
                 KeyCode::Esc => self.tab_prompt = None,
                 KeyCode::Backspace => {
                     text.pop();
                 }
-                KeyCode::Char(c) if text.len() < 252 => text.push(c),
+                KeyCode::Char('u') if ctrl => text.clear(),
+                KeyCode::Char(c) if !ctrl && text.len() < 252 => text.push(c),
                 KeyCode::Enter => {
                     let name = text.trim().to_string();
                     self.tab_prompt = None;
@@ -2324,12 +2351,14 @@ impl WorkbenchApp {
             return self.on_workspace_prompt_key(key);
         }
         if let Some(text) = &mut self.pane_prompt {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
                 KeyCode::Esc => self.pane_prompt = None,
                 KeyCode::Backspace => {
                     text.pop();
                 }
-                KeyCode::Char(c) if text.len() < 252 => text.push(c),
+                KeyCode::Char('u') if ctrl => text.clear(),
+                KeyCode::Char(c) if !ctrl && text.len() < 252 => text.push(c),
                 KeyCode::Enter => {
                     let name = text.trim().to_string();
                     self.pane_prompt = None;
@@ -2576,7 +2605,16 @@ impl WorkbenchApp {
                         return self.apply_action(action);
                     }
                 }
-                return KeyOutcome::Ignored;
+                // herdr's resize mode: h/l and Left/Right change the width,
+                // j/k and Up/Down the height.
+                let action = match key.code {
+                    KeyCode::Char('h') | KeyCode::Left => keys::Action::ResizePaneLeft,
+                    KeyCode::Char('l') | KeyCode::Right => keys::Action::ResizePaneRight,
+                    KeyCode::Char('k') | KeyCode::Up => keys::Action::ResizePaneUp,
+                    KeyCode::Char('j') | KeyCode::Down => keys::Action::ResizePaneDown,
+                    _ => return KeyOutcome::Ignored,
+                };
+                return self.apply_action(action);
             }
             if let Some(action) = self.keymap.resolve(false, false, key) {
                 return self.apply_action(action);
@@ -2633,12 +2671,14 @@ impl WorkbenchApp {
             return KeyOutcome::Ignored;
         };
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.context_menu = None,
+            KeyCode::Esc | KeyCode::Char('q') => self.close_context_menu(),
             KeyCode::Up | KeyCode::Char('k') => menu.selected = menu.selected.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => menu.selected = (menu.selected + 1).min(4),
+            KeyCode::Down | KeyCode::Char('j') => {
+                menu.selected = (menu.selected + 1).min(menu_actions().len() - 1);
+            }
             KeyCode::Enter => {
                 let selected = menu.selected;
-                self.context_menu = None;
+                self.close_context_menu();
                 return self.activate_menu(menu_actions()[selected]);
             }
             _ => {}
@@ -2817,6 +2857,27 @@ impl WorkbenchApp {
         }
     }
 
+    fn close_context_menu(&mut self) {
+        self.context_menu = None;
+        self.menu_hits.clear();
+    }
+
+    /// An overlay that owns the mouse: clicks and wheel events do not
+    /// reach the panes or the sidebar behind it.
+    fn modal_open(&self) -> bool {
+        self.context_menu.is_some()
+            || self.workspace_prompt.is_some()
+            || self.tab_prompt.is_some()
+            || self.pane_prompt.is_some()
+            || self.file_panel.is_some()
+            || self.handoff_picker.is_some()
+            || self.diff_view.is_some()
+            || self.terminal_picker.is_some()
+            || self.goto.is_some()
+            || self.show_key_help
+            || self.settings_open
+    }
+
     fn copy_to_clipboard(&mut self, text: &str) {
         self.last_copy = text.to_string();
         #[cfg(target_os = "macos")]
@@ -2866,17 +2927,26 @@ impl WorkbenchApp {
     }
 
     fn on_right_down(&mut self, column: u16, row: u16) {
-        if let Some((action, _)) = self
-            .menu_hits
-            .iter()
-            .find(|(_, rect)| contains_point(*rect, column, row))
-            .map(|(action, _)| (*action, ()))
-        {
-            let outcome = self.activate_menu(action);
-            if let KeyOutcome::Action(action) = outcome {
-                self.mouse_action = Some(action);
-            }
+        if self.context_menu.is_some() {
+            self.close_context_menu();
             return;
+        }
+        if self.modal_open() {
+            return;
+        }
+        // The menu acts on the pane that was right-clicked.
+        let target = self
+            .grid
+            .render_layout(self.last_pane_area.unwrap_or(PANE_REF_AREA))
+            .into_iter()
+            .find(|(_, rect)| contains_point(*rect, column, row))
+            .map(|(content, _)| content);
+        let Some(target) = target else {
+            return;
+        };
+        if target != self.pane_focus {
+            self.queue_focus(&target);
+            self.pane_focus = target;
         }
         self.context_menu = Some(ContextMenu {
             selected: 0,
@@ -2936,13 +3006,24 @@ impl WorkbenchApp {
     }
 
     fn on_left_down(&mut self, column: u16, row: u16) {
+        // The pane menu takes the click: an item runs, anything else
+        // closes the menu. Nothing reaches the grid underneath.
+        if self.context_menu.is_some() {
+            let hit = self
+                .menu_hits
+                .iter()
+                .find(|(_, rect)| contains_point(*rect, column, row))
+                .map(|(action, _)| *action);
+            self.close_context_menu();
+            if let Some(action) = hit {
+                if let KeyOutcome::Action(action) = self.activate_menu(action) {
+                    self.mouse_action = Some(action);
+                }
+            }
+            return;
+        }
         // Overlays are modal: clicks must not fall through to the grid.
-        if self.workspace_prompt.is_some()
-            || self.tab_prompt.is_some()
-            || self.file_panel.is_some()
-            || self.handoff_picker.is_some()
-            || self.diff_view.is_some()
-        {
+        if self.modal_open() {
             return;
         }
         if let Some((id, _)) = self
@@ -2952,6 +3033,13 @@ impl WorkbenchApp {
             .cloned()
         {
             self.mouse_action = Some(Self::select_workspace(id));
+            return;
+        }
+        if self
+            .new_tab_hit
+            .is_some_and(|r| contains_point(r, column, row))
+        {
+            self.mouse_action = Some(WorkbenchAction::NewTab);
             return;
         }
         if let Some((id, _)) = self
@@ -3168,25 +3256,7 @@ impl WorkbenchApp {
         let columns =
             Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(0)]).split(main);
         let right = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(columns[1]);
-        self.tab_hits.clear();
-        let mut x = right[0].x;
-        if let Some(scene) = self.scenes.scenes.get(&self.scenes.selected) {
-            for tab in scene.tabs.iter().filter(|t| !t.hidden) {
-                let label = format!(
-                    " {}{} ",
-                    if tab.id == scene.active { "● " } else { "" },
-                    tab.name
-                );
-                let w = (label.chars().count() as u16).min(right[0].right().saturating_sub(x));
-                let rect = Rect::new(x, right[0].y, w, 1);
-                frame.render_widget(Paragraph::new(label), rect);
-                self.tab_hits.push((tab.id.clone(), rect));
-                x += w;
-            }
-        }
-        if self.tab_hits.is_empty() {
-            frame.render_widget(Paragraph::new(" 0 Unassigned · ctrl+b c new tab"), right[0]);
-        }
+        self.draw_tab_bar(frame, right[0], &palette);
         let pane_area = right[1];
         self.last_pane_area = Some(pane_area);
         self.last_sidebar_edge = if sidebar_width > 0 {
@@ -3196,6 +3266,9 @@ impl WorkbenchApp {
         };
         if sidebar_width > 0 {
             self.draw_sidebar(frame, columns[0], &palette);
+        } else {
+            // A hidden sidebar must not leave click targets over the panes.
+            self.sidebar_hits.clear();
         }
 
         // The chrome pass yields leaf rects that INCLUDE their border
@@ -3223,6 +3296,7 @@ impl WorkbenchApp {
                     text: self.terminal_title(id),
                 },
             })
+            .filter(|title| !title.text.is_empty())
             .collect();
         crate::tui::chrome::render_pane_borders(frame, &rects, focused_index, &palette, &titles);
         self.pane_geometry.clear();
@@ -3508,13 +3582,17 @@ impl WorkbenchApp {
                     crate::agents::StatusSource::ScreenInference => "screen",
                     crate::agents::StatusSource::ProcessTree => "detected",
                 };
-                format!(
-                    "terminal {id} · {}:{}({source})",
-                    badge.agent,
-                    badge.status.as_str()
-                )
+                format!("{}:{}({source})", badge.agent, badge.status.as_str())
             }
-            None => format!("terminal {id}"),
+            // herdr parity: a plain shell pane has no title unless the
+            // user named it — never the raw terminal id.
+            None => self
+                .scenes
+                .scenes
+                .get(&self.scenes.selected)
+                .and_then(|scene| scene.tabs.iter().find(|t| t.id == scene.active))
+                .and_then(|tab| tab.pane_names.get(id).cloned())
+                .unwrap_or_default(),
         }
     }
 
@@ -3697,7 +3775,8 @@ impl WorkbenchApp {
         let column = menu.column;
         let row = menu.row;
         let width = 18u16;
-        let height = 7u16;
+        // Border, title row, one row per item, border.
+        let height = labels.len() as u16 + 3;
         let screen = frame.area();
         let x = column.min(screen.x.saturating_add(screen.width).saturating_sub(width));
         let y = row.min(
@@ -3720,7 +3799,7 @@ impl WorkbenchApp {
             lines.push(Line::from(Span::styled(format!(" {label}"), style)));
             self.menu_hits.push((
                 menu_actions()[index],
-                Rect::new(x, y.saturating_add(1 + index as u16), width, 1),
+                Rect::new(x, y.saturating_add(2 + index as u16), width, 1),
             ));
         }
         frame.render_widget(Clear, popup);
@@ -3748,6 +3827,61 @@ impl WorkbenchApp {
         );
     }
 
+    /// herdr's tab bar: numbered tabs (a custom name replaces the number),
+    /// the focused one on the accent, 1-column gaps, then a clickable `+`.
+    fn draw_tab_bar(&mut self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        use ratatui::style::Style;
+        self.tab_hits.clear();
+        self.new_tab_hit = None;
+        frame.render_widget(
+            Paragraph::new("").style(Style::new().bg(palette.panel_bg)),
+            area,
+        );
+        let mut x = area.x;
+        if let Some(scene) = self.scenes.scenes.get(&self.scenes.selected) {
+            for (index, tab) in scene.tabs.iter().filter(|t| !t.hidden).enumerate() {
+                let focused = tab.id == scene.active;
+                let name = if tab.name.is_empty() || tab.name == "Terminal" {
+                    (index + 1).to_string()
+                } else {
+                    tab.name.clone()
+                };
+                let name = if focused && self.zoomed {
+                    format!("{name} Z")
+                } else {
+                    name
+                };
+                let width = (name.chars().count() as u16 + 4).max(8);
+                let w = width.min(area.right().saturating_sub(x));
+                if w == 0 {
+                    break;
+                }
+                let style = if focused {
+                    Style::new().bg(palette.accent).fg(palette.panel_bg).bold()
+                } else {
+                    Style::new().bg(palette.surface0).fg(palette.overlay0)
+                };
+                let rect = Rect::new(x, area.y, w, 1);
+                frame.render_widget(
+                    Paragraph::new(name)
+                        .alignment(ratatui::layout::Alignment::Center)
+                        .style(style),
+                    rect,
+                );
+                self.tab_hits.push((tab.id.clone(), rect));
+                x = (x + w + 1).min(area.right());
+            }
+        }
+        if x + 3 <= area.right() {
+            let rect = Rect::new(x, area.y, 3, 1);
+            frame.render_widget(
+                Paragraph::new(" + ").style(Style::new().fg(palette.overlay1)),
+                rect,
+            );
+            self.new_tab_hit = Some(rect);
+        }
+    }
+
     fn draw_status_bar(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
         let mode = if self.prefix_pending {
             "PREFIX"
@@ -3773,14 +3907,17 @@ impl WorkbenchApp {
         } else {
             mode.to_string()
         };
-        let line = format!(" {}  {mode}", self.keymap.prefix_label());
-        frame.render_widget(
-            Paragraph::new(Span::styled(
-                line,
-                ratatui::style::Style::new().fg(palette.text),
-            )),
-            area,
-        );
+        let mut spans = vec![Span::styled(
+            format!(" {}  {mode}", self.keymap.prefix_label()),
+            ratatui::style::Style::new().fg(palette.text),
+        )];
+        if let Some(status) = self.live_status() {
+            spans.push(Span::styled(
+                format!("  · {status}"),
+                ratatui::style::Style::new().fg(palette.overlay1),
+            ));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     fn workspace_rollup(&self, id: &str) -> &'static str {
@@ -3826,15 +3963,6 @@ impl WorkbenchApp {
         // index); headers and dividers carry None. The viewport window is
         // computed over the SELECTED entity's whole block.
         let mut lines: Vec<(Line<'static>, Option<(Focus, usize)>)> = Vec::new();
-        if !self.status_line.is_empty() {
-            lines.push((
-                Line::from(Span::styled(
-                    fit(&self.status_line, width.saturating_sub(1)),
-                    ratatui::style::Style::new().fg(palette.overlay0),
-                )),
-                None,
-            ));
-        }
         for marker in &self.model.attention {
             lines.push((
                 Line::from(Span::styled(
@@ -5027,6 +5155,13 @@ fn sync_shared_layout(
     *seen = json;
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StartupShell {
+    AwaitingModel,
+    Decide,
+    Done,
+}
+
 fn run_client_inner(client: &mut crate::server::Client) -> Result<()> {
     use ratatui::crossterm::event::{self, Event};
     let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
@@ -5043,10 +5178,16 @@ fn run_client_inner(client: &mut crate::server::Client) -> Result<()> {
     let mut seen_layout = None;
     let mut holding_initial_layout = saved_layout.is_some();
     let mut next_refresh = std::time::Instant::now();
+    // herdr parity: the first attach lands in a live shell, not on an empty
+    // overview. Decided once, after the first model and saved layout.
+    let mut startup_shell = StartupShell::AwaitingModel;
     loop {
         while let Ok(result) = polling.models.try_recv() {
             match result {
                 Ok(model) => {
+                    if startup_shell == StartupShell::AwaitingModel {
+                        startup_shell = StartupShell::Decide;
+                    }
                     let known = model
                         .terminals
                         .iter()
@@ -5073,6 +5214,15 @@ fn run_client_inner(client: &mut crate::server::Client) -> Result<()> {
         }
         while let Ok(error) = polling.errors.try_recv() {
             app.set_status(error);
+        }
+        if startup_shell == StartupShell::Decide {
+            startup_shell = StartupShell::Done;
+            if app.terminal_leaves().is_empty() {
+                if let Err(e) = spawn_and_split(client, &mut app, SplitAxis::Horizontal) {
+                    app.set_status(format!("shell failed to start: {e}"));
+                }
+                publish_layout(client, &mut app);
+            }
         }
         terminal
             .draw(|frame| app.draw(frame))
@@ -5170,12 +5320,39 @@ fn run_client_inner(client: &mut crate::server::Client) -> Result<()> {
     Ok(())
 }
 
+/// Save a tab that exists only on this client, so the tree ops that follow
+/// (the new tab's first split) find it on the server.
+fn publish_layout(client: &mut crate::server::Client, app: &mut WorkbenchApp) {
+    if !app.layout_dirty() {
+        return;
+    }
+    match client.call(crate::server::RequestKind::WorkbenchLayout {
+        layout_json: Some(app.serialize_layout()),
+    }) {
+        Ok(_) => app.clear_layout_dirty(),
+        Err(e) => app.set_status(format!("layout save pending: {e}")),
+    }
+}
+
 fn flush_tree_ops(client: &mut crate::server::Client, app: &mut WorkbenchApp) {
+    let mut failed = None;
     for op in app.take_tree_ops() {
         if let Err(err) = client.call(crate::server::RequestKind::WorkbenchTree { op }) {
-            app.set_status(format!("tree update failed: {err}"));
+            failed = Some(err);
         }
     }
+    let Some(err) = failed else { return };
+    // An op can target a tab or scene the server has not seen yet (made
+    // locally, layout not yet published). The layout snapshot already
+    // carries the op's effect, so publishing it settles the server; only
+    // report a failure that publishing does not cover.
+    if app.layout_dirty() {
+        publish_layout(client, app);
+        if !app.layout_dirty() {
+            return;
+        }
+    }
+    app.set_status(format!("tree update failed: {err}"));
 }
 
 /// One status line for a workspace reply: what happened, plus how many
@@ -5225,6 +5402,7 @@ fn apply_client_action(
             if !app.new_tab("Terminal".into()) {
                 return Ok(());
             }
+            publish_layout(client, app);
             let id = app.selected_scene().to_string();
             if id == FLOATING {
                 spawn_and_split(client, app, SplitAxis::Horizontal)
@@ -5565,6 +5743,7 @@ fn spawn_and_split(
     {
         return Ok(());
     }
+    publish_layout(client, app);
     let scene = app.focused_worktree_id();
     let worktree_id = scene.clone().filter(|id| !id.starts_with("directory:"));
     let cwd = scene
@@ -5594,7 +5773,10 @@ fn spawn_and_split(
             crate::foundation::Error::Validation("spawn returned no terminal id".into())
         })?
         .to_string();
-    if !app.split_pane(axis, terminal_id.clone()) {
+    if app.split_pane(axis, terminal_id.clone()) {
+        // The new pane takes the keyboard, as in herdr.
+        app.enter_terminal_mode(terminal_id);
+    } else {
         // The split was refused after the spawn (e.g. a pane would fall
         // below the minimum size): roll the terminal back so nothing runs
         // orphaned. The raw-mode client has no log sink — the status line
@@ -5619,14 +5801,14 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    fn render(app: &mut WorkbenchApp, w: u16, h: u16) -> String {
+    pub(super) fn render(app: &mut WorkbenchApp, w: u16, h: u16) -> String {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal.draw(|f| app.draw(f)).expect("draw");
         terminal.backend().to_string()
     }
 
-    fn sample() -> WorkbenchModel {
+    pub(super) fn sample() -> WorkbenchModel {
         WorkbenchModel {
             projects: vec![ProjectRow {
                 project_id: "p1".into(),
@@ -6107,7 +6289,7 @@ mod tests {
         let mut app = WorkbenchApp::new();
         app.set_model(sample());
         app.attach_terminal("term-1".into());
-        render(&mut app, 120, 30);
+        super::tests::render(&mut app, 120, 30);
         let geom = app.visible_geometry();
         assert!(
             geom.iter()
@@ -6162,9 +6344,8 @@ mod tests {
         app.set_snapshot("t3", snapshot_with(&["gamma-out"]));
 
         let view = render(&mut app, 160, 44);
-        assert!(view.contains("terminal t1"), "{view}");
-        assert!(view.contains("terminal t2"));
-        assert!(view.contains("terminal t3"));
+        // herdr parity: plain shell panes carry no raw-id title.
+        assert!(!view.contains("terminal t1"), "{view}");
         assert!(view.contains("alpha-out"));
         assert!(view.contains("beta-out"));
         assert!(view.contains("gamma-out"));
@@ -6551,10 +6732,11 @@ mod tests {
     fn can_split_gates_before_the_pane_cap() {
         let mut app = WorkbenchApp::new();
         assert!(app.can_split());
-        for i in 0..8 {
+        // The first terminal replaces the overview placeholder.
+        for i in 0..crate::tui::layout::MAX_PANES {
             assert!(app.split_pane(SplitAxis::Horizontal, format!("t{i}")));
         }
-        assert_eq!(app.terminal_leaves().len(), 8, "browser + 8 terminals");
+        assert_eq!(app.terminal_leaves().len(), crate::tui::layout::MAX_PANES);
         assert!(
             !app.can_split(),
             "at the cap no further split may be attempted"
@@ -6598,13 +6780,15 @@ mod tests {
         // 15 columns: a 50% split gives the KEPT pane 7 (< 8) and the new
         // leaf 8+1 — the asymmetric (new-leaf-only) check let this through.
         app.last_pane_area = Some(Rect::new(0, 0, 15, 23));
+        // The first terminal only replaces the placeholder; no split yet.
+        assert!(app.split_pane(SplitAxis::Horizontal, "t0".into()));
         assert!(
             !app.split_pane(SplitAxis::Horizontal, "t1".into()),
             "a split that starves the kept pane must be refused"
         );
         assert_eq!(
             app.terminal_leaves().len(),
-            0,
+            1,
             "the refused split never entered the tree"
         );
     }
@@ -7023,6 +7207,198 @@ mod tests {
             idle.on_key(KeyEvent::from(KeyCode::Char('q'))),
             KeyOutcome::QuitRequested
         );
+    }
+
+    /// The 0.3.8 seal list: every retired workbench single key reaches the
+    /// pane in terminal mode, and none of them is a UI action outside it.
+    #[test]
+    fn every_retired_workbench_key_is_forwarded_or_inert() {
+        use ratatui::crossterm::event::KeyModifiers;
+        let ctrl = KeyModifiers::CONTROL;
+        let retired = [
+            ("enter", KeyEvent::from(KeyCode::Enter)),
+            ("o", KeyEvent::from(KeyCode::Char('o'))),
+            ("p", KeyEvent::from(KeyCode::Char('p'))),
+            ("d", KeyEvent::from(KeyCode::Char('d'))),
+            ("f", KeyEvent::from(KeyCode::Char('f'))),
+            ("D", KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT)),
+            ("h", KeyEvent::from(KeyCode::Char('h'))),
+            ("q", KeyEvent::from(KeyCode::Char('q'))),
+            ("ctrl+left", KeyEvent::new(KeyCode::Left, ctrl)),
+            ("ctrl+right", KeyEvent::new(KeyCode::Right, ctrl)),
+            ("ctrl+up", KeyEvent::new(KeyCode::Up, ctrl)),
+            ("ctrl+down", KeyEvent::new(KeyCode::Down, ctrl)),
+            ("ctrl+]", KeyEvent::new(KeyCode::Char(']'), ctrl)),
+        ];
+
+        let mut app = terminal_app();
+        let grid = app.grid.clone();
+        for (label, key) in retired {
+            let bytes = terminal_view::key(key, &app.input_modes()).expect(label);
+            assert_eq!(app.on_key(key), KeyOutcome::Forward(bytes), "{label}");
+            assert_eq!(app.terminal_mode.as_deref(), Some("term-1"), "{label}");
+        }
+        assert_eq!(app.grid, grid);
+        assert!(app.take_tree_ops().is_empty());
+
+        // Outside terminal mode the letters and chords do nothing. Enter is
+        // herdr's select on the focused list, not the old "open a shell".
+        // The old keys acted on the spaces list, so test there and on panes.
+        for focus in [Focus::Worktrees, Focus::Panes] {
+            let mut idle = WorkbenchApp::new();
+            idle.set_model(sample());
+            idle.focus = focus;
+            let grid = idle.grid.clone();
+            for (label, key) in retired.into_iter().filter(|(label, _)| *label != "enter") {
+                assert_eq!(idle.on_key(key), KeyOutcome::Ignored, "{label} {focus:?}");
+                assert!(idle.handoff_picker.is_none(), "{label}");
+            }
+            assert_eq!(idle.grid, grid);
+            assert!(idle.take_tree_ops().is_empty());
+        }
+    }
+
+    /// A new tab exists only on this client until it is saved. Its first
+    /// split must not reach the server before the tab does.
+    #[test]
+    fn a_new_tab_reaches_the_server_before_its_first_split() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let server = crate::server::Host::open(&home)
+            .expect("host")
+            .serve_background();
+        let socket = home.join(crate::server::SOCKET_NAME);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !socket.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let mut client = crate::server::Client::connect(&home).expect("client");
+
+        let mut app = WorkbenchApp::new();
+        for _ in 0..2 {
+            apply_client_action(&mut client, &mut app, WorkbenchAction::NewTab).expect("new tab");
+            flush_tree_ops(&mut client, &mut app);
+            assert!(
+                !app.status_line.contains("tree update failed"),
+                "{}",
+                app.status_line
+            );
+        }
+        let tree = client
+            .call(crate::server::RequestKind::WorkbenchTree {
+                op: crate::server::WorkbenchTreeOp::List,
+            })
+            .expect("list");
+        let tabs = tree["tree"]["scenes"][FLOATING]["tabs"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(tabs.len(), 2, "{tree}");
+        for tab in tabs {
+            assert!(tab["grid"].to_string().contains("term-"), "{tab}");
+        }
+
+        let _ = client.call(crate::server::RequestKind::Shutdown { close_policy: None });
+        let _ = server.join();
+    }
+
+    #[test]
+    fn rename_prompts_clear_on_ctrl_u_and_never_type_control_letters() {
+        use ratatui::crossterm::event::KeyModifiers;
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let mut app = terminal_app();
+        app.tab_prompt = Some("Terminal".into());
+        app.on_key(ctrl('u'));
+        app.on_key(ctrl('w'));
+        for c in "build".chars() {
+            app.on_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(app.tab_prompt.as_deref(), Some("build"));
+        app.pane_prompt = Some("old".into());
+        app.tab_prompt = None;
+        app.on_key(ctrl('u'));
+        app.on_key(ctrl('a'));
+        assert_eq!(app.pane_prompt.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn resize_mode_moves_the_focused_split_with_herdr_keys() {
+        let mut app = terminal_app();
+        assert!(app.grid.set_ratio_at_path(&[], 60));
+        prefix(&mut app);
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('r'))),
+            KeyOutcome::Handled
+        );
+        assert!(app.resize_mode);
+
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('h'))),
+            KeyOutcome::Handled
+        );
+        assert!(matches!(app.grid, PaneNode::Split { ratio: 55, .. }));
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Right)),
+            KeyOutcome::Handled
+        );
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('l'))),
+            KeyOutcome::Handled
+        );
+        assert!(matches!(app.grid, PaneNode::Split { ratio: 65, .. }));
+        assert!(
+            app.take_tree_ops()
+                .iter()
+                .any(|op| matches!(op, crate::server::WorkbenchTreeOp::Resize { ratio: 65, .. }))
+        );
+        // No vertical split: j/k change nothing and the mode stays.
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('j'))),
+            KeyOutcome::Ignored
+        );
+        assert!(matches!(app.grid, PaneNode::Split { ratio: 65, .. }));
+        // Other keys never reach the pane while resizing.
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('x'))),
+            KeyOutcome::Ignored
+        );
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Esc)),
+            KeyOutcome::Handled
+        );
+        assert!(!app.resize_mode);
+    }
+
+    #[test]
+    fn resize_mode_picks_the_split_that_holds_the_focused_pane() {
+        let mut app = terminal_app();
+        // Browser | (term-1 / term-2): k/j move only the inner split.
+        app.attach_terminal("term-2".into());
+        app.grid = PaneNode::Split {
+            axis: SplitAxis::Horizontal,
+            first: Box::new(PaneNode::leaf(PaneContent::Browser)),
+            second: Box::new(PaneNode::split_new(
+                PaneContent::Terminal("term-1".into()),
+                SplitAxis::Vertical,
+                PaneContent::Terminal("term-2".into()),
+            )),
+            ratio: 50,
+        };
+        app.pane_focus = PaneContent::Terminal("term-2".into());
+        prefix(&mut app);
+        app.on_key(KeyEvent::from(KeyCode::Char('r')));
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('k'))),
+            KeyOutcome::Handled
+        );
+        assert_eq!(app.grid.ratio_at_path(&[true]), Some(45));
+        assert_eq!(app.grid.ratio_at_path(&[]), Some(50));
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('h'))),
+            KeyOutcome::Handled
+        );
+        assert_eq!(app.grid.ratio_at_path(&[]), Some(45));
     }
 }
 
@@ -7521,15 +7897,26 @@ mod v15_tui_fix_tests {
                 .any(|op| matches!(op, crate::server::WorkbenchTreeOp::Resize { ratio: 70, .. }))
         );
 
+        // Right-click on t1: the menu acts on the pane under the pointer.
         let mut app = app_with_two_panes();
-        app.on_mouse(mouse_right(40, 8));
+        app.on_mouse(mouse_right(75, 8));
         let backend = TestBackend::new(120, 30);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         terminal.draw(|frame| app.draw(frame)).expect("draw");
         let (action, rect) = app.menu_hits[0];
         assert_eq!(action, MenuAction::SplitRight);
-        app.on_mouse(mouse_right(rect.x + 1, rect.y));
+        // The hit row is the row the label is drawn on, and every item
+        // (zoom included) is on screen.
+        let screen = terminal.backend().buffer().clone();
+        let row: String = (rect.x..rect.x + rect.width)
+            .map(|x| screen[(x, rect.y)].symbol().to_string())
+            .collect();
+        assert!(row.to_lowercase().contains("split right"), "{row:?}");
+        assert_eq!(app.menu_hits.len(), menu_actions().len());
+        // herdr: a left press on an item activates it.
+        app.on_mouse(mouse_down(rect.x + 1, rect.y));
         assert_eq!(app.take_mouse_action(), Some(WorkbenchAction::SplitRight));
+        assert!(app.context_menu.is_none());
         let source = "t1";
         assert!(app.split_pane(SplitAxis::Horizontal, "spawned".into()));
         assert!(app.take_tree_ops().iter().any(|op| matches!(
@@ -7543,5 +7930,52 @@ mod v15_tui_fix_tests {
                 && pane_id.as_deref() == Some(source)
                 && terminal_id.as_deref() == Some("spawned")
         )));
+    }
+
+    #[test]
+    fn a_press_outside_an_open_menu_only_closes_it() {
+        let mut app = app_with_two_panes();
+        app.on_mouse(mouse_right(40, 8));
+        super::tests::render(&mut app, 120, 30);
+        app.take_tree_ops();
+        app.on_mouse(mouse_down(100, 25));
+        assert!(app.context_menu.is_none());
+        assert!(app.menu_hits.is_empty());
+        assert_eq!(app.take_mouse_action(), None);
+        assert!(
+            app.take_tree_ops().is_empty(),
+            "the press must not reach the grid"
+        );
+    }
+
+    #[test]
+    fn overlays_swallow_pane_clicks() {
+        let mut app = app_with_two_panes();
+        super::tests::render(&mut app, 120, 30);
+        app.show_key_help = true;
+        app.take_tree_ops();
+        app.on_mouse(mouse_down(75, 10));
+        assert!(app.take_tree_ops().is_empty());
+    }
+
+    #[test]
+    fn a_hidden_sidebar_leaves_no_click_targets() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(super::tests::sample());
+        super::tests::render(&mut app, 120, 30);
+        assert!(!app.sidebar_hits.is_empty());
+        super::tests::render(&mut app, 50, 30);
+        assert!(app.sidebar_hits.is_empty());
+    }
+
+    #[test]
+    fn a_new_tab_is_one_terminal_pane_without_the_overview() {
+        let mut app = WorkbenchApp::new();
+        assert!(app.new_tab("Terminal".into()));
+        assert!(app.split_pane(SplitAxis::Horizontal, "term-1".into()));
+        assert_eq!(
+            app.grid.leaves(),
+            vec![PaneContent::Terminal("term-1".into())]
+        );
     }
 }

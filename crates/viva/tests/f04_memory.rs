@@ -28,6 +28,12 @@ fn frozen() -> viva::foundation::store::FrozenMigrations {
             "memory v3 native facts fts hrr",
             viva::memory::migrate::apply_memory_v3,
         )
+        .register_fn(
+            DOMAIN_MEMORY,
+            4,
+            "memory v4 curation candidates lifecycle",
+            viva::memory::migrate_v4::apply_memory_v4,
+        )
         .register(
             DOMAIN_AUTHORITY,
             1,
@@ -36,6 +42,56 @@ fn frozen() -> viva::foundation::store::FrozenMigrations {
         )
         .freeze()
         .expect("registry")
+}
+
+fn remember_emphasis(
+    service: &MemoryService,
+    member: &MemberId,
+    project: Option<&ProjectId>,
+    content: &str,
+    source: &str,
+) -> viva::memory::MemoryLink {
+    let proposed = service
+        .remember_with_options(
+            member,
+            project,
+            content,
+            source,
+            "general",
+            "",
+            viva::memory::KnowledgeKind::PersonalMemory,
+            true,
+            None,
+            None,
+        )
+        .expect("propose");
+    assert_eq!(proposed.candidate_status, "proposed");
+    service
+        .admit_candidate(&proposed.candidate_id)
+        .expect("admit")
+        .link
+        .expect("admitted link")
+}
+
+fn run_remember_admit_cli(home: &Path, mid: &str, extra: &[&str]) -> (bool, String, String) {
+    let mut remember_args = vec!["memory", "remember", "--member", mid, "--emphasis"];
+    remember_args.extend_from_slice(extra);
+    let (ok, stdout, stderr) = run_viva(home, &remember_args);
+    if !ok {
+        return (ok, stdout, stderr);
+    }
+    let body: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let candidate_id = body["candidate_id"].as_str().unwrap();
+    run_viva(home, &["memory", "admit", "--candidate", candidate_id])
+}
+
+fn fact_id_from_remember_stdout(stdout: &str) -> String {
+    let body: serde_json::Value = serde_json::from_str(stdout).unwrap();
+    body["link"]["fact_id"]
+        .as_str()
+        .or_else(|| body["fact_id"].as_str())
+        .expect("fact_id in remember output")
+        .to_string()
 }
 
 fn run_viva(home: &Path, args: &[&str]) -> (bool, String, String) {
@@ -67,26 +123,14 @@ fn cli_memory_works_without_hermes_or_python() {
     init_home(home.path());
     let member = MemberId::new();
     let mid = member.as_str();
-    let (ok, stdout, stderr) = run_viva(
+    let (ok, stdout, stderr) = run_remember_admit_cli(
         home.path(),
-        &[
-            "memory",
-            "remember",
-            "--member",
-            mid,
-            "--content",
-            EN_FACT,
-            "--source",
-            "f04 native acceptance",
-        ],
+        mid,
+        &["--content", EN_FACT, "--source", "f04 native acceptance"],
     );
-    assert!(ok, "remember: {stderr}\n{stdout}");
-    let link: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert!(
-        link["fact_id"]
-            .as_str()
-            .is_some_and(|id| id.starts_with("nf-"))
-    );
+    assert!(ok, "remember+admit: {stderr}\n{stdout}");
+    let fact_id = fact_id_from_remember_stdout(&stdout);
+    assert!(fact_id.starts_with("nf-"));
 
     let (ok, stdout, stderr) = run_viva(
         home.path(),
@@ -112,22 +156,18 @@ fn cli_memory_status_probe_archive_restore_without_hermes() {
     let member = MemberId::new();
     let mid = member.as_str();
 
-    let (ok, stdout, stderr) = run_viva(
+    let (ok, stdout, stderr) = run_remember_admit_cli(
         home.path(),
+        mid,
         &[
-            "memory",
-            "remember",
-            "--member",
-            mid,
             "--content",
             EN_FACT,
             "--source",
             "cli five-command acceptance",
         ],
     );
-    assert!(ok, "remember: {stderr}\n{stdout}");
-    let link: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let fact_id = link["fact_id"].as_str().unwrap();
+    assert!(ok, "remember+admit: {stderr}\n{stdout}");
+    let fact_id = fact_id_from_remember_stdout(&stdout);
 
     let (ok, stdout, stderr) = run_viva(
         home.path(),
@@ -167,7 +207,7 @@ fn cli_memory_status_probe_archive_restore_without_hermes() {
             "memory",
             "archive",
             "--fact",
-            fact_id,
+            &fact_id,
             "--member",
             mid,
             "--grant",
@@ -199,7 +239,7 @@ fn cli_memory_status_probe_archive_restore_without_hermes() {
             "memory",
             "restore",
             "--fact",
-            fact_id,
+            &fact_id,
             "--member",
             mid,
             "--grant",
@@ -217,18 +257,10 @@ fn chinese_trigram_substring_and_two_char_fallback() {
     init_home(home.path());
     let member = MemberId::new();
     let mid = member.as_str();
-    let (ok, _, stderr) = run_viva(
+    let (ok, _, stderr) = run_remember_admit_cli(
         home.path(),
-        &[
-            "memory",
-            "remember",
-            "--member",
-            mid,
-            "--content",
-            CN_FACT,
-            "--source",
-            "cn write",
-        ],
+        mid,
+        &["--content", CN_FACT, "--source", "cn write"],
     );
     assert!(ok, "remember cn: {stderr}");
 
@@ -255,18 +287,10 @@ fn chinese_trigram_substring_and_two_char_fallback() {
         "two-char query uses fallback; this content has no 记忆"
     );
 
-    let (ok, _, stderr) = run_viva(
+    let (ok, _, stderr) = run_remember_admit_cli(
         home.path(),
-        &[
-            "memory",
-            "remember",
-            "--member",
-            mid,
-            "--content",
-            "团队记忆：每周五复盘",
-            "--source",
-            "two-char",
-        ],
+        mid,
+        &["--content", "团队记忆：每周五复盘", "--source", "two-char"],
     );
     assert!(ok, "remember two-char fixture: {stderr}");
     let (ok, stdout, _) = run_viva(
@@ -291,9 +315,7 @@ fn member_and_project_isolation_native() {
     let project_a = ProjectId::new();
     let project_b = ProjectId::new();
 
-    let alice_link = service
-        .remember(&alice, Some(&project_a), EN_FACT, "alice", "general", "")
-        .expect("write");
+    let alice_link = remember_emphasis(&service, &alice, Some(&project_a), EN_FACT, "alice");
 
     let result = service
         .search(&bob, Some(&project_a), "release train", 16 * 1024)
@@ -303,9 +325,7 @@ fn member_and_project_isolation_native() {
     };
     assert!(facts.is_empty(), "bob does not see alice's scoped facts");
 
-    let bob_link = service
-        .remember(&bob, Some(&project_a), EN_FACT, "bob", "general", "")
-        .expect("bob write");
+    let bob_link = remember_emphasis(&service, &bob, Some(&project_a), EN_FACT, "bob");
     assert_eq!(bob_link.fact_id, alice_link.fact_id, "content dedupe");
     assert_ne!(bob_link.link_id, alice_link.link_id);
 
@@ -342,9 +362,7 @@ fn archive_restore_native() {
     let member = MemberId::new();
     let actor = exit_actor(&store, &member);
     let authority = AuthorityEngine::new(&store);
-    let link = service
-        .remember(&member, None, EN_FACT, "src", "general", "")
-        .expect("write");
+    let link = remember_emphasis(&service, &member, None, EN_FACT, "src");
 
     service
         .archive(&link.fact_id, "superseded", &actor, &authority)
@@ -375,12 +393,8 @@ fn duplicate_content_and_link_semantics() {
     let store = Store::open_in_memory(&frozen()).expect("store");
     let service = MemoryService::new(&store);
     let member = MemberId::new();
-    let first = service
-        .remember(&member, None, EN_FACT, "first source", "general", "")
-        .expect("write");
-    let second = service
-        .remember(&member, None, EN_FACT, "second source", "general", "")
-        .expect("dedupe");
+    let first = remember_emphasis(&service, &member, None, EN_FACT, "first source");
+    let second = remember_emphasis(&service, &member, None, EN_FACT, "second source");
     assert_eq!(first.fact_id, second.fact_id);
     assert_eq!(first.link_id, second.link_id);
     let link = service
@@ -434,9 +448,7 @@ fn link_adopts_existing_native_fact_for_harness_switch() {
     let service = MemoryService::new(&store);
     let writer = MemberId::new();
     let adopter = MemberId::new();
-    let original = service
-        .remember(&writer, None, EN_FACT, "old harness", "general", "")
-        .expect("write");
+    let original = remember_emphasis(&service, &writer, None, EN_FACT, "old harness");
     let adopted = service
         .link_fact(&original.fact_id, &adopter, None, "harness switch")
         .expect("adopt");

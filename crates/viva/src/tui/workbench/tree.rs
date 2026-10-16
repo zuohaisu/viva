@@ -842,6 +842,17 @@ mod tests {
         .unwrap();
         apply(
             &mut book,
+            &WorkbenchTreeOp::Split {
+                scene_id: Some("alpha".into()),
+                tab_id: Some(first.clone()),
+                pane_id: Some("t0".into()),
+                direction: "right".into(),
+                terminal_id: Some("ta".into()),
+            },
+        )
+        .unwrap();
+        apply(
+            &mut book,
             &WorkbenchTreeOp::CreateTab {
                 scene_id: Some("alpha".into()),
                 name: "two".into(),
@@ -857,6 +868,17 @@ mod tests {
                 pane_id: None,
                 direction: "down".into(),
                 terminal_id: Some("t1".into()),
+            },
+        )
+        .unwrap();
+        apply(
+            &mut book,
+            &WorkbenchTreeOp::Split {
+                scene_id: Some("alpha".into()),
+                tab_id: Some(second.clone()),
+                pane_id: Some("t1".into()),
+                direction: "down".into(),
+                terminal_id: Some("tb".into()),
             },
         )
         .unwrap();
@@ -996,7 +1018,7 @@ mod tests {
             &WorkbenchTreeOp::FocusPane {
                 scene_id: Some("alpha".into()),
                 tab_id: Some(second.clone()),
-                pane_id: "browser".into(),
+                pane_id: "t1".into(),
             },
         )
         .unwrap();

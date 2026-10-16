@@ -1,0 +1,40 @@
+│                                                                                                     │
+│ See full release notes:                                                                             │
+│ https://github.com/openai/codex/releases/latest                                                     │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+  >_ OpenAI Codex (v0.160.0)
+     <scratch>/cx
+
+  You rang? Metaphorically. You typed.
+
+
+› Run the shell command: curl -s https://example.com -o page.html
+
+
+• I’ll download the page to page.html in the current directory.
+
+• Failed (exit 6) curl -s https://example.com -o page.html
+  └ (no output)
+
+✗ You canceled the request to run curl -s https://example.com -o page.html
+
+• Failed (exit 1) curl -s https://example.com -o page.html
+  └ (no output)
+
+■ Conversation interrupted - use /feedback if something went wrong
+
+
+› Say only the word ok.
+
+
+• ok
+
+  Worked for 2s • 08:50
+
+
+› Ask Codex to do anything
+
+  GPT-6-Astra medium · <scratch>/cx · Run curl request
+  ← for agents · ? for shortcuts
