@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{ExecutionId, MemberId, TaskId};
 use crate::foundation::paths;
-use crate::foundation::records::{ExecutionStatus, get_execution};
+use crate::foundation::records::{ExecutionRecord, ExecutionStatus, get_execution};
 use crate::foundation::store::Store;
 use crate::knowledge::{KnowledgeRegistry, SkillSetService};
 use crate::tasks::TaskRegistry;
@@ -139,7 +139,7 @@ impl<'a> DistillService<'a> {
             entity: "task",
             id: task_id.as_str().to_string(),
         })?;
-        let step_count = self.count_steps_for_execution(execution_id, &task_id)?;
+        let step_count = self.count_steps_for_execution(execution_id, &task_id, &execution)?;
         let type_key = task_type_key
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -178,7 +178,11 @@ impl<'a> DistillService<'a> {
             task_goal: task.goal.clone(),
             completion_evidence: evidence,
             step_count,
-            step_summaries: self.step_summaries_for_execution(execution_id, &task_id)?,
+            step_summaries: self.step_summaries_for_execution(
+                execution_id,
+                &task_id,
+                &execution,
+            )?,
         };
         let draft = generate_skill_draft(&context)?;
         if !draft_contains_execution_source(&draft, execution_id) {
@@ -281,6 +285,7 @@ impl<'a> DistillService<'a> {
         &self,
         execution_id: &ExecutionId,
         task_id: &TaskId,
+        execution: &ExecutionRecord,
     ) -> Result<usize> {
         let by_execution: i64 = self.store.connection().query_row(
             "SELECT COUNT(1) FROM task_results WHERE execution_id = ?1",
@@ -290,19 +295,23 @@ impl<'a> DistillService<'a> {
         if by_execution > 0 {
             return Ok(by_execution as usize);
         }
-        let by_task: i64 = self.store.connection().query_row(
+        // No per-action execution id on computer_actions: count only actions
+        // recorded while this execution was active (created → last update).
+        let by_window: i64 = self.store.connection().query_row(
             "SELECT COUNT(1) FROM computer_actions
-             WHERE task_id = ?1 AND state = 'executed'",
-            [task_id.as_str()],
+             WHERE task_id = ?1 AND state = 'executed'
+               AND recorded_at >= ?2 AND recorded_at <= ?3",
+            rusqlite::params![task_id.as_str(), execution.created_at, execution.updated_at],
             |row| row.get(0),
         )?;
-        Ok(by_task as usize)
+        Ok(by_window as usize)
     }
 
     fn step_summaries_for_execution(
         &self,
         execution_id: &ExecutionId,
         task_id: &TaskId,
+        execution: &ExecutionRecord,
     ) -> Result<Vec<String>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT kind, payload FROM task_results
@@ -321,18 +330,26 @@ impl<'a> DistillService<'a> {
         }
         let mut stmt = self.store.connection().prepare(
             "SELECT tool, target, reason FROM computer_actions
-             WHERE task_id = ?1 AND state = 'executed' ORDER BY rowid",
+             WHERE task_id = ?1 AND state = 'executed'
+               AND recorded_at >= ?2 AND recorded_at <= ?3
+             ORDER BY rowid",
         )?;
-        let rows = stmt.query_map([task_id.as_str()], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            rusqlite::params![task_id.as_str(), execution.created_at, execution.updated_at],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )?;
         for row in rows {
             let (tool, target, reason) = row?;
-            out.push(format!("{tool} on {target} ({reason})"));
+            let note = reason
+                .filter(|r| !r.trim().is_empty())
+                .unwrap_or_else(|| "executed".into());
+            out.push(format!("{tool} on {target} ({note})"));
         }
         Ok(out)
     }
@@ -437,16 +454,14 @@ fn cheap_draft_from_context(context: &DistillContext) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr as _;
-
     use super::*;
 
     #[test]
     fn cheap_draft_cites_execution() {
         let ctx = DistillContext {
-            execution_id: ExecutionId::from_str("exec-test-1").unwrap(),
+            execution_id: ExecutionId::new(),
             member_id: MemberId::new(),
-            task_id: TaskId::from_str("task-1").unwrap(),
+            task_id: TaskId::new(),
             task_goal: "Ship the feature".into(),
             completion_evidence: "tests green".into(),
             step_count: 3,

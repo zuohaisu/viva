@@ -1064,12 +1064,19 @@ USAGE:
     viva skill rollback <skill> <version>
     viva skill project --skill <id> --out <path>
     viva skill distill <execution> [--task-type <key>]
+    viva skill list --member <id> | search --member <id> --query <text> [--team]
+    viva skill claim --member <id> --skill <id> [--execution <id>]
+    viva skill sync --member <id> --skill <id> [--execution <id>]
+    viva skill restore --member <id> --skill <id>
+    viva skill weekly
         Team skill bodies with append-only versions (#140). Every write
         records version, time, operator and source execution (or Haisu
         manual). Rollback copies an older version forward; history stays.
         `get` and `project` read the current version for callbacks and
         member projection. `distill` proposes a team skill from a completed
         execution (#141); optional `--task-type` groups repeated successes.
+        Member skill set commands (#139) use `--member` and `--execution`
+        on reads/claims; `weekly` summarizes overlap and set events.
 
     viva memory search --member <id> [--project <id>] --query <text>
         Search the linked external memory for one member's scope

@@ -5,7 +5,9 @@ use std::process::Command;
 
 use tempfile::TempDir;
 use viva::foundation::ids::{ExecutionId, MemberId};
-use viva::foundation::records::{AttributionSnapshot, ExecutionRecord, insert_execution};
+use viva::foundation::records::{
+    AttributionSnapshot, ExecutionRecord, get_execution, insert_execution,
+};
 use viva::foundation::store::Store;
 use viva::knowledge::Scope;
 use viva::knowledge::{KnowledgeRegistry, SkillSetService};
@@ -71,6 +73,51 @@ fn seed_completed_execution(
             .expect("fresh");
     }
 
+    CompletedRun {
+        member,
+        execution_id: execution.execution_id,
+    }
+}
+
+fn seed_completed_execution_with_computer_actions(
+    store: &Store,
+    member: MemberId,
+    goal: &str,
+    action_count: usize,
+) -> CompletedRun {
+    let tasks = TaskRegistry::new(store);
+    let task = tasks
+        .create_task(goal, vec![], Some(member.clone()), None, None)
+        .expect("task");
+    let mut execution = ExecutionRecord::start(
+        task.task_id.clone(),
+        AttributionSnapshot::capture(member.clone(), "developer", "test-model", "test-tool"),
+    );
+    execution.complete("acceptance evidence for distill");
+    insert_execution(store, &execution).expect("execution");
+    let stored = get_execution(store, &execution.execution_id)
+        .expect("get")
+        .expect("exists");
+    let stamp = stored.updated_at.clone();
+    for idx in 0..action_count {
+        store
+            .connection()
+            .execute(
+                "INSERT INTO computer_actions(
+                    action_id, task_id, actor_member_id, grant_id, tool, target,
+                    argv_json, state, reason, pre_state, action_output, post_state,
+                    foreground, recorded_at)
+                 VALUES (?1, ?2, ?3, NULL, 'shell', '/tmp', '[]', 'executed', NULL,
+                         NULL, NULL, NULL, 0, ?4)",
+                rusqlite::params![
+                    format!("cact-v141-{idx}-{}", execution.execution_id.as_str()),
+                    task.task_id.as_str(),
+                    member.as_str(),
+                    stamp,
+                ],
+            )
+            .expect("computer action");
+    }
     CompletedRun {
         member,
         execution_id: execution.execution_id,
@@ -227,6 +274,25 @@ fn create_without_execution_source_is_rejected_for_distill_path() {
     );
     assert!(ok, "distill returns not eligible: {stderr}");
     assert!(stdout.contains("not_eligible"), "stdout: {stdout}");
+}
+
+#[test]
+fn distill_counts_computer_actions_without_task_results() {
+    let home = TempDir::new().unwrap();
+    init_home(home.path());
+    let store = open_store(home.path());
+    let run = seed_completed_execution_with_computer_actions(
+        &store,
+        MemberId::new(),
+        "Drive tools only",
+        3,
+    );
+    let (ok, stdout, stderr) = run_viva(
+        home.path(),
+        &["skill", "distill", run.execution_id.as_str()],
+    );
+    assert!(ok, "distill from computer actions: {stderr}");
+    assert!(stdout.contains("created"), "stdout: {stdout}");
 }
 
 #[test]
