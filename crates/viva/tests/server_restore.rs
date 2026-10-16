@@ -736,3 +736,36 @@ fn a_corrupt_layout_is_backed_up_and_left_in_place() {
     let _ = host.child.wait();
     host.alive = false;
 }
+
+/// After a crash the socket file stays behind. The everyday entry points
+/// (`viva`, `viva events`, ...) start a new server instead of refusing.
+#[test]
+fn a_client_command_after_a_crash_starts_a_new_server() {
+    let dir = tempfile::tempdir().expect("home dir");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    let mut host = HostProc::start(&home);
+    host.kill_hard();
+    assert!(
+        home.join(server::SOCKET_NAME).exists(),
+        "the crash leaves the socket"
+    );
+    assert!(!socket_ready(&home));
+
+    let out = Command::new(env!("CARGO_BIN_EXE_viva"))
+        .args(["events", "--limit", "1"])
+        .env("VIVA_HOME", &home)
+        .env("SHELL", "/bin/sh")
+        .output()
+        .expect("viva events");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(socket_ready(&home), "a new server answers");
+    let _ = server::send_request(
+        &home,
+        server::new_request(RequestKind::Shutdown { close_policy: None }),
+    );
+}

@@ -435,6 +435,24 @@ impl PaneNode {
         out
     }
 
+    /// The ratio of the split at `path`, or `None` when the path does not
+    /// resolve to a split.
+    pub fn ratio_at_path(&self, path: &[bool]) -> Option<u16> {
+        let mut node = self;
+        for &go_second in path {
+            match node {
+                PaneNode::Split { first, second, .. } => {
+                    node = if go_second { second } else { first };
+                }
+                PaneNode::Leaf(_) => return None,
+            }
+        }
+        match node {
+            PaneNode::Split { ratio, .. } => Some(*ratio),
+            PaneNode::Leaf(_) => None,
+        }
+    }
+
     /// Set the ratio of the split at `path` (clamped 10..=90). Returns
     /// false when the path no longer resolves to a split — the tree's
     /// topology changed under a drag, which must then be cancelled.
