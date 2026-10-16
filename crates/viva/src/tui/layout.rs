@@ -119,9 +119,19 @@ impl PaneNode {
     /// child. Refuses when the tree is at the pane cap or the focus leaf
     /// is absent. Returns whether anything changed.
     pub fn split(&mut self, focus: &PaneContent, axis: SplitAxis, new_leaf: PaneContent) -> bool {
+        // A tab that only holds the overview placeholder gets the new pane
+        // in its place: the first terminal fills the tab, as in herdr.
+        if *self == PaneNode::Leaf(PaneContent::Browser) && new_leaf != PaneContent::Browser {
+            *self = PaneNode::Leaf(new_leaf);
+            return true;
+        }
         if self.leaves().len() >= MAX_PANES {
             return false;
         }
+        self.split_leaf(focus, axis, new_leaf)
+    }
+
+    fn split_leaf(&mut self, focus: &PaneContent, axis: SplitAxis, new_leaf: PaneContent) -> bool {
         match self {
             PaneNode::Leaf(content) if content == focus => {
                 let old = PaneNode::Leaf(content.clone());
@@ -135,7 +145,8 @@ impl PaneNode {
             }
             PaneNode::Leaf(_) => false,
             PaneNode::Split { first, second, .. } => {
-                first.split(focus, axis, new_leaf.clone()) || second.split(focus, axis, new_leaf)
+                first.split_leaf(focus, axis, new_leaf.clone())
+                    || second.split_leaf(focus, axis, new_leaf)
             }
         }
     }
