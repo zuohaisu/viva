@@ -4138,6 +4138,9 @@ fn agent_handoff(
         None,
         Some(&store),
     )?;
+    if let Some(text) = record.worktree_path.to_str() {
+        restore::remember_pane_cwd(store.connection(), &terminal_id.to_string(), text)?;
+    }
     seed_agent_identification(shared, &terminal_id, std::slice::from_ref(&to_agent));
     // Bracketed paste (QA round 5 F7): multi-line briefs would otherwise
     // be submitted line-by-line by TUI agents (each newline = one submit).
