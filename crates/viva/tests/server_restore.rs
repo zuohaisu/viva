@@ -1,4 +1,4 @@
-//! Server-process restart (TFHS-72): a killed server restores the scene
+//! Server-process restart (issue #154): a killed server restores the scene
 //! tree, pane directories, and focus with new processes. It does not
 //! resurrect the command that was running, and it does not re-run a
 //! finished execution. Live handoff is a different path and is not covered

@@ -111,7 +111,7 @@ CREATE TABLE recovery_plans (
 "#;
 
 /// The host v4 slice: a native session pointer per terminal and agent.
-/// After the server process itself exits, TFHS-72 may run `resume_command`
+/// After the server process itself exits, issue #154 may run `resume_command`
 /// to reopen that agent's own session. That run is not a task result, a
 /// QA verdict, or a memory fact, and it does not re-run a finished execution.
 pub const HOST_V4_SQL: &str = r#"
