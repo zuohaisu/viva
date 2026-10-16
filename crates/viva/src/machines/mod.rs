@@ -12,9 +12,10 @@
 //! to that session's socket. The local default socket stays `server.sock`.
 
 use std::io::{Read, Write};
+use std::os::unix::io::AsRawFd;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -88,10 +89,14 @@ pub struct MachineView {
 /// attempt takes an epoch, and only the newest attempt (or a disconnect
 /// that happened after it started) may write. An older SSH round that
 /// finishes late cannot put a dead machine back online.
-#[derive(Debug, Default)]
+type RefreshWait = Arc<(Mutex<Option<Vec<MachineView>>>, Condvar)>;
+
+#[derive(Default)]
 pub struct MachineCache {
     inner: Mutex<Vec<MachineView>>,
     epoch: Mutex<u64>,
+    /// Coalesce poller and `MachineRefresh` onto one SSH round.
+    refresh: Mutex<Option<RefreshWait>>,
 }
 
 impl MachineCache {
@@ -325,35 +330,60 @@ pub fn with_local(
 /// Refresh every saved machine. A failure keeps that machine's last snapshot
 /// and does not stop the others.
 pub fn refresh(home: &Path, cache: &MachineCache) -> Result<Vec<MachineView>> {
+    let (leader, done) = {
+        let mut slot = cache.refresh.lock().expect("machine refresh");
+        if let Some(done) = slot.as_ref() {
+            (false, Arc::clone(done))
+        } else {
+            let done = Arc::new((Mutex::new(None), Condvar::new()));
+            *slot = Some(Arc::clone(&done));
+            (true, done)
+        }
+    };
+
+    if !leader {
+        let mut guard = done.0.lock().expect("refresh wait");
+        while guard.is_none() {
+            guard = done.1.wait(guard).expect("refresh wait");
+        }
+        return Ok(guard.clone().expect("refresh finished"));
+    }
+
+    let result = refresh_inner(home, cache);
+    let shared = result
+        .as_ref()
+        .map(|views| views.clone())
+        .unwrap_or_else(|_| cache.snapshot());
+    {
+        let mut guard = done.0.lock().expect("refresh result");
+        *guard = Some(shared);
+        done.1.notify_all();
+    }
+    *cache.refresh.lock().expect("machine refresh") = None;
+    result
+}
+
+fn refresh_inner(home: &Path, cache: &MachineCache) -> Result<Vec<MachineView>> {
     let epoch = cache.begin();
     let records = load(home)?;
     let previous = cache.snapshot();
     let mut next = Vec::with_capacity(records.len());
     for record in records {
         let prev = previous.iter().find(|view| view.id == record.id);
-        if !record.enabled {
-            next.push(snapshot_from(
-                &record,
-                prev,
-                false,
-                Some("disabled".into()),
-                None,
-            ));
-            continue;
-        }
-        match fetch_projection(&record) {
-            Ok(projection) => next.push(snapshot_from(&record, prev, true, None, Some(projection))),
-            Err(err) => next.push(snapshot_from(
-                &record,
-                prev,
-                false,
-                Some(err.to_string()),
-                None,
-            )),
-        }
+        next.push(refresh_one(&record, prev));
     }
     let _published = cache.publish(epoch, next.clone());
     Ok(next)
+}
+
+fn refresh_one(record: &MachineRecord, prev: Option<&MachineView>) -> MachineView {
+    if !record.enabled {
+        return snapshot_from(record, prev, false, Some("disabled".into()), None);
+    }
+    match fetch_projection(record) {
+        Ok(projection) => snapshot_from(record, prev, true, None, Some(projection)),
+        Err(err) => snapshot_from(record, prev, false, Some(err.to_string()), None),
+    }
 }
 
 fn snapshot_from(
@@ -433,9 +463,15 @@ pub fn connect_client(record: &MachineRecord) -> Result<crate::server::Client> {
             record.label
         )));
     }
-    let mut child = Command::new(ssh_program())
-        .args(ssh_args(record))
-        .env_remove("VIVA_HOME")
+    let program = ssh_program();
+    let mut cmd = Command::new(&program);
+    cmd.args(ssh_args(record)).env_remove("VIVA_HOME");
+    for key in ["VIVA_FAKE_SSH_MAP", "VIVA_BRIDGE_BIN"] {
+        if let Ok(value) = std::env::var(key) {
+            cmd.env(key, value);
+        }
+    }
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -448,11 +484,11 @@ pub fn connect_client(record: &MachineRecord) -> Result<crate::server::Client> {
                 record.ssh_target
             ))
         })?;
-    let mut ssh_stdin = child
+    let ssh_stdin = child
         .stdin
         .take()
         .ok_or_else(|| Error::Validation("ssh stdin is unavailable".into()))?;
-    let mut ssh_stdout = child
+    let ssh_stdout = child
         .stdout
         .take()
         .ok_or_else(|| Error::Validation("ssh stdout is unavailable".into()))?;
@@ -460,15 +496,8 @@ pub fn connect_client(record: &MachineRecord) -> Result<crate::server::Client> {
         .stderr
         .take()
         .ok_or_else(|| Error::Validation("ssh stderr is unavailable".into()))?;
-    let (local, mut remote) = std::os::unix::net::UnixStream::pair()?;
-    let mut remote_out = remote.try_clone()?;
-    std::thread::spawn(move || {
-        let _ = std::io::copy(&mut ssh_stdout, &mut remote_out);
-        let _ = remote_out.shutdown(std::net::Shutdown::Write);
-    });
-    std::thread::spawn(move || {
-        let _ = std::io::copy(&mut remote, &mut ssh_stdin);
-    });
+    let (local, remote) = std::os::unix::net::UnixStream::pair()?;
+    std::thread::spawn(move || relay_ssh_stdio(remote, ssh_stdin, ssh_stdout));
     let stderr_text = Arc::new(Mutex::new(String::new()));
     let stderr_slot = Arc::clone(&stderr_text);
     std::thread::spawn(move || {
@@ -580,6 +609,59 @@ pub fn run_bridge(session: &str) -> Result<()> {
     }
     let _ = writer.join();
     Ok(())
+}
+
+/// Multiplex one socket leg and ssh stdio without two `copy` threads on the
+/// same socket end (Linux would let the outbound reader steal responses).
+fn relay_ssh_stdio(
+    mut socket: std::os::unix::net::UnixStream,
+    mut ssh_stdin: impl Write + Send + 'static,
+    mut ssh_stdout: impl Read + AsRawFd + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        let socket_fd = socket.as_raw_fd();
+        let ssh_fd = ssh_stdout.as_raw_fd();
+        let mut buf = [0u8; 8192];
+        loop {
+            let mut fds = [
+                libc::pollfd {
+                    fd: socket_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: ssh_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+            if ready <= 0 {
+                break;
+            }
+            if fds[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+                match socket.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if ssh_stdin.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            if fds[1].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+                match ssh_stdout.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if socket.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let _ = socket.shutdown(std::net::Shutdown::Write);
+    });
 }
 
 fn explain_failure(record: &MachineRecord, code: Option<i32>, stderr: &str, err: &Error) -> String {

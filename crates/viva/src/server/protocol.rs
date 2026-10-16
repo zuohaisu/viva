@@ -31,6 +31,10 @@ pub const PROTOCOL_VERSION: u32 = 2;
 pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Per-read timeout on the socket; a silent peer cannot hold a thread.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(10);
+/// One workbench refresh walks every enabled machine serially over SSH
+/// bridges; callers waiting on [`RequestKind::MachineRefresh`] need this
+/// wider budget than [`IO_TIMEOUT`].
+pub const MACHINE_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// One request over the control channel.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

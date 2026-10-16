@@ -35,8 +35,9 @@ mod protocol;
 pub use client::{Client, restart_server, restart_server_with};
 pub use handoff::{HandoffEntry, HandoffManifest};
 pub use protocol::{
-    MAX_MESSAGE_BYTES, PROTOCOL_VERSION, Request, RequestKind, Response, WorkbenchTreeOp,
-    new_request, read_message, round_trip, with_grant, write_message,
+    MACHINE_REFRESH_TIMEOUT, MAX_MESSAGE_BYTES, PROTOCOL_VERSION,
+    Request, RequestKind, Response, WorkbenchTreeOp, new_request, read_message, round_trip,
+    with_grant, write_message,
 };
 
 use std::os::fd::RawFd;
