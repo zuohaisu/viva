@@ -1063,11 +1063,13 @@ USAGE:
     viva skill version-get --skill <id> --version <n>
     viva skill rollback <skill> <version>
     viva skill project --skill <id> --out <path>
+    viva skill distill <execution> [--task-type <key>]
         Team skill bodies with append-only versions (#140). Every write
         records version, time, operator and source execution (or Haisu
         manual). Rollback copies an older version forward; history stays.
         `get` and `project` read the current version for callbacks and
-        member projection.
+        member projection. `distill` proposes a team skill from a completed
+        execution (#141); optional `--task-type` groups repeated successes.
 
     viva memory search --member <id> [--project <id>] --query <text>
         Search the linked external memory for one member's scope
@@ -2256,9 +2258,25 @@ fn cmd_skill(args: &[String]) -> Result<()> {
             );
             Ok(())
         }
+        Some("distill") => {
+            let execution_id = positional
+                .get(1)
+                .cloned()
+                .or_else(|| get("execution"))
+                .ok_or_else(|| {
+                    Error::Validation("skill distill needs <execution> or --execution".into())
+                })?;
+            let execution_id = viva::foundation::ids::ExecutionId::from_str(&execution_id)?;
+            let task_type = get("task-type");
+            let home = viva::foundation::paths::viva_home(None);
+            let svc = viva::skills::DistillService::new(&store, &home);
+            let outcome = svc.distill_from_execution(&execution_id, task_type.as_deref())?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+            Ok(())
+        }
         _ => Err(Error::Validation(
             "skill needs create | write | get | versions | version-get | rollback | project | \
-             list | search | claim | sync | restore | weekly (#139 member set commands)"
+             distill | list | search | claim | sync | restore | weekly (#139 member set commands)"
                 .into(),
         )),
     }
