@@ -1,0 +1,14 @@
+{
+  "id": "split-echo",
+  "name": "Split echo",
+  "version": "0.1.0",
+  "entry": "plugin.py",
+  "actions": [
+    {
+      "id": "open-split",
+      "title": "Open a split pane",
+      "pane": "split"
+    }
+  ],
+  "events": ["pane.opened"]
+}

@@ -19,6 +19,7 @@ pub mod knowledge;
 pub mod maintenance;
 pub mod members;
 pub mod memory;
+pub mod plugins;
 pub mod projects;
 pub mod redaction;
 pub mod server;
