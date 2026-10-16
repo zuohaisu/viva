@@ -66,8 +66,12 @@ impl TerminalRegistry {
         disk_log: Option<Arc<DiskLog>>,
         store: Option<&Store>,
     ) -> Result<(TerminalId, Arc<TerminalHandle>)> {
-        let handle = TerminalHandle::spawn(&spec, &owner, disk_log)?;
         let terminal_id = TerminalId::new();
+        let mut spec = spec;
+        spec.env.retain(|(key, _)| key != "VIVA_TERMINAL_ID");
+        spec.env
+            .push(("VIVA_TERMINAL_ID".into(), terminal_id.to_string()));
+        let handle = TerminalHandle::spawn(&spec, &owner, disk_log)?;
         let entry = TerminalEntry {
             terminal_id: terminal_id.clone(),
             owner: owner.clone(),

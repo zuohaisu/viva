@@ -472,6 +472,10 @@ pub struct WorkbenchApp {
     last_copy: String,
     scrollback_edit: Option<String>,
     workspace_nav: usize,
+    /// This client's memory of a done observation it has already drawn
+    /// for the focused pane. The key is the terminal id; the value is
+    /// that record's `updated_at`. It is not written to the scene book.
+    seen_done: std::collections::HashMap<String, String>,
 }
 
 impl WorkbenchApp {
@@ -533,6 +537,7 @@ impl WorkbenchApp {
             last_copy: String::new(),
             scrollback_edit: None,
             workspace_nav: 0,
+            seen_done: std::collections::HashMap::new(),
         }
     }
 
@@ -3186,6 +3191,7 @@ impl WorkbenchApp {
         if let Some(diff) = &self.diff_view {
             self.draw_diff(frame, frame.area(), diff);
         }
+        self.note_focused_done();
     }
 
     /// The browser leaf after the sidebar took over the lists: a small
@@ -3296,19 +3302,49 @@ impl WorkbenchApp {
         frame.render_widget(Paragraph::new(lines), area);
     }
 
-    /// The pane title: id plus the source-labeled agent statuses.
+    /// The pane title shows the badge this client displays: the winning
+    /// source only. A screen reading does not sit beside a controlled one.
     fn terminal_title(&self, id: &str) -> String {
-        let statuses = self
+        let seen = self.seen_done.get(id).map(String::as_str);
+        let badge = self
             .model
             .terminals
             .iter()
             .find(|t| t.terminal_id == id)
-            .map(|t| Self::format_agent_status(&t.agent_status))
-            .unwrap_or_default();
-        if statuses.is_empty() {
-            format!("terminal {id}")
-        } else {
-            format!("terminal {id} · {statuses}")
+            .and_then(|t| crate::agents::client_badge(&t.agent_status, seen));
+        match badge {
+            Some(badge) => {
+                let source = match badge.source {
+                    crate::agents::StatusSource::ControlledReport => "reported",
+                    crate::agents::StatusSource::ScreenInference => "screen",
+                    crate::agents::StatusSource::ProcessTree => "detected",
+                };
+                format!(
+                    "terminal {id} · {}:{}({source})",
+                    badge.agent,
+                    badge.status.as_str()
+                )
+            }
+            None => format!("terminal {id}"),
+        }
+    }
+
+    /// After the focused pane has been drawn as done, remember that
+    /// observation. The frame just drawn still shows done; the next one
+    /// shows idle. An unfocused pane is left alone.
+    fn note_focused_done(&mut self) {
+        let PaneContent::Terminal(id) = &self.pane_focus else {
+            return;
+        };
+        let id = id.clone();
+        let Some(terminal) = self.model.terminals.iter().find(|t| t.terminal_id == id) else {
+            return;
+        };
+        let Some(badge) = crate::agents::server_badge(&terminal.agent_status) else {
+            return;
+        };
+        if badge.status == crate::agents::AgentStatus::Done {
+            self.seen_done.insert(id, badge.updated_at);
         }
     }
 
@@ -3779,17 +3815,21 @@ impl WorkbenchApp {
         ));
         for (index, terminal) in self.agent_rows().into_iter().enumerate() {
             let selected = self.focus == Focus::Terminals && self.selected == index;
-            // The dot shows the best observation's state. Honesty (S4,
-            // ruling §5.3): only a controlled report may look authoritative
-            // — screen/process-tree dots stay muted.
-            let (dot, dot_color) = match terminal.records.first() {
-                Some(record) => {
-                    let color = if record.source.is_authoritative() && !terminal.stale {
-                        crate::tui::theme::status_color(record.status, palette)
+            // The dot is this client's badge. A controlled report wins even
+            // when a later screen scan disagrees. Screen and process dots
+            // stay muted. A done this client has already drawn shows as idle.
+            let seen = self
+                .seen_done
+                .get(&terminal.terminal_id)
+                .map(String::as_str);
+            let (dot, dot_color) = match crate::agents::client_badge(&terminal.records, seen) {
+                Some(badge) => {
+                    let color = if badge.source.is_authoritative() && !terminal.stale {
+                        crate::tui::theme::status_color(badge.status, palette)
                     } else {
                         palette.overlay0
                     };
-                    (crate::tui::theme::status_glyph(record.status), color)
+                    (crate::tui::theme::status_glyph(badge.status), color)
                 }
                 None => ("·", palette.overlay0),
             };
@@ -5757,6 +5797,55 @@ mod tests {
         );
     }
 
+    /// The focused pane shows done on the frame that first displays it.
+    /// The next frame shows idle. The server record is not rewritten.
+    #[test]
+    fn focused_done_shows_once_then_idle() {
+        use crate::agents::{AgentStatus, AgentStatusRecord, StatusSource};
+        let palette = Palette::catppuccin_mocha();
+        let record = AgentStatusRecord {
+            terminal_id: "term-1".into(),
+            agent: "codex".into(),
+            status: AgentStatus::Done,
+            source: StatusSource::ControlledReport,
+            detail: "turn finished".into(),
+            updated_at: "2026-10-15T00:00:00Z".into(),
+        };
+        let mut model = sample();
+        model.terminals[0].agent_status = vec![record.clone()];
+        model.agents = vec![crate::agents::AgentSessionRow {
+            terminal_id: "term-1".into(),
+            tool: "codex".into(),
+            name: "Codex".into(),
+            worktree_id: Some("wt1".into()),
+            location: "viva / agent/feat-x".into(),
+            live: Some(true),
+            records: vec![record],
+            stale: false,
+            in_workspace: true,
+            report_capability: "report:live".into(),
+        }];
+        let mut app = WorkbenchApp::new();
+        app.set_model(model);
+        let before = sidebar_mark(&mut app, 100, 40);
+        assert_eq!(before.0, "●");
+        assert_eq!(before.1, palette.teal, "an unfocused done stays done");
+        app.attach_terminal("term-1".into());
+        assert_eq!(app.pane_focus(), &PaneContent::Terminal("term-1".into()));
+        let first = sidebar_mark(&mut app, 100, 40);
+        assert_eq!(first.0, "●");
+        assert_eq!(
+            first.1, palette.teal,
+            "the first focused frame still shows done"
+        );
+        let second = sidebar_mark(&mut app, 100, 40);
+        assert_eq!(second.0, "○");
+        assert_eq!(
+            second.1, palette.green,
+            "the next frame shows that done as idle"
+        );
+    }
+
     /// The first filled dot in the sidebar's leftmost column: the agents
     /// section's status dot for the first terminal row.
     fn sidebar_dot(app: &mut WorkbenchApp, w: u16, h: u16) -> ratatui::style::Color {
@@ -5772,6 +5861,27 @@ mod tests {
             }
         }
         panic!("no status dot found in the sidebar");
+    }
+
+    /// The first agent mark in column 0: filled done/working or hollow idle.
+    fn sidebar_mark(
+        app: &mut WorkbenchApp,
+        w: u16,
+        h: u16,
+    ) -> (&'static str, ratatui::style::Color) {
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|f| app.draw(f)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        for y in 0..h {
+            if let Some(cell) = buffer.cell(ratatui::layout::Position::new(0, y)) {
+                if cell.symbol() == "●" || cell.symbol() == "○" {
+                    let glyph = if cell.symbol() == "●" { "●" } else { "○" };
+                    return (glyph, cell.fg);
+                }
+            }
+        }
+        panic!("no agent mark found in the sidebar");
     }
 
     // ------------------------------------------------------------------
