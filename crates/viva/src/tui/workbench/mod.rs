@@ -2064,7 +2064,7 @@ impl WorkbenchApp {
 
     /// Handle one key event.
     pub fn on_key(&mut self, key: KeyEvent) -> KeyOutcome {
-        use ratatui::crossterm::event::{KeyEventKind};
+        use ratatui::crossterm::event::KeyEventKind;
         // Releases never drive workbench shortcuts. In a terminal pane they
         // are forwarded only when the program asked for key-release events.
         if key.kind == KeyEventKind::Release {
