@@ -127,7 +127,6 @@ test("memory remember records provenance even when chat omits it", async () => {
       "The demo is on Fridays",
       "--source",
       "chat by Samuel (task task-1)",
-      "--emphasis",
     ]);
   });
 });

@@ -93,7 +93,6 @@ export function registerMemoryTools(pi: PiHost, env: VivaEnv): void {
         content,
         "--source",
         source,
-        "--emphasis",
       ];
       if (params.project_id) {
         cliArgs.push("--project", params.project_id);
@@ -110,9 +109,41 @@ export function registerMemoryTools(pi: PiHost, env: VivaEnv): void {
         if (!candidateId) {
           return toolSuccess(proposed);
         }
-        return toolSuccess(
-          await runEnvelope(env, ["memory", "admit", "--candidate", candidateId]),
-        );
+        const admitted = await runEnvelope(env, [
+          "memory",
+          "admit",
+          "--candidate",
+          candidateId,
+        ]);
+        const status =
+          typeof admitted === "object" &&
+          admitted !== null &&
+          "candidate_status" in admitted &&
+          typeof (admitted as { candidate_status: unknown }).candidate_status === "string"
+            ? (admitted as { candidate_status: string }).candidate_status
+            : null;
+        if (status === "rejected") {
+          let detail = "admission gate rejected this candidate";
+          if (
+            typeof admitted === "object" &&
+            admitted !== null &&
+            "decision" in admitted &&
+            typeof (admitted as { decision: unknown }).decision === "object"
+          ) {
+            const decision = (admitted as { decision: Record<string, unknown> }).decision;
+            const reject = decision.Reject ?? decision.reject;
+            if (
+              reject &&
+              typeof reject === "object" &&
+              "reasons" in reject &&
+              Array.isArray((reject as { reasons: unknown }).reasons)
+            ) {
+              detail = (reject as { reasons: string[] }).reasons.join("; ");
+            }
+          }
+          return toolFailure(`memory admission rejected: ${detail}`);
+        }
+        return toolSuccess(admitted);
       } catch (err) {
         return toolFailure(`memory write refused: ${String(err)}`);
       }

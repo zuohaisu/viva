@@ -449,7 +449,6 @@ impl<'a> MemoryService<'a> {
         let now = utc_now();
 
         let (fact_id, link) = if let Some(existing_id) = self.fact_id_for_hash(&hash)? {
-            self.upgrade_fact_kind(&existing_id, kind)?;
             let link = self.ensure_native_link_scoped(
                 existing_id.clone(),
                 &member,
@@ -458,6 +457,9 @@ impl<'a> MemoryService<'a> {
                 link_scope,
                 kind,
             )?;
+            if link.link_scope == link_scope {
+                self.upgrade_fact_kind(&existing_id, kind)?;
+            }
             (existing_id, link)
         } else {
             let fact_id = format!("nf-{}", uuid::Uuid::new_v4().simple());

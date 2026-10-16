@@ -250,6 +250,63 @@ fn team_knowledge_visible_across_members_personal_isolated() {
 }
 
 #[test]
+fn narrowing_scope_rejected_without_mutating_fact_kind() {
+    let store = store_v4();
+    let service = MemoryService::new(&store);
+    let alice = MemberId::new();
+    let content = "Shared norm: document admission gate outcomes in GitHub issue comments";
+
+    propose_and_admit(
+        &service,
+        &alice,
+        None,
+        content,
+        "team first",
+        KnowledgeKind::TeamKnowledge,
+        true,
+    );
+
+    let proposed = service
+        .remember_with_options(
+            &alice,
+            None,
+            content,
+            "personal attempt",
+            "general",
+            "",
+            KnowledgeKind::PersonalMemory,
+            true,
+            None,
+            None,
+        )
+        .expect("propose");
+    let err = service
+        .admit_candidate(&proposed.candidate_id)
+        .expect_err("narrow");
+    assert!(
+        err.to_string().contains("cannot be narrowed"),
+        "unexpected: {err}"
+    );
+
+    let kind: String = store
+        .connection()
+        .query_row("SELECT knowledge_kind FROM memory_facts LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(kind, "team_knowledge");
+    let status: String = store
+        .connection()
+        .query_row(
+            "SELECT status FROM memory_candidates WHERE candidate_id = ?1",
+            [&proposed.candidate_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "proposed");
+}
+
+#[test]
 fn kind_upgrade_personal_to_team_on_same_content() {
     let store = store_v4();
     let service = MemoryService::new(&store);
