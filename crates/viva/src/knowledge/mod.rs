@@ -30,9 +30,23 @@ use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{ExecutionId, MemberId, ProjectId, utc_now};
 use crate::foundation::store::{DOMAIN_KNOWLEDGE, MigrationRegistry, Store};
 
+mod skill_set;
+
+pub use skill_set::{
+    KNOWLEDGE_V2_SKILL_SET_SQL, MemberSkillMembership, SkillBodyRead, SkillSetEvent,
+    SkillSetService, SkillUsedIn, WeeklyReport,
+};
+
 /// Register the `knowledge` domain migrations (V11's namespace).
 pub fn register_migrations(registry: MigrationRegistry) -> MigrationRegistry {
-    registry.register(DOMAIN_KNOWLEDGE, 1, "knowledge v1", KNOWLEDGE_V1_SQL)
+    registry
+        .register(DOMAIN_KNOWLEDGE, 1, "knowledge v1", KNOWLEDGE_V1_SQL)
+        .register(
+            DOMAIN_KNOWLEDGE,
+            2,
+            "member skill sets v2",
+            KNOWLEDGE_V2_SKILL_SET_SQL,
+        )
 }
 
 pub const KNOWLEDGE_V1_SQL: &str = r#"
