@@ -1,0 +1,45 @@
+ All projects   team
+pane closed — terminal te│ ● build  Terminal
+ workspaces              │┌ viva ───────────────────────────────────────────────────────────┬ terminal term-78899ee554e84e87a064fb9ae12e6364 ──────────────────┐
+team unknown             ││                                                                 │user@host:~/w│
+ spaces                  ││                                                                 │…$    │
+alpha 1                  ││                                                                 │                                                                  │
+└─ ● master              ││                                                                 │                                                                  │
+   clean                 ││                                                                 │                                                                  │
+Beta // not a comment 1  ││                                                                 │                                                                  │
+└─ ● master              ││                                                                 │                                                                  │
+   clean                 ││                                                                 │                                                                  │
+ local                   ││                                                                 │                                                                  │
+└─ team                  ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││   viva workbench                                                │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││  2 projects · 2 worktrees · 5 terminals (5 live) · 0 tasks      │                                                                  │
+─────────────────────────││  ctrl+b prefix · a new pane is a terminal                       │                                                                  │
+ agents · workspace (! gl││  prefix+? lists bindings                                        │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         ││                                                                 │                                                                  │
+                         │└─────────────────────────────────────────────────────────────────┴──────────────────────────────────────────────────────────────────┘
+ ctrl+b  TERMINAL
