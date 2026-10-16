@@ -35,8 +35,8 @@ mod protocol;
 pub use client::{Client, restart_server, restart_server_with};
 pub use handoff::{HandoffEntry, HandoffManifest};
 pub use protocol::{
-    MAX_MESSAGE_BYTES, PROTOCOL_VERSION, Request, RequestKind, Response, WorkbenchTreeOp,
-    new_request, read_message, round_trip, with_grant, write_message,
+    MACHINE_REFRESH_TIMEOUT, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, Request, RequestKind, Response,
+    WorkbenchTreeOp, new_request, read_message, round_trip, with_grant, write_message,
 };
 
 use std::os::fd::RawFd;
@@ -225,6 +225,9 @@ pub struct Shared {
     /// the 3-5 Hz workbench view from spawning concurrent cycles that
     /// stampede `git pull --ff-only` into ref-lock failures.
     pub sync_in_flight: AtomicBool,
+    /// Saved SSH machines and the last workspace/agent snapshot from each.
+    /// The default socket stays this home's `server.sock`.
+    pub machines: crate::machines::MachineCache,
     /// Exit-watchers for dispatched executions. The graceful shutdown
     /// joins them BEFORE writing its handoff record — otherwise the
     /// process exit would die with the process and the next host would
@@ -313,6 +316,7 @@ impl Host {
             last_recovery_sweep: Mutex::new(None),
             gh_bin: Mutex::new(None),
             sync_in_flight: AtomicBool::new(false),
+            machines: crate::machines::MachineCache::default(),
             watchers: Mutex::new(Vec::new()),
             tree: Mutex::new(tree),
         });
@@ -472,6 +476,8 @@ impl Host {
     pub fn serve(self) -> Result<()> {
         let shared = self.shared;
         let listener = self.listener;
+        let poller = Arc::clone(&shared);
+        std::thread::spawn(move || poll_machines(poller));
         listener.set_nonblocking(true)?;
         loop {
             if shared.stopping.load(Ordering::SeqCst) {
@@ -929,6 +935,12 @@ fn handle_request(shared: Arc<Shared>, request: &Request) -> Result<serde_json::
             timeout_secs,
         } => agent_wait(&shared, terminal_id, status, *timeout_secs),
         RequestKind::EventsFeed { since_seq, limit } => events_feed(&shared, *since_seq, *limit),
+        RequestKind::MachineProjection => machine_projection(&shared),
+        RequestKind::MachineRefresh => {
+            let views = crate::machines::refresh(&shared.home, &shared.machines)?;
+            Ok(serde_json::to_value(views)?)
+        }
+        RequestKind::MachineForward { id, kind } => machine_forward(&shared, request, id, kind),
     }
 }
 
@@ -942,6 +954,9 @@ const SOCKET_CONTROL_ACTION: &str = "terminal_control";
 /// member-attributed. Read-only kinds and the OS-authenticated owner path
 /// (no member attribution) are not gated beyond grant validation below.
 fn is_member_gated_kind(kind: &RequestKind) -> bool {
+    if let RequestKind::MachineForward { kind, .. } = kind {
+        return is_member_gated_kind(kind);
+    }
     if let RequestKind::WorkbenchTree { op } = kind {
         return op.changes_state();
     }
@@ -1368,7 +1383,108 @@ fn workbench_view(shared: Arc<Shared>) -> Result<serde_json::Value> {
         }
     }
 
+    model.machines = crate::machines::with_local(
+        &model.workspaces,
+        model.workspace_id.clone(),
+        &model.agents,
+        &shared.machines.snapshot(),
+    );
+
     serde_json::to_value(&model).map_err(|e| Error::Validation(format!("view: {e}")))
+}
+
+fn poll_machines(shared: Arc<Shared>) {
+    while !shared.stopping.load(Ordering::SeqCst) {
+        let _ = crate::machines::refresh(&shared.home, &shared.machines);
+        for _ in 0..40 {
+            if shared.stopping.load(Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+/// Sidebar snapshot for a peer that reached this server over SSH.
+fn machine_projection(shared: &Shared) -> Result<serde_json::Value> {
+    let store = shared.store.lock().expect("store");
+    let mut model = crate::tui::workbench::assemble_view(&store, &shared.terminals)?;
+    drop(store);
+    for row in &mut model.terminals {
+        row.agent_status = shared.agent_board.project(&row.terminal_id);
+    }
+    let session_ctx = crate::agents::SessionContext {
+        worktrees: &model.worktrees,
+        projects: &model.projects,
+        workspace_id: model.workspace_id.as_deref(),
+    };
+    for row in &model.terminals {
+        if let Some(session) = crate::agents::build_session_row(row, &session_ctx) {
+            model.agents.push(session);
+        }
+    }
+    crate::agents::sort_sessions(&mut model.agents);
+    Ok(serde_json::json!({
+        "workspaces": model.workspaces,
+        "workspace_id": model.workspace_id,
+        "agents": model.agents,
+    }))
+}
+
+fn machine_forward(
+    shared: &Shared,
+    request: &Request,
+    id: &str,
+    kind: &RequestKind,
+) -> Result<serde_json::Value> {
+    if matches!(
+        kind,
+        RequestKind::MachineForward { .. } | RequestKind::MachineRefresh
+    ) {
+        return Err(Error::Validation(
+            "a machine forward cannot carry another machine forward".into(),
+        ));
+    }
+    let record = crate::machines::require(&shared.home, id)?;
+    if !record.enabled {
+        return Err(Error::Validation(format!(
+            "machine {} is disabled; input is refused",
+            record.label
+        )));
+    }
+    if let Some(view) = shared
+        .machines
+        .snapshot()
+        .into_iter()
+        .find(|view| view.id == id)
+    {
+        if !view.connected {
+            let why = if view.enabled {
+                "disconnected"
+            } else {
+                "disabled"
+            };
+            return Err(Error::Validation(format!(
+                "machine {} is {why}; input is refused",
+                view.label
+            )));
+        }
+    }
+    let mut forwarded = new_request(kind.clone());
+    forwarded.grant = request.grant.clone();
+    forwarded.member = request.member.clone();
+    match crate::machines::send_via_bridge(&record, forwarded) {
+        Ok(response) if response.ok => Ok(response.result.unwrap_or(serde_json::Value::Null)),
+        Ok(response) => {
+            Err(Error::Validation(response.error.unwrap_or_else(|| {
+                "remote viva rejected the request".into()
+            })))
+        }
+        Err(err) => {
+            shared.machines.mark_disconnected(id, err.to_string());
+            Err(err)
+        }
+    }
 }
 
 /// In-memory scene tree plus any stored JSON the server has not adopted.
@@ -3159,6 +3275,9 @@ fn fnv1a(text: &str) -> u64 {
 /// Send one request to the active server over the real channel. When
 /// no host listens, this fails cleanly and never starts a daemon.
 pub fn send_request(home: &Path, request: Request) -> Result<Response> {
+    if let Some(record) = crate::machines::invocation_target() {
+        return crate::machines::send_via_bridge(&record, request);
+    }
     let socket_path = home.join(SOCKET_NAME);
     if !socket_path.exists() {
         return Err(Error::Validation(format!(

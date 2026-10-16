@@ -42,6 +42,12 @@ impl Client {
     /// socket is absent or wedged — use [`ensure_server`] for the
     /// spawn-and-wait behavior.
     pub fn connect(home: &Path) -> Result<Self> {
+        // `--machine` dials that machine and must not open or spawn the
+        // local default socket. `from_stream` performs the handshake on the
+        // bridge, so this branch does not call back into `connect`.
+        if let Some(record) = crate::machines::invocation_target() {
+            return crate::machines::connect_client(&record);
+        }
         let socket_path = home.join(SOCKET_NAME);
         if !socket_path.exists() {
             return Err(Error::Validation(format!(
@@ -66,10 +72,31 @@ impl Client {
         Ok(client)
     }
 
+    /// Handshake on an already connected stream (an SSH bridge). Reconnect
+    /// later still goes through [`Self::connect`], which honors `--machine`.
+    pub fn from_stream(stream: UnixStream, home: &Path) -> Result<Self> {
+        let mut client = Self {
+            stream,
+            home: home.to_path_buf(),
+            last_activity: Instant::now(),
+            reconnect: false,
+        };
+        let response = client.call(RequestKind::Ping)?;
+        if response.get("pid").is_none() {
+            return Err(Error::Validation(
+                "socket answered but the host handshake failed; refusing to attach".into(),
+            ));
+        }
+        Ok(client)
+    }
+
     /// Connect, spawning a detached resident server first when none is
     /// running. The spawned server outlives this process by construction:
     /// its own process group, its output in `server.log`.
     pub fn ensure_server(home: &Path) -> Result<Self> {
+        if crate::machines::invocation_target().is_some() {
+            return Self::connect(home);
+        }
         if crate::foundation::legacy::old_control_socket_alive(home)? {
             return Err(Error::Validation(format!(
                 "the previous control socket {} is still serving; refusing to start a second \
