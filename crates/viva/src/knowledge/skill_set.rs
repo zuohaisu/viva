@@ -2,9 +2,10 @@
 //! summaries (issue #139, Resident-Container §7.1 / §8).
 //!
 //! Skills remain team-owned; each member carries an independent set of
-//! team skill references. Weight decay and automated forgetting live in
-//! issue #119 — this module records membership, append-only set events,
-//! and `used_in` rows (including the one-time initial 1.0 on join).
+//! team skill references. Weight, decay and forgetting live in
+//! [`super::skill_weight`] (issue #119). This module records membership,
+//! append-only set events, and `used_in` rows (including the one-time
+//! initial 1.0 on join).
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -17,6 +18,7 @@ use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{ExecutionId, MemberId, utc_now};
 use crate::foundation::store::Store;
 
+use super::skill_weight::SkillWeightService;
 use super::{KnowledgeRegistry, SkillRegistration};
 
 /// Default Jaccard similarity above which an overlap is reported (not merged).
@@ -121,12 +123,16 @@ pub struct WeeklyReport {
     pub synced: Vec<SkillSetEvent>,
     pub overlap_suggested: Vec<SkillSetEvent>,
     pub forgetting_section: String,
+    pub forgotten: Vec<super::skill_weight::SkillWeightEvent>,
+    pub would_forget: Vec<super::skill_weight::SkillWeightEvent>,
+    pub capacity_overflow: Vec<super::skill_weight::SkillWeightEvent>,
 }
 
 pub struct SkillSetService<'a> {
     store: &'a Store,
     knowledge: KnowledgeRegistry<'a>,
     overlap_threshold: f64,
+    home: Option<PathBuf>,
 }
 
 impl<'a> SkillSetService<'a> {
@@ -135,12 +141,27 @@ impl<'a> SkillSetService<'a> {
             store,
             knowledge: KnowledgeRegistry::new(store),
             overlap_threshold: DEFAULT_OVERLAP_THRESHOLD,
+            home: None,
         }
     }
 
     pub fn with_overlap_threshold(mut self, threshold: f64) -> Self {
         self.overlap_threshold = threshold;
         self
+    }
+
+    /// `soul.md` and `[skill_weight]` are read from this home.
+    #[must_use]
+    pub fn with_home(mut self, home: impl Into<PathBuf>) -> Self {
+        self.home = Some(home.into());
+        self
+    }
+
+    pub fn weights(&self) -> Result<SkillWeightService<'_>> {
+        match &self.home {
+            Some(home) => SkillWeightService::open(self.store, home),
+            None => Ok(SkillWeightService::with_defaults(self.store)),
+        }
     }
 
     pub fn list_member_skills(&self, member: &MemberId) -> Result<Vec<MemberSkillMembership>> {
@@ -181,9 +202,13 @@ impl<'a> SkillSetService<'a> {
         self.require_team_skill(skill_id)?;
         if let Some(existing) = self.membership(member, skill_id)? {
             return match existing.state {
-                MembershipState::Active => Ok(existing),
+                MembershipState::Active => {
+                    self.weights()?.absorb(member, skill_id)?;
+                    Ok(existing)
+                }
                 MembershipState::Forgotten => {
                     self.restore_membership(member, skill_id, "claimed_after_use")?;
+                    self.weights()?.absorb(member, skill_id)?;
                     self.membership(member, skill_id)?
                         .ok_or_else(|| Error::Validation("restore left no membership row".into()))
                 }
@@ -198,6 +223,7 @@ impl<'a> SkillSetService<'a> {
         self.append_event(member, skill_id, "claimed", None, json!({}))?;
         self.record_initial_use(member, skill_id, execution_id)?;
         self.check_overlap_and_record(member, skill_id)?;
+        self.weights()?.absorb(member, skill_id)?;
         self.membership(member, skill_id)?
             .ok_or_else(|| Error::Validation("claim left no membership row".into()))
     }
@@ -220,6 +246,7 @@ impl<'a> SkillSetService<'a> {
         } else {
             self.restore_membership(member, skill_id, "manual_restore")?;
         }
+        self.weights()?.absorb(member, skill_id)?;
         self.membership(member, skill_id)?
             .ok_or_else(|| Error::Validation("restore left no membership row".into()))
     }
@@ -234,6 +261,7 @@ impl<'a> SkillSetService<'a> {
         self.require_team_skill(skill_id)?;
         if let Some(existing) = self.membership(target, skill_id)? {
             if existing.state == MembershipState::Active {
+                self.weights()?.absorb(target, skill_id)?;
                 return Ok(existing);
             }
             self.restore_membership(target, skill_id, "sync_reactivate")?;
@@ -248,6 +276,7 @@ impl<'a> SkillSetService<'a> {
             self.check_overlap_and_record(target, skill_id)?;
         }
         self.append_event(target, skill_id, "synced", None, json!({}))?;
+        self.weights()?.absorb(target, skill_id)?;
         self.membership(target, skill_id)?
             .ok_or_else(|| Error::Validation("sync left no membership row".into()))
     }
@@ -286,6 +315,7 @@ impl<'a> SkillSetService<'a> {
         )?;
         self.record_initial_use(target, &registration.skill_id, execution_id)?;
         self.check_overlap_and_record(target, &registration.skill_id)?;
+        self.weights()?.absorb(target, &registration.skill_id)?;
         Ok(registration)
     }
 
@@ -333,6 +363,7 @@ impl<'a> SkillSetService<'a> {
             ))
         })?;
         let used_in = self.record_read_use(member, skill_id, execution_id, score_on_read)?;
+        self.weights()?.absorb(member, skill_id)?;
         Ok(SkillBodyRead {
             skill_id: skill_id.to_string(),
             entry_path: skill.entry_path,
@@ -370,7 +401,8 @@ impl<'a> SkillSetService<'a> {
         Ok(hits)
     }
 
-    /// Mark a skill forgotten in one member's set (#119 will call this).
+    /// Mark a skill forgotten in one member's set. Weight tracking writes the
+    /// `forgotten` event around this update.
     pub fn mark_forgotten(&self, member: &MemberId, skill_id: &str) -> Result<()> {
         let n = self.store.connection().execute(
             "UPDATE member_skill_memberships
@@ -430,6 +462,7 @@ impl<'a> SkillSetService<'a> {
                 _ => {}
             }
         }
+        let forgetting = self.weights()?.forgetting_since(&since)?;
         let generated_at = utc_now();
         conn.execute(
             "UPDATE skill_weekly_reports SET last_run_at = ?1, last_event_seq = ?2
@@ -443,7 +476,10 @@ impl<'a> SkillSetService<'a> {
             restored,
             synced,
             overlap_suggested,
-            forgetting_section: "尚未启用（技能权重与遗忘见 issue #119）".into(),
+            forgetting_section: forgetting.summary,
+            forgotten: forgetting.forgotten,
+            would_forget: forgetting.would_forget,
+            capacity_overflow: forgetting.capacity_overflow,
         })
     }
 

@@ -324,6 +324,7 @@ fn upgrade_renames_everything_and_keeps_every_row() {
                     ("memory".into(), 4),
                     ("skills".into(), 1),
                     ("knowledge".into(), 2),
+                    ("knowledge".into(), 3),
                 ]);
                 assert_eq!(
                     appended, expected,

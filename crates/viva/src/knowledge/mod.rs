@@ -31,10 +31,17 @@ use crate::foundation::ids::{ExecutionId, MemberId, ProjectId, utc_now};
 use crate::foundation::store::{DOMAIN_KNOWLEDGE, MigrationRegistry, Store};
 
 mod skill_set;
+mod skill_weight;
 
 pub use skill_set::{
     KNOWLEDGE_V2_SKILL_SET_SQL, MemberSkillMembership, SkillBodyRead, SkillSetEvent,
     SkillSetService, SkillUsedIn, WeeklyReport,
+};
+pub use skill_weight::{
+    DecayTrack, ForgettingDigest, KNOWLEDGE_V3_SKILL_WEIGHT_SQL, SessionEndReport,
+    SkillWeightConfig, SkillWeightEvent, SkillWeightService, SkillWeightView, TrackSource,
+    TrialMode, load_config, member_soul_path, parse_innate_skills, parse_skill_weight_config,
+    transcript_reads_skill_body,
 };
 
 /// Register the `knowledge` domain migrations (V11's namespace).
@@ -46,6 +53,12 @@ pub fn register_migrations(registry: MigrationRegistry) -> MigrationRegistry {
             2,
             "member skill sets v2",
             KNOWLEDGE_V2_SKILL_SET_SQL,
+        )
+        .register(
+            DOMAIN_KNOWLEDGE,
+            3,
+            "skill weights v3",
+            KNOWLEDGE_V3_SKILL_WEIGHT_SQL,
         )
 }
 

@@ -1058,7 +1058,12 @@ USAGE:
 
     viva skill create --name <text> --body-file <path> (--execution <id> | --manual)
     viva skill write --skill <id> --body-file <path> (--execution <id> | --manual)
-    viva skill get --skill <id>
+    viva skill get --skill <id> [--member <id> --execution <id>]
+    viva skill weight --member <id> [--skill <id>] [--rebuild]
+    viva skill track --member <id> --skill <id> --track <session|time>
+    viva skill correct <execution> <skill> [--member <id>]
+    viva skill session-end --member <id> --session <id>
+    viva skill ingest-session --member <id> --execution <id> --file <path>
     viva skill versions --skill <id>
     viva skill version-get --skill <id> --version <n>
     viva skill rollback <skill> <version>
@@ -1067,7 +1072,13 @@ USAGE:
         records version, time, operator and source execution (or Haisu
         manual). Rollback copies an older version forward; history stays.
         `get` and `project` read the current version for callbacks and
-        member projection.
+        member projection. With --member and --execution, `get` records one
+        body read for that member. `weight` is the current decayed weight.
+        `track` pins session or time decay (a pin is not replaced by the
+        default). `correct` sets that use to 0 and marks the skill for review.
+        `session-end` counts one of the member's sessions and may forget.
+        `ingest-session` counts harness body-reads found in a recovered
+        transcript. Projecting a skill does not change its weight.
 
     viva memory search --member <id> [--project <id>] --query <text>
         Search the linked external memory for one member's scope
@@ -2020,12 +2031,18 @@ fn cmd_skill(args: &[String]) -> Result<()> {
     let mut named: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut positional: Vec<String> = Vec::new();
     let mut manual = false;
+    let mut rebuild = false;
     let mut i = 0;
     while i < args.len() {
         let token = args[i].as_str();
         if token.starts_with("--") {
             if token == "--manual" {
                 manual = true;
+                i += 1;
+                continue;
+            }
+            if token == "--rebuild" {
+                rebuild = true;
                 i += 1;
                 continue;
             }
@@ -2108,8 +2125,12 @@ fn cmd_skill(args: &[String]) -> Result<()> {
                 let skill_id = require("skill")?;
                 let execution =
                     viva::foundation::ids::ExecutionId::from_str(&require("execution")?)?;
-                let sets = viva::knowledge::SkillSetService::new(&store);
-                let read = sets.get_body(&member, &skill_id, &execution, 1.0)?;
+                let home = viva::foundation::paths::viva_home(None);
+                let weights = viva::knowledge::SkillWeightService::open(&store, &home)?;
+                weights.settle_execution(&execution)?;
+                let score = weights.score_for_execution(&execution)?;
+                let sets = viva::knowledge::SkillSetService::new(&store).with_home(home);
+                let read = sets.get_body(&member, &skill_id, &execution, score)?;
                 println!("{}", serde_json::to_string_pretty(&read)?);
             } else {
                 let skill_id = require("skill")?;
@@ -2127,9 +2148,11 @@ fn cmd_skill(args: &[String]) -> Result<()> {
         }
         Some("list") => {
             let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
-            let sets = viva::knowledge::SkillSetService::new(&store);
+            let sets = viva::knowledge::SkillSetService::new(&store)
+                .with_home(viva::foundation::paths::viva_home(None));
             let knowledge = viva::knowledge::KnowledgeRegistry::new(&store);
             let rows = sets.list_member_skills(&member)?;
+            let weights = sets.weights()?;
             let mut out = Vec::new();
             for m in rows {
                 if let Some(skill) = knowledge.skill(&m.skill_id)? {
@@ -2137,6 +2160,7 @@ fn cmd_skill(args: &[String]) -> Result<()> {
                         "membership": m,
                         "skill": skill,
                         "derived_from": sets.skill_derived_from(&m.skill_id)?,
+                        "weight": weights.read(&member, &m.skill_id)?,
                     }));
                 }
             }
@@ -2147,7 +2171,8 @@ fn cmd_skill(args: &[String]) -> Result<()> {
             let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
             let query = require("query")?;
             let team = get("team").is_some();
-            let sets = viva::knowledge::SkillSetService::new(&store);
+            let sets = viva::knowledge::SkillSetService::new(&store)
+                .with_home(viva::foundation::paths::viva_home(None));
             let hits = sets.search(&member, &query, team)?;
             println!("{}", serde_json::to_string_pretty(&hits)?);
             Ok(())
@@ -2158,7 +2183,8 @@ fn cmd_skill(args: &[String]) -> Result<()> {
             let execution = get("execution")
                 .map(|e| viva::foundation::ids::ExecutionId::from_str(&e))
                 .transpose()?;
-            let sets = viva::knowledge::SkillSetService::new(&store);
+            let sets = viva::knowledge::SkillSetService::new(&store)
+                .with_home(viva::foundation::paths::viva_home(None));
             let membership = sets.claim(&member, &skill_id, execution.as_ref())?;
             println!("{}", serde_json::to_string_pretty(&membership)?);
             Ok(())
@@ -2169,7 +2195,8 @@ fn cmd_skill(args: &[String]) -> Result<()> {
             let execution = get("execution")
                 .map(|e| viva::foundation::ids::ExecutionId::from_str(&e))
                 .transpose()?;
-            let sets = viva::knowledge::SkillSetService::new(&store);
+            let sets = viva::knowledge::SkillSetService::new(&store)
+                .with_home(viva::foundation::paths::viva_home(None));
             if let (Some(source), Some(title), Some(entry)) =
                 (get("derived-from"), get("title"), get("entry"))
             {
@@ -2191,15 +2218,97 @@ fn cmd_skill(args: &[String]) -> Result<()> {
         Some("restore") => {
             let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
             let skill_id = require("skill")?;
-            let sets = viva::knowledge::SkillSetService::new(&store);
+            let sets = viva::knowledge::SkillSetService::new(&store)
+                .with_home(viva::foundation::paths::viva_home(None));
             let membership = sets.restore_manual(&member, &skill_id)?;
             println!("{}", serde_json::to_string_pretty(&membership)?);
             Ok(())
         }
         Some("weekly") => {
-            let sets = viva::knowledge::SkillSetService::new(&store);
+            let sets = viva::knowledge::SkillSetService::new(&store)
+                .with_home(viva::foundation::paths::viva_home(None));
             let report = sets.weekly_report()?;
             println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        Some("weight") => {
+            let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
+            let home = viva::foundation::paths::viva_home(None);
+            let weights = viva::knowledge::SkillWeightService::open(&store, &home)?;
+            if let Some(skill_id) = get("skill") {
+                let view = if rebuild {
+                    weights.rebuild(&member, &skill_id)?
+                } else {
+                    weights.read(&member, &skill_id)?
+                };
+                println!("{}", serde_json::to_string_pretty(&view)?);
+            } else {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&weights.read_active(&member)?)?
+                );
+            }
+            Ok(())
+        }
+        Some("track") => {
+            let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
+            let skill_id = require("skill")?;
+            let track = viva::knowledge::DecayTrack::parse(&require("track")?)?;
+            let home = viva::foundation::paths::viva_home(None);
+            let weights = viva::knowledge::SkillWeightService::open(&store, &home)?;
+            let view = weights.assign_track(&member, &skill_id, track)?;
+            println!("{}", serde_json::to_string_pretty(&view)?);
+            Ok(())
+        }
+        Some("correct") => {
+            let execution = positional
+                .get(1)
+                .cloned()
+                .or_else(|| get("execution"))
+                .ok_or_else(|| {
+                    Error::Validation("skill correct needs <execution> <skill>".into())
+                })?;
+            let skill_id = positional
+                .get(2)
+                .cloned()
+                .or_else(|| get("skill"))
+                .ok_or_else(|| {
+                    Error::Validation("skill correct needs <execution> <skill>".into())
+                })?;
+            let execution = viva::foundation::ids::ExecutionId::from_str(&execution)?;
+            let member = get("member")
+                .map(|id| viva::foundation::ids::MemberId::from_str(&id))
+                .transpose()?;
+            let home = viva::foundation::paths::viva_home(None);
+            let weights = viva::knowledge::SkillWeightService::open(&store, &home)?;
+            let view = weights.correct(&execution, &skill_id, member.as_ref())?;
+            println!("{}", serde_json::to_string_pretty(&view)?);
+            Ok(())
+        }
+        Some("session-end") => {
+            let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
+            let session_id = require("session")?;
+            let home = viva::foundation::paths::viva_home(None);
+            let weights = viva::knowledge::SkillWeightService::open(&store, &home)?;
+            let report = weights.on_session_ended(&member, &session_id)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        Some("ingest-session") => {
+            let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
+            let execution = viva::foundation::ids::ExecutionId::from_str(&require("execution")?)?;
+            let path = require("file")?;
+            let transcript = std::fs::read_to_string(&path)
+                .map_err(|err| Error::Validation(format!("could not read --file {path}: {err}")))?;
+            let home = viva::foundation::paths::viva_home(None);
+            let weights = viva::knowledge::SkillWeightService::open(&store, &home)?;
+            let recorded = weights.ingest_transcript(&member, &execution, &transcript)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "recorded": recorded,
+                }))?
+            );
             Ok(())
         }
         Some("versions") => {
@@ -2261,7 +2370,8 @@ fn cmd_skill(args: &[String]) -> Result<()> {
         }
         _ => Err(Error::Validation(
             "skill needs create | write | get | versions | version-get | rollback | project | \
-             list | search | claim | sync | restore | weekly (#139 member set commands)"
+             list | search | claim | sync | restore | weekly | weight | track | correct | \
+             session-end | ingest-session"
                 .into(),
         )),
     }

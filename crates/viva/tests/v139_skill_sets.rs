@@ -291,7 +291,7 @@ fn weekly_includes_events_after_downtime() {
     assert!(ok, "weekly after claim: {stderr}");
     assert!(stdout.contains("claimed"), "stdout: {stdout}");
     assert!(
-        stdout.contains("尚未启用"),
-        "forgetting section pending #119: {stdout}"
+        stdout.contains("本周没有遗忘"),
+        "weekly forgetting section: {stdout}"
     );
 }
