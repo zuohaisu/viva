@@ -36,6 +36,9 @@ pub const ENV_MEMBER_NAME: &str = "VIVA_MEMBER_NAME";
 pub const ENV_TASK_ID: &str = "VIVA_TASK_ID";
 pub const ENV_GRANT_ID: &str = "VIVA_GRANT_ID";
 pub const ENV_MODEL_BINDING: &str = "VIVA_MODEL_BINDING";
+/// Execution created for this Viva-launched session. The extension reports
+/// the Pi session id against it so capture can attribute turns.
+pub const ENV_EXECUTION_ID: &str = "VIVA_EXECUTION_ID";
 /// Overrides the `viva` binary the extension calls (tests use a fake).
 pub const ENV_VIVA_BIN: &str = "VIVA_BIN";
 

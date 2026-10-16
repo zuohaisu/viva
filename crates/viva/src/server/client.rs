@@ -110,6 +110,9 @@ impl Client {
         if socket_path.exists() {
             match Client::connect(home) {
                 Ok(client) => return Ok(client),
+                // Nobody listens: a killed host left the socket behind.
+                // The spawned server claims it with a record (`Host::open`).
+                Err(Error::Io(err)) if err.kind() == std::io::ErrorKind::ConnectionRefused => {}
                 Err(err) => {
                     return Err(Error::Validation(format!(
                         "socket {} exists but no healthy host answered ({}); \
@@ -226,6 +229,8 @@ fn spawn_detached_server(home: &Path, extra_args: &[&str]) -> Result<()> {
 /// passes the freshly installed wrapper/binary: the updating process itself
 /// is the OLD generation, and its on-disk executable has just been replaced.
 fn spawn_detached_server_from(home: &Path, entry: &Path, extra_args: &[&str]) -> Result<()> {
+    // A first run with a fresh VIVA_HOME has no directory yet.
+    crate::foundation::paths::ensure_private_dir(home)?;
     let log_path = home.join("server.log");
     let log = std::fs::OpenOptions::new()
         .create(true)

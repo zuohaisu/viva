@@ -55,6 +55,7 @@ brief, and offers controlled actions through the `viva` CLI.
 | `VIVA_MEMBER_NAME` | Display name at launch time (required) |
 | `VIVA_TASK_ID` | Attached task, when the session is task-scoped |
 | `VIVA_GRANT_ID` | Live per-task dispatch grant, when Viva holds one |
+| `VIVA_EXECUTION_ID` | Execution created for this launch. On session start the extension links the Pi session id to it so capture can attribute turns |
 | `VIVA_HOME` | Viva home the CLI calls operate on |
 | `VIVA_BIN` | `viva` binary override (tests) |
 

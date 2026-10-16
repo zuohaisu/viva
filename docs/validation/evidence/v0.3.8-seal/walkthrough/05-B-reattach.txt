@@ -1,0 +1,45 @@
+ All projects   team
+ workspaces              │ build  ● Terminal
+team unknown             │┌ terminal term-0c16b3ba01e942bea275ec77fcd49307 ──────────────────────────────┬ terminal term-055cba58053543ac9d16e6bf6c0328c0 ─────┐
+ spaces                  ││user@host:~/w│user@host:~/w│
+alpha 1                  ││…$                            │…│
+└─ ● master              ││                                                                              │atch/walk/repos/alpha$                               │
+   clean                 ││                                                                              │                                                     │
+Beta // not a comment 1  ││                                                                              │                                                     │
+└─ ● master              ││                                                                              │                                                     │
+   clean                 ││                                                                              │                                                     │
+ local                   ││                                                                              │                                                     │
+└─ team                  ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+─────────────────────────││                                                                              │                                                     │
+ agents · workspace (! gl││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         ││                                                                              │                                                     │
+                         │└──────────────────────────────────────────────────────────────────────────────┴─────────────────────────────────────────────────────┘
+ ctrl+b  WORKBENCH

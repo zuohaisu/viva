@@ -43,6 +43,25 @@ export default function viva(pi: PiHost): void {
 
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
     const lines: string[] = [];
+    const executionId = process.env.VIVA_EXECUTION_ID;
+    if (executionId) {
+      try {
+        await runEnvelope(env, [
+          "experience",
+          "link",
+          "--execution",
+          executionId,
+          "--harness",
+          "pi",
+          "--session",
+          ctx.sessionManager.getSessionId(),
+        ]);
+      } catch (err) {
+        lines.push(
+          `Experience link was not recorded (${String(err)}). The session still runs; it stays unassigned until the execution is linked.`,
+        );
+      }
+    }
     lines.push(
       `Viva context loaded: you are ${env.memberName} (member ${env.memberId}). ` +
         "This identity comes from Viva's member records, not from this chat.",

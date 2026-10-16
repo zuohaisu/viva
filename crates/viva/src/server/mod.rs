@@ -176,6 +176,7 @@ pub fn migrations() -> &'static crate::foundation::store::FrozenMigrations {
         let registry = crate::memory::register_migrations(registry);
         let registry = crate::skills::register_migrations(registry);
         let registry = crate::engagement::register_migrations(registry);
+        let registry = crate::experience::register_migrations(registry);
         let registry = registry.register(DOMAIN_HOST, 2, "host v2 (settings)", HOST_V2_SQL);
         let registry = registry.register(DOMAIN_HOST, 3, "host v3 (recovery plans)", HOST_V3_SQL);
         let registry = registry.register(
@@ -1950,13 +1951,29 @@ fn harness_open_in_worktree(
             pi.extension_path.display()
         )));
     }
-    let spec = pi.launch(
-        &member,
-        binding.as_ref(),
-        Some(&task),
-        &record.worktree_path,
-        None,
+    let execution_id = crate::experience::begin_harness_execution(
+        &store,
+        &task.task_id,
+        &member.member_id,
+        binding
+            .as_ref()
+            .map(|item| item.role.as_str())
+            .unwrap_or("unspecified"),
+        binding
+            .as_ref()
+            .map(|item| item.model_binding.as_str())
+            .unwrap_or("unspecified"),
+        "pi",
     )?;
+    let spec = pi
+        .launch(
+            &member,
+            binding.as_ref(),
+            Some(&task),
+            &record.worktree_path,
+            None,
+        )?
+        .with_env(crate::harness::pi::ENV_EXECUTION_ID, execution_id.as_str());
     let mut term = crate::terminal::TerminalSpec::new(spec.argv.clone(), spec.cwd.clone())?;
     term.env = spec.env.clone();
     let (terminal_id, handle) = shared.terminals.spawn(
@@ -1968,6 +1985,7 @@ fn harness_open_in_worktree(
         Some(&store),
     )?;
     seed_agent_identification(shared, &terminal_id, std::slice::from_ref(&spec.name));
+    crate::experience::remember_terminal_launch(&store, terminal_id.as_str(), &execution_id, "pi")?;
     if let Some(text) = spec.cwd.to_str() {
         restore::remember_pane_cwd(store.connection(), &terminal_id.to_string(), text)?;
     }
@@ -2153,6 +2171,12 @@ fn agent_report(
                 record.updated_at,
             ],
         )?;
+    }
+    if let Some(session) = native_session
+        .as_ref()
+        .filter(|session| !session.is_empty())
+    {
+        crate::experience::link_reported_session(&store, terminal_id.as_str(), agent, session)?;
     }
 
     let mut value =
@@ -4058,6 +4082,43 @@ fn worktree_cleanup(
 /// summary (or an honest "none") — material transfer, never a promise of
 /// lossless context. The departing terminal is left running: stopping it
 /// is the human's call.
+fn attributed_handoff(
+    store: &Store,
+    spec: &mut crate::terminal::TerminalSpec,
+    to_agent: &str,
+    task: Option<&crate::tasks::TaskRecord>,
+) -> Result<Option<(crate::foundation::ids::ExecutionId, &'static str)>> {
+    let Some(harness) = crate::experience::canonical_harness(to_agent) else {
+        return Ok(None);
+    };
+    let Some(task) = task else {
+        return Ok(None);
+    };
+    let Some(member_id) = task.assignee_member_id.clone() else {
+        return Ok(None);
+    };
+    let binding = crate::members::MemberRegistry::new(store).binding(&member_id)?;
+    let execution_id = crate::experience::begin_harness_execution(
+        store,
+        &task.task_id,
+        &member_id,
+        binding
+            .as_ref()
+            .map(|item| item.role.as_str())
+            .unwrap_or("unspecified"),
+        binding
+            .as_ref()
+            .map(|item| item.model_binding.as_str())
+            .unwrap_or("unspecified"),
+        harness,
+    )?;
+    spec.env.push((
+        crate::harness::pi::ENV_EXECUTION_ID.to_string(),
+        execution_id.to_string(),
+    ));
+    Ok(Some((execution_id, harness)))
+}
+
 fn agent_handoff(
     shared: &Shared,
     worktree_id: &str,
@@ -4111,10 +4172,11 @@ fn agent_handoff(
             }
         }
     }
-    let goal = TaskRegistry::new(&store)
-        .require_task(&record.task_id)
-        .map(|task| task.goal)
-        .unwrap_or_else(|_| "(no linked task)".into());
+    let task = TaskRegistry::new(&store).require_task(&record.task_id).ok();
+    let goal = task
+        .as_ref()
+        .map(|task| task.goal.clone())
+        .unwrap_or_else(|| "(no linked task)".into());
     let departing = summary
         .clone()
         .unwrap_or_else(|| "(no departing summary was reported)".into());
@@ -4130,8 +4192,9 @@ fn agent_handoff(
         from_line
     );
 
-    let spec =
+    let mut spec =
         crate::terminal::TerminalSpec::new(vec![to_agent.clone()], record.worktree_path.clone())?;
+    let harness_execution = attributed_handoff(&store, &mut spec, &to_agent, task.as_ref())?;
     let (terminal_id, handle) = shared.terminals.spawn(
         spec,
         crate::foundation::records::TerminalOwner::AgentCli,
@@ -4140,6 +4203,14 @@ fn agent_handoff(
         None,
         Some(&store),
     )?;
+    if let Some((execution_id, harness)) = harness_execution {
+        crate::experience::remember_terminal_launch(
+            &store,
+            terminal_id.as_str(),
+            &execution_id,
+            harness,
+        )?;
+    }
     if let Some(text) = record.worktree_path.to_str() {
         restore::remember_pane_cwd(store.connection(), &terminal_id.to_string(), text)?;
     }
@@ -5856,7 +5927,7 @@ mod s4_agent_status_tests {
         host.shutdown();
     }
 
-    /// A later screen that looks finished does not replace a controlled
+    /// A screen that asks for approval does not replace a later controlled
     /// working report. Saving a session pointer does not write a task
     /// result or a memory fact, and the server status stays `done`.
     #[test]
@@ -5868,7 +5939,7 @@ mod s4_agent_status_tests {
         let fake = fake_dir.join("codex");
         std::fs::write(
             &fake,
-            "#!/bin/sh\necho 'codex finished this turn'\nsleep 30\n",
+            "#!/bin/sh\necho 'Would you like to run the following command?'\nsleep 30\n",
         )
         .expect("write");
         #[cfg(unix)]
@@ -5897,19 +5968,19 @@ mod s4_agent_status_tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let row = view_for(&mut client, &terminal_id);
-            let screen_done = row
+            let screen_blocked = row
                 .get("agent_status")
                 .and_then(|v| v.as_array())
                 .is_some_and(|rows| {
                     rows.iter().any(|record| {
                         record.get("source").and_then(|v| v.as_str()) == Some("screen_inference")
-                            && record.get("status").and_then(|v| v.as_str()) == Some("done")
+                            && record.get("status").and_then(|v| v.as_str()) == Some("blocked")
                     })
                 });
-            if screen_done {
+            if screen_blocked {
                 break;
             }
-            assert!(Instant::now() < deadline, "screen done never observed");
+            assert!(Instant::now() < deadline, "screen blocked never observed");
             std::thread::sleep(Duration::from_millis(100));
         }
 
