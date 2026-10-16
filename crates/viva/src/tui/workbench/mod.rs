@@ -5717,8 +5717,11 @@ mod tests {
             app.on_key(KeyEvent::from(KeyCode::Enter)),
             KeyOutcome::Handled
         );
-        let refused = render(&mut app, 120, 48);
-        assert!(refused.contains("input is refused"), "{refused}");
+        assert!(
+            app.status_line.contains("input is refused"),
+            "{}",
+            app.status_line
+        );
         app.on_key(KeyEvent::from(KeyCode::Down));
         assert_eq!(
             app.on_key(KeyEvent::from(KeyCode::Enter)),
@@ -5747,10 +5750,10 @@ mod tests {
             .expect("lab agent row");
         app.on_mouse(click(lab_agent.x, lab_agent.y));
         assert!(app.take_mouse_action().is_none());
-        let refused_agent = render(&mut app, 120, 48);
         assert!(
-            refused_agent.contains("input is refused"),
-            "{refused_agent}"
+            app.status_line.contains("input is refused"),
+            "{}",
+            app.status_line
         );
         let other_agent = app
             .sidebar_hits
@@ -5777,8 +5780,11 @@ mod tests {
         }
         app.set_model(disconnected);
         assert!(app.terminal_mode().is_none());
-        let dropped = render(&mut app, 120, 48);
-        assert!(dropped.contains("input is refused"), "{dropped}");
+        assert!(
+            app.status_line.contains("input is refused"),
+            "{}",
+            app.status_line
+        );
     }
 
     #[test]
