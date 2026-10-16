@@ -71,7 +71,9 @@ fn run(args: &[String]) -> Result<()> {
         }
         Some("terminal") => cmd_terminal(args.get(1..).unwrap_or(&[])),
         Some("scene") => cmd_scene(args.get(1..).unwrap_or(&[])),
+        Some("plugin") => cmd_plugin(args.get(1..).unwrap_or(&[])),
         Some("agent") => cmd_agent(args.get(1..).unwrap_or(&[])),
+        Some("integration") => cmd_integration(args.get(1..).unwrap_or(&[])),
         Some("events") => cmd_events(args.get(1..).unwrap_or(&[])),
         Some("sync") => cmd_sync(args.get(1..).unwrap_or(&[])),
         Some("recovery") => cmd_recovery(args.get(1..).unwrap_or(&[])),
@@ -170,7 +172,20 @@ fn cmd_agent(args: &[String]) -> Result<()> {
             status: require("status")?,
             timeout_secs: wait_timeout.unwrap_or(30),
         },
-        _ => return Err(Error::Validation("agent needs prompt | wait".into())),
+        Some("report") => viva::server::RequestKind::AgentReport {
+            terminal_id: require("terminal")?,
+            agent: require("agent")?,
+            status: require("status")?,
+            detail: get("detail").unwrap_or_default(),
+            reset_at: get("reset-at"),
+            native_session: get("session"),
+            resume_command: get("resume"),
+        },
+        _ => {
+            return Err(Error::Validation(
+                "agent needs prompt | wait | report".into(),
+            ));
+        }
     };
     let mut request = viva::server::new_request(kind);
     request.member = get("member");
@@ -186,6 +201,66 @@ fn cmd_agent(args: &[String]) -> Result<()> {
     };
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
+}
+
+/// `viva integration install|uninstall|status <name> [--root <dir>]`.
+/// Writes one file at that agent's own config location. `--root` is the
+/// home directory; tests pass a temporary one.
+fn cmd_integration(args: &[String]) -> Result<()> {
+    let action = args.first().map(String::as_str).ok_or_else(|| {
+        Error::Validation("integration needs install | uninstall | status".into())
+    })?;
+    let (name, root) = parse_integration_name_and_root(&args[1..])?;
+    let home = match root {
+        Some(path) => std::path::PathBuf::from(path),
+        None => std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty())
+            .ok_or_else(|| Error::Validation("HOME is not set; pass --root".into()))?,
+    };
+    let status = match action {
+        "install" => viva::agents::integration::install(&name, &home)?,
+        "uninstall" => viva::agents::integration::uninstall(&name, &home)?,
+        "status" => viva::agents::integration::status(&name, &home)?,
+        _ => {
+            return Err(Error::Validation(
+                "integration needs install | uninstall | status".into(),
+            ));
+        }
+    };
+    println!("{}", serde_json::to_string_pretty(&status)?);
+    Ok(())
+}
+
+/// Positional agent name plus optional `--root`, in any order after the action.
+fn parse_integration_name_and_root(args: &[String]) -> Result<(String, Option<String>)> {
+    let mut name: Option<String> = None;
+    let mut root: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--root" {
+            root = Some(
+                args.get(i + 1)
+                    .cloned()
+                    .ok_or_else(|| Error::Validation("--root needs a directory".into()))?,
+            );
+            i += 2;
+            continue;
+        }
+        if args[i].starts_with("--") {
+            i += 1;
+            continue;
+        }
+        if name.is_some() {
+            return Err(Error::Validation(
+                "integration accepts only one agent name".into(),
+            ));
+        }
+        name = Some(args[i].clone());
+        i += 1;
+    }
+    let name = name.ok_or_else(|| Error::Validation("integration needs an agent name".into()))?;
+    Ok((name, root))
 }
 
 /// `viva events [--since <seq>] [--limit <n>]` — the durable event feed
@@ -455,6 +530,47 @@ fn cmd_terminal(args: &[String]) -> Result<()> {
         }
         _ => Err(Error::Validation(
             "terminal needs create | snapshot | resize (stop via `viva stop-terminal`)".into(),
+        )),
+    }
+}
+
+fn cmd_plugin(args: &[String]) -> Result<()> {
+    let home = viva::foundation::paths::viva_home(None);
+    viva::foundation::paths::ensure_private_dir(&home)?;
+    match args.first().map(String::as_str) {
+        Some("install") => {
+            if args.len() != 2 {
+                return Err(Error::Validation(
+                    "usage: viva plugin install <directory>".into(),
+                ));
+            }
+            let bin = std::env::current_exe().map_err(|err| {
+                Error::Validation(format!("cannot locate the viva binary: {err}"))
+            })?;
+            let info = viva::plugins::install(&home, &args[1], &bin)?;
+            println!("{}", serde_json::to_string_pretty(&info)?);
+            Ok(())
+        }
+        Some("uninstall") => {
+            if args.len() != 2 {
+                return Err(Error::Validation(
+                    "usage: viva plugin uninstall <id>".into(),
+                ));
+            }
+            viva::plugins::uninstall(&home, &args[1])?;
+            println!("{}", serde_json::json!({ "uninstalled": args[1] }));
+            Ok(())
+        }
+        Some("list") => {
+            if args.len() != 1 {
+                return Err(Error::Validation("usage: viva plugin list".into()));
+            }
+            let listed = viva::plugins::list(&home)?;
+            println!("{}", serde_json::to_string_pretty(&listed)?);
+            Ok(())
+        }
+        _ => Err(Error::Validation(
+            "plugin needs install <directory> | uninstall <id> | list".into(),
         )),
     }
 }
@@ -832,6 +948,21 @@ USAGE:
         not stop its terminal. --member and --grant follow the socket rules.
         Two clients share the tree; a later focus or size wins for that tab.
 
+    viva plugin install <directory>
+        Install a plugin from a local directory that contains
+        viva-plugin.json, and start its entry process. URLs, herdr.dev,
+        and marketplace endpoints are refused. The process receives
+        pane.opened and popup events on a private socket and operates
+        panes with `viva scene`. A member still needs a live grant.
+        Protected actions (merge, approve, push to a protected branch,
+        self-authorize) are refused. popup is not a pane and has no pane id.
+
+    viva plugin uninstall <id>
+        Stop that plugin process and remove the installed copy.
+
+    viva plugin list
+        List installed plugins.
+
     viva stop-terminal <terminal-id>
         Stop one terminal (its process group only).
 
@@ -874,8 +1005,19 @@ USAGE:
     viva agent prompt --terminal <id> --text <text> [--member <id> --grant <id>]
     viva agent wait --terminal <id> --status <working|blocked|done|idle> \
         [--timeout <secs>] [--member <id> --grant <id>]
-        The orchestration primitives (issue #47): prompt an agent's
-        terminal, or wait server-side for its reported status.
+    viva agent report --terminal <id> --agent <name> \
+        --status <working|blocked|done|idle|unknown|rate_limited> \
+        [--detail <text>] [--session <ref>] [--resume <command>] \
+        [--reset-at <rfc3339>] [--member <id> --grant <id>]
+        Prompt an agent's terminal, wait for its reported status, or
+        record that status. A session reference is stored and never run.
+        With no --member, the caller is the owner. A member still needs
+        a live grant carrying agent_report.
+
+    viva integration install|uninstall|status <name> [--root <dir>]
+        Optional hook for one agent: pi, claude, codex, opencode, kimi,
+        qodercli, cursor, grok, hermes. Install writes only that agent's
+        file. Uninstall deletes that file when Viva wrote it. macOS only.
 
     viva events [--since <seq>] [--limit <n>]
         The durable event feed: reconnect with your last seen seq
@@ -2663,5 +2805,26 @@ mod cli_arg_tests {
         assert_eq!(id.as_deref(), Some("other"));
         assert_eq!(rest, vec!["status".to_string()]);
         assert!(peel_machine_flag(&["--machine".into()]).is_err());
+    }
+
+    #[test]
+    fn integration_root_may_appear_before_agent_name() {
+        let (name, root) = parse_integration_name_and_root(&[
+            "--root".to_string(),
+            "/tmp/home".to_string(),
+            "pi".to_string(),
+        ])
+        .expect("parse");
+        assert_eq!(name, "pi");
+        assert_eq!(root.as_deref(), Some("/tmp/home"));
+
+        let (name, root) = parse_integration_name_and_root(&[
+            "pi".to_string(),
+            "--root".to_string(),
+            "/tmp/home".to_string(),
+        ])
+        .expect("parse");
+        assert_eq!(name, "pi");
+        assert_eq!(root.as_deref(), Some("/tmp/home"));
     }
 }

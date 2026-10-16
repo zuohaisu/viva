@@ -108,6 +108,21 @@ CREATE TABLE recovery_plans (
 );
 "#;
 
+/// The host v4 slice: a native session pointer per terminal and agent.
+/// This is the reference TFHS-72 can resume from. It is not a task
+/// result, a QA verdict, or a memory fact, and Viva never runs the
+/// stored command.
+pub const HOST_V4_SQL: &str = r#"
+CREATE TABLE agent_native_sessions (
+    terminal_id    TEXT NOT NULL,
+    agent          TEXT NOT NULL,
+    native_session TEXT NOT NULL,
+    resume_command TEXT NOT NULL,
+    updated_at     TEXT NOT NULL,
+    PRIMARY KEY (terminal_id, agent)
+);
+"#;
+
 /// Socket file name inside `VIVA_HOME`.
 pub const SOCKET_NAME: &str = "server.sock";
 /// Rendezvous socket for a live handoff (created by the restarting host,
@@ -159,6 +174,12 @@ pub fn migrations() -> &'static crate::foundation::store::FrozenMigrations {
         let registry = crate::memory::register_migrations(registry);
         let registry = registry.register(DOMAIN_HOST, 2, "host v2 (settings)", HOST_V2_SQL);
         let registry = registry.register(DOMAIN_HOST, 3, "host v3 (recovery plans)", HOST_V3_SQL);
+        let registry = registry.register(
+            DOMAIN_HOST,
+            4,
+            "host v4 (agent native sessions)",
+            HOST_V4_SQL,
+        );
         registry
             .register(DOMAIN_HOST, 1, "host v1", HOST_V1_SQL)
             .freeze()
@@ -521,6 +542,9 @@ impl Host {
                         .stop(&entry.terminal_id, StopPolicy::default(), Some(&store));
             }
             drop(store);
+            // Plugin processes are not terminals. A full shutdown stops
+            // them; a live handoff leaves them running with the new host.
+            crate::plugins::stop_installed(&shared.home);
         }
         // Join watchers WITHOUT holding the store lock: each watcher needs
         // it to record its exit. A watcher cannot hang: the stop above made
@@ -875,6 +899,8 @@ fn handle_request(shared: Arc<Shared>, request: &Request) -> Result<serde_json::
             status,
             detail,
             reset_at,
+            native_session,
+            resume_command,
         } => agent_report(
             &shared,
             terminal_id,
@@ -882,6 +908,10 @@ fn handle_request(shared: Arc<Shared>, request: &Request) -> Result<serde_json::
             status,
             detail,
             reset_at.as_deref(),
+            ReportedSession {
+                native_session: native_session.as_deref(),
+                resume_command: resume_command.as_deref(),
+            },
         ),
         RequestKind::AgentContentSubmit {
             terminal_id,
@@ -1224,25 +1254,34 @@ fn workbench_view(shared: Arc<Shared>) -> Result<serde_json::Value> {
                 }
             }
             let records = shared.agent_board.project(&row.terminal_id);
-            if let (Some(agent), Some(h)) = (
-                records
-                    .first()
-                    .map(|r| r.agent.clone())
-                    .or_else(|| (row.owner_label == "agent_cli").then(|| "unknown".into())),
-                handle,
-            ) {
+            // Process name first, then a controlled report. A pane with
+            // neither stays unnamed: a generic owner label is not an agent.
+            let known_agent = records
+                .iter()
+                .find(|record| record.source == crate::agents::StatusSource::ProcessTree)
+                .or_else(|| {
+                    records.iter().find(|record| {
+                        record.source == crate::agents::StatusSource::ControlledReport
+                    })
+                })
+                .map(|record| record.agent.clone());
+            if let Some(h) = handle {
                 if let Ok(snapshot) = h.snapshot() {
-                    if let Some(status) = crate::agents::infer_from_screen(&snapshot) {
-                        shared
-                            .agent_board
-                            .observe(crate::agents::AgentStatusRecord {
-                                terminal_id: row.terminal_id.clone(),
-                                agent,
-                                status,
-                                source: crate::agents::StatusSource::ScreenInference,
-                                detail: "screen rules (auxiliary, never a fact)".into(),
-                                updated_at: utc_now(),
-                            });
+                    if let Some(observation) =
+                        crate::agents::screen::infer_screen(&snapshot, known_agent.as_deref())
+                    {
+                        if observation.status != crate::agents::AgentStatus::Unknown {
+                            shared
+                                .agent_board
+                                .observe(crate::agents::AgentStatusRecord {
+                                    terminal_id: row.terminal_id.clone(),
+                                    agent: observation.agent,
+                                    status: observation.status,
+                                    source: crate::agents::StatusSource::ScreenInference,
+                                    detail: "screen rules (auxiliary, never a fact)".into(),
+                                    updated_at: utc_now(),
+                                });
+                        }
                     }
                 }
             }
@@ -1691,9 +1730,55 @@ fn workbench_tree(shared: &Shared, op: &WorkbenchTreeOp) -> Result<serde_json::V
             tree.book = next;
             tree.unmanaged = None;
             tree.stored = true;
-            Ok(serde_json::json!({ "tree": serde_json::from_str::<serde_json::Value>(&saved)? }))
+            let body =
+                serde_json::json!({ "tree": serde_json::from_str::<serde_json::Value>(&saved)? });
+            let event = pane_opened_event(other, &tree.book);
+            drop(tree);
+            if let Some(event) = event {
+                crate::plugins::publish(&shared.home, &event);
+            }
+            Ok(body)
         }
     }
+}
+
+/// A pane-opening tree edit, told to installed plugins as `pane.opened`.
+/// Popup is not a tree edit and is not emitted here.
+fn pane_opened_event(
+    op: &WorkbenchTreeOp,
+    book: &crate::tui::workbench::scenes::SceneBook,
+) -> Option<serde_json::Value> {
+    let (open, scene_id, tab_id) = match op {
+        WorkbenchTreeOp::Split {
+            scene_id, tab_id, ..
+        } => ("split", scene_id.as_deref(), tab_id.as_deref()),
+        WorkbenchTreeOp::CreatePane {
+            scene_id, tab_id, ..
+        } => ("overlay", scene_id.as_deref(), tab_id.as_deref()),
+        WorkbenchTreeOp::CreateTab { scene_id, .. } => ("tab", scene_id.as_deref(), None),
+        WorkbenchTreeOp::Zoom {
+            scene_id, tab_id, ..
+        } => {
+            if !crate::tui::workbench::tree::tab_is_zoomed(
+                book,
+                scene_id.as_deref(),
+                tab_id.as_deref(),
+            ) {
+                return None;
+            }
+            ("zoomed", scene_id.as_deref(), tab_id.as_deref())
+        }
+        _ => return None,
+    };
+    let (scene_id, tab_id, pane_id) =
+        crate::tui::workbench::tree::focused_pane(book, scene_id, tab_id)?;
+    Some(serde_json::json!({
+        "type": "pane.opened",
+        "open": open,
+        "pane_id": pane_id,
+        "scene_id": scene_id,
+        "tab_id": tab_id,
+    }))
 }
 
 /// The real bounded diff of one worktree against HEAD (served over the
@@ -1885,18 +1970,7 @@ fn worktree_create_for_task(
 /// dominant case is that the session IS the agent CLI. Identification
 /// names the agent only - the state stays unknown until a source speaks.
 fn seed_agent_identification(shared: &Shared, terminal_id: &TerminalId, argv: &[String]) {
-    let Some(program) = argv.first() else {
-        return;
-    };
-    let base = program
-        .rsplit('/')
-        .next()
-        .unwrap_or(program)
-        .to_ascii_lowercase();
-    let agent = crate::agents::DETECTABLE_AGENTS
-        .iter()
-        .find(|agent| base.starts_with(**agent))
-        .map(|agent| agent.to_string());
+    let agent = crate::agents::agent_from_command(&argv.join(" "));
     if let Some(agent) = agent {
         shared
             .agent_board
@@ -1915,6 +1989,11 @@ fn seed_agent_identification(shared: &Shared, terminal_id: &TerminalId, argv: &[
 /// member attribution + a live grant carrying `agent_report` (the socket
 /// gate enforces that before this handler runs). The report is audited;
 /// it describes the agent's state and never completes a task.
+struct ReportedSession<'a> {
+    native_session: Option<&'a str>,
+    resume_command: Option<&'a str>,
+}
+
 fn agent_report(
     shared: &Shared,
     terminal_id: &str,
@@ -1922,12 +2001,15 @@ fn agent_report(
     status: &str,
     detail: &str,
     reset_at: Option<&str>,
+    session: ReportedSession<'_>,
 ) -> Result<serde_json::Value> {
     let terminal_id = TerminalId::from_str(terminal_id)?;
     let status = crate::agents::AgentStatus::parse(status)?;
     if agent.trim().is_empty() {
         return Err(Error::Validation("agent name must not be empty".into()));
     }
+    let native_session = optional_session_field("native session", session.native_session)?;
+    let resume_command = optional_session_field("resume command", session.resume_command)?;
     // A report about a terminal this server hosts: identity checks out.
     shared
         .terminals
@@ -1959,6 +2041,8 @@ fn agent_report(
                 "status": status.as_str(),
                 "detail": detail,
                 "source": "controlled_report",
+                "native_session": native_session,
+                "resume_command": resume_command,
             }),
         },
     )?;
@@ -1994,8 +2078,56 @@ fn agent_report(
             rusqlite::params![terminal_id.to_string(), utc_now()],
         )?;
     }
+    if native_session.is_some() || resume_command.is_some() {
+        store.connection().execute(
+            "INSERT INTO agent_native_sessions(
+                terminal_id, agent, native_session, resume_command, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(terminal_id, agent) DO UPDATE SET
+                native_session = CASE
+                    WHEN excluded.native_session <> '' THEN excluded.native_session
+                    ELSE agent_native_sessions.native_session
+                END,
+                resume_command = CASE
+                    WHEN excluded.resume_command <> '' THEN excluded.resume_command
+                    ELSE agent_native_sessions.resume_command
+                END,
+                updated_at = excluded.updated_at",
+            rusqlite::params![
+                terminal_id.to_string(),
+                agent,
+                native_session.clone().unwrap_or_default(),
+                resume_command.clone().unwrap_or_default(),
+                record.updated_at,
+            ],
+        )?;
+    }
 
-    serde_json::to_value(&record).map_err(|e| Error::Validation(format!("record: {e}")))
+    let mut value =
+        serde_json::to_value(&record).map_err(|e| Error::Validation(format!("record: {e}")))?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("native_session".into(), serde_json::json!(native_session));
+        object.insert("resume_command".into(), serde_json::json!(resume_command));
+    }
+    Ok(value)
+}
+
+/// A session pointer is one line, at most 1024 bytes. Empty means "not
+/// provided" and leaves any stored pointer alone.
+fn optional_session_field(label: &str, value: Option<&str>) -> Result<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > 1024 || value.chars().any(|ch| matches!(ch, '\0' | '\n' | '\r')) {
+        return Err(Error::Validation(format!(
+            "{label} must be a single line of at most 1024 bytes"
+        )));
+    }
+    Ok(Some(value.to_string()))
 }
 
 /// Submit agent content for the self-model container's intake. The content
@@ -5447,6 +5579,8 @@ mod s4_agent_status_tests {
             status: "blocked".into(),
             detail: "waiting for tool approval".into(),
             reset_at: None,
+            native_session: None,
+            resume_command: None,
         });
         request.grant = Some(grant);
         request.member = Some("member-00000000-0000-0000-0000-000000000000".into());
@@ -5571,6 +5705,8 @@ mod s4_agent_status_tests {
             status: "done".into(),
             detail: String::new(),
             reset_at: None,
+            native_session: None,
+            resume_command: None,
         });
         request.member = Some("member-00000000-0000-0000-0000-000000000000".into());
         let err = client.call_request(request).expect_err("must deny");
@@ -5580,18 +5716,28 @@ mod s4_agent_status_tests {
 
     /// Screen inference shows up as AUXILIARY in the view - and the fact
     /// layer stays untouched (no task results invented by screen rules).
+    /// The child is a program named `claude`. A shell that merely prints a
+    /// permission phrase is not guessed.
     #[test]
     fn screen_inference_is_auxiliary_only() {
         let host = start_host();
         let mut client = host.client();
-        // A child that leaves a blocking-looking screen behind.
+        let fake_dir = host.home.join("fake-agents");
+        std::fs::create_dir_all(&fake_dir).expect("fake dir");
+        let fake = fake_dir.join("claude");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho 'Claude Code'\necho 'Do you want to proceed?'\nsleep 30\n",
+        )
+        .expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
         let created = client
             .call(RequestKind::TerminalCreate {
-                argv: vec![
-                    "/bin/sh".into(),
-                    "-c".into(),
-                    "echo 'Do you want to proceed? (y/n)'; sleep 30".into(),
-                ],
+                argv: vec![fake.display().to_string()],
                 cwd: host.home.display().to_string(),
                 env: vec![],
                 cols: 80,
@@ -5644,6 +5790,199 @@ mod s4_agent_status_tests {
             .query_row("SELECT COUNT(*) FROM task_results", [], |row| row.get(0))
             .expect("task results");
         assert_eq!(results, 0, "screen inference must not invent facts");
+        host.shutdown();
+    }
+
+    /// A later screen that looks finished does not replace a controlled
+    /// working report. Saving a session pointer does not write a task
+    /// result or a memory fact, and the server status stays `done`.
+    #[test]
+    fn controlled_report_beats_screen_and_session_ref_is_not_a_fact() {
+        let host = start_host();
+        let mut client = host.client();
+        let fake_dir = host.home.join("fake-agents");
+        std::fs::create_dir_all(&fake_dir).expect("fake dir");
+        let fake = fake_dir.join("codex");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho 'codex finished this turn'\nsleep 30\n",
+        )
+        .expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let created = client
+            .call(RequestKind::TerminalCreate {
+                argv: vec![fake.display().to_string()],
+                cwd: host.home.display().to_string(),
+                env: vec![],
+                cols: 80,
+                rows: 24,
+                purpose: "badge probe".into(),
+                worktree_id: None,
+                owner: "agent_cli".into(),
+            })
+            .expect("create");
+        let terminal_id = created
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .expect("terminal id")
+            .to_string();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let row = view_for(&mut client, &terminal_id);
+            let screen_done = row
+                .get("agent_status")
+                .and_then(|v| v.as_array())
+                .is_some_and(|rows| {
+                    rows.iter().any(|record| {
+                        record.get("source").and_then(|v| v.as_str()) == Some("screen_inference")
+                            && record.get("status").and_then(|v| v.as_str()) == Some("done")
+                    })
+                });
+            if screen_done {
+                break;
+            }
+            assert!(Instant::now() < deadline, "screen done never observed");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        client
+            .call(RequestKind::AgentReport {
+                terminal_id: terminal_id.clone(),
+                agent: "codex".into(),
+                status: "working".into(),
+                detail: "still on this turn".into(),
+                reset_at: None,
+                native_session: None,
+                resume_command: None,
+            })
+            .expect("working report");
+
+        let row = view_for(&mut client, &terminal_id);
+        let statuses = row
+            .get("agent_status")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .expect("statuses");
+        let sources: Vec<&str> = statuses
+            .iter()
+            .filter_map(|record| record.get("source").and_then(|v| v.as_str()))
+            .collect();
+        assert!(sources.contains(&"controlled_report"), "{sources:?}");
+        assert!(sources.contains(&"screen_inference"), "{sources:?}");
+        let records: Vec<crate::agents::AgentStatusRecord> =
+            serde_json::from_value(serde_json::Value::Array(statuses)).expect("records");
+        let badge = crate::agents::server_badge(&records).expect("badge");
+        assert_eq!(badge.status, crate::agents::AgentStatus::Working);
+        assert_eq!(badge.source, crate::agents::StatusSource::ControlledReport);
+
+        let store = Store::open(
+            &crate::foundation::paths::database_path(&host.home),
+            migrations(),
+        )
+        .expect("store");
+        let count = |sql: &str| -> i64 {
+            store
+                .connection()
+                .query_row(sql, [], |row| row.get(0))
+                .expect("count")
+        };
+        assert_eq!(count("SELECT COUNT(*) FROM task_results"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM memory_facts"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM agent_native_sessions"), 0);
+        drop(store);
+
+        let saved = client
+            .call(RequestKind::AgentReport {
+                terminal_id: terminal_id.clone(),
+                agent: "codex".into(),
+                status: "done".into(),
+                detail: "turn finished".into(),
+                reset_at: None,
+                native_session: Some("sess-1".into()),
+                resume_command: Some("codex resume sess-1".into()),
+            })
+            .expect("session report");
+        assert_eq!(
+            saved.get("native_session").and_then(|v| v.as_str()),
+            Some("sess-1")
+        );
+        assert_eq!(saved.get("status").and_then(|v| v.as_str()), Some("done"));
+
+        let store = Store::open(
+            &crate::foundation::paths::database_path(&host.home),
+            migrations(),
+        )
+        .expect("store");
+        let facts: i64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM task_results", [], |row| row.get(0))
+            .expect("task results");
+        let memories: i64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM memory_facts", [], |row| row.get(0))
+            .expect("memory facts");
+        assert_eq!(facts, 0);
+        assert_eq!(memories, 0);
+        let (session, resume): (String, String) = store
+            .connection()
+            .query_row(
+                "SELECT native_session, resume_command FROM agent_native_sessions
+                 WHERE terminal_id = ?1 AND agent = 'codex'",
+                [terminal_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("session row");
+        assert_eq!(session, "sess-1");
+        assert_eq!(resume, "codex resume sess-1");
+        drop(store);
+
+        let row = view_for(&mut client, &terminal_id);
+        let controlled = row
+            .get("agent_status")
+            .and_then(|v| v.as_array())
+            .and_then(|rows| {
+                rows.iter().find(|record| {
+                    record.get("source").and_then(|v| v.as_str()) == Some("controlled_report")
+                })
+            })
+            .expect("controlled record");
+        assert_eq!(
+            controlled.get("status").and_then(|v| v.as_str()),
+            Some("done"),
+            "the server status stays done; seen-done is a client display"
+        );
+
+        client
+            .call(RequestKind::AgentReport {
+                terminal_id: terminal_id.clone(),
+                agent: "codex".into(),
+                status: "idle".into(),
+                detail: "status only".into(),
+                reset_at: None,
+                native_session: None,
+                resume_command: None,
+            })
+            .expect("status-only report");
+        let store = Store::open(
+            &crate::foundation::paths::database_path(&host.home),
+            migrations(),
+        )
+        .expect("store");
+        let kept: String = store
+            .connection()
+            .query_row(
+                "SELECT native_session FROM agent_native_sessions
+                 WHERE terminal_id = ?1 AND agent = 'codex'",
+                [terminal_id.as_str()],
+                |row| row.get(0),
+            )
+            .expect("session kept");
+        assert_eq!(kept, "sess-1");
         host.shutdown();
     }
 
@@ -5800,6 +6139,8 @@ mod s5_orchestration_tests {
             status: "blocked".into(),
             detail: "needs a decision".into(),
             reset_at: None,
+            native_session: None,
+            resume_command: None,
         });
         report.grant = Some(report_grant.clone());
         client.call_request(report).expect("report");
@@ -6515,6 +6856,8 @@ mod v15_tests {
             status: "blocked".into(),
             detail: "implemented the parser, tests pending".into(),
             reset_at: None,
+            native_session: None,
+            resume_command: None,
         });
         report.grant = Some(grant);
         client.call_request(report).expect("report");
@@ -6830,6 +7173,8 @@ mod v15_tests {
             status: "rate_limited".into(),
             detail: "5h limit hit".into(),
             reset_at: None,
+            native_session: None,
+            resume_command: None,
         });
         report.grant = Some(grant);
         let err = client.call_request(report).expect_err("must refuse");

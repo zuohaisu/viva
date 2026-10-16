@@ -29,12 +29,16 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::foundation::error::Result;
-use crate::terminal::TerminalSnapshot;
 
+pub mod badge;
 pub mod capabilities;
+pub mod integration;
+pub mod screen;
 pub mod session;
 
+pub use badge::{AgentBadge, client_badge, server_badge};
 pub use capabilities::{AgentCliProfile, CapabilityLevel, capability_matrix, profile_for};
+pub use screen::agent_from_command;
 pub use session::{SessionContext, build_session_row, qualifies_for_agent_list, sort_sessions};
 
 /// The agent CLIs Viva detects in its first version (owner ruling,
@@ -193,42 +197,6 @@ impl AgentStatusBoard {
 }
 
 // ---------------------------------------------------------------------------
-// Screen inference (auxiliary only)
-// ---------------------------------------------------------------------------
-
-/// Phrases that (when they appear in the last screen of output) usually
-/// mean the agent is waiting for the user. Deliberately conservative: the
-/// auxiliary layer prefers silence over a wrong guess.
-const BLOCKED_MARKERS: &[&str] = &[
-    "do you want to",
-    "waiting for your input",
-    "press y",
-    "(y/n)",
-    "yes, allow",
-    "approve?",
-    "confirm:",
-];
-
-/// Infer an auxiliary status from the terminal's own snapshot. Returns
-/// `None` when nothing conclusive is on screen — unknown stays unknown.
-pub fn infer_from_screen(snapshot: &TerminalSnapshot) -> Option<AgentStatus> {
-    let tail: String = snapshot
-        .visible
-        .iter()
-        .chain(snapshot.scrollback.iter().rev().take(3))
-        .map(|line| line.trim().to_ascii_lowercase())
-        .collect::<Vec<_>>()
-        .join("\n");
-    if tail.is_empty() {
-        return None;
-    }
-    if BLOCKED_MARKERS.iter().any(|marker| tail.contains(marker)) {
-        return Some(AgentStatus::Blocked);
-    }
-    None
-}
-
-// ---------------------------------------------------------------------------
 // Process-tree identification
 // ---------------------------------------------------------------------------
 
@@ -242,41 +210,6 @@ pub struct ProcessAgent {
     pub started: String,
 }
 
-/// Match executable/script position, never arbitrary arguments or prefixes.
-pub fn agent_from_command(command: &str) -> Option<String> {
-    let mut words = command.split_whitespace();
-    let exe = words.next()?;
-    let classify = |word: &str| {
-        let base = word.rsplit('/').next().unwrap_or(word).to_ascii_lowercase();
-        DETECTABLE_AGENTS
-            .iter()
-            .find(|agent| {
-                base == **agent || base == format!("{agent}.js") || base == format!("{agent}.py")
-            })
-            .map(|a| a.to_string())
-            .or_else(|| {
-                if word.contains("/pi-coding-agent/") && word.ends_with("/cli.js") {
-                    Some("pi".into())
-                } else {
-                    None
-                }
-            })
-    };
-    if let Some(agent) = classify(exe) {
-        return Some(agent);
-    }
-    let base = exe.rsplit('/').next().unwrap_or(exe);
-    if matches!(
-        base,
-        "node" | "nodejs" | "python" | "python3" | "sh" | "bash" | "zsh"
-    ) {
-        let script = words.next()?;
-        if !script.starts_with('-') {
-            return classify(script);
-        }
-    }
-    None
-}
 #[derive(Default)]
 pub struct ProcessTable {
     children: HashMap<u32, Vec<u32>>,
@@ -382,27 +315,6 @@ pub fn report_stale(record: &AgentStatusRecord) -> bool {
 mod tests {
     use super::*;
     use crate::foundation::ids::utc_now;
-
-    fn snapshot(visible: &[&str]) -> TerminalSnapshot {
-        TerminalSnapshot {
-            screen: None,
-            cols: 80,
-            rows: visible.len() as u16,
-            visible: visible.iter().map(|s| s.to_string()).collect(),
-            scrollback: vec![],
-            scrollback_capped: false,
-            total_output_bytes: 0,
-            log_truncated: false,
-        }
-    }
-
-    #[test]
-    fn screen_rules_are_conservative_and_auxiliary() {
-        let blocked = snapshot(&["Collecting facts...", "Do you want to proceed? (y/n)"]);
-        assert_eq!(infer_from_screen(&blocked), Some(AgentStatus::Blocked));
-        let quiet = snapshot(&["building...", "g++ -O2 main.rs"]);
-        assert_eq!(infer_from_screen(&quiet), None, "silence stays unknown");
-    }
 
     #[test]
     fn board_keeps_sources_side_by_side_without_overwriting() {
