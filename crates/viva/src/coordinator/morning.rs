@@ -294,44 +294,37 @@ impl<'a> MorningRollup<'a> {
             self.options.window_start.as_str(),
             self.options.window_end.as_str(),
         );
-        match timeline {
-            EvidenceState::Unavailable { reason } => Ok(MultiRoundSignal::Unknown { reason }),
-            EvidenceState::Fetched { payload, .. } => {
-                let non_author_review_comments = payload
-                    .review_comments
-                    .iter()
-                    .filter(|c| !c.author_is_pr_author)
-                    .filter(|c| in_window(&c.created_at, start, end))
-                    .count();
-                let push_cycles =
-                    count_request_push_cycles(&payload.reviews, &payload.commits, start, end);
-                let change_requests_in_window = payload
-                    .reviews
-                    .iter()
-                    .filter(|r| r.state.eq_ignore_ascii_case("CHANGES_REQUESTED"))
-                    .filter(|r| in_window(&r.submitted_at, start, end))
-                    .count();
-                if push_cycles >= 3 || non_author_review_comments >= 3 {
-                    Ok(MultiRoundSignal::Yes {
-                        detail: format!(
-                            "request_push_cycles_in_window={push_cycles}, \
-                             non_author_review_comments_in_window={non_author_review_comments}"
-                        ),
-                    })
-                } else if change_requests_in_window > 0
-                    && payload.commits.is_empty()
-                    && non_author_review_comments < 3
-                {
-                    Ok(MultiRoundSignal::Unknown {
-                        reason: "could not observe push events to pair with change requests".into(),
-                    })
-                } else {
-                    Ok(MultiRoundSignal::No)
+        let payload = match timeline {
+            EvidenceState::Unavailable { reason } => {
+                return Ok(MultiRoundSignal::Unknown { reason });
+            }
+            EvidenceState::Fetched { payload, .. } => payload,
+        };
+        let comments = match payload.repo.as_ref() {
+            Some((owner, repo)) => {
+                match fetch_review_comments(&self.gh, &wt.worktree_path, owner, repo, pr_number) {
+                    EvidenceState::Fetched { payload: rows, .. } => Some(
+                        count_non_author_review_comments(&rows, &payload.pr_author, start, end),
+                    ),
+                    EvidenceState::Unavailable { .. } => None,
                 }
             }
-        }
+            None => None,
+        };
+        Ok(classify_multi_round(
+            &payload.reviews,
+            &payload.commits,
+            comments,
+            start,
+            end,
+        ))
     }
 }
+
+/// Check conclusions that mean the check failed. `conclusion` is a CheckRun
+/// field; `state` is a StatusContext field. Real `gh pr view` returns
+/// `statusCheckRollup` as an array of those nodes, not a `{state}` object.
+const CHECK_FAILURES: &[&str] = &["FAILURE", "ERROR", "TIMED_OUT", "STARTUP_FAILURE"];
 
 #[derive(Debug, Deserialize)]
 struct PrDetail {
@@ -342,32 +335,38 @@ struct PrDetail {
     #[serde(default)]
     mergeable: Option<String>,
     #[serde(default, rename = "statusCheckRollup")]
-    status_check_rollup: Option<StatusCheckRollup>,
+    status_check_rollup: Option<Vec<StatusCheck>>,
 }
 
 #[derive(Debug, Deserialize)]
-struct StatusCheckRollup {
+struct StatusCheck {
+    #[serde(default)]
+    conclusion: Option<String>,
     #[serde(default)]
     state: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ReviewRow {
+    #[serde(default)]
     state: String,
     #[serde(default, rename = "submittedAt")]
     submitted_at: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct CommentRow {
-    #[serde(default, rename = "createdAt")]
-    created_at: String,
-    author: CommentAuthor,
+struct GhUser {
+    #[serde(default)]
+    login: String,
 }
 
+/// One inline review comment from `gh api repos/.../pulls/{n}/comments`.
 #[derive(Debug, Deserialize)]
-struct CommentAuthor {
-    login: String,
+struct ReviewComment {
+    #[serde(default, rename = "created_at")]
+    created_at: String,
+    #[serde(default)]
+    user: Option<GhUser>,
 }
 
 #[derive(Debug)]
@@ -413,33 +412,58 @@ fn fetch_pr_detail(gh: &GhRunner, cwd: &Path, number: u64) -> EvidenceState<PrDe
             "--json",
             "state,url,isDraft,mergeable,statusCheckRollup",
         ],
-        |stdout| {
-            let raw: PrDetail = serde_json::from_str(stdout)?;
-            let checks_failed = raw.status_check_rollup.as_ref().and_then(|r| {
-                r.state
-                    .as_deref()
-                    .map(|s| s.eq_ignore_ascii_case("FAILURE"))
-            });
-            let merge_conflict = raw
-                .mergeable
-                .as_deref()
-                .map(|m| m.eq_ignore_ascii_case("CONFLICTING"));
-            Ok(PrDetailParsed {
-                state: raw.state,
-                is_draft: raw.is_draft,
-                url: raw.url,
-                checks_failed,
-                merge_conflict,
-            })
-        },
+        parse_pr_detail,
     )
+}
+
+fn parse_pr_detail(stdout: &str) -> Result<PrDetailParsed> {
+    let raw: PrDetail = serde_json::from_str(stdout)?;
+    Ok(PrDetailParsed {
+        state: raw.state,
+        is_draft: raw.is_draft,
+        url: raw.url,
+        checks_failed: checks_failed_from(raw.status_check_rollup.as_deref()),
+        merge_conflict: merge_conflict_from(raw.mergeable.as_deref()),
+    })
+}
+
+/// Empty or missing rollup is unknown. Any failed conclusion/state is a
+/// failure; a non-empty rollup with none of those is not a failure
+/// (pending checks have not failed).
+fn checks_failed_from(checks: Option<&[StatusCheck]>) -> Option<bool> {
+    let checks = checks?;
+    if checks.is_empty() {
+        return None;
+    }
+    Some(checks.iter().any(|check| {
+        check_failed(check.conclusion.as_deref()) || check_failed(check.state.as_deref())
+    }))
+}
+
+fn check_failed(value: Option<&str>) -> bool {
+    value
+        .map(|token| {
+            CHECK_FAILURES
+                .iter()
+                .any(|failure| token.eq_ignore_ascii_case(failure))
+        })
+        .unwrap_or(false)
+}
+
+fn merge_conflict_from(mergeable: Option<&str>) -> Option<bool> {
+    match mergeable {
+        Some(value) if value.eq_ignore_ascii_case("CONFLICTING") => Some(true),
+        Some(value) if value.eq_ignore_ascii_case("MERGEABLE") => Some(false),
+        _ => None,
+    }
 }
 
 #[derive(Debug)]
 struct PrTimeline {
+    pr_author: String,
+    repo: Option<(String, String)>,
     reviews: Vec<ReviewRow>,
     commits: Vec<CommitRow>,
-    review_comments: Vec<CommentRowWithAuthorFlag>,
 }
 
 fn fetch_pr_timeline(gh: &GhRunner, cwd: &Path, number: u64) -> EvidenceState<PrTimeline> {
@@ -450,53 +474,146 @@ fn fetch_pr_timeline(gh: &GhRunner, cwd: &Path, number: u64) -> EvidenceState<Pr
             "view",
             &number.to_string(),
             "--json",
-            "author,reviews,reviewComments,commits",
+            "author,reviews,commits,url",
         ],
-        |stdout| {
-            let value: serde_json::Value = serde_json::from_str(stdout)?;
-            let author = value
-                .get("author")
-                .and_then(|a| a.get("login"))
-                .and_then(|l| l.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let reviews = value
-                .get("reviews")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|v| serde_json::from_value(v).ok())
-                .collect();
-            let commits = value
-                .get("commits")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|v| serde_json::from_value(v).ok())
-                .collect();
-            let review_comments = value
-                .get("reviewComments")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|v| {
-                    let row: CommentRow = serde_json::from_value(v).ok()?;
-                    Some(CommentRowWithAuthorFlag {
-                        created_at: row.created_at,
-                        author_is_pr_author: row.author.login == author,
-                    })
-                })
-                .collect();
-            Ok(PrTimeline {
-                reviews,
-                commits,
-                review_comments,
-            })
-        },
+        parse_pr_timeline,
     )
+}
+
+fn parse_pr_timeline(stdout: &str) -> Result<PrTimeline> {
+    let value: serde_json::Value = serde_json::from_str(stdout)?;
+    let pr_author = value
+        .get("author")
+        .and_then(|a| a.get("login"))
+        .and_then(|l| l.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let repo = value
+        .get("url")
+        .and_then(|u| u.as_str())
+        .and_then(repo_from_pr_url);
+    let reviews = value
+        .get("reviews")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect();
+    let commits = value
+        .get("commits")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect();
+    Ok(PrTimeline {
+        pr_author,
+        repo,
+        reviews,
+        commits,
+    })
+}
+
+fn repo_from_pr_url(url: &str) -> Option<(String, String)> {
+    let (_scheme, rest) = url.split_once("://")?;
+    let mut parts = rest.split('/');
+    let _host = parts.next()?;
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    let kind = parts.next()?;
+    let number = parts.next()?;
+    if parts.next().is_some() || (kind != "pull" && kind != "pulls") {
+        return None;
+    }
+    if number.is_empty() || !number.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some((owner.to_string(), repo.to_string()))
+}
+
+fn fetch_review_comments(
+    gh: &GhRunner,
+    cwd: &Path,
+    owner: &str,
+    repo: &str,
+    number: u64,
+) -> EvidenceState<Vec<ReviewComment>> {
+    let Some(path) = crate::git::evidence::pull_review_comments_api_path(owner, repo, number)
+    else {
+        return EvidenceState::Unavailable {
+            reason: "pull request URL is not a review-comment API path".into(),
+        };
+    };
+    gh.read(cwd, &["api", "--paginate", &path], |stdout| {
+        if stdout.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(serde_json::from_str(stdout)?)
+    })
+}
+
+fn count_non_author_review_comments(
+    comments: &[ReviewComment],
+    pr_author: &str,
+    start: &str,
+    end: &str,
+) -> usize {
+    comments
+        .iter()
+        .filter(|comment| in_window(&comment.created_at, start, end))
+        .filter(|comment| {
+            let login = comment
+                .user
+                .as_ref()
+                .map(|user| user.login.as_str())
+                .unwrap_or("");
+            pr_author.is_empty() || login != pr_author
+        })
+        .count()
+}
+
+/// `comments` is `None` when the review-comment list could not be read.
+/// Three request→push cycles are enough on their own. Otherwise a missing
+/// comment count stays unknown instead of being treated as zero.
+fn classify_multi_round(
+    reviews: &[ReviewRow],
+    commits: &[CommitRow],
+    comments: Option<usize>,
+    start: &str,
+    end: &str,
+) -> MultiRoundSignal {
+    let push_cycles = count_request_push_cycles(reviews, commits, start, end);
+    let change_requests_in_window = reviews
+        .iter()
+        .filter(|review| review.state.eq_ignore_ascii_case("CHANGES_REQUESTED"))
+        .filter(|review| in_window(&review.submitted_at, start, end))
+        .count();
+    let comment_count = comments.unwrap_or(0);
+    if push_cycles >= 3 || comments.is_some_and(|count| count >= 3) {
+        let shown = match comments {
+            Some(count) => count.to_string(),
+            None => "unknown".to_string(),
+        };
+        return MultiRoundSignal::Yes {
+            detail: format!(
+                "request_push_cycles_in_window={push_cycles}, \
+                 non_author_review_comments_in_window={shown}"
+            ),
+        };
+    }
+    if comments.is_none() {
+        return MultiRoundSignal::Unknown {
+            reason: "could not read pull request review comments".into(),
+        };
+    }
+    if change_requests_in_window > 0 && commits.is_empty() && comment_count < 3 {
+        return MultiRoundSignal::Unknown {
+            reason: "could not observe push events to pair with change requests".into(),
+        };
+    }
+    MultiRoundSignal::No
 }
 
 #[derive(Debug, Deserialize)]
@@ -549,12 +666,6 @@ fn in_window_ts(at: &OffsetDateTime, start: &str, end: &str) -> bool {
     *at >= start && *at < end
 }
 
-#[derive(Debug)]
-struct CommentRowWithAuthorFlag {
-    created_at: String,
-    author_is_pr_author: bool,
-}
-
 fn in_window(ts: &str, start: &str, end: &str) -> bool {
     let Ok(at) = OffsetDateTime::parse(ts, &Rfc3339) else {
         return false;
@@ -566,4 +677,225 @@ fn in_window(ts: &str, start: &str, end: &str) -> bool {
         return false;
     };
     at >= start && at < end
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parsed(value: serde_json::Value) -> PrDetailParsed {
+        parse_pr_detail(&value.to_string()).expect("parse pr detail")
+    }
+
+    #[test]
+    fn status_check_rollup_array_reads_conclusion_and_state() {
+        let success = parsed(serde_json::json!({
+            "state": "OPEN",
+            "isDraft": false,
+            "url": "https://github.com/example/repo/pull/42",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [{
+                "__typename": "CheckRun",
+                "conclusion": "SUCCESS",
+                "status": "COMPLETED",
+                "name": "rust",
+                "startedAt": "2026-10-15T11:00:00Z",
+                "completedAt": "2026-10-15T12:00:00Z",
+                "detailsUrl": "https://example/checks/rust",
+                "workflowName": "CI"
+            }]
+        }));
+        assert_eq!(success.checks_failed, Some(false));
+        assert_eq!(success.merge_conflict, Some(false));
+        assert!(!success.is_draft);
+
+        let failed = parsed(serde_json::json!({
+            "state": "OPEN",
+            "mergeable": "CONFLICTING",
+            "statusCheckRollup": [
+                {
+                    "__typename": "CheckRun",
+                    "conclusion": "FAILURE",
+                    "status": "COMPLETED",
+                    "name": "rust"
+                },
+                {"__typename": "StatusContext", "state": "ERROR", "context": "ci"}
+            ]
+        }));
+        assert_eq!(failed.checks_failed, Some(true));
+        assert_eq!(failed.merge_conflict, Some(true));
+
+        let timed_out = parsed(serde_json::json!({
+            "state": "OPEN",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [{"conclusion": "TIMED_OUT", "status": "COMPLETED"}]
+        }));
+        assert_eq!(timed_out.checks_failed, Some(true));
+
+        let startup = parsed(serde_json::json!({
+            "state": "OPEN",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [{"conclusion": "STARTUP_FAILURE", "status": "COMPLETED"}]
+        }));
+        assert_eq!(startup.checks_failed, Some(true));
+    }
+
+    #[test]
+    fn empty_rollup_is_unknown_and_the_old_object_shape_does_not_parse() {
+        let empty = parsed(serde_json::json!({
+            "state": "OPEN",
+            "mergeable": "UNKNOWN",
+            "statusCheckRollup": []
+        }));
+        assert_eq!(empty.checks_failed, None);
+        assert_eq!(empty.merge_conflict, None);
+
+        let missing = parsed(serde_json::json!({
+            "state": "OPEN",
+            "statusCheckRollup": null
+        }));
+        assert_eq!(missing.checks_failed, None);
+
+        let pending = parsed(serde_json::json!({
+            "state": "OPEN",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [{
+                "conclusion": null,
+                "status": "IN_PROGRESS",
+                "name": "rust"
+            }]
+        }));
+        assert_eq!(pending.checks_failed, Some(false));
+
+        let object = serde_json::json!({
+            "state": "OPEN",
+            "isDraft": false,
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": {"state": "SUCCESS"}
+        });
+        assert!(
+            parse_pr_detail(&object.to_string()).is_err(),
+            "gh does not return statusCheckRollup as an object"
+        );
+    }
+
+    #[test]
+    fn review_comment_count_skips_the_author_and_a_missing_read_stays_unknown() {
+        let start = "2026-10-15T00:00:00Z";
+        let end = "2026-10-16T00:00:00Z";
+        let comments: Vec<ReviewComment> = serde_json::from_value(serde_json::json!([
+            {"user": {"login": "reviewer"}, "created_at": "2026-10-15T10:00:00Z", "body": "a"},
+            {"user": {"login": "reviewer"}, "created_at": "2026-10-15T11:00:00Z", "body": "b"},
+            {"user": {"login": "reviewer"}, "created_at": "2026-10-15T12:00:00Z", "body": "c"},
+            {"user": {"login": "dev"}, "created_at": "2026-10-15T12:30:00Z", "body": "self"},
+            {"user": {"login": "reviewer"}, "created_at": "2026-10-14T12:00:00Z", "body": "old"}
+        ]))
+        .expect("comments");
+        assert_eq!(
+            count_non_author_review_comments(&comments, "dev", start, end),
+            3
+        );
+
+        assert!(matches!(
+            classify_multi_round(&[], &[], Some(3), start, end),
+            MultiRoundSignal::Yes { .. }
+        ));
+        assert!(matches!(
+            classify_multi_round(&[], &[], None, start, end),
+            MultiRoundSignal::Unknown { .. }
+        ));
+        assert!(matches!(
+            classify_multi_round(
+                &[
+                    review("CHANGES_REQUESTED", "2026-10-15T10:00:00Z"),
+                    review("CHANGES_REQUESTED", "2026-10-15T11:00:00Z"),
+                    review("CHANGES_REQUESTED", "2026-10-15T12:00:00Z"),
+                ],
+                &[
+                    commit("2026-10-15T10:30:00Z"),
+                    commit("2026-10-15T11:30:00Z"),
+                    commit("2026-10-15T12:30:00Z"),
+                ],
+                None,
+                start,
+                end,
+            ),
+            MultiRoundSignal::Yes { .. }
+        ));
+    }
+
+    #[test]
+    fn timeline_parses_without_a_review_comments_field() {
+        let raw = serde_json::json!({
+            "author": {"login": "dev"},
+            "url": "https://github.com/example/repo/pull/42",
+            "reviews": [{
+                "author": {"login": "reviewer"},
+                "state": "COMMENTED",
+                "submittedAt": "2026-10-15T10:00:00Z"
+            }],
+            "commits": [{"oid": "abc", "committedDate": "2026-10-15T10:30:00Z"}]
+        });
+        let timeline = parse_pr_timeline(&raw.to_string()).expect("timeline");
+        assert_eq!(timeline.pr_author, "dev");
+        assert_eq!(
+            timeline.repo,
+            Some(("example".to_string(), "repo".to_string()))
+        );
+        assert_eq!(timeline.reviews.len(), 1);
+        assert_eq!(timeline.commits.len(), 1);
+    }
+
+    #[test]
+    fn live_gh_accepts_the_open_pull_request_contract() {
+        let gh = crate::git::evidence::GhRunner::default();
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        if !gh.auth_available(&root) {
+            eprintln!("live gh contract not executed: gh auth unavailable");
+            return;
+        }
+        match fetch_pr_detail(&gh, &root, 163) {
+            EvidenceState::Fetched { payload, .. } => {
+                assert!(
+                    !payload.state.is_empty(),
+                    "real gh pr view returned a state"
+                );
+                assert!(
+                    payload.checks_failed.is_some(),
+                    "statusCheckRollup array must become a boolean"
+                );
+            }
+            EvidenceState::Unavailable { reason } => {
+                panic!("real gh pr view did not parse: {reason}");
+            }
+        }
+        let timeline = match fetch_pr_timeline(&gh, &root, 163) {
+            EvidenceState::Fetched { payload, .. } => payload,
+            EvidenceState::Unavailable { reason } => {
+                panic!("real gh timeline did not parse: {reason}");
+            }
+        };
+        let (owner, repo) = timeline
+            .repo
+            .expect("real pr view url should identify owner/repo");
+        match fetch_review_comments(&gh, &root, &owner, &repo, 163) {
+            EvidenceState::Fetched { .. } => {}
+            EvidenceState::Unavailable { reason } => {
+                panic!("real gh api review comments did not parse: {reason}");
+            }
+        }
+    }
+
+    fn review(state: &str, at: &str) -> ReviewRow {
+        ReviewRow {
+            state: state.to_string(),
+            submitted_at: at.to_string(),
+        }
+    }
+
+    fn commit(at: &str) -> CommitRow {
+        CommitRow {
+            committed_date: at.to_string(),
+        }
+    }
 }

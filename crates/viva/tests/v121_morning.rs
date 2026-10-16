@@ -43,22 +43,55 @@ fn frozen() -> viva::foundation::store::FrozenMigrations {
 
 fn write_fake_gh(dir: &Path) -> std::path::PathBuf {
     let gh = dir.join("gh");
+    // JSON shapes match `gh pr view --json` and
+    // `gh api repos/{owner}/{repo}/pulls/{n}/comments` (gh 2.101).
     fs::write(
         &gh,
         r#"#!/bin/sh
 if [ "$1" = "auth" ] && [ "$2" = "status" ]; then exit 0; fi
+if [ "$1" = "api" ]; then
+  path=""
+  for arg in "$@"; do
+    case "$arg" in
+      repos/*) path=$arg ;;
+    esac
+  done
+  case "$path" in
+    repos/example/repo/pulls/11/comments)
+      echo '[{"user":{"login":"reviewer"},"created_at":"2026-10-15T10:00:00Z","body":"a"},{"user":{"login":"reviewer"},"created_at":"2026-10-15T11:00:00Z","body":"b"},{"user":{"login":"reviewer"},"created_at":"2026-10-15T12:00:00Z","body":"c"},{"user":{"login":"dev"},"created_at":"2026-10-15T12:30:00Z","body":"self"},{"user":{"login":"reviewer"},"created_at":"2026-10-14T12:00:00Z","body":"old"}]'
+      exit 0
+      ;;
+    repos/example/repo/pulls/*/comments)
+      echo '[]'
+      exit 0
+      ;;
+  esac
+  exit 1
+fi
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   case "$3" in
     feature-wait|42)
-      echo '{"number":42,"state":"OPEN","url":"https://example/pr/42","isDraft":false,"mergeable":"MERGEABLE","statusCheckRollup":{"state":"SUCCESS"},"author":{"login":"dev"},"reviewComments":[],"reviews":[{"state":"CHANGES_REQUESTED","submittedAt":"2026-10-15T10:00:00Z"},{"state":"CHANGES_REQUESTED","submittedAt":"2026-10-15T11:00:00Z"},{"state":"CHANGES_REQUESTED","submittedAt":"2026-10-15T12:00:00Z"}],"commits":[{"committedDate":"2026-10-15T10:30:00Z"},{"committedDate":"2026-10-15T11:30:00Z"},{"committedDate":"2026-10-15T12:30:00Z"}]}'
+      echo '{"number":42,"state":"OPEN","url":"https://github.com/example/repo/pull/42","isDraft":false,"mergeable":"MERGEABLE","statusCheckRollup":[{"__typename":"CheckRun","conclusion":"SUCCESS","status":"COMPLETED","name":"rust","startedAt":"2026-10-15T11:00:00Z","completedAt":"2026-10-15T12:00:00Z","detailsUrl":"https://example/checks/rust","workflowName":"CI"}],"author":{"login":"dev"},"reviews":[{"author":{"login":"reviewer"},"state":"CHANGES_REQUESTED","submittedAt":"2026-10-15T10:00:00Z"},{"author":{"login":"reviewer"},"state":"CHANGES_REQUESTED","submittedAt":"2026-10-15T11:00:00Z"},{"author":{"login":"reviewer"},"state":"CHANGES_REQUESTED","submittedAt":"2026-10-15T12:00:00Z"}],"commits":[{"oid":"a","committedDate":"2026-10-15T10:30:00Z"},{"oid":"b","committedDate":"2026-10-15T11:30:00Z"},{"oid":"c","committedDate":"2026-10-15T12:30:00Z"}]}'
       exit 0
       ;;
     feature-draft|7)
-      echo '{"number":7,"state":"OPEN","url":"https://example/pr/7","isDraft":true,"mergeable":"MERGEABLE","statusCheckRollup":{"state":"SUCCESS"},"author":{"login":"dev"},"reviewComments":[],"reviews":[],"commits":[]}'
+      echo '{"number":7,"state":"OPEN","url":"https://github.com/example/repo/pull/7","isDraft":true,"mergeable":"MERGEABLE","statusCheckRollup":[{"__typename":"CheckRun","conclusion":"SUCCESS","status":"COMPLETED","name":"rust","workflowName":"CI"}],"author":{"login":"dev"},"reviews":[],"commits":[]}'
       exit 0
       ;;
     feature-blocked|9)
-      echo '{"number":9,"state":"OPEN","url":"https://example/pr/9","isDraft":false,"mergeable":"CONFLICTING","statusCheckRollup":{"state":"FAILURE"},"author":{"login":"dev"},"reviewComments":[],"reviews":[],"commits":[]}'
+      echo '{"number":9,"state":"OPEN","url":"https://github.com/example/repo/pull/9","isDraft":false,"mergeable":"CONFLICTING","statusCheckRollup":[{"__typename":"CheckRun","conclusion":"FAILURE","status":"COMPLETED","name":"rust","workflowName":"CI"},{"__typename":"StatusContext","state":"ERROR","context":"ci","targetUrl":"https://example/status"}],"author":{"login":"dev"},"reviews":[],"commits":[]}'
+      exit 0
+      ;;
+    feature-comments|11)
+      echo '{"number":11,"state":"OPEN","url":"https://github.com/example/repo/pull/11","isDraft":false,"mergeable":"MERGEABLE","statusCheckRollup":[{"__typename":"CheckRun","conclusion":"SUCCESS","status":"COMPLETED","name":"rust","workflowName":"CI"}],"author":{"login":"dev"},"reviews":[],"commits":[]}'
+      exit 0
+      ;;
+    feature-nochecks|12)
+      echo '{"number":12,"state":"OPEN","url":"https://github.com/example/repo/pull/12","isDraft":false,"mergeable":"MERGEABLE","statusCheckRollup":[],"author":{"login":"dev"},"reviews":[],"commits":[]}'
+      exit 0
+      ;;
+    feature-unknown|13)
+      echo '{"number":13,"state":"OPEN","url":"https://github.com/example/repo/pull/13","isDraft":false,"mergeable":"UNKNOWN","statusCheckRollup":[],"author":{"login":"dev"},"reviews":[{"author":{"login":"reviewer"},"state":"CHANGES_REQUESTED","submittedAt":"2026-10-15T10:00:00Z"}],"commits":[]}'
       exit 0
       ;;
   esac
@@ -118,6 +151,21 @@ fn morning_report_classifies_merge_draft_blocked_and_multi_round() {
         .expect("blocked");
     bind_worktree(&store, &blocked.task_id, "feature-blocked", dir.path());
 
+    let comments = tasks
+        .create_task("review comments", vec![], None, None, None)
+        .expect("task");
+    bind_worktree(&store, &comments.task_id, "feature-comments", dir.path());
+
+    let nochecks = tasks
+        .create_task("no checks", vec![], None, None, None)
+        .expect("task");
+    bind_worktree(&store, &nochecks.task_id, "feature-nochecks", dir.path());
+
+    let unknown = tasks
+        .create_task("unknown pushes", vec![], None, None, None)
+        .expect("task");
+    bind_worktree(&store, &unknown.task_id, "feature-unknown", dir.path());
+
     let options = MorningOptions::parse_window("2026-10-15T00:00:00Z", "2026-10-16T00:00:00Z", 0)
         .expect("window")
         .with_gh_program(gh.to_string_lossy());
@@ -137,6 +185,8 @@ fn morning_report_classifies_merge_draft_blocked_and_multi_round() {
         wait_item.waiting_merge,
         Some(viva::coordinator::WaitingMerge::Open { pr_number: 42, .. })
     ));
+    assert_eq!(wait_item.blocked.github_checks_failed, Some(false));
+    assert_eq!(wait_item.blocked.merge_conflict, Some(false));
     assert!(matches!(
         wait_item.multi_round,
         viva::coordinator::MultiRoundSignal::Yes { .. }
@@ -151,6 +201,10 @@ fn morning_report_classifies_merge_draft_blocked_and_multi_round() {
         draft_item.waiting_merge,
         Some(viva::coordinator::WaitingMerge::Draft { .. })
     ));
+    assert!(matches!(
+        draft_item.multi_round,
+        viva::coordinator::MultiRoundSignal::No
+    ));
 
     let blocked_item = report
         .items
@@ -160,6 +214,38 @@ fn morning_report_classifies_merge_draft_blocked_and_multi_round() {
     assert!(blocked_item.blocked.viva_task_blocked);
     assert_eq!(blocked_item.blocked.github_checks_failed, Some(true));
     assert_eq!(blocked_item.blocked.merge_conflict, Some(true));
+
+    let comments_item = report
+        .items
+        .iter()
+        .find(|i| i.task_id == comments.task_id.to_string())
+        .expect("comments");
+    assert!(matches!(
+        comments_item.multi_round,
+        viva::coordinator::MultiRoundSignal::Yes { .. }
+    ));
+
+    let nochecks_item = report
+        .items
+        .iter()
+        .find(|i| i.task_id == nochecks.task_id.to_string())
+        .expect("nochecks");
+    assert!(matches!(
+        nochecks_item.waiting_merge,
+        Some(viva::coordinator::WaitingMerge::Open { pr_number: 12, .. })
+    ));
+    assert_eq!(nochecks_item.blocked.github_checks_failed, None);
+
+    let unknown_item = report
+        .items
+        .iter()
+        .find(|i| i.task_id == unknown.task_id.to_string())
+        .expect("unknown");
+    assert_eq!(unknown_item.blocked.merge_conflict, None);
+    assert!(matches!(
+        unknown_item.multi_round,
+        viva::coordinator::MultiRoundSignal::Unknown { .. }
+    ));
 }
 
 #[test]

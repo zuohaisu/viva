@@ -7,7 +7,8 @@
 //!   ref, Git-native discovery, explicit adoption of existing checkouts,
 //!   protected-ref refusal and one-writable-checkout-per-branch. Nothing
 //!   in this domain deletes or prunes a worktree — release only records.
-//! - [`evidence`]: strictly read-only `gh` (whitelisted subcommand trees),
+//! - [`evidence`]: strictly read-only `gh` (whitelisted subcommand trees,
+//!   plus GET of pull-request review comments),
 //!   evidence rows bound to task + head SHA with visible staleness, and
 //!   honest `Unavailable` states when auth/network is missing.
 

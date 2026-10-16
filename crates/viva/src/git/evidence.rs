@@ -2,8 +2,10 @@
 //! (V08, issue #17).
 //!
 //! - The only `gh` surface here is a **read whitelist** (pr/issue/run list
-//!   and view, pr status). Write subcommands and change flags are rejected
-//!   structurally at the entry — they cannot reach the CLI.
+//!   and view, pr status) plus one GET: `gh api [--paginate]
+//!   repos/{owner}/{repo}/pulls/{n}/comments`. Write subcommands, other
+//!   `gh api` paths, and method/body flags are rejected structurally at
+//!   the entry — they cannot reach the CLI.
 //! - Evidence rows record the queried subject, the head SHA it belongs to,
 //!   the raw state JSON and the fetch time. On later reads the row is
 //!   flagged stale when the worktree head has moved past it.
@@ -24,8 +26,9 @@ use crate::foundation::ids::{TaskId, WorktreeId, utc_now};
 use crate::foundation::store::Store;
 use crate::git::cli::{CliRunner, GitFailure};
 
-/// The exhaustive `gh` read surface. Anything outside this tree is a write
-/// or an admin operation and is rejected before spawning.
+/// The exhaustive `gh` read surface, apart from one GET of
+/// `repos/{owner}/{repo}/pulls/{n}/comments`. Anything outside this tree
+/// is a write or an admin operation and is rejected before spawning.
 pub const READ_WHITELIST: &[&[&str]] = &[
     &["pr", "list"],
     &["pr", "status"],
@@ -37,6 +40,75 @@ pub const READ_WHITELIST: &[&[&str]] = &[
     &["run", "list"],
     &["run", "view"],
 ];
+
+/// `gh api` defaults to GET and can also POST. Only the pull-request
+/// review-comment list is allowed, with an optional `--paginate` and no
+/// method, field, or input flags.
+fn is_pull_review_comments_get(args: &[&str]) -> bool {
+    if args.first() != Some(&"api") {
+        return false;
+    }
+    let mut saw_paginate = false;
+    let mut path = None;
+    for arg in &args[1..] {
+        if *arg == "--paginate" {
+            if saw_paginate {
+                return false;
+            }
+            saw_paginate = true;
+            continue;
+        }
+        if arg.starts_with('-') || path.is_some() {
+            return false;
+        }
+        path = Some(*arg);
+    }
+    path.is_some_and(is_review_comments_path)
+}
+
+fn is_review_comments_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("repos/") else {
+        return false;
+    };
+    let mut parts = rest.split('/');
+    let (Some(owner), Some(repo), Some(pulls), Some(number), Some(comments)) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return false;
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+    pulls == "pulls"
+        && comments == "comments"
+        && is_github_name(owner)
+        && is_github_name(repo)
+        && !number.is_empty()
+        && number.chars().all(|c| c.is_ascii_digit())
+}
+
+fn is_github_name(name: &str) -> bool {
+    if name.is_empty() || name == "." || name == ".." || name.contains("..") {
+        return false;
+    }
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Path for the one allowed `gh api` read, or `None` when `owner` / `repo`
+/// would not pass the allowlist.
+pub(crate) fn pull_review_comments_api_path(
+    owner: &str,
+    repo: &str,
+    number: u64,
+) -> Option<String> {
+    let path = format!("repos/{owner}/{repo}/pulls/{number}/comments");
+    is_review_comments_path(&path).then_some(path)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GhRejection {
@@ -120,6 +192,16 @@ impl GhRunner {
         if args.len() < 2 {
             return Err(GhRejection::WriteAttempt {
                 detail: "gh requires a subcommand tree (e.g. `pr view`)".into(),
+            });
+        }
+        if is_pull_review_comments_get(args) {
+            return Ok(());
+        }
+        if args[0] == "api" {
+            return Err(GhRejection::WriteAttempt {
+                detail: "gh api is limited to GET repos/{owner}/{repo}/pulls/{n}/comments \
+                         (optional --paginate); other API calls are outside the read-only surface"
+                    .into(),
             });
         }
         let ok = READ_WHITELIST
@@ -401,6 +483,47 @@ mod tests {
         assert!(GhRunner::validate_read_args(&["pr", "view", "123"]).is_ok());
         assert!(GhRunner::validate_read_args(&["pr", "list", "--state", "open"]).is_ok());
         assert!(GhRunner::validate_read_args(&["run", "list"]).is_ok());
+
+        assert!(
+            GhRunner::validate_read_args(&[
+                "api",
+                "--paginate",
+                "repos/zuohaisu/viva/pulls/163/comments"
+            ])
+            .is_ok()
+        );
+        assert!(
+            GhRunner::validate_read_args(&["api", "repos/zuohaisu/viva/pulls/163/comments"])
+                .is_ok()
+        );
+        assert!(
+            GhRunner::validate_read_args(&[
+                "api",
+                "--method",
+                "POST",
+                "repos/o/r/pulls/1/comments"
+            ])
+            .is_err()
+        );
+        assert!(
+            GhRunner::validate_read_args(&["api", "-X", "DELETE", "repos/o/r/pulls/1/comments"])
+                .is_err()
+        );
+        assert!(
+            GhRunner::validate_read_args(&["api", "-f", "body=x", "repos/o/r/pulls/1/comments"])
+                .is_err()
+        );
+        assert!(GhRunner::validate_read_args(&["api", "repos/o/r/pulls/1/reviews"]).is_err());
+        assert!(GhRunner::validate_read_args(&["api", "repos/../r/pulls/1/comments"]).is_err());
+        assert!(
+            GhRunner::validate_read_args(&[
+                "api",
+                "--paginate",
+                "--paginate",
+                "repos/o/r/pulls/1/comments"
+            ])
+            .is_err()
+        );
     }
 
     #[test]
