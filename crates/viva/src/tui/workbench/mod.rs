@@ -1807,18 +1807,30 @@ impl WorkbenchApp {
 
     fn nudge_split(&mut self, delta: i16, horizontal: bool) -> KeyOutcome {
         let area = self.last_pane_area.unwrap_or(PANE_REF_AREA);
+        // The innermost split on this axis that holds the focused pane.
+        let focused = self
+            .grid
+            .render_layout(area)
+            .into_iter()
+            .find(|(content, _)| *content == self.pane_focus)
+            .map(|(_, rect)| rect);
         let Some(hit) = self
             .grid
             .splits(area)
             .into_iter()
-            .find(|hit| horizontal == matches!(hit.axis, SplitAxis::Horizontal))
+            .filter(|hit| horizontal == matches!(hit.axis, SplitAxis::Horizontal))
+            .filter(|hit| focused.is_none_or(|rect| hit.area.intersection(rect) == rect))
+            .max_by_key(|hit| hit.path.len())
         else {
             return KeyOutcome::Ignored;
         };
-        let ratio = (hit.pos as i16).clamp(10, 90);
-        let _ = ratio;
-        let current = 50i16;
-        let next = (current + delta).clamp(10, 90) as u16;
+        let Some(current) = self.grid.ratio_at_path(&hit.path) else {
+            return KeyOutcome::Ignored;
+        };
+        let next = (current as i16 + delta).clamp(10, 90) as u16;
+        if next == current {
+            return KeyOutcome::Handled;
+        }
         if self.grid.set_ratio_at_path(&hit.path, next) {
             self.layout_dirty = true;
             self.queue_tree(crate::server::WorkbenchTreeOp::Resize {
@@ -2039,10 +2051,17 @@ impl WorkbenchApp {
                 return KeyOutcome::Handled;
             }
         }
-        if matches!(
-            self.focus,
-            Focus::Worktrees | Focus::Terminals | Focus::Tasks
-        ) {
+        // List movement takes plain keys only; Ctrl/Alt chords such as the
+        // retired Ctrl+Arrow are not UI actions.
+        let chord = key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        if !chord
+            && matches!(
+                self.focus,
+                Focus::Worktrees | Focus::Terminals | Focus::Tasks
+            )
+        {
             match key.code {
                 KeyCode::Down | KeyCode::Char('j') if self.row_count() > 0 => {
                     self.selected = (self.selected + 1).min(self.row_count() - 1);
@@ -2258,7 +2277,7 @@ impl WorkbenchApp {
 
     /// Handle one key event.
     pub fn on_key(&mut self, key: KeyEvent) -> KeyOutcome {
-        use ratatui::crossterm::event::KeyEventKind;
+        use ratatui::crossterm::event::{KeyEventKind, KeyModifiers};
         // Releases never drive workbench shortcuts. In a terminal pane they
         // are forwarded only when the program asked for key-release events.
         if key.kind == KeyEventKind::Release {
@@ -2297,12 +2316,14 @@ impl WorkbenchApp {
             return KeyOutcome::Handled;
         }
         if let Some(text) = &mut self.tab_prompt {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
                 KeyCode::Esc => self.tab_prompt = None,
                 KeyCode::Backspace => {
                     text.pop();
                 }
-                KeyCode::Char(c) if text.len() < 252 => text.push(c),
+                KeyCode::Char('u') if ctrl => text.clear(),
+                KeyCode::Char(c) if !ctrl && text.len() < 252 => text.push(c),
                 KeyCode::Enter => {
                     let name = text.trim().to_string();
                     self.tab_prompt = None;
@@ -2324,12 +2345,14 @@ impl WorkbenchApp {
             return self.on_workspace_prompt_key(key);
         }
         if let Some(text) = &mut self.pane_prompt {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
                 KeyCode::Esc => self.pane_prompt = None,
                 KeyCode::Backspace => {
                     text.pop();
                 }
-                KeyCode::Char(c) if text.len() < 252 => text.push(c),
+                KeyCode::Char('u') if ctrl => text.clear(),
+                KeyCode::Char(c) if !ctrl && text.len() < 252 => text.push(c),
                 KeyCode::Enter => {
                     let name = text.trim().to_string();
                     self.pane_prompt = None;
@@ -2576,7 +2599,16 @@ impl WorkbenchApp {
                         return self.apply_action(action);
                     }
                 }
-                return KeyOutcome::Ignored;
+                // herdr's resize mode: h/l and Left/Right change the width,
+                // j/k and Up/Down the height.
+                let action = match key.code {
+                    KeyCode::Char('h') | KeyCode::Left => keys::Action::ResizePaneLeft,
+                    KeyCode::Char('l') | KeyCode::Right => keys::Action::ResizePaneRight,
+                    KeyCode::Char('k') | KeyCode::Up => keys::Action::ResizePaneUp,
+                    KeyCode::Char('j') | KeyCode::Down => keys::Action::ResizePaneDown,
+                    _ => return KeyOutcome::Ignored,
+                };
+                return self.apply_action(action);
             }
             if let Some(action) = self.keymap.resolve(false, false, key) {
                 return self.apply_action(action);
@@ -5170,6 +5202,20 @@ fn run_client_inner(client: &mut crate::server::Client) -> Result<()> {
     Ok(())
 }
 
+/// Save a tab that exists only on this client, so the tree ops that follow
+/// (the new tab's first split) find it on the server.
+fn publish_layout(client: &mut crate::server::Client, app: &mut WorkbenchApp) {
+    if !app.layout_dirty() {
+        return;
+    }
+    match client.call(crate::server::RequestKind::WorkbenchLayout {
+        layout_json: Some(app.serialize_layout()),
+    }) {
+        Ok(_) => app.clear_layout_dirty(),
+        Err(e) => app.set_status(format!("layout save pending: {e}")),
+    }
+}
+
 fn flush_tree_ops(client: &mut crate::server::Client, app: &mut WorkbenchApp) {
     for op in app.take_tree_ops() {
         if let Err(err) = client.call(crate::server::RequestKind::WorkbenchTree { op }) {
@@ -5225,6 +5271,7 @@ fn apply_client_action(
             if !app.new_tab("Terminal".into()) {
                 return Ok(());
             }
+            publish_layout(client, app);
             let id = app.selected_scene().to_string();
             if id == FLOATING {
                 spawn_and_split(client, app, SplitAxis::Horizontal)
@@ -5565,6 +5612,7 @@ fn spawn_and_split(
     {
         return Ok(());
     }
+    publish_layout(client, app);
     let scene = app.focused_worktree_id();
     let worktree_id = scene.clone().filter(|id| !id.starts_with("directory:"));
     let cwd = scene
@@ -7023,6 +7071,198 @@ mod tests {
             idle.on_key(KeyEvent::from(KeyCode::Char('q'))),
             KeyOutcome::QuitRequested
         );
+    }
+
+    /// The 0.3.8 seal list: every retired workbench single key reaches the
+    /// pane in terminal mode, and none of them is a UI action outside it.
+    #[test]
+    fn every_retired_workbench_key_is_forwarded_or_inert() {
+        use ratatui::crossterm::event::KeyModifiers;
+        let ctrl = KeyModifiers::CONTROL;
+        let retired = [
+            ("enter", KeyEvent::from(KeyCode::Enter)),
+            ("o", KeyEvent::from(KeyCode::Char('o'))),
+            ("p", KeyEvent::from(KeyCode::Char('p'))),
+            ("d", KeyEvent::from(KeyCode::Char('d'))),
+            ("f", KeyEvent::from(KeyCode::Char('f'))),
+            ("D", KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT)),
+            ("h", KeyEvent::from(KeyCode::Char('h'))),
+            ("q", KeyEvent::from(KeyCode::Char('q'))),
+            ("ctrl+left", KeyEvent::new(KeyCode::Left, ctrl)),
+            ("ctrl+right", KeyEvent::new(KeyCode::Right, ctrl)),
+            ("ctrl+up", KeyEvent::new(KeyCode::Up, ctrl)),
+            ("ctrl+down", KeyEvent::new(KeyCode::Down, ctrl)),
+            ("ctrl+]", KeyEvent::new(KeyCode::Char(']'), ctrl)),
+        ];
+
+        let mut app = terminal_app();
+        let grid = app.grid.clone();
+        for (label, key) in retired {
+            let bytes = terminal_view::key(key, &app.input_modes()).expect(label);
+            assert_eq!(app.on_key(key), KeyOutcome::Forward(bytes), "{label}");
+            assert_eq!(app.terminal_mode.as_deref(), Some("term-1"), "{label}");
+        }
+        assert_eq!(app.grid, grid);
+        assert!(app.take_tree_ops().is_empty());
+
+        // Outside terminal mode the letters and chords do nothing. Enter is
+        // herdr's select on the focused list, not the old "open a shell".
+        // The old keys acted on the spaces list, so test there and on panes.
+        for focus in [Focus::Worktrees, Focus::Panes] {
+            let mut idle = WorkbenchApp::new();
+            idle.set_model(sample());
+            idle.focus = focus;
+            let grid = idle.grid.clone();
+            for (label, key) in retired.into_iter().filter(|(label, _)| *label != "enter") {
+                assert_eq!(idle.on_key(key), KeyOutcome::Ignored, "{label} {focus:?}");
+                assert!(idle.handoff_picker.is_none(), "{label}");
+            }
+            assert_eq!(idle.grid, grid);
+            assert!(idle.take_tree_ops().is_empty());
+        }
+    }
+
+    /// A new tab exists only on this client until it is saved. Its first
+    /// split must not reach the server before the tab does.
+    #[test]
+    fn a_new_tab_reaches_the_server_before_its_first_split() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let server = crate::server::Host::open(&home)
+            .expect("host")
+            .serve_background();
+        let socket = home.join(crate::server::SOCKET_NAME);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !socket.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let mut client = crate::server::Client::connect(&home).expect("client");
+
+        let mut app = WorkbenchApp::new();
+        for _ in 0..2 {
+            apply_client_action(&mut client, &mut app, WorkbenchAction::NewTab).expect("new tab");
+            flush_tree_ops(&mut client, &mut app);
+            assert!(
+                !app.status_line.contains("tree update failed"),
+                "{}",
+                app.status_line
+            );
+        }
+        let tree = client
+            .call(crate::server::RequestKind::WorkbenchTree {
+                op: crate::server::WorkbenchTreeOp::List,
+            })
+            .expect("list");
+        let tabs = tree["tree"]["scenes"][FLOATING]["tabs"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(tabs.len(), 2, "{tree}");
+        for tab in tabs {
+            assert!(tab["grid"].to_string().contains("term-"), "{tab}");
+        }
+
+        let _ = client.call(crate::server::RequestKind::Shutdown { close_policy: None });
+        let _ = server.join();
+    }
+
+    #[test]
+    fn rename_prompts_clear_on_ctrl_u_and_never_type_control_letters() {
+        use ratatui::crossterm::event::KeyModifiers;
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let mut app = terminal_app();
+        app.tab_prompt = Some("Terminal".into());
+        app.on_key(ctrl('u'));
+        app.on_key(ctrl('w'));
+        for c in "build".chars() {
+            app.on_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(app.tab_prompt.as_deref(), Some("build"));
+        app.pane_prompt = Some("old".into());
+        app.tab_prompt = None;
+        app.on_key(ctrl('u'));
+        app.on_key(ctrl('a'));
+        assert_eq!(app.pane_prompt.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn resize_mode_moves_the_focused_split_with_herdr_keys() {
+        let mut app = terminal_app();
+        assert!(app.grid.set_ratio_at_path(&[], 60));
+        prefix(&mut app);
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('r'))),
+            KeyOutcome::Handled
+        );
+        assert!(app.resize_mode);
+
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('h'))),
+            KeyOutcome::Handled
+        );
+        assert!(matches!(app.grid, PaneNode::Split { ratio: 55, .. }));
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Right)),
+            KeyOutcome::Handled
+        );
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('l'))),
+            KeyOutcome::Handled
+        );
+        assert!(matches!(app.grid, PaneNode::Split { ratio: 65, .. }));
+        assert!(
+            app.take_tree_ops()
+                .iter()
+                .any(|op| matches!(op, crate::server::WorkbenchTreeOp::Resize { ratio: 65, .. }))
+        );
+        // No vertical split: j/k change nothing and the mode stays.
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('j'))),
+            KeyOutcome::Ignored
+        );
+        assert!(matches!(app.grid, PaneNode::Split { ratio: 65, .. }));
+        // Other keys never reach the pane while resizing.
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('x'))),
+            KeyOutcome::Ignored
+        );
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Esc)),
+            KeyOutcome::Handled
+        );
+        assert!(!app.resize_mode);
+    }
+
+    #[test]
+    fn resize_mode_picks_the_split_that_holds_the_focused_pane() {
+        let mut app = terminal_app();
+        // Browser | (term-1 / term-2): k/j move only the inner split.
+        app.attach_terminal("term-2".into());
+        app.grid = PaneNode::Split {
+            axis: SplitAxis::Horizontal,
+            first: Box::new(PaneNode::leaf(PaneContent::Browser)),
+            second: Box::new(PaneNode::split_new(
+                PaneContent::Terminal("term-1".into()),
+                SplitAxis::Vertical,
+                PaneContent::Terminal("term-2".into()),
+            )),
+            ratio: 50,
+        };
+        app.pane_focus = PaneContent::Terminal("term-2".into());
+        prefix(&mut app);
+        app.on_key(KeyEvent::from(KeyCode::Char('r')));
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('k'))),
+            KeyOutcome::Handled
+        );
+        assert_eq!(app.grid.ratio_at_path(&[true]), Some(45));
+        assert_eq!(app.grid.ratio_at_path(&[]), Some(50));
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('h'))),
+            KeyOutcome::Handled
+        );
+        assert_eq!(app.grid.ratio_at_path(&[]), Some(45));
     }
 }
 

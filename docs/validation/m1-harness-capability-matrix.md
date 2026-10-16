@@ -1,5 +1,7 @@
 # M1 harness capability matrix (S6)
 
+> Historical M1 record. The single-key walkthrough below (`p`, `o`, `d`, `h`, `w`, bare `q`) was retired in 0.3.8; current keys follow herdr — see [`0.3.8-herdr-capability-matrix.md`](0.3.8-herdr-capability-matrix.md).
+
 Machine-readable source: `viva harness matrix` (JSON).
 
 Dimensions (M1 exit criteria):

@@ -110,6 +110,9 @@ impl Client {
         if socket_path.exists() {
             match Client::connect(home) {
                 Ok(client) => return Ok(client),
+                // Nobody listens: a killed host left the socket behind.
+                // The spawned server claims it with a record (`Host::open`).
+                Err(Error::Io(err)) if err.kind() == std::io::ErrorKind::ConnectionRefused => {}
                 Err(err) => {
                     return Err(Error::Validation(format!(
                         "socket {} exists but no healthy host answered ({}); \
