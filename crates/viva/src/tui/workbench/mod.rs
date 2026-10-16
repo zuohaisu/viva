@@ -14,16 +14,16 @@
 //!   worktrees V08, terminals V05). Lists, dirty flags and needs-attention
 //!   markers are projections — there is no second workflow state here, and
 //!   unknown states are shown as unknown, never guessed.
-//! - Terminals are launched through explicit harness combinations (V09):
-//!   Pi by default, any other installed CLI by explicit argv — and shells
-//!   and editors run as plain user tools that never fake a member or an
-//!   execution.
+//! - A new pane is a terminal. Pi, Claude, Codex, and any other TUI agent
+//!   start when the user runs that command in the pane. The workbench has
+//!   no action that launches one of them.
 //! - Diffs and status are real git facts, read-only; editing is delegated
 //!   to the user's own editor — the workbench builds no code editor.
 //! - Quit is a detach: worktree contents and records are left exactly as
 //!   they are, nothing is re-run when the client reattaches.
 
-mod keybindings;
+mod copy_mode;
+mod keys;
 mod polling;
 pub mod scenes;
 pub mod terminal_view;
@@ -212,9 +212,7 @@ pub enum WorkbenchAction {
     SplitBelow,
     /// Open a shell at the selected worktree (the `o` action).
     OpenWorktreeShell(String),
-    /// Launch Pi with member/task context at the selected worktree (`p`).
-    OpenPiHarness(String),
-    /// Create the selected task's worktree (the `w` action).
+    /// Create the selected task's worktree (reachable as a command, not a single key).
     CreateTaskWorktree(String),
     /// V15-1: open the file browser for a worktree.
     BrowseFiles(String),
@@ -318,6 +316,8 @@ impl WorkspacePrompt {
                 " Open workspace: a repo, a folder or a .code-workspace file · ↑↓ recent · Enter · Esc "
             }
             "new" => " New workspace name · Enter · Esc ",
+            "rename" => " Rename workspace · Enter · Esc ",
+            "worktree" => " New worktree branch · Enter · Esc ",
             "add" => " Add project: path of a repo or folder · Enter · Esc ",
             _ => " Save As: path of the .code-workspace file · Enter · Esc ",
         }
@@ -327,8 +327,56 @@ impl WorkspacePrompt {
 /// How many recent workspaces the open prompt lists.
 const RECENT_LIMIT: usize = 8;
 
-const DEFAULT_STATUS_HINT: &str =
-    "ctrl+b prefix · Enter opens · j/k navigate lists · h/j/k/l panes · mouse focuses sidebar";
+const DEFAULT_STATUS_HINT: &str = "";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuAction {
+    SplitRight,
+    SplitDown,
+    Close,
+    Rename,
+    Zoom,
+}
+
+struct ContextMenu {
+    selected: usize,
+    column: u16,
+    row: u16,
+}
+
+struct GotoPicker {
+    query: String,
+    searching: bool,
+    cursor: usize,
+    /// `b` `w` `i` `d` filter agent rows; `None` lists every terminal.
+    kind: Option<String>,
+}
+
+struct GotoRow {
+    id: String,
+    group: String,
+    label: String,
+}
+
+fn menu_actions() -> [MenuAction; 5] {
+    [
+        MenuAction::SplitRight,
+        MenuAction::SplitDown,
+        MenuAction::Close,
+        MenuAction::Rename,
+        MenuAction::Zoom,
+    ]
+}
+
+struct DragSelect {
+    id: String,
+    area: Rect,
+    start_col: u16,
+    start_row: u16,
+    end_col: u16,
+    end_row: u16,
+    moved: bool,
+}
 
 /// The workbench application state. Pure view state + explicit caches;
 /// drive it with [`WorkbenchApp::on_key`], the setters, and [`Self::draw`].
@@ -404,9 +452,26 @@ pub struct WorkbenchApp {
     /// Herdr-style prefix mode: `ctrl+b` then one action key.
     prefix_pending: bool,
     show_key_help: bool,
+    help_filter: String,
+    help_filtering: bool,
     sidebar_collapsed: bool,
     copy_mode: bool,
+    copy_state: copy_mode::CopyMode,
     resize_mode: bool,
+    navigate: bool,
+    goto: Option<GotoPicker>,
+    settings_open: bool,
+    onboarding_pending: bool,
+    keymap: keys::KeyMap,
+    config_path: Option<std::path::PathBuf>,
+    context_menu: Option<ContextMenu>,
+    menu_hits: Vec<(MenuAction, Rect)>,
+    tree_ops: Vec<crate::server::WorkbenchTreeOp>,
+    pane_prompt: Option<String>,
+    drag_select: Option<DragSelect>,
+    last_copy: String,
+    scrollback_edit: Option<String>,
+    workspace_nav: usize,
 }
 
 impl WorkbenchApp {
@@ -448,10 +513,111 @@ impl WorkbenchApp {
             scroll_offsets: std::collections::HashMap::new(),
             prefix_pending: false,
             show_key_help: false,
+            help_filter: String::new(),
+            help_filtering: false,
             sidebar_collapsed: false,
             copy_mode: false,
+            copy_state: copy_mode::CopyMode::default(),
             resize_mode: false,
+            navigate: false,
+            goto: None,
+            settings_open: false,
+            onboarding_pending: false,
+            keymap: keys::KeyMap::builtin(),
+            config_path: None,
+            context_menu: None,
+            menu_hits: Vec::new(),
+            tree_ops: Vec::new(),
+            pane_prompt: None,
+            drag_select: None,
+            last_copy: String::new(),
+            scrollback_edit: None,
+            workspace_nav: 0,
         }
+    }
+
+    pub fn navigate_mode(&self) -> bool {
+        self.navigate
+    }
+
+    pub fn settings_open(&self) -> bool {
+        self.settings_open
+    }
+
+    pub fn goto_open(&self) -> bool {
+        self.goto.is_some()
+    }
+
+    pub fn help_open(&self) -> bool {
+        self.show_key_help
+    }
+
+    pub fn help_text(&self) -> String {
+        self.keymap.help_text(&self.help_filter)
+    }
+
+    pub fn command_catalog(&self) -> Vec<keys::CommandRow> {
+        self.keymap.command_rows()
+    }
+
+    pub fn config_warnings(&self) -> &[String] {
+        self.keymap.warnings()
+    }
+
+    pub fn last_copy(&self) -> &str {
+        &self.last_copy
+    }
+
+    pub fn scrollback_edit_path(&self) -> Option<&str> {
+        self.scrollback_edit.as_deref()
+    }
+
+    pub fn take_tree_ops(&mut self) -> Vec<crate::server::WorkbenchTreeOp> {
+        std::mem::take(&mut self.tree_ops)
+    }
+
+    pub fn load_config_str(&mut self, text: &str, path: Option<std::path::PathBuf>) {
+        self.keymap = keys::KeyMap::load_str(text);
+        self.config_path = path;
+        self.onboarding_pending = !self.keymap.onboarding_done();
+        if self.onboarding_pending {
+            self.settings_open = true;
+        }
+        if !self.keymap.warnings().is_empty() {
+            self.set_status(self.keymap.warnings().join("; "));
+        }
+    }
+
+    pub fn load_home_config(&mut self) {
+        let path = crate::foundation::paths::viva_home(None).join("config.toml");
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        self.load_config_str(&text, Some(path));
+    }
+
+    fn queue_tree(&mut self, op: crate::server::WorkbenchTreeOp) {
+        self.tree_ops.push(op);
+    }
+
+    fn active_tab_id(&self) -> Option<String> {
+        self.scenes
+            .scenes
+            .get(&self.scenes.selected)
+            .map(|scene| scene.active.clone())
+    }
+
+    fn pane_key(content: &PaneContent) -> String {
+        match content {
+            PaneContent::Browser => "browser".into(),
+            PaneContent::Terminal(id) => id.clone(),
+        }
+    }
+
+    fn queue_focus(&mut self, content: &PaneContent) {
+        self.queue_tree(crate::server::WorkbenchTreeOp::FocusPane {
+            scene_id: Some(self.scenes.selected.clone()),
+            tab_id: self.active_tab_id(),
+            pane_id: Self::pane_key(content),
+        });
     }
 
     pub fn focus(&self) -> Focus {
@@ -596,6 +762,11 @@ impl WorkbenchApp {
                     self.set_status("type a value first (Esc cancels)");
                     return KeyOutcome::Handled;
                 }
+                if action == "worktree" {
+                    self.workspace_prompt = None;
+                    self.set_status(format!("new worktree `{text}`"));
+                    return KeyOutcome::Handled;
+                }
                 self.workspace_prompt = None;
                 return KeyOutcome::Action(WorkbenchAction::Workspace {
                     action: action.into(),
@@ -629,6 +800,13 @@ impl WorkbenchApp {
         event: ratatui::crossterm::event::MouseEvent,
     ) -> Option<(String, Vec<u8>)> {
         use ratatui::crossterm::event::{KeyModifiers, MouseEventKind};
+        if matches!(
+            event.kind,
+            MouseEventKind::Down(ratatui::crossterm::event::MouseButton::Right)
+                | MouseEventKind::Up(ratatui::crossterm::event::MouseButton::Right)
+        ) {
+            return None;
+        }
         if self.file_panel.is_some()
             || self.diff_view.is_some()
             || self.handoff_picker.is_some()
@@ -1113,7 +1291,23 @@ impl WorkbenchApp {
                     return false;
                 }
             }
+            let split_target = Self::pane_key(&self.pane_focus);
+            let spawned = match &content {
+                PaneContent::Terminal(id) => id.clone(),
+                PaneContent::Browser => "browser".into(),
+            };
             self.pane_focus = content;
+            self.queue_tree(crate::server::WorkbenchTreeOp::Split {
+                scene_id: Some(self.scenes.selected.clone()),
+                tab_id: self.active_tab_id(),
+                pane_id: Some(split_target),
+                direction: match axis {
+                    SplitAxis::Horizontal => "right",
+                    SplitAxis::Vertical => "down",
+                }
+                .into(),
+                terminal_id: Some(spawned),
+            });
             true
         } else {
             self.set_status(format!(
@@ -1195,9 +1389,7 @@ impl WorkbenchApp {
     pub fn enter_terminal_mode(&mut self, terminal_id: impl Into<String>) {
         self.focus = Focus::Panes;
         self.terminal_mode = Some(terminal_id.into());
-        self.status_line =
-            "terminal · ctrl+b prefix · Esc to CLI · shift+PgUp scrollback · click sidebar to release"
-                .into();
+        self.status_line = "terminal · only the prefix key is intercepted".into();
     }
 
     pub fn leave_terminal_mode(&mut self) {
@@ -1205,6 +1397,23 @@ impl WorkbenchApp {
         self.copy_mode = false;
         self.prefix_pending = false;
         self.status_line = "terminal released".into();
+    }
+
+    /// While keyboard-forwarding is active, keep the PTY target aligned with
+    /// pane focus after prefix focus/cycle moves (swap intentionally does not
+    /// retarget — input stays on the terminal that had focus before the swap).
+    fn sync_terminal_mode_to_pane_focus(&mut self) {
+        if self.terminal_mode.is_none() {
+            return;
+        }
+        match &self.pane_focus {
+            PaneContent::Terminal(id) => {
+                if self.terminal_mode.as_deref() != Some(id.as_str()) {
+                    self.enter_terminal_mode(id.clone());
+                }
+            }
+            PaneContent::Browser => self.leave_terminal_mode(),
+        }
     }
 
     fn clear_prefix(&mut self) {
@@ -1240,99 +1449,146 @@ impl WorkbenchApp {
         KeyOutcome::Handled
     }
 
-    fn apply_prefix_action(&mut self, action: keybindings::PrefixAction) -> KeyOutcome {
-        use keybindings::PrefixAction;
+    fn focus_dir(&mut self, direction: Direction) -> KeyOutcome {
+        if self.move_pane_focus(direction) {
+            self.queue_focus(&self.pane_focus.clone());
+            self.sync_terminal_mode_to_pane_focus();
+            KeyOutcome::Handled
+        } else {
+            KeyOutcome::Ignored
+        }
+    }
+
+    fn prompt(&mut self, action: &'static str) -> KeyOutcome {
+        self.workspace_prompt = Some(WorkspacePrompt {
+            action,
+            text: String::new(),
+            pick: None,
+        });
+        KeyOutcome::Handled
+    }
+
+    fn enter_copy_mode(&mut self) {
+        let lines = self.focused_copy_lines();
+        self.copy_mode = true;
+        self.copy_state = copy_mode::CopyMode::default();
+        self.copy_state.place_at_end(&lines);
+    }
+
+    fn focused_copy_lines(&self) -> Vec<String> {
+        let id = match self.terminal_mode.as_deref() {
+            Some(id) => id,
+            None => match &self.pane_focus {
+                PaneContent::Terminal(id) => id.as_str(),
+                PaneContent::Browser => return Vec::new(),
+            },
+        };
+        self.snapshots
+            .get(id)
+            .map(|snap| {
+                snap.scrollback
+                    .iter()
+                    .chain(snap.visible.iter())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn apply_action(&mut self, action: keys::Action) -> KeyOutcome {
+        use keys::Action;
         match action {
-            PrefixAction::ShowHelp => {
+            Action::Help => {
                 self.show_key_help = !self.show_key_help;
+                self.help_filter.clear();
+                self.help_filtering = false;
                 KeyOutcome::Handled
             }
-            PrefixAction::Detach => {
+            Action::Settings => {
+                self.settings_open = true;
+                KeyOutcome::Handled
+            }
+            Action::Detach => {
                 self.quit_requested = true;
                 KeyOutcome::QuitRequested
             }
-            PrefixAction::NewTab => KeyOutcome::Action(WorkbenchAction::NewTab),
-            PrefixAction::SplitVertical => KeyOutcome::Action(WorkbenchAction::SplitRight),
-            PrefixAction::SplitHorizontal => KeyOutcome::Action(WorkbenchAction::SplitBelow),
-            PrefixAction::FocusPaneLeft => self
-                .move_pane_focus(Direction::Left)
-                .then_some(())
-                .map_or(KeyOutcome::Ignored, |_| KeyOutcome::Handled),
-            PrefixAction::FocusPaneDown => self
-                .move_pane_focus(Direction::Down)
-                .then_some(())
-                .map_or(KeyOutcome::Ignored, |_| KeyOutcome::Handled),
-            PrefixAction::FocusPaneUp => self
-                .move_pane_focus(Direction::Up)
-                .then_some(())
-                .map_or(KeyOutcome::Ignored, |_| KeyOutcome::Handled),
-            PrefixAction::FocusPaneRight => self
-                .move_pane_focus(Direction::Right)
-                .then_some(())
-                .map_or(KeyOutcome::Ignored, |_| KeyOutcome::Handled),
-            PrefixAction::WorkspacePicker => {
-                self.workspace_prompt = Some(WorkspacePrompt {
-                    action: "open",
-                    text: String::new(),
-                    pick: None,
+            Action::NewTab => KeyOutcome::Action(WorkbenchAction::NewTab),
+            Action::SplitVertical => KeyOutcome::Action(WorkbenchAction::SplitRight),
+            Action::SplitHorizontal => KeyOutcome::Action(WorkbenchAction::SplitBelow),
+            Action::FocusPaneLeft | Action::NavigatePaneLeft => self.focus_dir(Direction::Left),
+            Action::FocusPaneDown | Action::NavigatePaneDown => self.focus_dir(Direction::Down),
+            Action::FocusPaneUp | Action::NavigatePaneUp => self.focus_dir(Direction::Up),
+            Action::FocusPaneRight | Action::NavigatePaneRight => self.focus_dir(Direction::Right),
+            Action::WorkspacePicker => {
+                self.navigate = true;
+                self.prefix_pending = false;
+                self.workspace_nav = self
+                    .model
+                    .workspaces
+                    .iter()
+                    .position(|w| Some(&w.workspace_id) == self.model.workspace_id.as_ref())
+                    .unwrap_or(0);
+                KeyOutcome::Handled
+            }
+            Action::NewWorkspace => self.prompt("new"),
+            Action::RenameWorkspace => self.prompt("rename"),
+            Action::NewWorktree => self.prompt("worktree"),
+            Action::OpenWorktree => self.prompt("open"),
+            Action::CloseWorkspace => KeyOutcome::Action(WorkbenchAction::Workspace {
+                action: "close".into(),
+                value: None,
+                project_id: None,
+            }),
+            Action::RemoveWorktree => {
+                let project_id = self
+                    .model
+                    .worktrees
+                    .get(self.selected)
+                    .map(|w| w.project_id.clone());
+                KeyOutcome::Action(WorkbenchAction::Workspace {
+                    action: "remove".into(),
+                    value: None,
+                    project_id,
+                })
+            }
+            Action::Goto => {
+                self.goto = Some(GotoPicker {
+                    query: String::new(),
+                    searching: false,
+                    cursor: 0,
+                    kind: None,
                 });
                 KeyOutcome::Handled
             }
-            PrefixAction::NewWorkspace => {
-                self.workspace_prompt = Some(WorkspacePrompt {
-                    action: "new",
-                    text: String::new(),
-                    pick: None,
-                });
-                KeyOutcome::Handled
-            }
-            PrefixAction::RenameWorkspace => {
-                self.set_status(
-                    "rename workspace: not implemented yet (herdr parity pending backend)",
-                );
-                KeyOutcome::Handled
-            }
-            PrefixAction::CloseWorkspace => {
-                self.set_status(
-                    "close workspace: not implemented yet (herdr parity pending backend)",
-                );
-                KeyOutcome::Handled
-            }
-            PrefixAction::Goto => {
-                self.focus = Focus::Worktrees;
-                self.selected = 0;
-                self.set_status("goto: pick a space in the sidebar (↑↓ · Enter)");
-                KeyOutcome::Handled
-            }
-            PrefixAction::ToggleSidebar => {
+            Action::ToggleSidebar => {
                 self.sidebar_collapsed = !self.sidebar_collapsed;
                 self.layout_dirty = true;
                 KeyOutcome::Handled
             }
-            PrefixAction::NextTab => self.cycle_tab_relative(1),
-            PrefixAction::PreviousTab => self.cycle_tab_relative(-1),
-            PrefixAction::SwitchTab1 => self.switch_tab_index(0),
-            PrefixAction::SwitchTab2 => self.switch_tab_index(1),
-            PrefixAction::SwitchTab3 => self.switch_tab_index(2),
-            PrefixAction::SwitchTab4 => self.switch_tab_index(3),
-            PrefixAction::SwitchTab5 => self.switch_tab_index(4),
-            PrefixAction::SwitchTab6 => self.switch_tab_index(5),
-            PrefixAction::SwitchTab7 => self.switch_tab_index(6),
-            PrefixAction::SwitchTab8 => self.switch_tab_index(7),
-            PrefixAction::SwitchTab9 => self.switch_tab_index(8),
-            PrefixAction::RenameTab => {
+            Action::NextTab => self.cycle_tab_relative(1),
+            Action::PreviousTab => self.cycle_tab_relative(-1),
+            Action::SwitchTab(n) => self.switch_tab_index(n.saturating_sub(1) as usize),
+            Action::SwitchWorkspace(n) => self.switch_workspace_index(n.saturating_sub(1) as usize),
+            Action::RenameTab => {
                 self.tab_prompt = Some(String::new());
                 KeyOutcome::Handled
             }
-            PrefixAction::CloseTab => {
+            Action::CloseTab => {
+                let tab_id = self.active_tab_id().unwrap_or_default();
                 self.close_tab();
+                self.queue_tree(crate::server::WorkbenchTreeOp::CloseTab {
+                    scene_id: Some(self.scenes.selected.clone()),
+                    tab_id,
+                });
                 KeyOutcome::Handled
             }
-            PrefixAction::CyclePaneNext => {
+            Action::CyclePaneNext => {
                 self.cycle_pane();
+                self.queue_focus(&self.pane_focus.clone());
+                self.sync_terminal_mode_to_pane_focus();
                 KeyOutcome::Handled
             }
-            PrefixAction::CyclePanePrevious => {
+            Action::CyclePanePrevious => {
                 let leaves = self.grid.leaves();
                 if leaves.len() < 2 {
                     return KeyOutcome::Ignored;
@@ -1344,43 +1600,301 @@ impl WorkbenchApp {
                 self.pane_focus = leaves[(index + leaves.len() - 1) % leaves.len()].clone();
                 self.focus = Focus::Panes;
                 self.layout_dirty = true;
+                self.queue_focus(&self.pane_focus.clone());
+                self.sync_terminal_mode_to_pane_focus();
                 KeyOutcome::Handled
             }
-            PrefixAction::ClosePane => {
+            Action::ClosePane => {
+                let pane_id = Self::pane_key(&self.pane_focus);
                 self.close_pane();
-                KeyOutcome::Handled
-            }
-            PrefixAction::Zoom => {
-                self.toggle_zoom();
-                KeyOutcome::Handled
-            }
-            PrefixAction::ResizeMode => {
-                self.resize_mode = !self.resize_mode;
-                self.set_status(if self.resize_mode {
-                    "resize mode · drag dividers only · prefix+r to exit (keyboard resize n/a)"
-                } else {
-                    "resize mode off"
+                self.queue_tree(crate::server::WorkbenchTreeOp::ClosePane {
+                    scene_id: Some(self.scenes.selected.clone()),
+                    tab_id: self.active_tab_id(),
+                    pane_id,
                 });
                 KeyOutcome::Handled
             }
-            PrefixAction::CopyMode => {
-                if self.terminal_mode.is_some() {
-                    self.copy_mode = !self.copy_mode;
-                    self.set_status(if self.copy_mode {
-                        "copy mode · j/k scroll · Esc exits copy"
+            Action::Zoom => {
+                self.toggle_zoom();
+                self.queue_tree(crate::server::WorkbenchTreeOp::Zoom {
+                    scene_id: Some(self.scenes.selected.clone()),
+                    tab_id: self.active_tab_id(),
+                    on: Some(self.zoomed),
+                });
+                KeyOutcome::Handled
+            }
+            Action::ResizeMode => {
+                self.resize_mode = !self.resize_mode;
+                KeyOutcome::Handled
+            }
+            Action::ResizePaneLeft => self.nudge_split(-5, true),
+            Action::ResizePaneRight => self.nudge_split(5, true),
+            Action::ResizePaneUp => self.nudge_split(-5, false),
+            Action::ResizePaneDown => self.nudge_split(5, false),
+            Action::CopyMode => {
+                if matches!(self.pane_focus, PaneContent::Terminal(_))
+                    || self.terminal_mode.is_some()
+                {
+                    if self.copy_mode {
+                        self.copy_mode = false;
                     } else {
-                        "copy mode off"
-                    });
+                        self.enter_copy_mode();
+                    }
                 } else {
                     self.set_status("copy mode needs a focused terminal pane");
                 }
                 KeyOutcome::Handled
             }
-            PrefixAction::SwapPaneLeft => self.swap_pane(Direction::Left),
-            PrefixAction::SwapPaneDown => self.swap_pane(Direction::Down),
-            PrefixAction::SwapPaneUp => self.swap_pane(Direction::Up),
-            PrefixAction::SwapPaneRight => self.swap_pane(Direction::Right),
+            Action::RenamePane => {
+                self.pane_prompt = Some(String::new());
+                KeyOutcome::Handled
+            }
+            Action::EditScrollback => self.edit_scrollback(),
+            Action::ClearPane => {
+                self.set_status("clear pane is not bound by default");
+                KeyOutcome::Handled
+            }
+            Action::ReloadConfig => self.reload_config(),
+            Action::OpenNotificationTarget => self.open_notification(),
+            Action::NavigateWorkspaceUp | Action::PreviousWorkspace => self.step_workspace(-1),
+            Action::NavigateWorkspaceDown | Action::NextWorkspace => self.step_workspace(1),
+            Action::PreviousAgent => self.step_agent(-1),
+            Action::NextAgent => self.step_agent(1),
+            Action::FocusAgent(n) => self.focus_agent_index(n.saturating_sub(1) as usize),
+            Action::MoveTabPrevious => self.move_tab(-1),
+            Action::MoveTabNext => self.move_tab(1),
+            Action::LastPane => {
+                self.cycle_pane();
+                self.queue_focus(&self.pane_focus.clone());
+                self.sync_terminal_mode_to_pane_focus();
+                KeyOutcome::Handled
+            }
+            Action::SwapPaneLeft => self.swap_pane(Direction::Left),
+            Action::SwapPaneDown => self.swap_pane(Direction::Down),
+            Action::SwapPaneUp => self.swap_pane(Direction::Up),
+            Action::SwapPaneRight => self.swap_pane(Direction::Right),
+            Action::Command(id) => self.run_command(&id),
         }
+    }
+
+    fn step_workspace(&mut self, delta: isize) -> KeyOutcome {
+        let len = self.model.workspaces.len();
+        if len == 0 {
+            return KeyOutcome::Ignored;
+        }
+        let next = self.workspace_nav as isize + delta;
+        self.workspace_nav = next.clamp(0, len as isize - 1) as usize;
+        let Some(id) = self
+            .model
+            .workspaces
+            .get(self.workspace_nav)
+            .map(|w| w.workspace_id.clone())
+        else {
+            return KeyOutcome::Ignored;
+        };
+        KeyOutcome::Action(Self::select_workspace(Some(id)))
+    }
+
+    fn switch_workspace_index(&mut self, index: usize) -> KeyOutcome {
+        let Some(id) = self
+            .model
+            .workspaces
+            .get(index)
+            .map(|w| w.workspace_id.clone())
+        else {
+            return KeyOutcome::Ignored;
+        };
+        self.workspace_nav = index;
+        KeyOutcome::Action(Self::select_workspace(Some(id)))
+    }
+
+    fn step_agent(&mut self, delta: isize) -> KeyOutcome {
+        let len = self.agent_rows().len();
+        if len == 0 {
+            return KeyOutcome::Ignored;
+        }
+        self.focus = Focus::Terminals;
+        let next = self.selected as isize + delta;
+        self.selected = next.clamp(0, len as isize - 1) as usize;
+        KeyOutcome::Handled
+    }
+
+    fn focus_agent_index(&mut self, index: usize) -> KeyOutcome {
+        let rows = self.agent_rows();
+        if index >= rows.len() {
+            return KeyOutcome::Ignored;
+        }
+        let id = rows[index].terminal_id.clone();
+        self.focus = Focus::Terminals;
+        self.selected = index;
+        KeyOutcome::Action(WorkbenchAction::EnterTerminal(id))
+    }
+
+    fn move_tab(&mut self, delta: isize) -> KeyOutcome {
+        let Some(scene) = self.scenes.scenes.get_mut(&self.scenes.selected) else {
+            return KeyOutcome::Ignored;
+        };
+        let Some(index) = scene.tabs.iter().position(|t| t.id == scene.active) else {
+            return KeyOutcome::Ignored;
+        };
+        let next = index as isize + delta;
+        if next < 0 || next >= scene.tabs.len() as isize {
+            return KeyOutcome::Ignored;
+        }
+        scene.tabs.swap(index, next as usize);
+        self.layout_dirty = true;
+        KeyOutcome::Handled
+    }
+
+    fn nudge_split(&mut self, delta: i16, horizontal: bool) -> KeyOutcome {
+        let area = self.last_pane_area.unwrap_or(PANE_REF_AREA);
+        let Some(hit) = self
+            .grid
+            .splits(area)
+            .into_iter()
+            .find(|hit| horizontal == matches!(hit.axis, SplitAxis::Horizontal))
+        else {
+            return KeyOutcome::Ignored;
+        };
+        let ratio = (hit.pos as i16).clamp(10, 90);
+        let _ = ratio;
+        let current = 50i16;
+        let next = (current + delta).clamp(10, 90) as u16;
+        if self.grid.set_ratio_at_path(&hit.path, next) {
+            self.layout_dirty = true;
+            self.queue_tree(crate::server::WorkbenchTreeOp::Resize {
+                scene_id: Some(self.scenes.selected.clone()),
+                tab_id: self.active_tab_id(),
+                path: hit.path,
+                ratio: next,
+            });
+            KeyOutcome::Handled
+        } else {
+            KeyOutcome::Ignored
+        }
+    }
+
+    fn edit_scrollback(&mut self) -> KeyOutcome {
+        let lines = self.focused_copy_lines();
+        let id = self
+            .terminal_mode
+            .clone()
+            .or_else(|| match &self.pane_focus {
+                PaneContent::Terminal(id) => Some(id.clone()),
+                PaneContent::Browser => None,
+            });
+        let Some(id) = id else {
+            self.set_status("edit scrollback needs a focused terminal");
+            return KeyOutcome::Handled;
+        };
+        let path = std::env::temp_dir().join(format!("viva-scrollback-{id}.txt"));
+        if std::fs::write(&path, lines.join("\n")).is_err() {
+            self.set_status("could not write scrollback");
+            return KeyOutcome::Handled;
+        }
+        self.scrollback_edit = Some(path.display().to_string());
+        self.set_status("scrollback written; the pane keeps running");
+        KeyOutcome::Handled
+    }
+
+    fn reload_config(&mut self) -> KeyOutcome {
+        let Some(path) = self.config_path.clone() else {
+            self.keymap = keys::KeyMap::builtin();
+            self.set_status("no config file; defaults restored");
+            return KeyOutcome::Handled;
+        };
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        self.keymap = keys::KeyMap::load_str(&text);
+        self.onboarding_pending = !self.keymap.onboarding_done();
+        if self.keymap.warnings().is_empty() {
+            self.set_status(format!("reloaded {}", path.display()));
+        } else {
+            self.set_status(self.keymap.warnings().join("; "));
+        }
+        KeyOutcome::Handled
+    }
+
+    fn open_notification(&mut self) -> KeyOutcome {
+        if let Some(marker) = self.model.attention.first() {
+            self.focus = Focus::Terminals;
+            self.set_status(format!("notification: {}: {}", marker.kind, marker.detail));
+            return KeyOutcome::Handled;
+        }
+        if let Some(index) = self
+            .agent_rows()
+            .iter()
+            .position(|row| row.needs_attention())
+        {
+            self.focus = Focus::Terminals;
+            self.selected = index;
+            self.set_status("notification target focused");
+            return KeyOutcome::Handled;
+        }
+        self.set_status("no notification target");
+        KeyOutcome::Handled
+    }
+
+    fn run_command(&mut self, id: &str) -> KeyOutcome {
+        let worktree = self.focused_worktree_id();
+        match id {
+            "viva.diff" => match worktree {
+                Some(id) => KeyOutcome::Action(WorkbenchAction::ShowDiff(id)),
+                None => {
+                    self.set_status("diff needs a worktree");
+                    KeyOutcome::Handled
+                }
+            },
+            "viva.files" => match worktree {
+                Some(id) => KeyOutcome::Action(WorkbenchAction::BrowseFiles(id)),
+                None => {
+                    self.set_status("files need a worktree");
+                    KeyOutcome::Handled
+                }
+            },
+            "viva.handoff" => match worktree {
+                Some(id) => {
+                    self.handoff_picker = Some(HandoffPicker {
+                        worktree_id: id,
+                        agents: Vec::new(),
+                        selected: 0,
+                    });
+                    KeyOutcome::Handled
+                }
+                None => {
+                    self.set_status("handoff needs a worktree");
+                    KeyOutcome::Handled
+                }
+            },
+            "viva.auto-pull" => KeyOutcome::Action(WorkbenchAction::ToggleAutoPull),
+            "viva.cleanup" => {
+                self.cleanup_armed = worktree;
+                self.set_status(if self.cleanup_armed.is_some() {
+                    "cleanup armed · Enter confirms · Esc cancels"
+                } else {
+                    "cleanup needs a worktree"
+                });
+                KeyOutcome::Handled
+            }
+            other => {
+                self.set_status(format!("command {other}"));
+                KeyOutcome::Handled
+            }
+        }
+    }
+
+    fn finish_onboarding(&mut self) {
+        self.settings_open = false;
+        self.onboarding_pending = false;
+        if let Some(path) = &self.config_path {
+            if let Err(err) = keys::write_onboarding_false(path) {
+                self.set_status(format!("could not write onboarding flag: {err}"));
+                return;
+            }
+            self.keymap = keys::KeyMap::load_str(
+                &std::fs::read_to_string(path).unwrap_or_else(|_| "onboarding = false\n".into()),
+            );
+        }
+        self.set_status("settings saved");
     }
 
     fn cycle_tab_relative(&mut self, delta: i32) -> KeyOutcome {
@@ -1422,8 +1936,8 @@ impl WorkbenchApp {
 
     fn handle_prefix_follow(&mut self, key: KeyEvent) -> KeyOutcome {
         self.clear_prefix();
-        if let Some(action) = keybindings::match_prefix_follow(key) {
-            self.apply_prefix_action(action)
+        if let Some(action) = self.keymap.resolve(true, self.navigate, key) {
+            self.apply_action(action)
         } else {
             self.set_status("unknown prefix key");
             KeyOutcome::Ignored
@@ -1432,46 +1946,38 @@ impl WorkbenchApp {
 
     fn on_navigation_surface_key(&mut self, key: KeyEvent) -> KeyOutcome {
         use ratatui::crossterm::event::KeyModifiers;
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
-        {
-            self.quit_requested = true;
-            return KeyOutcome::QuitRequested;
-        }
-        if keybindings::is_prefix(key) {
+        if self.keymap.is_prefix(key) {
             self.arm_prefix();
             return KeyOutcome::Handled;
         }
         if self.prefix_pending {
             return self.handle_prefix_follow(key);
         }
-        if self.show_key_help && matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
-            self.show_key_help = false;
-            return KeyOutcome::Handled;
-        }
-        if self.focus == Focus::Panes {
-            if matches!(key.code, KeyCode::Tab) {
-                self.cycle_pane();
+        if self.navigate {
+            if matches!(key.code, KeyCode::Esc)
+                || (key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(key.code, KeyCode::Char('[')))
+            {
+                self.navigate = false;
                 return KeyOutcome::Handled;
             }
-            if let Some(nav) = keybindings::match_direct_pane_nav(key) {
-                let direction = match nav {
-                    keybindings::DirectPaneNav::Left => Direction::Left,
-                    keybindings::DirectPaneNav::Down => Direction::Down,
-                    keybindings::DirectPaneNav::Up => Direction::Up,
-                    keybindings::DirectPaneNav::Right => Direction::Right,
-                };
-                return if self.move_pane_focus(direction) {
-                    KeyOutcome::Handled
-                } else {
-                    KeyOutcome::Ignored
-                };
+            if key.code == KeyCode::Char('/') && key.modifiers.is_empty() {
+                return self.prompt("open");
             }
-            if matches!(key.code, KeyCode::Enter) {
-                if let PaneContent::Terminal(id) = &self.pane_focus {
-                    self.enter_terminal_mode(id.clone());
-                    return KeyOutcome::Handled;
-                }
+            if let Some(action) = self.keymap.resolve(false, true, key) {
+                return self.apply_action(action);
+            }
+            return KeyOutcome::Ignored;
+        }
+        if self.show_key_help && matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
+            self.show_key_help = false;
+            self.help_filtering = false;
+            return KeyOutcome::Handled;
+        }
+        if self.focus == Focus::Panes && matches!(key.code, KeyCode::Enter) {
+            if let PaneContent::Terminal(id) = &self.pane_focus {
+                self.enter_terminal_mode(id.clone());
+                return KeyOutcome::Handled;
             }
         }
         if matches!(
@@ -1558,7 +2064,6 @@ impl WorkbenchApp {
 
     /// Handle one key event.
     pub fn on_key(&mut self, key: KeyEvent) -> KeyOutcome {
-        use ratatui::crossterm::event::KeyModifiers;
         if let Some(index) = &mut self.terminal_picker {
             match key.code {
                 KeyCode::Esc => self.terminal_picker = None,
@@ -1612,12 +2117,63 @@ impl WorkbenchApp {
         if self.workspace_prompt.is_some() {
             return self.on_workspace_prompt_key(key);
         }
-        // QA F8: stale cleanup arming must never survive an unrelated
-        // keypress — only the confirming second `D` keeps it.
-        if self.cleanup_armed.is_some()
-            && !(key.code == KeyCode::Char('D') && self.focus == Focus::Worktrees)
-        {
+        if let Some(text) = &mut self.pane_prompt {
+            match key.code {
+                KeyCode::Esc => self.pane_prompt = None,
+                KeyCode::Backspace => {
+                    text.pop();
+                }
+                KeyCode::Char(c) if text.len() < 252 => text.push(c),
+                KeyCode::Enter => {
+                    let name = text.trim().to_string();
+                    self.pane_prompt = None;
+                    if !name.is_empty() {
+                        let pane_id = Self::pane_key(&self.pane_focus);
+                        if let Some(scene) = self.scenes.scenes.get_mut(&self.scenes.selected) {
+                            if let Some(tab) = scene.tabs.iter_mut().find(|t| t.id == scene.active)
+                            {
+                                tab.pane_names.insert(pane_id.clone(), name.clone());
+                            }
+                        }
+                        self.layout_dirty = true;
+                        self.queue_tree(crate::server::WorkbenchTreeOp::RenamePane {
+                            scene_id: Some(self.scenes.selected.clone()),
+                            tab_id: self.active_tab_id(),
+                            pane_id,
+                            name,
+                        });
+                    }
+                }
+                _ => {}
+            }
+            return KeyOutcome::Handled;
+        }
+        if self.cleanup_armed.is_some() {
+            if key.code == KeyCode::Enter {
+                let id = self.cleanup_armed.take().unwrap();
+                return KeyOutcome::Action(WorkbenchAction::CleanupWorktree(id));
+            }
+            if key.code == KeyCode::Esc {
+                self.cleanup_armed = None;
+                self.set_status("cleanup cancelled");
+                return KeyOutcome::Handled;
+            }
             self.cleanup_armed = None;
+        }
+        if self.settings_open {
+            if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
+                self.finish_onboarding();
+            }
+            return KeyOutcome::Handled;
+        }
+        if self.context_menu.is_some() {
+            return self.on_menu_key(key);
+        }
+        if self.goto.is_some() {
+            return self.on_goto_key(key);
+        }
+        if self.show_key_help {
+            return self.on_help_key(key);
         }
         // Overlays own the keyboard first (V15-1 file panel).
         if self.file_panel.is_some() {
@@ -1765,53 +2321,308 @@ impl WorkbenchApp {
                 _ => KeyOutcome::Ignored,
             };
         }
-        if self.terminal_mode.is_some() {
-            if keybindings::is_prefix(key) {
+        if self.navigate || self.terminal_mode.is_some() || self.copy_mode || self.resize_mode {
+            if self.keymap.is_prefix(key) {
                 self.arm_prefix();
                 return KeyOutcome::Handled;
             }
             if self.prefix_pending {
                 return self.handle_prefix_follow(key);
             }
+            if self.navigate {
+                return self.on_navigation_surface_key(key);
+            }
             if self.copy_mode {
-                return match key.code {
-                    KeyCode::Esc => {
+                let lines = self.focused_copy_lines();
+                let page = self
+                    .last_pane_area
+                    .map(|area| area.height as usize)
+                    .unwrap_or(20);
+                return match self.copy_state.on_key(key, &lines, page) {
+                    copy_mode::CopyEffect::Exit => {
                         self.copy_mode = false;
-                        self.set_status("copy mode off");
                         KeyOutcome::Handled
                     }
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        let id = self.terminal_mode.clone().unwrap();
-                        self.scroll_terminal(id, -1);
+                    copy_mode::CopyEffect::Copied(text) => {
+                        self.copy_to_clipboard(&text);
+                        self.copy_mode = false;
                         KeyOutcome::Handled
                     }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        let id = self.terminal_mode.clone().unwrap();
-                        self.scroll_terminal(id, 1);
-                        KeyOutcome::Handled
-                    }
-                    _ => KeyOutcome::Ignored,
+                    copy_mode::CopyEffect::Stay => KeyOutcome::Handled,
                 };
             }
-            if key.modifiers.contains(KeyModifiers::SHIFT)
-                && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
-            {
-                let id = self.terminal_mode.clone().unwrap();
-                self.scroll_terminal(id, if key.code == KeyCode::PageUp { 20 } else { -20 });
-                return KeyOutcome::Handled;
-            }
-            if let Some(id) = self.terminal_mode.clone() {
-                self.scroll_offsets.insert(id, 0);
-            }
-            return match terminal_view::key(key, &self.input_modes()) {
-                Some(bytes) => KeyOutcome::Forward(bytes),
-                None => {
-                    self.set_status("key not forwarded in this terminal mode");
-                    KeyOutcome::Ignored
+            if self.resize_mode {
+                if key.code == KeyCode::Esc {
+                    self.resize_mode = false;
+                    return KeyOutcome::Handled;
                 }
-            };
+                if let Some(action) = self.keymap.resolve(false, false, key) {
+                    if matches!(
+                        action,
+                        keys::Action::ResizePaneLeft
+                            | keys::Action::ResizePaneRight
+                            | keys::Action::ResizePaneUp
+                            | keys::Action::ResizePaneDown
+                    ) {
+                        return self.apply_action(action);
+                    }
+                }
+                return KeyOutcome::Ignored;
+            }
+            if let Some(action) = self.keymap.resolve(false, false, key) {
+                return self.apply_action(action);
+            }
+            if self.terminal_mode.is_some() {
+                if let Some(id) = self.terminal_mode.clone() {
+                    self.scroll_offsets.insert(id, 0);
+                }
+                return match terminal_view::key(key, &self.input_modes()) {
+                    Some(bytes) => KeyOutcome::Forward(bytes),
+                    None => KeyOutcome::Ignored,
+                };
+            }
         }
         self.on_navigation_surface_key(key)
+    }
+
+    fn on_help_key(&mut self, key: KeyEvent) -> KeyOutcome {
+        use ratatui::crossterm::event::KeyModifiers;
+        if self.keymap.is_prefix(key) {
+            self.arm_prefix();
+            return KeyOutcome::Handled;
+        }
+        if self.prefix_pending {
+            return self.handle_prefix_follow(key);
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.show_key_help = false;
+                self.help_filtering = false;
+                self.help_filter.clear();
+            }
+            KeyCode::Char('/') if !self.help_filtering && key.modifiers.is_empty() => {
+                self.help_filtering = true;
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.help_filter.clear();
+            }
+            KeyCode::Backspace if self.help_filtering => {
+                self.help_filter.pop();
+            }
+            KeyCode::Char(c)
+                if self.help_filtering && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.help_filter.push(c);
+            }
+            _ => {}
+        }
+        KeyOutcome::Handled
+    }
+
+    fn on_menu_key(&mut self, key: KeyEvent) -> KeyOutcome {
+        let Some(menu) = self.context_menu.as_mut() else {
+            return KeyOutcome::Ignored;
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.context_menu = None,
+            KeyCode::Up | KeyCode::Char('k') => menu.selected = menu.selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => menu.selected = (menu.selected + 1).min(4),
+            KeyCode::Enter => {
+                let selected = menu.selected;
+                self.context_menu = None;
+                return self.activate_menu(menu_actions()[selected]);
+            }
+            _ => {}
+        }
+        KeyOutcome::Handled
+    }
+
+    fn on_goto_key(&mut self, key: KeyEvent) -> KeyOutcome {
+        use ratatui::crossterm::event::KeyModifiers;
+        if self.keymap.is_prefix(key) {
+            self.arm_prefix();
+            return KeyOutcome::Handled;
+        }
+        if self.prefix_pending {
+            return self.handle_prefix_follow(key);
+        }
+        let rows = self.goto_rows();
+        let Some(goto) = self.goto.as_mut() else {
+            return KeyOutcome::Ignored;
+        };
+        if goto.searching {
+            match key.code {
+                KeyCode::Esc => goto.searching = false,
+                KeyCode::Enter => goto.searching = false,
+                KeyCode::Backspace => {
+                    goto.query.pop();
+                }
+                KeyCode::Left | KeyCode::Right => {}
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    goto.query.push(c);
+                }
+                _ => {}
+            }
+            goto.cursor = 0;
+            return KeyOutcome::Handled;
+        }
+        match key.code {
+            KeyCode::Esc => self.goto = None,
+            KeyCode::Char('/') => {
+                if let Some(goto) = self.goto.as_mut() {
+                    goto.searching = true;
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(goto) = self.goto.as_mut() {
+                    goto.cursor = goto.cursor.saturating_sub(1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(goto) = self.goto.as_mut() {
+                    let max = rows.len().saturating_sub(1);
+                    goto.cursor = (goto.cursor + 1).min(max);
+                }
+            }
+            KeyCode::Left => self.goto_section(-1),
+            KeyCode::Right => self.goto_section(1),
+            KeyCode::Char('b') => self.set_goto_filter(Some("blocked".into())),
+            KeyCode::Char('w') => self.set_goto_filter(Some("working".into())),
+            KeyCode::Char('i') => self.set_goto_filter(Some("idle".into())),
+            KeyCode::Char('d') => self.set_goto_filter(Some("done".into())),
+            KeyCode::Char('a') => self.set_goto_filter(None),
+            KeyCode::Enter => {
+                let cursor = self.goto.as_ref().map(|g| g.cursor).unwrap_or(0);
+                self.goto = None;
+                if let Some(id) = rows.get(cursor).map(|row| row.id.clone()) {
+                    return KeyOutcome::Action(WorkbenchAction::EnterTerminal(id));
+                }
+            }
+            _ => {}
+        }
+        KeyOutcome::Handled
+    }
+
+    fn set_goto_filter(&mut self, kind: Option<String>) {
+        if let Some(goto) = self.goto.as_mut() {
+            goto.kind = kind;
+            goto.cursor = 0;
+        }
+    }
+
+    fn goto_section(&mut self, delta: isize) {
+        let rows = self.goto_rows();
+        let Some(goto) = self.goto.as_mut() else {
+            return;
+        };
+        let current = rows.get(goto.cursor).map(|row| row.group.clone());
+        let groups: Vec<&str> =
+            rows.iter()
+                .map(|row| row.group.as_str())
+                .fold(Vec::new(), |mut acc, group| {
+                    if acc.last().copied() != Some(group) {
+                        acc.push(group);
+                    }
+                    acc
+                });
+        let index = current
+            .as_deref()
+            .and_then(|group| groups.iter().position(|item| *item == group))
+            .unwrap_or(0);
+        let next = index as isize + delta;
+        if next < 0 || next >= groups.len() as isize {
+            return;
+        }
+        let target = groups[next as usize];
+        if let Some(pos) = rows.iter().position(|row| row.group == target) {
+            goto.cursor = pos;
+        }
+    }
+
+    fn goto_rows(&self) -> Vec<GotoRow> {
+        let filter = self.goto.as_ref();
+        let query = filter
+            .map(|goto| goto.query.to_lowercase())
+            .unwrap_or_default();
+        let kind = filter.and_then(|goto| goto.kind.clone());
+        let mut rows = Vec::new();
+        for terminal in &self.model.terminals {
+            let group = terminal.worktree_id.as_deref().unwrap_or("floating");
+            let agent = self
+                .model
+                .agents
+                .iter()
+                .find(|agent| agent.terminal_id == terminal.terminal_id);
+            let status = agent
+                .and_then(|agent| agent.records.first())
+                .map(|record| record.status.as_str().to_string())
+                .unwrap_or_else(|| "terminal".into());
+            if let Some(kind) = &kind {
+                if status != *kind {
+                    continue;
+                }
+            }
+            let label = agent
+                .map(|agent| format!("{} · {status}", agent.name))
+                .unwrap_or_else(|| format!("{} · terminal", terminal.terminal_id));
+            let hay = format!("{label} {group} {status}").to_lowercase();
+            if !query.is_empty() && !hay.contains(&query) {
+                continue;
+            }
+            rows.push(GotoRow {
+                id: terminal.terminal_id.clone(),
+                group: group.to_string(),
+                label,
+            });
+        }
+        rows
+    }
+
+    fn activate_menu(&mut self, action: MenuAction) -> KeyOutcome {
+        match action {
+            MenuAction::SplitRight => KeyOutcome::Action(WorkbenchAction::SplitRight),
+            MenuAction::SplitDown => KeyOutcome::Action(WorkbenchAction::SplitBelow),
+            MenuAction::Close => {
+                let pane_id = Self::pane_key(&self.pane_focus);
+                self.close_pane();
+                self.queue_tree(crate::server::WorkbenchTreeOp::ClosePane {
+                    scene_id: Some(self.scenes.selected.clone()),
+                    tab_id: self.active_tab_id(),
+                    pane_id,
+                });
+                KeyOutcome::Handled
+            }
+            MenuAction::Rename => {
+                self.pane_prompt = Some(String::new());
+                KeyOutcome::Handled
+            }
+            MenuAction::Zoom => {
+                self.toggle_zoom();
+                self.queue_tree(crate::server::WorkbenchTreeOp::Zoom {
+                    scene_id: Some(self.scenes.selected.clone()),
+                    tab_id: self.active_tab_id(),
+                    on: Some(self.zoomed),
+                });
+                KeyOutcome::Handled
+            }
+        }
+    }
+
+    fn copy_to_clipboard(&mut self, text: &str) {
+        self.last_copy = text.to_string();
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(mut child) = std::process::Command::new("pbcopy")
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+            {
+                if let Some(stdin) = child.stdin.as_mut() {
+                    use std::io::Write;
+                    let _ = stdin.write_all(text.as_bytes());
+                }
+                let _ = child.wait();
+            }
+        }
     }
 
     /// Handle one mouse event (herdr-parity interaction). Left button
@@ -1824,6 +2635,14 @@ impl WorkbenchApp {
             MouseEventKind::Down(MouseButton::Left) => self.on_left_down(mouse.column, mouse.row),
             MouseEventKind::Drag(MouseButton::Left) => self.on_left_drag(mouse.column, mouse.row),
             MouseEventKind::Up(MouseButton::Left) => {
+                if let Some(select) = self.drag_select.take() {
+                    if select.moved {
+                        let text = self.selection_text(&select);
+                        if !text.is_empty() {
+                            self.copy_to_clipboard(&text);
+                        }
+                    }
+                }
                 // A drag that moved the layout breaks any double-click
                 // sequence: the next grab starts a fresh drag.
                 if self.drag_moved {
@@ -1832,8 +2651,79 @@ impl WorkbenchApp {
                 self.drag_moved = false;
                 self.drag = DragState::None;
             }
+            MouseEventKind::Down(MouseButton::Right) => self.on_right_down(mouse.column, mouse.row),
             _ => {}
         }
+    }
+
+    fn on_right_down(&mut self, column: u16, row: u16) {
+        if let Some((action, _)) = self
+            .menu_hits
+            .iter()
+            .find(|(_, rect)| contains_point(*rect, column, row))
+            .map(|(action, _)| (*action, ()))
+        {
+            let outcome = self.activate_menu(action);
+            if let KeyOutcome::Action(action) = outcome {
+                self.mouse_action = Some(action);
+            }
+            return;
+        }
+        self.context_menu = Some(ContextMenu {
+            selected: 0,
+            column,
+            row,
+        });
+    }
+
+    fn selection_text(&self, select: &DragSelect) -> String {
+        let Some(snap) = self.snapshots.get(&select.id) else {
+            return String::new();
+        };
+        let lines: Vec<&str> = snap
+            .scrollback
+            .iter()
+            .chain(snap.visible.iter())
+            .map(String::as_str)
+            .collect();
+        if lines.is_empty() {
+            return String::new();
+        }
+        let row_of = |y: u16| -> usize {
+            let rel = y.saturating_sub(select.area.y) as usize;
+            let visible = snap.visible.len().max(1);
+            let start = lines.len().saturating_sub(visible);
+            (start + rel).min(lines.len().saturating_sub(1))
+        };
+        let mut r1 = row_of(select.start_row.min(select.end_row));
+        let mut r2 = row_of(select.start_row.max(select.end_row));
+        let c1 = select.start_col.saturating_sub(select.area.x) as usize;
+        let c2 = select.end_col.saturating_sub(select.area.x) as usize;
+        if r1 > r2 {
+            std::mem::swap(&mut r1, &mut r2);
+        }
+        let (c1, c2) = if select.start_row < select.end_row
+            || (select.start_row == select.end_row && select.start_col <= select.end_col)
+        {
+            (c1, c2)
+        } else {
+            (c2, c1)
+        };
+        if r1 == r2 {
+            let line = lines[r1];
+            return line
+                .chars()
+                .skip(c1.min(c2))
+                .take(c1.abs_diff(c2).max(1))
+                .collect();
+        }
+        let mut out = Vec::new();
+        out.push(lines[r1].chars().skip(c1).collect::<String>());
+        for line in lines.iter().take(r2).skip(r1 + 1) {
+            out.push((*line).to_string());
+        }
+        out.push(lines[r2].chars().take(c2.max(1)).collect());
+        out.join("\n")
     }
 
     fn on_left_down(&mut self, column: u16, row: u16) {
@@ -1958,17 +2848,47 @@ impl WorkbenchApp {
             .map(|(content, _)| content);
         if let Some(content) = hit_leaf {
             self.focus = Focus::Panes;
+            self.queue_focus(&content);
             if self.pane_focus != content {
-                self.pane_focus = content;
+                self.pane_focus = content.clone();
                 self.layout_dirty = true;
-                if self.terminal_mode.is_some() {
-                    self.leave_terminal_mode();
+            }
+            match &content {
+                PaneContent::Terminal(id) => self.enter_terminal_mode(id.clone()),
+                PaneContent::Browser => self.leave_terminal_mode(),
+            }
+            if let PaneContent::Terminal(id) = &content {
+                if let Some((_, rect)) = self
+                    .pane_geometry
+                    .iter()
+                    .find(|(pane, _)| pane == id)
+                    .cloned()
+                {
+                    self.drag_select = Some(DragSelect {
+                        id: id.clone(),
+                        area: rect,
+                        start_col: column,
+                        start_row: row,
+                        end_col: column,
+                        end_row: row,
+                        moved: false,
+                    });
                 }
             }
         }
     }
 
     fn on_left_drag(&mut self, column: u16, row: u16) {
+        if let Some(select) = self.drag_select.as_mut() {
+            if column != select.start_col || row != select.start_row {
+                select.moved = true;
+                select.end_col = column;
+                select.end_row = row;
+            }
+            if select.moved {
+                return;
+            }
+        }
         match self.drag.clone() {
             DragState::None => {}
             DragState::Sidebar => {
@@ -2003,6 +2923,12 @@ impl WorkbenchApp {
                     if self.grid.set_ratio_at_path(&path, ratio) {
                         self.layout_dirty = true;
                         self.drag_moved = true;
+                        self.queue_tree(crate::server::WorkbenchTreeOp::Resize {
+                            scene_id: Some(self.scenes.selected.clone()),
+                            tab_id: self.active_tab_id(),
+                            path: path.clone(),
+                            ratio,
+                        });
                     }
                 }
             }
@@ -2157,6 +3083,18 @@ impl WorkbenchApp {
         if self.show_key_help {
             self.draw_key_help(frame, main, &palette);
         }
+        if self.settings_open {
+            self.draw_settings(frame, main, &palette);
+        }
+        if self.goto.is_some() {
+            self.draw_goto(frame, main, &palette);
+        }
+        if self.context_menu.is_some() {
+            self.draw_context_menu(frame, &palette);
+        }
+        if self.pane_prompt.is_some() {
+            self.draw_pane_prompt(frame, &palette);
+        }
         self.draw_status_bar(frame, rows[2], &palette);
         if let Some(selected) = self.terminal_picker {
             let area = centered(frame.area(), 90, frame.area().height.saturating_sub(4));
@@ -2267,11 +3205,11 @@ impl WorkbenchApp {
                 ratatui::style::Style::new().fg(palette.subtext0),
             )),
             Line::from(Span::styled(
-                "Enter opens · ctrl+b prefix · click sidebar sections",
+                "ctrl+b prefix · a new pane is a terminal",
                 ratatui::style::Style::new().fg(palette.overlay0),
             )),
             Line::from(Span::styled(
-                "ctrl+b ? help · v/− split · z zoom · q detach",
+                "prefix+? lists bindings",
                 ratatui::style::Style::new().fg(palette.overlay0),
             )),
         ];
@@ -2418,41 +3356,28 @@ impl WorkbenchApp {
             self.workspace_hits.push((id.clone(), rect));
             x += w + 1;
         }
-        let hint = " ctrl+b w open · shift+n new workspace · click tabs to switch";
-        let room = area.right().saturating_sub(x);
-        if room > 12 {
-            let shown: String = hint.chars().take(room as usize).collect();
-            frame.render_widget(
-                Paragraph::new(Span::styled(
-                    shown,
-                    ratatui::style::Style::new().fg(palette.subtext0),
-                )),
-                Rect::new(x, area.y, room, 1),
-            );
-        }
     }
 
     fn draw_key_help(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
-        let lines: Vec<Line> = std::iter::once(Line::from(Span::styled(
-            " Workbench keys (herdr defaults) ",
+        let body = self.keymap.help_text(&self.help_filter);
+        let mut lines = vec![Line::from(Span::styled(
+            format!(" keys · prefix {} · / filter ", self.keymap.prefix_label()),
             ratatui::style::Style::new()
                 .fg(palette.text)
                 .bg(palette.panel_bg)
                 .bold(),
-        )))
-        .chain(keybindings::help_lines().iter().map(|line| {
-            Line::from(Span::styled(
-                *line,
+        ))];
+        if self.help_filtering {
+            lines.push(Line::from(format!(" /{}", self.help_filter)));
+        }
+        for row in body.lines().take(area.height.saturating_sub(4) as usize) {
+            lines.push(Line::from(Span::styled(
+                row.to_string(),
                 ratatui::style::Style::new().fg(palette.subtext0),
-            ))
-        }))
-        .chain([Line::from(Span::styled(
-            " Esc or ctrl+b ? closes this help ",
-            ratatui::style::Style::new().fg(palette.overlay0),
-        ))])
-        .collect();
-        let height = (lines.len() as u16).min(area.height.saturating_sub(2));
-        let popup = centered(area, area.width.saturating_sub(4).max(40), height + 2);
+            )));
+        }
+        let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(1));
+        let popup = centered(area, 90, height);
         frame.render_widget(Clear, popup);
         frame.render_widget(
             Paragraph::new(lines).block(
@@ -2464,97 +3389,191 @@ impl WorkbenchApp {
         );
     }
 
-    fn draw_status_bar(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
-        // The version badge reserves its columns at the right edge first
-        // (dim, unobtrusive provenance); the hints budget shrinks around
-        // it, so the two never overlap.
-        let version = format!(" v{}", env!("CARGO_PKG_VERSION"));
-        let version_width = version.chars().count() as u16;
-        let (bar_area, version_area) = if area.width > version_width {
-            (
-                Rect {
-                    width: area.width - version_width,
-                    ..area
-                },
-                Rect {
-                    x: area.x + area.width - version_width,
-                    width: version_width,
-                    ..area
-                },
-            )
-        } else {
-            (area, Rect::new(area.x, area.y, 0, area.height))
-        };
-        let mut spans: Vec<Span> = Vec::new();
-        if self.prefix_pending {
-            spans.push(Self::chip(" PREFIX ", palette.peach, palette));
+    fn draw_settings(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        let warnings = self.config_warnings();
+        let mut body = format!(
+            " settings\n prefix {}\n\n Enter or Esc continues and writes onboarding = false",
+            self.keymap.prefix_label()
+        );
+        if !warnings.is_empty() {
+            body.push_str("\n\n");
+            body.push_str(&warnings.join("\n"));
         }
-        if self.terminal_mode.is_some() {
-            spans.push(Self::chip(" TERMINAL ", palette.accent, palette));
-        }
-        if self.copy_mode {
-            spans.push(Self::chip(" COPY ", palette.yellow, palette));
-        }
-        if self.resize_mode {
-            spans.push(Self::chip(" RESIZE ", palette.yellow, palette));
-        }
-        if self.zoomed {
-            spans.push(Self::chip(" ZOOM ", palette.accent, palette));
-        }
-        if self.model.auto_pull {
-            spans.push(Self::chip(" AUTO-PULL ", palette.mauve, palette));
-        }
-        if self.cleanup_armed.is_some() {
-            spans.push(Self::chip(" CLEANUP ARMED ", palette.red, palette));
-        }
-        for marker in &self.model.attention {
-            spans.push(Span::styled(
-                format!("  ● needs attention: {}: {}", marker.kind, marker.detail),
-                ratatui::style::Style::new().fg(palette.red),
-            ));
-        }
-        if let Some(note) = &self.model.sync_note {
-            spans.push(Span::styled(
-                format!("  |  {note}"),
-                ratatui::style::Style::new().fg(palette.overlay0),
-            ));
-        }
-        // The hints are decoration: they get whatever columns remain, with
-        // an ellipsis when they do not fit.
-        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-        let budget = (bar_area.width as usize).saturating_sub(used);
-        if budget > 1 {
-            let body_budget = budget - 1; // one leading space
-            let truncated = self.status_line.chars().count() > body_budget;
-            let mut body = fit(&self.status_line, body_budget);
-            if truncated {
-                body = fit(&body, body_budget.saturating_sub(1));
-            }
-            spans.push(Span::styled(
-                format!(" {body}{}", if truncated { "…" } else { "" }),
-                ratatui::style::Style::new().fg(palette.overlay0),
-            ));
-        }
-        frame.render_widget(Paragraph::new(Line::from(spans)), bar_area);
-        if version_area.width > 0 {
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    version,
-                    ratatui::style::Style::new().fg(palette.overlay0),
-                ))),
-                version_area,
-            );
-        }
+        let popup = centered(area, 72, 14);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(body).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(ratatui::style::Style::new().fg(palette.accent)),
+            ),
+            popup,
+        );
     }
 
-    fn chip(label: &str, bg: ratatui::style::Color, palette: &Palette) -> Span<'static> {
-        Span::styled(
-            label.to_string(),
-            ratatui::style::Style::new()
-                .fg(palette.chip_fg())
-                .bg(bg)
-                .bold(),
-        )
+    fn draw_goto(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        let rows = self.goto_rows();
+        let cursor = self.goto.as_ref().map(|goto| goto.cursor).unwrap_or(0);
+        let query = self
+            .goto
+            .as_ref()
+            .map(|goto| goto.query.clone())
+            .unwrap_or_default();
+        let mut lines = vec![Line::from(format!(" goto  /{query}"))];
+        let mut last_group = String::new();
+        for (index, row) in rows
+            .iter()
+            .enumerate()
+            .take(area.height.saturating_sub(4) as usize)
+        {
+            if row.group != last_group {
+                last_group = row.group.clone();
+                lines.push(Line::from(Span::styled(
+                    format!(" {}", row.group),
+                    ratatui::style::Style::new().fg(palette.overlay0),
+                )));
+            }
+            let mark = if index == cursor { "▶" } else { " " };
+            lines.push(Line::from(format!(" {mark} {}", row.label)));
+        }
+        if rows.is_empty() {
+            lines.push(Line::from(" no terminals"));
+        }
+        let popup = centered(area, 80, 18);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(ratatui::style::Style::new().fg(palette.accent)),
+            ),
+            popup,
+        );
+    }
+
+    fn draw_context_menu(&mut self, frame: &mut Frame, palette: &Palette) {
+        let Some(menu) = &self.context_menu else {
+            return;
+        };
+        let labels = ["split right", "split down", "close", "rename", "zoom"];
+        let selected = menu.selected;
+        let column = menu.column;
+        let row = menu.row;
+        let width = 18u16;
+        let height = 7u16;
+        let screen = frame.area();
+        let x = column.min(screen.x.saturating_add(screen.width).saturating_sub(width));
+        let y = row.min(
+            screen
+                .y
+                .saturating_add(screen.height)
+                .saturating_sub(height),
+        );
+        let popup = Rect::new(x, y, width, height);
+        let mut lines = vec![Line::from(" pane")];
+        self.menu_hits.clear();
+        for (index, label) in labels.iter().enumerate() {
+            let style = if index == selected {
+                ratatui::style::Style::new()
+                    .fg(palette.chip_fg())
+                    .bg(palette.accent)
+            } else {
+                ratatui::style::Style::new().fg(palette.text)
+            };
+            lines.push(Line::from(Span::styled(format!(" {label}"), style)));
+            self.menu_hits.push((
+                menu_actions()[index],
+                Rect::new(x, y.saturating_add(1 + index as u16), width, 1),
+            ));
+        }
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(ratatui::style::Style::new().fg(palette.accent)),
+            ),
+            popup,
+        );
+    }
+
+    fn draw_pane_prompt(&self, frame: &mut Frame, palette: &Palette) {
+        let value = self.pane_prompt.clone().unwrap_or_default();
+        let popup = centered(frame.area(), 60, 3);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(format!(" rename pane: {value}")).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(ratatui::style::Style::new().fg(palette.accent)),
+            ),
+            popup,
+        );
+    }
+
+    fn draw_status_bar(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        let mode = if self.prefix_pending {
+            "PREFIX"
+        } else if self.navigate {
+            "NAVIGATE"
+        } else if self.copy_mode {
+            "COPY"
+        } else if self.resize_mode {
+            "RESIZE"
+        } else if self.settings_open {
+            "SETTINGS"
+        } else if self.goto.is_some() {
+            "GOTO"
+        } else if self.show_key_help {
+            "HELP"
+        } else if self.terminal_mode.is_some() {
+            "TERMINAL"
+        } else {
+            "WORKBENCH"
+        };
+        let mode = if self.zoomed {
+            format!("{mode} ZOOM")
+        } else {
+            mode.to_string()
+        };
+        let line = format!(" {}  {mode}", self.keymap.prefix_label());
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                line,
+                ratatui::style::Style::new().fg(palette.text),
+            )),
+            area,
+        );
+    }
+
+    fn workspace_rollup(&self, id: &str) -> &'static str {
+        if self.model.workspace_id.as_deref() != Some(id) {
+            return "unknown";
+        }
+        let mut best = 0u8;
+        let mut label = "unknown";
+        for agent in self.agent_rows() {
+            let status = agent
+                .records
+                .first()
+                .map(|record| record.status.as_str())
+                .unwrap_or("unknown");
+            let rank = match status {
+                "blocked" | "rate_limited" => 5,
+                "working" => 4,
+                "done" => 3,
+                "idle" => 2,
+                _ => 1,
+            };
+            if rank > best {
+                best = rank;
+                label = match status {
+                    "rate_limited" => "blocked",
+                    other => other,
+                };
+            }
+        }
+        label
     }
 
     /// The herdr-style sidebar: `spaces` (projects → worktrees as a tree),
@@ -2570,6 +3589,73 @@ impl WorkbenchApp {
         // index); headers and dividers carry None. The viewport window is
         // computed over the SELECTED entity's whole block.
         let mut lines: Vec<(Line<'static>, Option<(Focus, usize)>)> = Vec::new();
+        if !self.status_line.is_empty() {
+            lines.push((
+                Line::from(Span::styled(
+                    fit(&self.status_line, width.saturating_sub(1)),
+                    ratatui::style::Style::new().fg(palette.overlay0),
+                )),
+                None,
+            ));
+        }
+        for marker in &self.model.attention {
+            lines.push((
+                Line::from(Span::styled(
+                    "needs attention",
+                    ratatui::style::Style::new().fg(palette.red),
+                )),
+                None,
+            ));
+            lines.push((
+                Line::from(Span::styled(
+                    fit(&marker.kind, width.saturating_sub(1)),
+                    ratatui::style::Style::new().fg(palette.red),
+                )),
+                None,
+            ));
+            lines.push((
+                Line::from(Span::styled(
+                    fit(&marker.detail, width.saturating_sub(1)),
+                    ratatui::style::Style::new().fg(palette.red),
+                )),
+                None,
+            ));
+        }
+        lines.push((
+            Self::section_header(" workspaces", self.navigate, palette),
+            None,
+        ));
+        if self.model.workspaces.is_empty() {
+            lines.push((
+                Line::from(Span::styled(
+                    " no workspace",
+                    ratatui::style::Style::new().fg(palette.overlay0),
+                )),
+                None,
+            ));
+        }
+        for (index, workspace) in self.model.workspaces.iter().enumerate() {
+            let rollup = self.workspace_rollup(&workspace.workspace_id);
+            let selected = self.navigate && self.workspace_nav == index;
+            lines.push((
+                Self::row(
+                    vec![
+                        Span::styled(
+                            fit(&workspace.name, width.saturating_sub(12)),
+                            ratatui::style::Style::new().fg(palette.text),
+                        ),
+                        Span::styled(
+                            format!(" {rollup}"),
+                            ratatui::style::Style::new().fg(palette.subtext0),
+                        ),
+                    ],
+                    selected,
+                    width,
+                    palette,
+                ),
+                None,
+            ));
+        }
 
         // -- spaces --
         lines.push((
@@ -3607,6 +4693,7 @@ fn run_client_inner(client: &mut crate::server::Client) -> Result<()> {
         .map_err(|e| crate::foundation::Error::Io(std::io::Error::other(e.to_string())))?;
 
     let mut app = WorkbenchApp::new();
+    app.load_home_config();
     let polling = polling::Polling::start(client)?;
     let mut saved_layout = client
         .call(crate::server::RequestKind::WorkbenchLayout { layout_json: None })
@@ -3660,6 +4747,7 @@ fn run_client_inner(client: &mut crate::server::Client) -> Result<()> {
         if !event::poll(std::time::Duration::from_millis(32))
             .map_err(|e| crate::foundation::Error::Io(std::io::Error::other(e.to_string())))?
         {
+            flush_tree_ops(client, &mut app);
             sync_shared_layout(
                 client,
                 &mut app,
@@ -3726,6 +4814,9 @@ fn run_client_inner(client: &mut crate::server::Client) -> Result<()> {
             }
             _ => {}
         }
+        // Tree ops land before the layout snapshot so a later merge cannot
+        // replay a split the server already applied.
+        flush_tree_ops(client, &mut app);
         // Commit the viewed tab, then pick up other clients' tabs.
         sync_shared_layout(
             client,
@@ -3736,6 +4827,14 @@ fn run_client_inner(client: &mut crate::server::Client) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn flush_tree_ops(client: &mut crate::server::Client, app: &mut WorkbenchApp) {
+    for op in app.take_tree_ops() {
+        if let Err(err) = client.call(crate::server::RequestKind::WorkbenchTree { op }) {
+            app.set_status(format!("tree update failed: {err}"));
+        }
+    }
 }
 
 /// One status line for a workspace reply: what happened, plus how many
@@ -3856,46 +4955,6 @@ fn apply_client_action(
             app.attach_terminal(terminal_id.clone());
             app.enter_terminal_mode(terminal_id);
             Ok(())
-        }
-        WorkbenchAction::OpenPiHarness(worktree_id) => {
-            if app.selected_scene() != worktree_id {
-                app.select_worktree(worktree_id.clone());
-            }
-            let has_tab = app
-                .scenes
-                .scenes
-                .get(app.selected_scene())
-                .is_some_and(|s| !s.active.is_empty());
-            if !has_tab && !app.new_tab("Pi".into()) {
-                return Ok(());
-            }
-            let value = client.call(crate::server::RequestKind::HarnessOpenInWorktree {
-                worktree_id,
-                harness: "pi".into(),
-            });
-            match value {
-                Ok(v) => {
-                    let terminal_id = v
-                        .get("terminal_id")
-                        .and_then(|x| x.as_str())
-                        .ok_or_else(|| {
-                            crate::foundation::Error::Validation(
-                                "harness open returned no terminal id".into(),
-                            )
-                        })?
-                        .to_string();
-                    app.attach_terminal(terminal_id.clone());
-                    app.enter_terminal_mode(terminal_id);
-                    app.set_status(
-                        "Pi launched with member/task context (see harness matrix if unavailable)",
-                    );
-                    Ok(())
-                }
-                Err(err) => {
-                    app.set_status(format!("Pi launch refused: {err}"));
-                    Ok(())
-                }
-            }
         }
         WorkbenchAction::BrowseFiles(worktree_id) => {
             let value = client.call(crate::server::RequestKind::WorktreeFiles {
@@ -4300,6 +5359,33 @@ mod tests {
             "prefix+? works while forwarding mode is active"
         );
         assert_eq!(app.terminal_mode(), Some("term-1"));
+    }
+
+    #[test]
+    fn prefix_focus_moves_retarget_terminal_forwarding() {
+        use ratatui::crossterm::event::KeyModifiers;
+        let none = KeyModifiers::empty();
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.grid = PaneNode::split_new(
+            PaneContent::Terminal("term-1".into()),
+            SplitAxis::Horizontal,
+            PaneContent::Terminal("term-2".into()),
+        );
+        app.pane_focus = PaneContent::Terminal("term-1".into());
+        app.last_pane_area = Some(Rect::new(0, 0, 100, 40));
+        app.enter_terminal_mode("term-1");
+
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('l'), none),
+            KeyOutcome::Handled
+        );
+        assert_eq!(app.pane_focus(), &PaneContent::Terminal("term-2".into()));
+        assert_eq!(app.terminal_mode(), Some("term-2"));
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('a'))),
+            KeyOutcome::Forward(b"a".to_vec())
+        );
     }
 
     #[test]
@@ -4839,20 +5925,419 @@ mod tests {
         );
     }
 
-    /// The client version is shown dim at the status bar's right edge,
-    /// and the hints budget shrinks around it (the two never overlap).
+    /// The bottom bar is the current prefix and the mode. Old footer hints
+    /// are gone, and the version badge is not part of that bar.
     #[test]
-    fn version_is_shown_dim_at_the_status_bar_edge() {
+    fn status_bar_shows_only_the_prefix_and_the_mode() {
         let mut app = WorkbenchApp::new();
-        let expected = concat!("v", env!("CARGO_PKG_VERSION"));
         let frame = render(&mut app, 100, 24);
-        assert!(frame.contains(expected), "{frame}");
-        // Narrow terminal: the hints yield, the version badge stays.
-        let frame = render(&mut app, 40, 24);
-        assert!(frame.contains(expected), "{frame}");
+        assert!(frame.contains("ctrl+b"), "{frame}");
+        assert!(frame.contains("WORKBENCH"), "{frame}");
+        assert!(!frame.contains("Enter opens"), "{frame}");
         assert!(
-            frame.contains("…"),
-            "hints truncate before the badge: {frame}"
+            !frame.contains(concat!("v", env!("CARGO_PKG_VERSION"))),
+            "{frame}"
+        );
+        app.enter_terminal_mode("term-1");
+        let frame = render(&mut app, 100, 24);
+        assert!(frame.contains("TERMINAL"), "{frame}");
+        assert!(!frame.contains("WORKBENCH"), "{frame}");
+    }
+
+    fn prefix(app: &mut WorkbenchApp) {
+        let out = app.on_key(KeyEvent::new(
+            KeyCode::Char('b'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        ));
+        assert_eq!(
+            out,
+            KeyOutcome::Handled,
+            "ctrl+b is intercepted and is not written to the pane"
+        );
+        assert!(app.prefix_pending);
+    }
+
+    fn follow(
+        app: &mut WorkbenchApp,
+        code: KeyCode,
+        mods: ratatui::crossterm::event::KeyModifiers,
+    ) -> KeyOutcome {
+        prefix(app);
+        app.on_key(KeyEvent::new(code, mods))
+    }
+
+    fn shifted(c: char) -> (KeyCode, ratatui::crossterm::event::KeyModifiers) {
+        (
+            KeyCode::Char(c.to_ascii_uppercase()),
+            ratatui::crossterm::event::KeyModifiers::SHIFT,
+        )
+    }
+
+    fn terminal_app() -> WorkbenchApp {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.attach_terminal("term-1".into());
+        app.grid = PaneNode::split_new(
+            PaneContent::Browser,
+            SplitAxis::Horizontal,
+            PaneContent::Terminal("term-1".into()),
+        );
+        app.pane_focus = PaneContent::Terminal("term-1".into());
+        app.last_pane_area = Some(Rect::new(0, 0, 100, 40));
+        app.enter_terminal_mode("term-1");
+        app
+    }
+
+    #[test]
+    fn every_default_binding_triggers_and_ctrl_b_stays_out_of_the_pane() {
+        use ratatui::crossterm::event::KeyModifiers;
+        let none = KeyModifiers::empty();
+
+        let mut app = terminal_app();
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('?'), none),
+            KeyOutcome::Handled
+        );
+        assert!(app.help_open());
+
+        let mut app = terminal_app();
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('s'), none),
+            KeyOutcome::Handled
+        );
+        assert!(app.settings_open());
+
+        let mut app = terminal_app();
+        let (code, mods) = shifted('n');
+        assert_eq!(follow(&mut app, code, mods), KeyOutcome::Handled);
+        assert_eq!(app.workspace_prompt.as_ref().map(|p| p.action), Some("new"));
+
+        let mut app = terminal_app();
+        let (code, mods) = shifted('g');
+        assert_eq!(follow(&mut app, code, mods), KeyOutcome::Handled);
+        assert_eq!(
+            app.workspace_prompt.as_ref().map(|p| p.action),
+            Some("worktree")
+        );
+
+        let mut app = terminal_app();
+        let (code, mods) = shifted('w');
+        assert_eq!(follow(&mut app, code, mods), KeyOutcome::Handled);
+        assert_eq!(
+            app.workspace_prompt.as_ref().map(|p| p.action),
+            Some("rename")
+        );
+
+        let mut app = terminal_app();
+        let (code, mods) = shifted('d');
+        assert_eq!(
+            follow(&mut app, code, mods),
+            KeyOutcome::Action(WorkbenchAction::Workspace {
+                action: "close".into(),
+                value: None,
+                project_id: None,
+            })
+        );
+
+        let mut app = terminal_app();
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('w'), none),
+            KeyOutcome::Handled
+        );
+        assert!(app.navigate_mode());
+        app.model.workspaces = vec![
+            crate::workspaces::navigation::WorkspaceRow {
+                workspace_id: "ws-a".into(),
+                name: "a".into(),
+                source_path: None,
+                opened_at: String::new(),
+            },
+            crate::workspaces::navigation::WorkspaceRow {
+                workspace_id: "ws-b".into(),
+                name: "b".into(),
+                source_path: None,
+                opened_at: String::new(),
+            },
+        ];
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Down)),
+            KeyOutcome::Action(WorkbenchAction::Workspace {
+                action: "select".into(),
+                value: Some("ws-b".into()),
+                project_id: None,
+            })
+        );
+        assert_eq!(app.workspace_nav, 1);
+        assert_eq!(app.take_mouse_action(), None);
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Up)),
+            KeyOutcome::Action(WorkbenchAction::Workspace {
+                action: "select".into(),
+                value: Some("ws-a".into()),
+                project_id: None,
+            })
+        );
+        assert_eq!(app.workspace_nav, 0);
+        assert_eq!(app.take_mouse_action(), None);
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('h'))),
+            KeyOutcome::Handled
+        );
+        assert_eq!(app.pane_focus(), &PaneContent::Browser);
+        app.pane_focus = PaneContent::Terminal("term-1".into());
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Right)),
+            KeyOutcome::Ignored
+        );
+        app.pane_focus = PaneContent::Browser;
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('l'))),
+            KeyOutcome::Handled
+        );
+        assert_eq!(app.pane_focus(), &PaneContent::Terminal("term-1".into()));
+        app.grid = PaneNode::split_new(
+            PaneContent::Browser,
+            SplitAxis::Vertical,
+            PaneContent::Terminal("term-1".into()),
+        );
+        app.pane_focus = PaneContent::Browser;
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('j'))),
+            KeyOutcome::Handled
+        );
+        assert_eq!(app.pane_focus(), &PaneContent::Terminal("term-1".into()));
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('k'))),
+            KeyOutcome::Handled
+        );
+        assert_eq!(app.pane_focus(), &PaneContent::Browser);
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Left)),
+            KeyOutcome::Ignored
+        );
+
+        let mut app = terminal_app();
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('q'), none),
+            KeyOutcome::QuitRequested
+        );
+
+        let mut app = terminal_app();
+        let (code, mods) = shifted('r');
+        assert_eq!(follow(&mut app, code, mods), KeyOutcome::Handled);
+        assert!(app.status_line.contains("defaults"));
+
+        let mut app = terminal_app();
+        app.model.attention.push(AttentionMarker {
+            kind: "execution_failed".into(),
+            detail: "exec-1".into(),
+        });
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('o'), none),
+            KeyOutcome::Handled
+        );
+        assert_eq!(app.focus(), Focus::Terminals);
+
+        let mut app = terminal_app();
+        assert!(app.new_tab("one".into()));
+        assert!(app.new_tab("two".into()));
+        let first = app.scenes.scenes[&app.scenes.selected].active.clone();
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('n'), none),
+            KeyOutcome::Handled
+        );
+        assert_ne!(app.scenes.scenes[&app.scenes.selected].active, first);
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('p'), none),
+            KeyOutcome::Handled
+        );
+        assert_eq!(app.scenes.scenes[&app.scenes.selected].active, first);
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('1'), none),
+            KeyOutcome::Handled
+        );
+
+        let mut app = terminal_app();
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('c'), none),
+            KeyOutcome::Action(WorkbenchAction::NewTab)
+        );
+
+        let mut app = terminal_app();
+        let (code, mods) = shifted('t');
+        assert_eq!(follow(&mut app, code, mods), KeyOutcome::Handled);
+        assert!(app.tab_prompt.is_some());
+
+        let mut app = terminal_app();
+        assert!(app.new_tab("only".into()));
+        let (code, mods) = shifted('x');
+        assert_eq!(follow(&mut app, code, mods), KeyOutcome::Handled);
+        assert!(
+            app.take_tree_ops()
+                .iter()
+                .any(|op| matches!(op, crate::server::WorkbenchTreeOp::CloseTab { .. }))
+        );
+
+        let mut app = terminal_app();
+        let (code, mods) = shifted('p');
+        assert_eq!(follow(&mut app, code, mods), KeyOutcome::Handled);
+        assert!(app.pane_prompt.is_some());
+
+        let mut app = terminal_app();
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('e'), none),
+            KeyOutcome::Handled
+        );
+        assert!(app.scrollback_edit_path().is_some());
+
+        let mut app = terminal_app();
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('['), none),
+            KeyOutcome::Handled
+        );
+        assert!(app.copy_mode);
+
+        let mut app = terminal_app();
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('h'), none),
+            KeyOutcome::Handled
+        );
+        assert_eq!(app.pane_focus(), &PaneContent::Browser);
+        let mut app = terminal_app();
+        app.pane_focus = PaneContent::Browser;
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('l'), none),
+            KeyOutcome::Handled
+        );
+        assert_eq!(app.pane_focus(), &PaneContent::Terminal("term-1".into()));
+        let mut app = terminal_app();
+        app.grid = PaneNode::split_new(
+            PaneContent::Browser,
+            SplitAxis::Vertical,
+            PaneContent::Terminal("term-1".into()),
+        );
+        app.pane_focus = PaneContent::Browser;
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('j'), none),
+            KeyOutcome::Handled
+        );
+        assert_eq!(app.pane_focus(), &PaneContent::Terminal("term-1".into()));
+        app.pane_focus = PaneContent::Terminal("term-1".into());
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('k'), none),
+            KeyOutcome::Handled
+        );
+        assert_eq!(app.pane_focus(), &PaneContent::Browser);
+
+        let mut app = terminal_app();
+        let (code, mods) = shifted('h');
+        assert_eq!(follow(&mut app, code, mods), KeyOutcome::Handled);
+        let mut app = terminal_app();
+        app.pane_focus = PaneContent::Browser;
+        let (code, mods) = shifted('l');
+        assert_eq!(follow(&mut app, code, mods), KeyOutcome::Handled);
+        let mut app = terminal_app();
+        app.grid = PaneNode::split_new(
+            PaneContent::Browser,
+            SplitAxis::Vertical,
+            PaneContent::Terminal("term-1".into()),
+        );
+        app.pane_focus = PaneContent::Browser;
+        let (code, mods) = shifted('j');
+        assert_eq!(follow(&mut app, code, mods), KeyOutcome::Handled);
+        app.pane_focus = PaneContent::Terminal("term-1".into());
+        let (code, mods) = shifted('k');
+        assert_eq!(follow(&mut app, code, mods), KeyOutcome::Handled);
+
+        let mut app = terminal_app();
+        let before = app.pane_focus().clone();
+        assert_eq!(follow(&mut app, KeyCode::Tab, none), KeyOutcome::Handled);
+        assert_ne!(app.pane_focus(), &before);
+        assert_eq!(
+            follow(&mut app, KeyCode::BackTab, none),
+            KeyOutcome::Handled
+        );
+
+        let mut app = terminal_app();
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('v'), none),
+            KeyOutcome::Action(WorkbenchAction::SplitRight)
+        );
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('-'), none),
+            KeyOutcome::Action(WorkbenchAction::SplitBelow)
+        );
+
+        let mut app = terminal_app();
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('x'), none),
+            KeyOutcome::Handled
+        );
+        assert!(app.take_tree_ops().iter().any(|op| matches!(
+            op,
+            crate::server::WorkbenchTreeOp::ClosePane { pane_id, .. } if pane_id == "term-1"
+        )));
+
+        let mut app = terminal_app();
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('z'), none),
+            KeyOutcome::Handled
+        );
+        assert!(app.zoomed());
+
+        let mut app = terminal_app();
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('r'), none),
+            KeyOutcome::Handled
+        );
+        assert!(app.resize_mode);
+
+        let mut app = terminal_app();
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('b'), none),
+            KeyOutcome::Handled
+        );
+        assert!(app.sidebar_collapsed);
+
+        let mut app = terminal_app();
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('g'), none),
+            KeyOutcome::Handled
+        );
+        assert!(app.goto_open());
+
+        let help = WorkbenchApp::new().help_text();
+        assert!(!help.to_ascii_lowercase().contains("open pi"), "{help}");
+        assert!(!help.contains("打开 Pi"), "{help}");
+        for row in WorkbenchApp::new().command_catalog() {
+            assert!(!row.description.to_ascii_lowercase().contains("open pi"));
+            assert!(!row.id.to_ascii_lowercase().contains("open pi"));
+            assert!(!row.description.contains("打开 Pi"));
+            assert!(!row.id.contains("打开"));
+        }
+    }
+
+    #[test]
+    fn retired_keys_reach_the_pane_in_terminal_mode() {
+        use ratatui::crossterm::event::KeyModifiers;
+        let mut app = terminal_app();
+        for (label, key, bytes) in [
+            ("p", KeyEvent::from(KeyCode::Char('p')), b"p".to_vec()),
+            ("d", KeyEvent::from(KeyCode::Char('d')), b"d".to_vec()),
+            ("f", KeyEvent::from(KeyCode::Char('f')), b"f".to_vec()),
+            ("q", KeyEvent::from(KeyCode::Char('q')), b"q".to_vec()),
+            (
+                "ctrl+]",
+                KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL),
+                vec![0x1d],
+            ),
+        ] {
+            assert_eq!(app.on_key(key), KeyOutcome::Forward(bytes), "{label}");
+        }
+        let mut idle = WorkbenchApp::new();
+        assert_ne!(
+            idle.on_key(KeyEvent::from(KeyCode::Char('q'))),
+            KeyOutcome::QuitRequested
         );
     }
 }
@@ -4894,7 +6379,7 @@ mod v15_tui_fix_tests {
     }
 
     #[test]
-    fn prefix_goto_focuses_spaces_list() {
+    fn prefix_goto_opens_a_searchable_list() {
         let mut app = WorkbenchApp::new();
         app.set_model(sample());
         app.on_key(KeyEvent::from(KeyCode::Char('j')));
@@ -4905,8 +6390,7 @@ mod v15_tui_fix_tests {
         );
         app.on_key(prefix);
         app.on_key(KeyEvent::from(KeyCode::Char('g')));
-        assert_eq!(app.focus(), Focus::Worktrees);
-        assert_eq!(app.selected, 0);
+        assert!(app.goto_open());
     }
 
     #[test]
@@ -5327,5 +6811,52 @@ mod v15_tui_fix_tests {
             "dragging 5 rows up must shrink the top pane of the right column (row 15 -> 16/43 = 37%)"
         );
         assert!(app.layout_dirty());
+    }
+
+    fn mouse_right(x: u16, y: u16) -> ratatui::crossterm::event::MouseEvent {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        mouse(MouseEventKind::Down(MouseButton::Right), x, y)
+    }
+
+    #[test]
+    fn mouse_click_drag_and_right_click_split_queue_server_tree_ops() {
+        let mut app = app_with_two_panes();
+        app.on_mouse(mouse_down(75, 10));
+        assert!(app.take_tree_ops().iter().any(|op| matches!(
+            op,
+            crate::server::WorkbenchTreeOp::FocusPane { pane_id, .. } if pane_id == "t1"
+        )));
+
+        let mut app = app_with_two_panes();
+        app.on_mouse(mouse_down(49, 10));
+        app.on_mouse(mouse_drag(69, 10));
+        assert!(
+            app.take_tree_ops()
+                .iter()
+                .any(|op| matches!(op, crate::server::WorkbenchTreeOp::Resize { ratio: 70, .. }))
+        );
+
+        let mut app = app_with_two_panes();
+        app.on_mouse(mouse_right(40, 8));
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        let (action, rect) = app.menu_hits[0];
+        assert_eq!(action, MenuAction::SplitRight);
+        app.on_mouse(mouse_right(rect.x + 1, rect.y));
+        assert_eq!(app.take_mouse_action(), Some(WorkbenchAction::SplitRight));
+        let source = "t1";
+        assert!(app.split_pane(SplitAxis::Horizontal, "spawned".into()));
+        assert!(app.take_tree_ops().iter().any(|op| matches!(
+            op,
+            crate::server::WorkbenchTreeOp::Split {
+                direction,
+                pane_id,
+                terminal_id,
+                ..
+            } if direction == "right"
+                && pane_id.as_deref() == Some(source)
+                && terminal_id.as_deref() == Some("spawned")
+        )));
     }
 }
