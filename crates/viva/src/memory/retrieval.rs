@@ -149,6 +149,9 @@ pub struct CandidateFact {
     pub trust_score: f64,
     pub hrr_vector: Option<Vec<u8>>,
     pub fts_rank: f64,
+    pub summary: String,
+    pub knowledge_kind: String,
+    pub lifecycle_status: String,
 }
 
 pub fn shift_similarity(sim: f64) -> f64 {

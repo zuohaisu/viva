@@ -2187,9 +2187,15 @@ fn cmd_memory(args: &[String]) -> Result<()> {
     use std::str::FromStr as _;
 
     let mut named: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut bool_flags: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut i = 1; // args[0] is the subcommand
     while i < args.len() {
         let flag = args[i].as_str();
+        if flag == "--emphasis" {
+            bool_flags.insert(flag.to_string());
+            i += 1;
+            continue;
+        }
         i += 1;
         let value = args
             .get(i)
@@ -2202,6 +2208,7 @@ fn cmd_memory(args: &[String]) -> Result<()> {
     let require = |key: &str| -> Result<String> {
         get(key).ok_or_else(|| Error::Validation(format!("memory needs --{key}")))
     };
+    let emphasis = bool_flags.contains("--emphasis");
 
     let store = open_store()?;
     let service = viva::memory::MemoryService::new(&store);
@@ -2289,15 +2296,55 @@ fn cmd_memory(args: &[String]) -> Result<()> {
             let project = get("--project")
                 .map(|p| viva::foundation::ids::ProjectId::from_str(&p))
                 .transpose()?;
-            let link = service.remember(
+            let kind = match get("--kind").unwrap_or_else(|| "personal_memory".into()).as_str() {
+                "project_knowledge" => viva::memory::KnowledgeKind::ProjectKnowledge,
+                "team_knowledge" => viva::memory::KnowledgeKind::TeamKnowledge,
+                _ => viva::memory::KnowledgeKind::PersonalMemory,
+            };
+            let result = service.remember_with_options(
                 &member_id,
                 project.as_ref(),
                 &require("--content")?,
                 &require("--source")?,
                 &get("--category").unwrap_or_else(|| "general".into()),
                 &get("--tags").unwrap_or_default(),
+                kind,
+                emphasis,
+                get("--provenance").as_deref(),
+                get("--summary").as_deref(),
             )?;
-            println!("{}", serde_json::to_string_pretty(&link)?);
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+        Some("curate") => {
+            let member_id = viva::foundation::ids::MemberId::from_str(&require("--member")?)?;
+            let project = get("--project")
+                .map(|p| viva::foundation::ids::ProjectId::from_str(&p))
+                .transpose()?;
+            let path = require("--turns-file")?;
+            let raw = std::fs::read_to_string(&path)?;
+            let turns: Vec<viva::memory::SessionTurn> = serde_json::from_str(&raw)
+                .map_err(|e| Error::Validation(format!("turns-file JSON: {e}")))?;
+            let provenance = get("--provenance").unwrap_or_else(|| "{}".into());
+            let outcome = service.curate_session(
+                &member_id,
+                project.as_ref(),
+                &turns,
+                &provenance,
+                emphasis,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+            Ok(())
+        }
+        Some("record-use") => {
+            let member_id = viva::foundation::ids::MemberId::from_str(&require("--member")?)?;
+            service.record_execution_usage(
+                &require("--fact")?,
+                &member_id,
+                &require("--execution")?,
+                &get("--note").unwrap_or_default(),
+            )?;
+            println!("{}", serde_json::json!({ "ok": true }));
             Ok(())
         }
         Some(cmd @ ("archive" | "restore")) => {
@@ -2333,7 +2380,7 @@ fn cmd_memory(args: &[String]) -> Result<()> {
             Ok(())
         }
         _ => Err(Error::Validation(
-            "memory needs search | probe | link | remember | archive | restore | status".into(),
+            "memory needs search | probe | link | remember | curate | record-use | archive | restore | status".into(),
         )),
     }
 }
