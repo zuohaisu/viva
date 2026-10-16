@@ -89,6 +89,54 @@ impl TerminalRegistry {
         Ok((terminal_id, handle))
     }
 
+    /// Spawn under an existing pane id. A dead server uses this so the
+    /// saved scene tree, focus, and resume row still name the same pane.
+    /// The child is a new process; nothing about the previous pid is adopted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_with_id(
+        &self,
+        terminal_id: TerminalId,
+        spec: TerminalSpec,
+        owner: TerminalOwner,
+        worktree_id: Option<crate::foundation::ids::WorktreeId>,
+        purpose: impl Into<String>,
+        history: Vec<String>,
+        store: Option<&Store>,
+    ) -> Result<Arc<TerminalHandle>> {
+        if self
+            .sessions
+            .lock()
+            .expect("terminal registry")
+            .iter()
+            .any(|(entry, _)| entry.terminal_id == terminal_id)
+        {
+            return Err(Error::Validation(format!(
+                "terminal `{terminal_id}` is already running"
+            )));
+        }
+        let mut spec = spec;
+        spec.env.retain(|(key, _)| key != "VIVA_TERMINAL_ID");
+        spec.env
+            .push(("VIVA_TERMINAL_ID".into(), terminal_id.to_string()));
+        let handle = TerminalHandle::spawn_showing(&spec, &owner, None, history)?;
+        let entry = TerminalEntry {
+            terminal_id: terminal_id.clone(),
+            owner: owner.clone(),
+            worktree_id,
+            purpose: purpose.into(),
+        };
+        if let Some(store) = store {
+            handle.record_event(store, &terminal_id, &owner, TerminalEventKind::Spawned)?;
+        }
+        self.sessions
+            .lock()
+            .expect("terminal registry")
+            .push((entry, Arc::new(handle)));
+        self.handle(&terminal_id)?.ok_or_else(|| {
+            Error::Validation(format!("terminal `{terminal_id}` was not registered"))
+        })
+    }
+
     /// The live handle of a registered terminal.
     pub fn handle(&self, terminal_id: &TerminalId) -> Result<Option<Arc<TerminalHandle>>> {
         Ok(self
