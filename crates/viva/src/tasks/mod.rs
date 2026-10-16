@@ -36,7 +36,7 @@ pub fn register_migrations(registry: MigrationRegistry) -> MigrationRegistry {
             "tasks and executions v1",
             TASKS_EXECUTIONS_V1_SQL,
         )
-        .register(
+        .register_rebuild(
             DOMAIN_TASKS_EXECUTIONS,
             2,
             "tasks blocked status",
@@ -110,7 +110,6 @@ CREATE TABLE task_briefs (
 
 /// Allow `blocked` as a first-class task status (Resident C4 morning report).
 pub const TASKS_EXECUTIONS_V2_SQL: &str = r#"
-PRAGMA foreign_keys=OFF;
 CREATE TABLE tasks_new (
     task_id             TEXT PRIMARY KEY,
     goal                TEXT NOT NULL CHECK (length(trim(goal)) > 0),
@@ -126,7 +125,6 @@ CREATE TABLE tasks_new (
 INSERT INTO tasks_new SELECT * FROM tasks;
 DROP TABLE tasks;
 ALTER TABLE tasks_new RENAME TO tasks;
-PRAGMA foreign_keys=ON;
 "#;
 
 // ---------------------------------------------------------------------------
@@ -1018,7 +1016,7 @@ impl<'a> TaskRegistry<'a> {
         let text = text.into();
         let actor = actor.into();
         let dedup_key = dedup_key.into();
-        let _ = self.record_result(
+        match self.record_result(
             task_id,
             None,
             ResultSource::User,
@@ -1029,7 +1027,9 @@ impl<'a> TaskRegistry<'a> {
                 "source": "coordinator",
                 "remember_available": false,
             }),
-        );
+        )? {
+            Ok(_) | Err(_) => {}
+        }
         self.append_outcome(task_id, OutcomeKind::Corrected, text, actor)
     }
 

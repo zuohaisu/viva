@@ -1895,7 +1895,9 @@ fn cmd_control_create_project(args: &[String]) -> Result<()> {
 /// `viva morning correct --task <id> --text <text> [--actor <name>]`
 fn cmd_morning(args: &[String]) -> Result<()> {
     use time::OffsetDateTime;
-    use viva::coordinator::{MorningOptions, MorningRollup, default_previous_local_day};
+    use viva::coordinator::{
+        MorningOptions, MorningRollup, default_previous_local_day, local_tz_offset_seconds,
+    };
 
     let sub = args.first().map(String::as_str);
     if sub == Some("correct") {
@@ -1903,7 +1905,7 @@ fn cmd_morning(args: &[String]) -> Result<()> {
     }
     let mut since = None;
     let mut until = None;
-    let mut tz_offset_seconds: i32 = 0;
+    let mut tz_offset_seconds: Option<i32> = None;
     let mut gh_program = None;
     let mut i = 0;
     while i < args.len() {
@@ -1918,9 +1920,10 @@ fn cmd_morning(args: &[String]) -> Result<()> {
             }
             "--tz-offset-seconds" => {
                 i += 1;
-                tz_offset_seconds = args.get(i).and_then(|s| s.parse().ok()).ok_or_else(|| {
-                    Error::Validation("--tz-offset-seconds needs an integer".into())
-                })?;
+                tz_offset_seconds =
+                    Some(args.get(i).and_then(|s| s.parse().ok()).ok_or_else(|| {
+                        Error::Validation("--tz-offset-seconds needs an integer".into())
+                    })?);
             }
             "--gh" => {
                 i += 1;
@@ -1935,8 +1938,9 @@ fn cmd_morning(args: &[String]) -> Result<()> {
         }
         i += 1;
     }
-    let tz = time::UtcOffset::from_whole_seconds(tz_offset_seconds)
-        .map_err(|e| Error::Validation(format!("--tz-offset-seconds invalid: {e}")))?;
+    let tz_seconds = tz_offset_seconds.unwrap_or_else(local_tz_offset_seconds);
+    let tz = time::UtcOffset::from_whole_seconds(tz_seconds)
+        .map_err(|e| Error::Validation(format!("timezone offset invalid: {e}")))?;
     let (window_start, window_end) = match (since, until) {
         (Some(s), Some(u)) => (s, u),
         (None, None) => default_previous_local_day(OffsetDateTime::now_utc(), tz)?,
@@ -1947,7 +1951,7 @@ fn cmd_morning(args: &[String]) -> Result<()> {
             ));
         }
     };
-    let mut options = MorningOptions::parse_window(&window_start, &window_end, tz_offset_seconds)?;
+    let mut options = MorningOptions::parse_window(&window_start, &window_end, tz_seconds)?;
     if let Some(gh) = gh_program {
         options = options.with_gh_program(gh);
     }

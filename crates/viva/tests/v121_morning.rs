@@ -25,7 +25,7 @@ fn frozen() -> viva::foundation::store::FrozenMigrations {
             "tasks v1",
             viva::tasks::TASKS_EXECUTIONS_V1_SQL,
         )
-        .register(
+        .register_rebuild(
             DOMAIN_TASKS_EXECUTIONS,
             2,
             "tasks v2",
@@ -50,15 +50,15 @@ if [ "$1" = "auth" ] && [ "$2" = "status" ]; then exit 0; fi
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   case "$3" in
     feature-wait|42)
-      echo '{"number":42,"state":"OPEN","url":"https://example/pr/42","isDraft":false,"mergeable":"MERGEABLE","statusCheckRollup":{"state":"SUCCESS"},"author":{"login":"dev"},"comments":[],"reviews":[{"state":"CHANGES_REQUESTED","submittedAt":"2026-10-15T10:00:00Z"},{"state":"CHANGES_REQUESTED","submittedAt":"2026-10-15T11:00:00Z"},{"state":"CHANGES_REQUESTED","submittedAt":"2026-10-15T12:00:00Z"}]}'
+      echo '{"number":42,"state":"OPEN","url":"https://example/pr/42","isDraft":false,"mergeable":"MERGEABLE","statusCheckRollup":{"state":"SUCCESS"},"author":{"login":"dev"},"reviewComments":[],"reviews":[{"state":"CHANGES_REQUESTED","submittedAt":"2026-10-15T10:00:00Z"},{"state":"CHANGES_REQUESTED","submittedAt":"2026-10-15T11:00:00Z"},{"state":"CHANGES_REQUESTED","submittedAt":"2026-10-15T12:00:00Z"}],"commits":[{"committedDate":"2026-10-15T10:30:00Z"},{"committedDate":"2026-10-15T11:30:00Z"},{"committedDate":"2026-10-15T12:30:00Z"}]}'
       exit 0
       ;;
     feature-draft|7)
-      echo '{"number":7,"state":"OPEN","url":"https://example/pr/7","isDraft":true,"mergeable":"MERGEABLE","statusCheckRollup":{"state":"SUCCESS"},"author":{"login":"dev"},"comments":[],"reviews":[]}'
+      echo '{"number":7,"state":"OPEN","url":"https://example/pr/7","isDraft":true,"mergeable":"MERGEABLE","statusCheckRollup":{"state":"SUCCESS"},"author":{"login":"dev"},"reviewComments":[],"reviews":[],"commits":[]}'
       exit 0
       ;;
     feature-blocked|9)
-      echo '{"number":9,"state":"OPEN","url":"https://example/pr/9","isDraft":false,"mergeable":"CONFLICTING","statusCheckRollup":{"state":"FAILURE"},"author":{"login":"dev"},"comments":[],"reviews":[]}'
+      echo '{"number":9,"state":"OPEN","url":"https://example/pr/9","isDraft":false,"mergeable":"CONFLICTING","statusCheckRollup":{"state":"FAILURE"},"author":{"login":"dev"},"reviewComments":[],"reviews":[],"commits":[]}'
       exit 0
       ;;
   esac
@@ -226,4 +226,50 @@ fn correction_is_readable_from_task_and_child_grant_cannot_widen() {
             .is_err(),
         "child grant must not add actions outside the parent scope"
     );
+    let denials = engine.recent_denials(3).expect("denials");
+    assert!(
+        denials
+            .iter()
+            .any(|(_, action, _, _)| action == "delegate_grant"),
+        "widening delegation must leave a denial record"
+    );
+}
+
+#[test]
+fn tasks_executions_v2_migration_preserves_nonempty_v1_database() {
+    let dir = tempfile::TempDir::new().expect("dir");
+    let v1_only = MigrationRegistry::new()
+        .register(DOMAIN_FOUNDATION, 1, "foundation v1", FOUNDATION_V1_SQL)
+        .register(
+            DOMAIN_TASKS_EXECUTIONS,
+            1,
+            "tasks v1",
+            viva::tasks::TASKS_EXECUTIONS_V1_SQL,
+        )
+        .freeze()
+        .expect("v1");
+    let store = Store::open(&dir.path().join("viva.db"), &v1_only).expect("v1 open");
+    let task = TaskRegistry::new(&store)
+        .create_task("legacy task", vec![], None, None, None)
+        .expect("task");
+    store
+        .connection()
+        .execute(
+            "INSERT INTO task_outcomes(task_id, kind, evidence, actor, recorded_at)
+             VALUES (?1, 'corrected', 'note', 'qa', '2026-10-15T00:00:00Z')",
+            [task.task_id.as_str()],
+        )
+        .expect("outcome");
+    drop(store);
+
+    let full = frozen();
+    let store = Store::open(&dir.path().join("viva.db"), &full).expect("v2 open");
+    store
+        .connection()
+        .query_row(
+            "SELECT status FROM tasks WHERE task_id = ?1",
+            [task.task_id.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("task survived");
 }

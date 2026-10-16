@@ -42,6 +42,13 @@ impl MorningOptions {
     }
 }
 
+/// Best-effort local UTC offset for the host (seconds east of UTC).
+pub fn local_tz_offset_seconds() -> i32 {
+    UtcOffset::current_local_offset()
+        .map(|o| o.whole_seconds())
+        .unwrap_or(0)
+}
+
 /// Default window: the previous local natural day `[00:00, next 00:00)`.
 pub fn default_previous_local_day(now: OffsetDateTime, tz: UtcOffset) -> Result<(String, String)> {
     let local = now.to_offset(tz);
@@ -282,41 +289,41 @@ impl<'a> MorningRollup<'a> {
         wt: &TaskWorktreeRecord,
         pr_number: u64,
     ) -> Result<MultiRoundSignal> {
-        let reviews = fetch_pr_reviews(&self.gh, &wt.worktree_path, pr_number);
-        let comments = fetch_pr_review_comments(&self.gh, &wt.worktree_path, pr_number);
+        let timeline = fetch_pr_timeline(&self.gh, &wt.worktree_path, pr_number);
         let (start, end) = (
             self.options.window_start.as_str(),
             self.options.window_end.as_str(),
         );
-        match (reviews, comments) {
-            (EvidenceState::Unavailable { reason }, _)
-            | (_, EvidenceState::Unavailable { reason }) => {
-                Ok(MultiRoundSignal::Unknown { reason })
-            }
-            (
-                EvidenceState::Fetched {
-                    payload: reviews, ..
-                },
-                EvidenceState::Fetched {
-                    payload: comments, ..
-                },
-            ) => {
-                let change_requests = reviews
-                    .iter()
-                    .filter(|r| r.state.eq_ignore_ascii_case("CHANGES_REQUESTED"))
-                    .filter(|r| in_window(&r.submitted_at, start, end))
-                    .count();
-                let non_author_comments = comments
+        match timeline {
+            EvidenceState::Unavailable { reason } => Ok(MultiRoundSignal::Unknown { reason }),
+            EvidenceState::Fetched { payload, .. } => {
+                let non_author_review_comments = payload
+                    .review_comments
                     .iter()
                     .filter(|c| !c.author_is_pr_author)
                     .filter(|c| in_window(&c.created_at, start, end))
                     .count();
-                if change_requests >= 3 || non_author_comments >= 3 {
+                let push_cycles =
+                    count_request_push_cycles(&payload.reviews, &payload.commits, start, end);
+                let change_requests_in_window = payload
+                    .reviews
+                    .iter()
+                    .filter(|r| r.state.eq_ignore_ascii_case("CHANGES_REQUESTED"))
+                    .filter(|r| in_window(&r.submitted_at, start, end))
+                    .count();
+                if push_cycles >= 3 || non_author_review_comments >= 3 {
                     Ok(MultiRoundSignal::Yes {
                         detail: format!(
-                            "change_requests_in_window={change_requests}, \
-                             non_author_review_comments_in_window={non_author_comments}"
+                            "request_push_cycles_in_window={push_cycles}, \
+                             non_author_review_comments_in_window={non_author_review_comments}"
                         ),
+                    })
+                } else if change_requests_in_window > 0
+                    && payload.commits.is_empty()
+                    && non_author_review_comments < 3
+                {
+                    Ok(MultiRoundSignal::Unknown {
+                        reason: "could not observe push events to pair with change requests".into(),
                     })
                 } else {
                     Ok(MultiRoundSignal::No)
@@ -428,30 +435,14 @@ fn fetch_pr_detail(gh: &GhRunner, cwd: &Path, number: u64) -> EvidenceState<PrDe
     )
 }
 
-fn fetch_pr_reviews(gh: &GhRunner, cwd: &Path, number: u64) -> EvidenceState<Vec<ReviewRow>> {
-    gh.read(
-        cwd,
-        &["pr", "view", &number.to_string(), "--json", "reviews"],
-        |stdout| {
-            let value: serde_json::Value = serde_json::from_str(stdout)?;
-            let rows = value
-                .get("reviews")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            Ok(rows
-                .into_iter()
-                .filter_map(|v| serde_json::from_value(v).ok())
-                .collect())
-        },
-    )
+#[derive(Debug)]
+struct PrTimeline {
+    reviews: Vec<ReviewRow>,
+    commits: Vec<CommitRow>,
+    review_comments: Vec<CommentRowWithAuthorFlag>,
 }
 
-fn fetch_pr_review_comments(
-    gh: &GhRunner,
-    cwd: &Path,
-    number: u64,
-) -> EvidenceState<Vec<CommentRowWithAuthorFlag>> {
+fn fetch_pr_timeline(gh: &GhRunner, cwd: &Path, number: u64) -> EvidenceState<PrTimeline> {
     gh.read(
         cwd,
         &[
@@ -459,7 +450,7 @@ fn fetch_pr_review_comments(
             "view",
             &number.to_string(),
             "--json",
-            "author,comments",
+            "author,reviews,reviewComments,commits",
         ],
         |stdout| {
             let value: serde_json::Value = serde_json::from_str(stdout)?;
@@ -469,12 +460,27 @@ fn fetch_pr_review_comments(
                 .and_then(|l| l.as_str())
                 .unwrap_or_default()
                 .to_string();
-            let comments = value
-                .get("comments")
-                .and_then(|c| c.as_array())
+            let reviews = value
+                .get("reviews")
+                .and_then(|v| v.as_array())
                 .cloned()
-                .unwrap_or_default();
-            Ok(comments
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|v| serde_json::from_value(v).ok())
+                .collect();
+            let commits = value
+                .get("commits")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|v| serde_json::from_value(v).ok())
+                .collect();
+            let review_comments = value
+                .get("reviewComments")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
                 .into_iter()
                 .filter_map(|v| {
                     let row: CommentRow = serde_json::from_value(v).ok()?;
@@ -483,9 +489,64 @@ fn fetch_pr_review_comments(
                         author_is_pr_author: row.author.login == author,
                     })
                 })
-                .collect())
+                .collect();
+            Ok(PrTimeline {
+                reviews,
+                commits,
+                review_comments,
+            })
         },
     )
+}
+
+#[derive(Debug, Deserialize)]
+struct CommitRow {
+    #[serde(default, rename = "committedDate")]
+    committed_date: String,
+}
+
+/// Count paired change-request → push cycles in the window.
+fn count_request_push_cycles(
+    reviews: &[ReviewRow],
+    commits: &[CommitRow],
+    start: &str,
+    end: &str,
+) -> usize {
+    let mut requests: Vec<OffsetDateTime> = reviews
+        .iter()
+        .filter(|r| r.state.eq_ignore_ascii_case("CHANGES_REQUESTED"))
+        .filter_map(|r| OffsetDateTime::parse(&r.submitted_at, &Rfc3339).ok())
+        .filter(|t| in_window_ts(t, start, end))
+        .collect();
+    requests.sort();
+    let mut pushes: Vec<OffsetDateTime> = commits
+        .iter()
+        .filter_map(|c| OffsetDateTime::parse(&c.committed_date, &Rfc3339).ok())
+        .filter(|t| in_window_ts(t, start, end))
+        .collect();
+    pushes.sort();
+    let mut cycles = 0usize;
+    let mut push_idx = 0usize;
+    for req in requests {
+        while push_idx < pushes.len() && pushes[push_idx] <= req {
+            push_idx += 1;
+        }
+        if push_idx < pushes.len() {
+            cycles += 1;
+            push_idx += 1;
+        }
+    }
+    cycles
+}
+
+fn in_window_ts(at: &OffsetDateTime, start: &str, end: &str) -> bool {
+    let Ok(start) = OffsetDateTime::parse(start, &Rfc3339) else {
+        return false;
+    };
+    let Ok(end) = OffsetDateTime::parse(end, &Rfc3339) else {
+        return false;
+    };
+    *at >= start && *at < end
 }
 
 #[derive(Debug)]
