@@ -1085,6 +1085,22 @@ USAGE:
         Report native memory in the Viva store (fact counts and any
         legacy Hermes link rows kept for provenance only).
 
+    viva memory state show|experiences --execution <id>
+    viva memory state set --execution <id> --domain work|personal
+        [--project <id>] [--interlocutor <text>] [--activity <text>]
+    viva memory state resolve --execution <id>
+        [--repository <url>] [--task <id>] [--entry <name>]
+        [--utterance <text>] [--project <id>] [--interlocutor <text>]
+        [--activity <text>]
+        Engagement state for this execution only (#118). Explicit domain
+        or utterance wins, then a repository task entry, then the configured
+        judgment model. Pending results store no guessed domain.
+
+    viva memory recall --execution <id> --query <text>
+    viva memory opening --execution <id>
+        Recall and opening projection after the execution's engagement
+        filter. Work, pending, and unknown states omit personal domain.
+
     viva harness matrix
         Cross-harness capability matrix (launch / interactive / status /
         handoff / native resume / fork) with tested, unsupported or unknown
@@ -2275,6 +2291,13 @@ fn cmd_skill(args: &[String]) -> Result<()> {
 fn cmd_memory(args: &[String]) -> Result<()> {
     use std::str::FromStr as _;
 
+    match args.first().map(String::as_str) {
+        Some("state") => return cmd_memory_state(&args[1..]),
+        Some("recall") => return cmd_memory_recall(&args[1..]),
+        Some("opening") => return cmd_memory_opening(&args[1..]),
+        _ => {}
+    }
+
     let mut named: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut bool_flags: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut i = 1; // args[0] is the subcommand
@@ -2474,9 +2497,162 @@ fn cmd_memory(args: &[String]) -> Result<()> {
             Ok(())
         }
         _ => Err(Error::Validation(
-            "memory needs search | probe | link | remember | admit | curate | record-use | archive | restore | status".into(),
+            "memory needs search | probe | link | remember | admit | curate | record-use | archive | restore | status | state | recall | opening".into(),
         )),
     }
+}
+
+fn flag_map(args: &[String]) -> Result<std::collections::HashMap<String, String>> {
+    let mut named = std::collections::HashMap::new();
+    let mut i = 0;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        if !flag.starts_with("--") {
+            return Err(Error::Validation(format!("unexpected argument `{flag}`")));
+        }
+        i += 1;
+        let value = args
+            .get(i)
+            .cloned()
+            .ok_or_else(|| Error::Validation(format!("flag {flag} needs a value")))?;
+        let key = flag.trim_start_matches("--").to_string();
+        if named.insert(key.clone(), value).is_some() {
+            return Err(Error::Validation(format!("duplicate flag --{key}")));
+        }
+        i += 1;
+    }
+    Ok(named)
+}
+
+fn require_flag(
+    flags: &std::collections::HashMap<String, String>,
+    key: &str,
+    usage: &str,
+) -> Result<String> {
+    flags
+        .get(key)
+        .cloned()
+        .ok_or_else(|| Error::Validation(format!("{usage} needs --{key}")))
+}
+
+fn cmd_memory_state(args: &[String]) -> Result<()> {
+    use std::str::FromStr as _;
+
+    let action = args.first().map(String::as_str);
+    let flags = flag_map(args.get(1..).unwrap_or(&[]))?;
+    let usage = "viva memory state show|set|resolve|experiences --execution <id>";
+    let execution =
+        viva::foundation::ids::ExecutionId::from_str(&require_flag(&flags, "execution", usage)?)?;
+    let store = open_store()?;
+    let service = viva::engagement::EngagementService::from_settings(&store)?;
+    match action {
+        Some("show") => {
+            let view = service.get(&execution)?;
+            println!("{}", serde_json::to_string_pretty(&view)?);
+            Ok(())
+        }
+        Some("experiences") => {
+            let rows = service.experiences(&execution)?;
+            println!("{}", serde_json::to_string_pretty(&rows)?);
+            Ok(())
+        }
+        Some("set") => {
+            let domain = viva::engagement::EngagementDomain::parse(&require_flag(
+                &flags,
+                "domain",
+                "viva memory state set --execution <id> --domain work|personal",
+            )?)?;
+            let outcome = service.resolve(state_input(&flags, execution, Some(domain))?)?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+            Ok(())
+        }
+        Some("resolve") => {
+            let outcome = service.resolve(state_input(&flags, execution, None)?)?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+            Ok(())
+        }
+        _ => Err(Error::Validation(usage.into())),
+    }
+}
+
+fn state_input(
+    flags: &std::collections::HashMap<String, String>,
+    execution: viva::foundation::ids::ExecutionId,
+    explicit_domain: Option<viva::engagement::EngagementDomain>,
+) -> Result<viva::engagement::ResolveInput> {
+    use std::str::FromStr as _;
+
+    let task_id = flags
+        .get("task")
+        .map(|value| viva::foundation::ids::TaskId::from_str(value))
+        .transpose()?;
+    let project_id = flags
+        .get("project")
+        .map(|value| viva::foundation::ids::ProjectId::from_str(value))
+        .transpose()?;
+    Ok(viva::engagement::ResolveInput {
+        execution_id: execution,
+        repository: flags.get("repository").cloned(),
+        task_id,
+        entry: flags.get("entry").cloned(),
+        utterance: flags.get("utterance").cloned(),
+        explicit_domain,
+        project_id,
+        interlocutor: flags.get("interlocutor").cloned(),
+        activity: flags.get("activity").cloned(),
+    })
+}
+
+fn cmd_memory_recall(args: &[String]) -> Result<()> {
+    use std::str::FromStr as _;
+
+    let flags = flag_map(args)?;
+    let usage = "viva memory recall --execution <id> --query <text>";
+    let execution =
+        viva::foundation::ids::ExecutionId::from_str(&require_flag(&flags, "execution", usage)?)?;
+    let query = require_flag(&flags, "query", usage)?;
+    let store = open_store()?;
+    let recalled =
+        viva::engagement::EngagementService::from_settings(&store)?.recall(&execution, &query)?;
+    let facts = match recalled.search {
+        viva::memory::MemorySearch::Fetched {
+            facts,
+            hidden_unclaimable,
+        } => serde_json::json!({
+            "state": "fetched",
+            "facts": facts,
+            "hidden_unclaimable": hidden_unclaimable,
+        }),
+        viva::memory::MemorySearch::Unavailable { reason } => serde_json::json!({
+            "state": "unavailable",
+            "reason": reason,
+        }),
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "engagement": recalled.engagement,
+            "include_personal": recalled.include_personal,
+            "recall": facts,
+        }))?
+    );
+    Ok(())
+}
+
+fn cmd_memory_opening(args: &[String]) -> Result<()> {
+    use std::str::FromStr as _;
+
+    let flags = flag_map(args)?;
+    let execution = viva::foundation::ids::ExecutionId::from_str(&require_flag(
+        &flags,
+        "execution",
+        "viva memory opening --execution <id>",
+    )?)?;
+    let store = open_store()?;
+    let projection = viva::engagement::EngagementService::from_settings(&store)?
+        .opening_projection(&execution)?;
+    println!("{}", serde_json::to_string_pretty(&projection)?);
+    Ok(())
 }
 
 /// `viva workflow …` (F01) — the reachable entry for delivery workflows.
