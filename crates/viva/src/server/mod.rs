@@ -5855,7 +5855,7 @@ mod s4_agent_status_tests {
         host.shutdown();
     }
 
-    /// A later screen that looks finished does not replace a controlled
+    /// A screen that asks for approval does not replace a later controlled
     /// working report. Saving a session pointer does not write a task
     /// result or a memory fact, and the server status stays `done`.
     #[test]
@@ -5867,7 +5867,7 @@ mod s4_agent_status_tests {
         let fake = fake_dir.join("codex");
         std::fs::write(
             &fake,
-            "#!/bin/sh\necho 'codex finished this turn'\nsleep 30\n",
+            "#!/bin/sh\necho 'Would you like to run the following command?'\nsleep 30\n",
         )
         .expect("write");
         #[cfg(unix)]
@@ -5896,19 +5896,19 @@ mod s4_agent_status_tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let row = view_for(&mut client, &terminal_id);
-            let screen_done = row
+            let screen_blocked = row
                 .get("agent_status")
                 .and_then(|v| v.as_array())
                 .is_some_and(|rows| {
                     rows.iter().any(|record| {
                         record.get("source").and_then(|v| v.as_str()) == Some("screen_inference")
-                            && record.get("status").and_then(|v| v.as_str()) == Some("done")
+                            && record.get("status").and_then(|v| v.as_str()) == Some("blocked")
                     })
                 });
-            if screen_done {
+            if screen_blocked {
                 break;
             }
-            assert!(Instant::now() < deadline, "screen done never observed");
+            assert!(Instant::now() < deadline, "screen blocked never observed");
             std::thread::sleep(Duration::from_millis(100));
         }
 

@@ -40,8 +40,9 @@ pub fn screen_rules() -> &'static [ScreenRule] {
             identify: &["openai codex"],
             working: &["esc to interrupt"],
             blocked: &["would you like to run"],
-            done: &["codex finished this turn"],
-            idle: &["codex waiting for input"],
+            // Real codex-cli 0.160 prints no fixed done or idle line.
+            done: &[],
+            idle: &[],
         },
         ScreenRule {
             agent: "claude",
@@ -51,8 +52,9 @@ pub fn screen_rules() -> &'static [ScreenRule] {
             identify: &["claude code"],
             working: &["esc to interrupt"],
             blocked: &["do you want to proceed?"],
-            done: &["claude finished this turn"],
-            idle: &["claude waiting for input"],
+            // Real Claude Code 2.1 prints no fixed done or idle line.
+            done: &[],
+            idle: &[],
         },
         ScreenRule {
             agent: "codebuddy",
@@ -372,8 +374,13 @@ mod tests {
             ),
             (
                 Some("codex"),
-                &["OpenAI Codex", "Codex finished this turn"][..],
-                Some(("codex", AgentStatus::Done)),
+                &["OpenAI Codex", "• Working (2s • esc to interrupt)"][..],
+                Some(("codex", AgentStatus::Working)),
+            ),
+            (
+                Some("codex"),
+                &["Would you like to run the following command?"][..],
+                Some(("codex", AgentStatus::Blocked)),
             ),
             (
                 Some("cursor"),
@@ -451,6 +458,46 @@ mod tests {
                 }
                 None => assert!(hit.is_none(), "{lines:?} -> {hit:?}"),
             }
+        }
+    }
+
+    /// Lines captured from real Claude Code 2.1 and codex-cli 0.160 screens
+    /// after a finished turn. Neither has a fixed done or idle sentence, so
+    /// the reading stays unknown.
+    #[test]
+    fn real_finished_and_idle_screens_stay_unknown() {
+        for (agent, lines) in [
+            (
+                "claude",
+                &[
+                    "Claude Code v2.1.301",
+                    "✻ Churned for 13s · done 8:46 AM",
+                    "❯",
+                ][..],
+            ),
+            (
+                "claude",
+                &[
+                    "Claude Code v2.1.301",
+                    "❯ Try \"create a util logging.py that...\"",
+                ][..],
+            ),
+            (
+                "codex",
+                &[
+                    ">_ OpenAI Codex (v0.160.0)",
+                    "• ok",
+                    "Worked for 2s • 08:50",
+                ][..],
+            ),
+            (
+                "codex",
+                &[">_ OpenAI Codex (v0.160.0)", "› Ask Codex to do anything"][..],
+            ),
+        ] {
+            let hit = infer_screen(&snapshot(lines), Some(agent)).expect(agent);
+            assert_eq!(hit.status, AgentStatus::Unknown, "{agent}: {lines:?}");
+            assert!(infer_screen(&snapshot(lines), None).is_none(), "{lines:?}");
         }
     }
 
