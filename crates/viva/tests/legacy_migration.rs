@@ -4,7 +4,7 @@
 //! (see its header). Every test starts from a copy of it and opens it with
 //! the current code.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
@@ -85,6 +85,41 @@ fn dump_table(conn: &Connection, table: &str) -> Vec<String> {
     .expect("query dump")
     .map(|row| row.expect("row"))
     .collect()
+}
+
+fn parse_migration_domain_version(row: &str) -> (String, u32) {
+    let parts: Vec<&str> = row.split(" | ").collect();
+    assert!(parts.len() >= 2, "migration row: {row}");
+    let domain = parts[0]
+        .trim()
+        .strip_prefix("Text(\"")
+        .and_then(|s| s.strip_suffix("\")"))
+        .unwrap_or_else(|| panic!("domain cell in `{row}`"));
+    let version = parts[1]
+        .trim()
+        .strip_prefix("Integer(")
+        .and_then(|s| s.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("version cell in `{row}`"))
+        .parse()
+        .expect("version number");
+    (domain.to_string(), version)
+}
+
+fn normalize_migration_domain(domain: &str) -> &str {
+    if domain == "office_host" {
+        "host"
+    } else {
+        domain
+    }
+}
+
+fn migration_keys(rows: &[String]) -> BTreeSet<(String, u32)> {
+    rows.iter()
+        .map(|row| {
+            let (domain, version) = parse_migration_domain_version(row);
+            (normalize_migration_domain(&domain).to_string(), version)
+        })
+        .collect()
 }
 
 /// Everything logical in a database: the schema rows and every user table.
@@ -280,9 +315,17 @@ fn upgrade_renames_everything_and_keeps_every_row() {
                     after[table].len() >= rows.len(),
                     "schema_migrations must not shrink"
                 );
-                assert!(
-                    after[table].len() - rows.len() <= 2,
-                    "only expected pending domain migrations (memory v3, host v4) may append rows"
+                let before_keys = migration_keys(rows);
+                let after_keys = migration_keys(&after[table]);
+                let appended: BTreeSet<_> = after_keys.difference(&before_keys).cloned().collect();
+                let expected: BTreeSet<(String, u32)> = BTreeSet::from([
+                    ("host".into(), 4),
+                    ("memory".into(), 3),
+                    ("skills".into(), 1),
+                ]);
+                assert_eq!(
+                    appended, expected,
+                    "only expected pending domain migrations may append rows"
                 );
             } else {
                 assert_eq!(after[table].len(), rows.len(), "row count of {table}");

@@ -24,6 +24,7 @@ pub mod plugins;
 pub mod projects;
 pub mod redaction;
 pub mod server;
+pub mod skills;
 pub mod tasks;
 pub mod terminal;
 pub mod tools;
