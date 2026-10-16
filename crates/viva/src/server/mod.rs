@@ -31,13 +31,15 @@
 mod client;
 mod handoff;
 mod protocol;
+mod restore;
 
 pub use client::{Client, restart_server, restart_server_with};
 pub use handoff::{HandoffEntry, HandoffManifest};
 pub use protocol::{
-    MAX_MESSAGE_BYTES, PROTOCOL_VERSION, Request, RequestKind, Response, WorkbenchTreeOp,
-    new_request, read_message, round_trip, with_grant, write_message,
+    MACHINE_REFRESH_TIMEOUT, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, Request, RequestKind, Response,
+    WorkbenchTreeOp, new_request, read_message, round_trip, with_grant, write_message,
 };
+pub use restore::restore_workspace;
 
 use std::os::fd::RawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -109,9 +111,9 @@ CREATE TABLE recovery_plans (
 "#;
 
 /// The host v4 slice: a native session pointer per terminal and agent.
-/// This is the reference TFHS-72 can resume from. It is not a task
-/// result, a QA verdict, or a memory fact, and Viva never runs the
-/// stored command.
+/// After the server process itself exits, issue #154 may run `resume_command`
+/// to reopen that agent's own session. That run is not a task result, a
+/// QA verdict, or a memory fact, and it does not re-run a finished execution.
 pub const HOST_V4_SQL: &str = r#"
 CREATE TABLE agent_native_sessions (
     terminal_id    TEXT NOT NULL,
@@ -172,6 +174,7 @@ pub fn migrations() -> &'static crate::foundation::store::FrozenMigrations {
         let registry = crate::maintenance::register_migrations(registry);
         let registry = crate::tools::computer::register_migrations(registry);
         let registry = crate::memory::register_migrations(registry);
+        let registry = crate::skills::register_migrations(registry);
         let registry = registry.register(DOMAIN_HOST, 2, "host v2 (settings)", HOST_V2_SQL);
         let registry = registry.register(DOMAIN_HOST, 3, "host v3 (recovery plans)", HOST_V3_SQL);
         let registry = registry.register(
@@ -225,6 +228,9 @@ pub struct Shared {
     /// the 3-5 Hz workbench view from spawning concurrent cycles that
     /// stampede `git pull --ff-only` into ref-lock failures.
     pub sync_in_flight: AtomicBool,
+    /// Saved SSH machines and the last workspace/agent snapshot from each.
+    /// The default socket stays this home's `server.sock`.
+    pub machines: crate::machines::MachineCache,
     /// Exit-watchers for dispatched executions. The graceful shutdown
     /// joins them BEFORE writing its handoff record — otherwise the
     /// process exit would die with the process and the next host would
@@ -233,6 +239,11 @@ pub struct Shared {
     watchers: Mutex<Vec<std::thread::JoinHandle<()>>>,
     /// The scene / tab / pane tree. Clients render it; they do not own it.
     tree: Mutex<WorkbenchTree>,
+    /// Panes kept after a dead-server restore that could not start a process.
+    pane_errors: Mutex<std::collections::BTreeMap<String, String>>,
+    /// Last time pane screen history was written. History stays off until
+    /// `pane_screen_history` is set, so this is usually unused.
+    history_flushed_at: Mutex<Option<Instant>>,
 }
 
 /// A claimed, running server.
@@ -291,7 +302,7 @@ impl Host {
             "INSERT INTO hosts(host_id, pid, started_at) VALUES (?1, ?2, ?3)",
             rusqlite::params![host_id, std::process::id() as i64, utc_now()],
         )?;
-        let tree = load_workbench_tree(&store);
+        let tree = load_workbench_tree(&store, home, &host_id);
 
         let listener = UnixListener::bind(&socket_path)?;
         let shared = Arc::new(Shared {
@@ -313,8 +324,11 @@ impl Host {
             last_recovery_sweep: Mutex::new(None),
             gh_bin: Mutex::new(None),
             sync_in_flight: AtomicBool::new(false),
+            machines: crate::machines::MachineCache::default(),
             watchers: Mutex::new(Vec::new()),
             tree: Mutex::new(tree),
+            pane_errors: Mutex::new(std::collections::BTreeMap::new()),
+            history_flushed_at: Mutex::new(None),
         });
         Ok(Self { shared, listener })
     }
@@ -472,11 +486,14 @@ impl Host {
     pub fn serve(self) -> Result<()> {
         let shared = self.shared;
         let listener = self.listener;
+        let poller = Arc::clone(&shared);
+        std::thread::spawn(move || poll_machines(poller));
         listener.set_nonblocking(true)?;
         loop {
             if shared.stopping.load(Ordering::SeqCst) {
                 break;
             }
+            restore::maybe_flush_screen_history(&shared);
             sweep_recovery_plans(&shared);
             match listener.accept() {
                 Ok((stream, _)) => {
@@ -526,6 +543,7 @@ impl Host {
         let transferred = shared.transferred.load(Ordering::SeqCst);
         let mut terminal_count = 0usize;
         if !transferred {
+            let _ = restore::flush_screen_history(shared);
             let store = shared.store.lock().expect("store");
             let terminals = shared.terminals.list();
             terminal_count = terminals.len();
@@ -774,6 +792,9 @@ fn handle_request(shared: Arc<Shared>, request: &Request) -> Result<serde_json::
             terminal_id,
             scrollback,
         } => {
+            if let Some(snapshot) = restore::error_snapshot(&shared, terminal_id) {
+                return Ok(serde_json::to_value(snapshot)?);
+            }
             let id = TerminalId::from_str(terminal_id)?;
             let handle = shared
                 .terminals
@@ -929,6 +950,12 @@ fn handle_request(shared: Arc<Shared>, request: &Request) -> Result<serde_json::
             timeout_secs,
         } => agent_wait(&shared, terminal_id, status, *timeout_secs),
         RequestKind::EventsFeed { since_seq, limit } => events_feed(&shared, *since_seq, *limit),
+        RequestKind::MachineProjection => machine_projection(&shared),
+        RequestKind::MachineRefresh => {
+            let views = crate::machines::refresh(&shared.home, &shared.machines)?;
+            Ok(serde_json::to_value(views)?)
+        }
+        RequestKind::MachineForward { id, kind } => machine_forward(&shared, request, id, kind),
     }
 }
 
@@ -942,6 +969,9 @@ const SOCKET_CONTROL_ACTION: &str = "terminal_control";
 /// member-attributed. Read-only kinds and the OS-authenticated owner path
 /// (no member attribution) are not gated beyond grant validation below.
 fn is_member_gated_kind(kind: &RequestKind) -> bool {
+    if let RequestKind::MachineForward { kind, .. } = kind {
+        return is_member_gated_kind(kind);
+    }
     if let RequestKind::WorkbenchTree { op } = kind {
         return op.changes_state();
     }
@@ -1157,6 +1187,9 @@ fn terminal_create(
         None,
         Some(&store),
     )?;
+    if let Some(text) = cwd.to_str() {
+        restore::remember_pane_cwd(store.connection(), &terminal_id.to_string(), text)?;
+    }
     seed_agent_identification(shared, &terminal_id, argv);
     Ok(serde_json::json!({
         "terminal_id": terminal_id.to_string(),
@@ -1172,6 +1205,9 @@ fn terminal_resize(
     cols: u16,
     rows: u16,
 ) -> Result<serde_json::Value> {
+    if restore::error_snapshot(shared, terminal_id).is_some() {
+        return Ok(serde_json::json!({"resized": true, "cols": cols, "rows": rows}));
+    }
     let terminal_id = TerminalId::from_str(terminal_id)?;
     let handle = shared
         .terminals
@@ -1368,7 +1404,108 @@ fn workbench_view(shared: Arc<Shared>) -> Result<serde_json::Value> {
         }
     }
 
+    model.machines = crate::machines::with_local(
+        &model.workspaces,
+        model.workspace_id.clone(),
+        &model.agents,
+        &shared.machines.snapshot(),
+    );
+
     serde_json::to_value(&model).map_err(|e| Error::Validation(format!("view: {e}")))
+}
+
+fn poll_machines(shared: Arc<Shared>) {
+    while !shared.stopping.load(Ordering::SeqCst) {
+        let _ = crate::machines::refresh(&shared.home, &shared.machines);
+        for _ in 0..40 {
+            if shared.stopping.load(Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+/// Sidebar snapshot for a peer that reached this server over SSH.
+fn machine_projection(shared: &Shared) -> Result<serde_json::Value> {
+    let store = shared.store.lock().expect("store");
+    let mut model = crate::tui::workbench::assemble_view(&store, &shared.terminals)?;
+    drop(store);
+    for row in &mut model.terminals {
+        row.agent_status = shared.agent_board.project(&row.terminal_id);
+    }
+    let session_ctx = crate::agents::SessionContext {
+        worktrees: &model.worktrees,
+        projects: &model.projects,
+        workspace_id: model.workspace_id.as_deref(),
+    };
+    for row in &model.terminals {
+        if let Some(session) = crate::agents::build_session_row(row, &session_ctx) {
+            model.agents.push(session);
+        }
+    }
+    crate::agents::sort_sessions(&mut model.agents);
+    Ok(serde_json::json!({
+        "workspaces": model.workspaces,
+        "workspace_id": model.workspace_id,
+        "agents": model.agents,
+    }))
+}
+
+fn machine_forward(
+    shared: &Shared,
+    request: &Request,
+    id: &str,
+    kind: &RequestKind,
+) -> Result<serde_json::Value> {
+    if matches!(
+        kind,
+        RequestKind::MachineForward { .. } | RequestKind::MachineRefresh
+    ) {
+        return Err(Error::Validation(
+            "a machine forward cannot carry another machine forward".into(),
+        ));
+    }
+    let record = crate::machines::require(&shared.home, id)?;
+    if !record.enabled {
+        return Err(Error::Validation(format!(
+            "machine {} is disabled; input is refused",
+            record.label
+        )));
+    }
+    if let Some(view) = shared
+        .machines
+        .snapshot()
+        .into_iter()
+        .find(|view| view.id == id)
+    {
+        if !view.connected {
+            let why = if view.enabled {
+                "disconnected"
+            } else {
+                "disabled"
+            };
+            return Err(Error::Validation(format!(
+                "machine {} is {why}; input is refused",
+                view.label
+            )));
+        }
+    }
+    let mut forwarded = new_request(kind.clone());
+    forwarded.grant = request.grant.clone();
+    forwarded.member = request.member.clone();
+    match crate::machines::send_via_bridge(&record, forwarded) {
+        Ok(response) if response.ok => Ok(response.result.unwrap_or(serde_json::Value::Null)),
+        Ok(response) => {
+            Err(Error::Validation(response.error.unwrap_or_else(|| {
+                "remote viva rejected the request".into()
+            })))
+        }
+        Err(err) => {
+            shared.machines.mark_disconnected(id, err.to_string());
+            Err(err)
+        }
+    }
 }
 
 /// In-memory scene tree plus any stored JSON the server has not adopted.
@@ -1428,7 +1565,7 @@ fn scene_for_terminal(map: &std::collections::BTreeMap<String, String>, id: &str
 /// Load the persisted layout into the resident tree. A version-2 book is
 /// the tree. An older `{grid, focus}` payload is migrated once and written
 /// back. Anything else is kept verbatim so a later read still returns it.
-fn load_workbench_tree(store: &Store) -> WorkbenchTree {
+fn load_workbench_tree(store: &Store, home: &Path, host_id: &str) -> WorkbenchTree {
     let saved: Option<String> = store
         .connection()
         .query_row(
@@ -1445,6 +1582,7 @@ fn load_workbench_tree(store: &Store) -> WorkbenchTree {
         };
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&saved) else {
+        restore::note_corrupt_snapshot(store, home, host_id, "workbench_layout", saved.as_bytes());
         return WorkbenchTree {
             book: crate::tui::workbench::scenes::SceneBook::default(),
             unmanaged: Some(saved),
@@ -1453,6 +1591,20 @@ fn load_workbench_tree(store: &Store) -> WorkbenchTree {
     };
     let map = terminal_scene_map(store);
     match crate::tui::workbench::tree::import_stored(&value, |id| scene_for_terminal(&map, id)) {
+        Err(_) => {
+            restore::note_corrupt_snapshot(
+                store,
+                home,
+                host_id,
+                "workbench_layout",
+                saved.as_bytes(),
+            );
+            WorkbenchTree {
+                book: crate::tui::workbench::scenes::SceneBook::default(),
+                unmanaged: Some(saved),
+                stored: true,
+            }
+        }
         Ok(Some(book)) => {
             if value.get("version").is_none() {
                 if let Ok(json) = serde_json::to_string(&book) {
@@ -1555,6 +1707,11 @@ fn workbench_tree(shared: &Shared, op: &WorkbenchTreeOp) -> Result<serde_json::V
             let mut body = serde_json::json!({ "tree": tree.book });
             if let Some(raw) = &tree.unmanaged {
                 body["unmanaged_layout"] = serde_json::Value::String(raw.clone());
+            }
+            drop(tree);
+            let errors = shared.pane_errors.lock().expect("pane errors");
+            if !errors.is_empty() {
+                body["pane_errors"] = serde_json::json!(&*errors);
             }
             Ok(body)
         }
@@ -1691,9 +1848,10 @@ fn terminal_open_in_worktree(shared: &Shared, worktree_id: &str) -> Result<serde
         let store = shared.store.lock().expect("store");
         let project = crate::projects::ProjectRegistry::new(&store)
             .require(&crate::foundation::ids::ProjectId::from_str(pid)?)?;
+        let cwd = project.repo_path.clone();
         let spec = crate::terminal::TerminalSpec::new(
             vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())],
-            project.repo_path,
+            cwd.clone(),
         )?;
         let (id, handle) = shared.terminals.spawn(
             spec,
@@ -1703,6 +1861,9 @@ fn terminal_open_in_worktree(shared: &Shared, worktree_id: &str) -> Result<serde
             None,
             Some(&store),
         )?;
+        if let Some(text) = cwd.to_str() {
+            restore::remember_pane_cwd(store.connection(), &id.to_string(), text)?;
+        }
         return Ok(serde_json::json!({"terminal_id":id.to_string(),"pid":handle.pid()}));
     }
     let worktree_id = WorktreeId::from_str(worktree_id)?;
@@ -1730,6 +1891,9 @@ fn terminal_open_in_worktree(shared: &Shared, worktree_id: &str) -> Result<serde
         None,
         Some(&store),
     )?;
+    if let Some(text) = path.to_str() {
+        restore::remember_pane_cwd(store.connection(), &terminal_id.to_string(), text)?;
+    }
     Ok(serde_json::json!({
         "terminal_id": terminal_id.to_string(),
         "pid": handle.pid(),
@@ -1803,6 +1967,9 @@ fn harness_open_in_worktree(
         Some(&store),
     )?;
     seed_agent_identification(shared, &terminal_id, std::slice::from_ref(&spec.name));
+    if let Some(text) = spec.cwd.to_str() {
+        restore::remember_pane_cwd(store.connection(), &terminal_id.to_string(), text)?;
+    }
     Ok(serde_json::json!({
         "terminal_id": terminal_id.to_string(),
         "pid": handle.pid(),
@@ -2626,6 +2793,8 @@ pub fn resume_server(home: &Path) -> Result<()> {
         ));
     }
     let host = Host::open(home)?;
+    // Adopt the transferred processes. Do not start replacement shells —
+    // that path is only for a server whose process had already exited.
     {
         let shared = host.shared();
         let store = shared.store.lock().expect("store");
@@ -2939,6 +3108,9 @@ fn dispatch(
         }
     };
     seed_agent_identification(shared, &terminal_id, argv);
+    if let Some(text) = cwd.to_str() {
+        restore::remember_pane_cwd(store.connection(), &terminal_id.to_string(), text)?;
+    }
     let pid = handle.pid().unwrap_or(0) as i64;
     tasks.confirm_launch(request_key, pid, handle.pid_start_marker.clone())?;
 
@@ -3035,6 +3207,9 @@ fn terminal_list(shared: &Shared) -> Result<serde_json::Value> {
 }
 
 fn terminal_snapshot(shared: &Shared, terminal_id: &str) -> Result<serde_json::Value> {
+    if let Some(snapshot) = restore::error_snapshot(shared, terminal_id) {
+        return Ok(serde_json::to_value(snapshot)?);
+    }
     let terminal_id = TerminalId::from_str(terminal_id)?;
     let handle = shared
         .terminals
@@ -3159,6 +3334,9 @@ fn fnv1a(text: &str) -> u64 {
 /// Send one request to the active server over the real channel. When
 /// no host listens, this fails cleanly and never starts a daemon.
 pub fn send_request(home: &Path, request: Request) -> Result<Response> {
+    if let Some(record) = crate::machines::invocation_target() {
+        return crate::machines::send_via_bridge(&record, request);
+    }
     let socket_path = home.join(SOCKET_NAME);
     if !socket_path.exists() {
         return Err(Error::Validation(format!(
@@ -3961,6 +4139,9 @@ fn agent_handoff(
         None,
         Some(&store),
     )?;
+    if let Some(text) = record.worktree_path.to_str() {
+        restore::remember_pane_cwd(store.connection(), &terminal_id.to_string(), text)?;
+    }
     seed_agent_identification(shared, &terminal_id, std::slice::from_ref(&to_agent));
     // Bracketed paste (QA round 5 F7): multi-line briefs would otherwise
     // be submitted line-by-line by TUI agents (each newline = one submit).
