@@ -1399,6 +1399,23 @@ impl WorkbenchApp {
         self.status_line = "terminal released".into();
     }
 
+    /// While keyboard-forwarding is active, keep the PTY target aligned with
+    /// pane focus after prefix focus/cycle moves (swap intentionally does not
+    /// retarget — input stays on the terminal that had focus before the swap).
+    fn sync_terminal_mode_to_pane_focus(&mut self) {
+        if self.terminal_mode.is_none() {
+            return;
+        }
+        match &self.pane_focus {
+            PaneContent::Terminal(id) => {
+                if self.terminal_mode.as_deref() != Some(id.as_str()) {
+                    self.enter_terminal_mode(id.clone());
+                }
+            }
+            PaneContent::Browser => self.leave_terminal_mode(),
+        }
+    }
+
     fn clear_prefix(&mut self) {
         self.prefix_pending = false;
         if self.status_line.starts_with("prefix mode") {
@@ -1435,6 +1452,7 @@ impl WorkbenchApp {
     fn focus_dir(&mut self, direction: Direction) -> KeyOutcome {
         if self.move_pane_focus(direction) {
             self.queue_focus(&self.pane_focus.clone());
+            self.sync_terminal_mode_to_pane_focus();
             KeyOutcome::Handled
         } else {
             KeyOutcome::Ignored
@@ -1567,6 +1585,7 @@ impl WorkbenchApp {
             Action::CyclePaneNext => {
                 self.cycle_pane();
                 self.queue_focus(&self.pane_focus.clone());
+                self.sync_terminal_mode_to_pane_focus();
                 KeyOutcome::Handled
             }
             Action::CyclePanePrevious => {
@@ -1582,6 +1601,7 @@ impl WorkbenchApp {
                 self.focus = Focus::Panes;
                 self.layout_dirty = true;
                 self.queue_focus(&self.pane_focus.clone());
+                self.sync_terminal_mode_to_pane_focus();
                 KeyOutcome::Handled
             }
             Action::ClosePane => {
@@ -1636,14 +1656,8 @@ impl WorkbenchApp {
             }
             Action::ReloadConfig => self.reload_config(),
             Action::OpenNotificationTarget => self.open_notification(),
-            Action::NavigateWorkspaceUp | Action::PreviousWorkspace => {
-                self.step_workspace(-1);
-                KeyOutcome::Handled
-            }
-            Action::NavigateWorkspaceDown | Action::NextWorkspace => {
-                self.step_workspace(1);
-                KeyOutcome::Handled
-            }
+            Action::NavigateWorkspaceUp | Action::PreviousWorkspace => self.step_workspace(-1),
+            Action::NavigateWorkspaceDown | Action::NextWorkspace => self.step_workspace(1),
             Action::PreviousAgent => self.step_agent(-1),
             Action::NextAgent => self.step_agent(1),
             Action::FocusAgent(n) => self.focus_agent_index(n.saturating_sub(1) as usize),
@@ -1652,6 +1666,7 @@ impl WorkbenchApp {
             Action::LastPane => {
                 self.cycle_pane();
                 self.queue_focus(&self.pane_focus.clone());
+                self.sync_terminal_mode_to_pane_focus();
                 KeyOutcome::Handled
             }
             Action::SwapPaneLeft => self.swap_pane(Direction::Left),
@@ -1662,21 +1677,22 @@ impl WorkbenchApp {
         }
     }
 
-    fn step_workspace(&mut self, delta: isize) {
+    fn step_workspace(&mut self, delta: isize) -> KeyOutcome {
         let len = self.model.workspaces.len();
         if len == 0 {
-            return;
+            return KeyOutcome::Ignored;
         }
         let next = self.workspace_nav as isize + delta;
         self.workspace_nav = next.clamp(0, len as isize - 1) as usize;
-        if let Some(id) = self
+        let Some(id) = self
             .model
             .workspaces
             .get(self.workspace_nav)
             .map(|w| w.workspace_id.clone())
-        {
-            self.mouse_action = Some(Self::select_workspace(Some(id)));
-        }
+        else {
+            return KeyOutcome::Ignored;
+        };
+        KeyOutcome::Action(Self::select_workspace(Some(id)))
     }
 
     fn switch_workspace_index(&mut self, index: usize) -> KeyOutcome {
@@ -2423,6 +2439,13 @@ impl WorkbenchApp {
 
     fn on_goto_key(&mut self, key: KeyEvent) -> KeyOutcome {
         use ratatui::crossterm::event::KeyModifiers;
+        if self.keymap.is_prefix(key) {
+            self.arm_prefix();
+            return KeyOutcome::Handled;
+        }
+        if self.prefix_pending {
+            return self.handle_prefix_follow(key);
+        }
         let rows = self.goto_rows();
         let Some(goto) = self.goto.as_mut() else {
             return KeyOutcome::Ignored;
@@ -5339,6 +5362,33 @@ mod tests {
     }
 
     #[test]
+    fn prefix_focus_moves_retarget_terminal_forwarding() {
+        use ratatui::crossterm::event::KeyModifiers;
+        let none = KeyModifiers::empty();
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.grid = PaneNode::split_new(
+            PaneContent::Terminal("term-1".into()),
+            SplitAxis::Horizontal,
+            PaneContent::Terminal("term-2".into()),
+        );
+        app.pane_focus = PaneContent::Terminal("term-1".into());
+        app.last_pane_area = Some(Rect::new(0, 0, 100, 40));
+        app.enter_terminal_mode("term-1");
+
+        assert_eq!(
+            follow(&mut app, KeyCode::Char('l'), none),
+            KeyOutcome::Handled
+        );
+        assert_eq!(app.pane_focus(), &PaneContent::Terminal("term-2".into()));
+        assert_eq!(app.terminal_mode(), Some("term-2"));
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('a'))),
+            KeyOutcome::Forward(b"a".to_vec())
+        );
+    }
+
+    #[test]
     fn control_combos_map_to_real_control_bytes_without_panicking() {
         // D7 regression: every Ctrl combo must produce a defined byte —
         // no overflow panic (Ctrl+Space), no garbage (Ctrl+9).
@@ -6011,11 +6061,24 @@ mod tests {
         ];
         assert_eq!(
             app.on_key(KeyEvent::from(KeyCode::Down)),
-            KeyOutcome::Handled
+            KeyOutcome::Action(WorkbenchAction::Workspace {
+                action: "select".into(),
+                value: Some("ws-b".into()),
+                project_id: None,
+            })
         );
         assert_eq!(app.workspace_nav, 1);
-        assert_eq!(app.on_key(KeyEvent::from(KeyCode::Up)), KeyOutcome::Handled);
+        assert_eq!(app.take_mouse_action(), None);
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Up)),
+            KeyOutcome::Action(WorkbenchAction::Workspace {
+                action: "select".into(),
+                value: Some("ws-a".into()),
+                project_id: None,
+            })
+        );
         assert_eq!(app.workspace_nav, 0);
+        assert_eq!(app.take_mouse_action(), None);
         assert_eq!(
             app.on_key(KeyEvent::from(KeyCode::Char('h'))),
             KeyOutcome::Handled
