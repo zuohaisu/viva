@@ -82,6 +82,7 @@ fn run(args: &[String]) -> Result<()> {
         Some("data") => cmd_data(args.get(1..).unwrap_or(&[])),
         Some("tools") => cmd_tools(args.get(1..).unwrap_or(&[])),
         Some("memory") => cmd_memory(args.get(1..).unwrap_or(&[])),
+        Some("morning") => cmd_morning(args.get(1..).unwrap_or(&[])),
         Some("experience") => cmd_experience(args.get(1..).unwrap_or(&[])),
         Some("skill") => cmd_skill(args.get(1..).unwrap_or(&[])),
         Some("harness") => cmd_harness(args.get(1..).unwrap_or(&[])),
@@ -1958,6 +1959,117 @@ fn cmd_control_create_project(args: &[String]) -> Result<()> {
 /// `viva create-task --goal <text>` — open one task. This is
 /// an owner-side CLI: whoever runs the binary creates the task in their
 /// own VIVA_HOME.
+/// `viva morning` — read-only progress rollup for the coordinator (C4).
+/// `viva morning correct --task <id> --text <text> [--actor <name>]`
+fn cmd_morning(args: &[String]) -> Result<()> {
+    use time::OffsetDateTime;
+    use viva::coordinator::{
+        MorningOptions, MorningRollup, default_previous_local_day, local_tz_offset_seconds,
+    };
+
+    let sub = args.first().map(String::as_str);
+    if sub == Some("correct") {
+        return cmd_morning_correct(args.get(1..).unwrap_or(&[]));
+    }
+    let mut since = None;
+    let mut until = None;
+    let mut tz_offset_seconds: Option<i32> = None;
+    let mut gh_program = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--since" => {
+                i += 1;
+                since = args.get(i).cloned();
+            }
+            "--until" => {
+                i += 1;
+                until = args.get(i).cloned();
+            }
+            "--tz-offset-seconds" => {
+                i += 1;
+                tz_offset_seconds =
+                    Some(args.get(i).and_then(|s| s.parse().ok()).ok_or_else(|| {
+                        Error::Validation("--tz-offset-seconds needs an integer".into())
+                    })?);
+            }
+            "--gh" => {
+                i += 1;
+                gh_program = args.get(i).cloned();
+            }
+            other => {
+                return Err(Error::Validation(format!(
+                    "unknown morning flag `{other}` (try: viva morning [--since RFC3339] \
+                     [--until RFC3339] [--tz-offset-seconds N] | viva morning correct ...)"
+                )));
+            }
+        }
+        i += 1;
+    }
+    let tz_seconds = tz_offset_seconds.unwrap_or_else(local_tz_offset_seconds);
+    let tz = time::UtcOffset::from_whole_seconds(tz_seconds)
+        .map_err(|e| Error::Validation(format!("timezone offset invalid: {e}")))?;
+    let (window_start, window_end) = match (since, until) {
+        (Some(s), Some(u)) => (s, u),
+        (None, None) => default_previous_local_day(OffsetDateTime::now_utc(), tz)?,
+        _ => {
+            return Err(Error::Validation(
+                "pass both --since and --until, or neither for the default previous local day"
+                    .into(),
+            ));
+        }
+    };
+    let mut options = MorningOptions::parse_window(&window_start, &window_end, tz_seconds)?;
+    if let Some(gh) = gh_program {
+        options = options.with_gh_program(gh);
+    }
+    let store = open_store()?;
+    let report = MorningRollup::new(&store, options).build()?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+fn cmd_morning_correct(args: &[String]) -> Result<()> {
+    use std::str::FromStr as _;
+    let mut task = None;
+    let mut text = None;
+    let mut actor = "coordinator".to_string();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--task" => {
+                i += 1;
+                task = args.get(i).cloned();
+            }
+            "--text" => {
+                i += 1;
+                text = args.get(i).cloned();
+            }
+            "--actor" => {
+                i += 1;
+                actor = args.get(i).cloned().unwrap_or(actor);
+            }
+            other => {
+                return Err(Error::Validation(format!(
+                    "unknown morning correct flag `{other}`"
+                )));
+            }
+        }
+        i += 1;
+    }
+    let task = task.ok_or_else(|| {
+        Error::Validation("usage: viva morning correct --task <id> --text <text>".into())
+    })?;
+    let text = text.ok_or_else(|| Error::Validation("--text is required".into()))?;
+    let task_id = viva::foundation::ids::TaskId::from_str(&task)?;
+    let store = open_store()?;
+    let registry = viva::tasks::TaskRegistry::new(&store);
+    let dedup = format!("coordinator-correct-{}", uuid::Uuid::new_v4().simple());
+    let outcome = registry.record_coordinator_note(&task_id, text, actor, dedup)?;
+    println!("{}", serde_json::to_string_pretty(&outcome)?);
+    Ok(())
+}
+
 fn cmd_control_create_task(args: &[String]) -> Result<()> {
     let mut goal = None;
     let mut i = 0;
@@ -1995,6 +2107,7 @@ fn cmd_control_grant(args: &[String]) -> Result<()> {
     let mut action = None;
     let mut mode = None;
     let mut expires = None;
+    let mut parent = None;
     let mut i = 0;
     while i < args.len() {
         let flag = args[i].as_str();
@@ -2009,6 +2122,7 @@ fn cmd_control_grant(args: &[String]) -> Result<()> {
             "--action" => action = Some(value),
             "--mode" => mode = Some(value),
             "--expires" => expires = Some(value),
+            "--parent" => parent = Some(value),
             other => {
                 return Err(Error::Validation(format!("unknown grant flag `{other}`")));
             }
@@ -2035,7 +2149,15 @@ fn cmd_control_grant(args: &[String]) -> Result<()> {
     })?)?;
     let store = open_store()?;
     let engine = viva::authority::AuthorityEngine::new(&store);
-    let grant = engine.issue_root_grant(member, task, vec![action], mode, expires)?;
+    let grant = if let Some(parent_id) = parent {
+        let principal = member.ok_or_else(|| {
+            Error::Validation("--member is required when delegating a child grant".into())
+        })?;
+        let parent_id = viva::foundation::ids::GrantId::from_str(&parent_id)?;
+        engine.delegate_grant(&parent_id, principal, vec![action], mode, expires)?
+    } else {
+        engine.issue_root_grant(member, task, vec![action], mode, expires)?
+    };
     println!("{}", serde_json::to_string_pretty(&grant)?);
     Ok(())
 }

@@ -438,6 +438,19 @@ impl<'a> WorktreeService<'a> {
         Ok(())
     }
 
+    /// The newest live worktree bound to a task, if any.
+    pub fn active_for_task(&self, task_id: &TaskId) -> Result<Option<TaskWorktreeRecord>> {
+        let mut stmt = self.store.connection().prepare(
+            "SELECT worktree_id, task_id, repo_root, worktree_path, branch, base_sha,
+                    source, created_at, released_at
+             FROM task_worktrees
+             WHERE task_id = ?1 AND released_at IS NULL
+             ORDER BY created_at DESC LIMIT 1",
+        )?;
+        let row = stmt.query_row([task_id.as_str()], map_record).optional()?;
+        Ok(row)
+    }
+
     pub fn record(&self, worktree_id: &WorktreeId) -> Result<Option<TaskWorktreeRecord>> {
         let mut stmt = self.store.connection().prepare(
             "SELECT worktree_id, task_id, repo_root, worktree_path, branch, base_sha,

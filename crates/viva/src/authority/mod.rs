@@ -319,19 +319,23 @@ impl<'a> AuthorityEngine<'a> {
                 )));
             }
             if !parent.actions.contains(action) {
-                return Err(Error::Validation(format!(
+                let reason = format!(
                     "child grant action `{action}` is outside the parent's scope — \
                      a child grant may never widen its parent"
-                )));
+                );
+                self.record_delegation_denial(&principal, &reason)?;
+                return Err(Error::Validation(reason));
             }
         }
         // Child never widens: mode ceiling.
         if mode > parent.mode {
-            return Err(Error::Validation(format!(
+            let reason = format!(
                 "child grant mode {} exceeds the parent's {} — a child grant may never widen its parent",
                 mode.as_str(),
                 parent.mode.as_str()
-            )));
+            );
+            self.record_delegation_denial(&principal, &reason)?;
+            return Err(Error::Validation(reason));
         }
         // Child never widens: task scope, and the child's expiry is capped
         // at the parent's (an unset child expiry inherits the parent's).
@@ -554,6 +558,15 @@ impl<'a> AuthorityEngine<'a> {
     }
 
     // -- Denial log ------------------------------------------------------------
+
+    fn record_delegation_denial(&self, principal: &MemberId, reason: &str) -> Result<()> {
+        self.store.connection().execute(
+            "INSERT INTO grant_denials(subject, action, reason, occurred_at)
+             VALUES (?1, 'delegate_grant', ?2, ?3)",
+            rusqlite::params![format!("member:{}", principal.as_str()), reason, utc_now()],
+        )?;
+        Ok(())
+    }
 
     fn record_denial(&self, actor: &Actor, action: &str, reason: &DenialReason) -> Result<()> {
         let subject = match actor {

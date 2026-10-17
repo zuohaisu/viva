@@ -21,7 +21,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 serde_yaml = "0.9.34"
 thiserror = "2.0.21"
-time = { version = "0.3.45", features = ["formatting", "parsing"] }
+time = { version = "0.3.45", features = ["formatting", "parsing", "local-offset"] }
 uuid = { version = "1.26.1", features = ["v4", "serde"] }
 # V05 (issue #14) terminal emulation; since S3 (issue #45) the PTY backend
 # is owned (src/terminal/pty.rs, libc) so the master fd is transferable for

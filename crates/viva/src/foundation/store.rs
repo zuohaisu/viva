@@ -105,6 +105,11 @@ pub struct Migration {
     /// Schema-dependent upgrades run inside the same versioned transaction.
     /// SQL alone cannot conditionally ADD a column to an already existing table.
     pub apply: Option<fn(&rusqlite::Transaction<'_>) -> Result<()>>,
+    /// When true, `PRAGMA foreign_keys=OFF` runs on the connection **before**
+    /// the migration transaction begins. Inside an open transaction SQLite
+    /// ignores that pragma, so table rebuilds that DROP referenced tables
+    /// need this flag instead of inline `PRAGMA` in the SQL batch.
+    pub foreign_keys_off_outside_tx: bool,
 }
 
 /// Registry under construction; validated by [`MigrationRegistry::freeze`].
@@ -134,6 +139,28 @@ impl MigrationRegistry {
             name,
             sql,
             apply: None,
+            foreign_keys_off_outside_tx: false,
+        });
+        self
+    }
+
+    /// Like [`Self::register`], but disables foreign-key enforcement on the
+    /// connection for the duration of the migration transaction (table rebuild).
+    #[must_use]
+    pub fn register_rebuild(
+        mut self,
+        domain: Domain,
+        version: u32,
+        name: &'static str,
+        sql: &'static str,
+    ) -> Self {
+        self.migrations.push(Migration {
+            domain,
+            version,
+            name,
+            sql,
+            apply: None,
+            foreign_keys_off_outside_tx: true,
         });
         self
     }
@@ -153,6 +180,7 @@ impl MigrationRegistry {
             name,
             sql: "",
             apply: Some(apply),
+            foreign_keys_off_outside_tx: false,
         });
         self
     }
@@ -517,46 +545,80 @@ impl Store {
             if already {
                 continue;
             }
-            // Immediate transaction: migration DDL takes the write lock up
-            // front so a concurrent opener waits instead of interleaving.
-            let tx = self
-                .conn
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let already = tx.query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE domain = ?1 AND version = ?2",
-                rusqlite::params![migration.domain.as_str(), migration.version as i64],
-                |row| row.get::<_, i64>(0),
-            )? > 0;
-            if already {
-                continue;
+            let fk_rebuild = migration.foreign_keys_off_outside_tx;
+            if fk_rebuild {
+                self.conn.pragma_update(None, "foreign_keys", "OFF")?;
             }
-            tx.execute_batch(migration.sql).map_err(|err| {
-                if migration.domain == DOMAIN_MAINTENANCE
-                    && migration.version == 2
-                    && matches!(&err, rusqlite::Error::SqliteFailure(inner, _)
-                        if inner.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE)
-                {
-                    Error::Migration(format!(
-                        "maintenance v2 could not backfill conflicting proposal keys ({err}); \
-                         no proposal was changed. Stop the server, preserve the database with \
-                         SQLite backup, then inspect both proposals and resolve the key conflict \
-                         as described in the Wiki (F01-F04-Acceptance). A private raw \
-                         inventory is available via `viva data export --out <dir>`"
-                    ))
-                } else {
-                    err.into()
+            let applied = (|| -> Result<()> {
+                // Immediate transaction: migration DDL takes the write lock up
+                // front so a concurrent opener waits instead of interleaving.
+                let tx = self
+                    .conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let already = tx.query_row(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE domain = ?1 AND version = ?2",
+                    rusqlite::params![migration.domain.as_str(), migration.version as i64],
+                    |row| row.get::<_, i64>(0),
+                )? > 0;
+                if already {
+                    return Ok(());
                 }
-            })?;
-            if let Some(apply) = migration.apply {
-                apply(&tx)?;
+                tx.execute_batch(migration.sql).map_err(|err| {
+                    if migration.domain == DOMAIN_MAINTENANCE
+                        && migration.version == 2
+                        && matches!(&err, rusqlite::Error::SqliteFailure(inner, _)
+                            if inner.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE)
+                    {
+                        Error::Migration(format!(
+                            "maintenance v2 could not backfill conflicting proposal keys ({err}); \
+                             no proposal was changed. Stop the server, preserve the database with \
+                             SQLite backup, then inspect both proposals and resolve the key conflict \
+                             as described in the Wiki (F01-F04-Acceptance). A private raw \
+                             inventory is available via `viva data export --out <dir>`"
+                        ))
+                    } else {
+                        err.into()
+                    }
+                })?;
+                if let Some(apply) = migration.apply {
+                    apply(&tx)?;
+                }
+                tx.execute(
+                    "INSERT INTO schema_migrations(domain, version, name, applied_at) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![migration.domain.as_str(), migration.version as i64, migration.name, utc_now()],
+                )?;
+                tx.commit()?;
+                Ok(())
+            })();
+            if fk_rebuild {
+                self.conn.pragma_update(None, "foreign_keys", "ON")?;
+                if applied.is_ok() {
+                    self.assert_foreign_key_check()?;
+                }
             }
-            tx.execute(
-                "INSERT INTO schema_migrations(domain, version, name, applied_at) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![migration.domain.as_str(), migration.version as i64, migration.name, utc_now()],
-            )?;
-            tx.commit()?;
+            applied?;
         }
         self.reload_schema_versions()?;
+        Ok(())
+    }
+
+    fn assert_foreign_key_check(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA foreign_key_check")?;
+        let violations: Vec<String> = stmt
+            .query_map([], |row| {
+                let table: String = row.get(0)?;
+                let rowid: i64 = row.get(1)?;
+                let parent: String = row.get(2)?;
+                let fkid: i64 = row.get(3)?;
+                Ok(format!("{table} row {rowid} -> {parent}({fkid})"))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if !violations.is_empty() {
+            return Err(Error::Migration(format!(
+                "foreign_key_check failed after migration: {}",
+                violations.join("; ")
+            )));
+        }
         Ok(())
     }
 
