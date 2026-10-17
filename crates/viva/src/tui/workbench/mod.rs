@@ -3134,20 +3134,22 @@ impl WorkbenchApp {
         let Some(snap) = self.snapshots.get(&select.id) else {
             return String::new();
         };
-        let lines: Vec<&str> = snap
-            .scrollback
-            .iter()
-            .chain(snap.visible.iter())
-            .map(String::as_str)
-            .collect();
+        let (lines, origin) = viewport_lines(snap);
         if lines.is_empty() {
             return String::new();
         }
+        // A projected screen is already the viewport, so row 0 is the top
+        // drawn line. The plain visible fallback still clamps onto the
+        // last row when a drag runs past it.
+        let clamp = snap.screen.is_none();
         let row_of = |y: u16| -> usize {
-            let rel = y.saturating_sub(select.area.y) as usize;
-            let visible = snap.visible.len().max(1);
-            let start = lines.len().saturating_sub(visible);
-            (start + rel).min(lines.len().saturating_sub(1))
+            let rel = usize::from(y.saturating_sub(select.area.y));
+            let idx = origin.saturating_add(rel);
+            if clamp {
+                idx.min(lines.len().saturating_sub(1))
+            } else {
+                idx
+            }
         };
         let mut r1 = row_of(select.start_row.min(select.end_row));
         let mut r2 = row_of(select.start_row.max(select.end_row));
@@ -3163,21 +3165,26 @@ impl WorkbenchApp {
         } else {
             (c2, c1)
         };
+        let line = |idx: usize| lines.get(idx).map(String::as_str).unwrap_or("");
         if r1 == r2 {
             let start = c1.min(c2);
-            let count = c1.abs_diff(c2).max(1);
-            return super::text::slice_display_span(lines[r1], start, count);
+            let count = c1.abs_diff(c2).saturating_add(1);
+            return super::text::slice_display_span(line(r1), start, count);
         }
         let mut out = Vec::new();
         out.push(super::text::slice_display_span(
-            lines[r1],
+            line(r1),
             c1,
             usize::MAX - c1,
         ));
-        for line in lines.iter().take(r2).skip(r1 + 1) {
-            out.push((*line).to_string());
+        for idx in (r1 + 1)..r2 {
+            out.push(line(idx).to_string());
         }
-        out.push(super::text::slice_display_span(lines[r2], 0, c2.max(1)));
+        out.push(super::text::slice_display_span(
+            line(r2),
+            0,
+            c2.saturating_add(1),
+        ));
         out.join("\n")
     }
 
@@ -4984,6 +4991,28 @@ fn centered(area: Rect, percent_x: u16, height: u16) -> Rect {
 
 /// Whether the cell (`x`, `y`) lies inside `rect` (zero-size rects contain
 /// nothing).
+/// Lines the pane is showing. A screen projection is that viewport, top to
+/// bottom. Without one, the window is the tail of scrollback plus `visible`.
+fn viewport_lines(snap: &crate::terminal::TerminalSnapshot) -> (Vec<String>, usize) {
+    if let Some(screen) = &snap.screen {
+        let lines = screen
+            .lines
+            .iter()
+            .map(|row| row.iter().map(|run| run.0.as_str()).collect())
+            .collect();
+        return (lines, 0);
+    }
+    let lines: Vec<String> = snap
+        .scrollback
+        .iter()
+        .chain(snap.visible.iter())
+        .cloned()
+        .collect();
+    let visible = snap.visible.len().max(1);
+    let origin = lines.len().saturating_sub(visible);
+    (lines, origin)
+}
+
 fn word_at_pane(
     app: &WorkbenchApp,
     id: &str,
@@ -4992,19 +5021,13 @@ fn word_at_pane(
     row: u16,
 ) -> Option<super::text::WordSpan> {
     let snap = app.snapshots.get(id)?;
-    let lines: Vec<&str> = snap
-        .scrollback
-        .iter()
-        .chain(snap.visible.iter())
-        .map(String::as_str)
-        .collect();
+    let (lines, origin) = viewport_lines(snap);
     if lines.is_empty() {
         return None;
     }
-    let rel = row.saturating_sub(area.y) as usize;
-    let visible = snap.visible.len().max(1);
-    let start = lines.len().saturating_sub(visible);
-    let line = lines.get(start.saturating_add(rel))?;
+    let rel = usize::from(row.saturating_sub(area.y));
+    let idx = origin.saturating_add(rel);
+    let line = lines.get(idx)?;
     super::text::word_span_at_column(line, column.saturating_sub(area.x))
 }
 
@@ -6124,6 +6147,37 @@ mod tests {
         terminal.backend().to_string()
     }
 
+    /// Reversed cells on one row, left to right, plus the glyphs in them.
+    fn reversed_on_row(
+        app: &mut WorkbenchApp,
+        w: u16,
+        h: u16,
+        row: u16,
+    ) -> (Vec<u16>, String, String) {
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|f| app.draw(f)).expect("draw");
+        let frame = terminal.backend().to_string();
+        let buffer = terminal.backend().buffer().clone();
+        let mut columns = Vec::new();
+        let mut symbols = String::new();
+        for x in 0..w {
+            let Some(cell) = buffer.cell(ratatui::layout::Position::new(x, row)) else {
+                continue;
+            };
+            if cell.modifier.contains(ratatui::style::Modifier::REVERSED) {
+                columns.push(x);
+                symbols.push_str(cell.symbol());
+            }
+        }
+        (columns, symbols, frame)
+    }
+
+    fn reversed_columns(app: &mut WorkbenchApp, w: u16, h: u16, row: u16) -> (Vec<u16>, String) {
+        let (columns, _symbols, frame) = reversed_on_row(app, w, h, row);
+        (columns, frame)
+    }
+
     pub(super) fn sample() -> WorkbenchModel {
         WorkbenchModel {
             projects: vec![ProjectRow {
@@ -6832,24 +6886,24 @@ mod tests {
         app.last_pane_area = Some(Rect::new(0, 0, 80, 24));
         app.copy_on_select = false;
         app.set_snapshot("t1", snapshot_with(&["abcdef"]));
-        app.pane_geometry = vec![("t1".into(), Rect::new(0, 0, 20, 5))];
+        app.pane_geometry = vec![("t1".into(), Rect::new(0, 10, 20, 5))];
         app.enter_terminal_mode("t1");
         app.on_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 0,
-            row: 0,
+            row: 10,
             modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
         });
         app.on_mouse(MouseEvent {
             kind: MouseEventKind::Drag(MouseButton::Left),
             column: 2,
-            row: 0,
+            row: 10,
             modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
         });
         app.on_mouse(MouseEvent {
             kind: MouseEventKind::Up(MouseButton::Left),
             column: 2,
-            row: 0,
+            row: 10,
             modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
         });
         assert!(
@@ -6857,16 +6911,143 @@ mod tests {
             "the selection stays until Ctrl+C"
         );
         assert!(app.retained_selection.is_some());
-        let kept = render(&mut app, 40, 8);
-        assert!(
-            kept.contains("ab"),
-            "the retained selection is still drawn: {kept}"
+        let (reversed, kept) = reversed_columns(&mut app, 80, 24, 10);
+        assert_eq!(
+            reversed,
+            vec![0, 1, 2],
+            "the highlight includes the cell under the pointer\n{kept}"
         );
         assert_eq!(app.on_key(ctrl_c), KeyOutcome::Handled);
-        assert_eq!(app.last_copy(), "ab");
+        assert_eq!(
+            app.last_copy(),
+            "abc",
+            "Ctrl+C copies the highlighted cells"
+        );
         assert!(app.retained_selection.is_none());
         assert!(!app.quit_requested());
         assert_eq!(app.on_key(ctrl_c), KeyOutcome::Forward(vec![0x03]));
+    }
+
+    #[test]
+    fn drag_copies_the_release_cell_and_a_scrolled_screen_row() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let down = |column, row| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        };
+        let drag = |column, row| MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column,
+            row,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        };
+        let up = |column, row| MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column,
+            row,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        };
+
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.last_pane_area = Some(Rect::new(0, 0, 80, 24));
+        app.set_snapshot("t1", snapshot_with(&["abcdef", "ghijkl"]));
+        app.pane_geometry = vec![("t1".into(), Rect::new(0, 10, 20, 5))];
+        app.enter_terminal_mode("t1");
+        app.on_mouse(down(0, 10));
+        app.on_mouse(drag(2, 10));
+        app.on_mouse(up(2, 10));
+        assert_eq!(
+            app.last_copy(),
+            "abc",
+            "releasing on column 2 copies a, b, and c"
+        );
+
+        app.last_text_click = None;
+        app.on_mouse(down(0, 10));
+        app.on_mouse(drag(2, 11));
+        app.on_mouse(up(2, 11));
+        assert_eq!(app.last_copy(), "abcdef\nghi");
+
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.focus = Focus::Panes;
+        app.sidebar_collapsed = true;
+        app.scroll_offsets.insert("t1".into(), 4);
+        app.set_snapshot(
+            "t1",
+            TerminalSnapshot {
+                screen: Some(crate::terminal::screen::ScreenView {
+                    lines: vec![vec![crate::terminal::screen::Run(
+                        "cargo test".into(),
+                        10,
+                        0,
+                        0,
+                        0,
+                    )]],
+                    cursor: (0, 0),
+                    cursor_visible: false,
+                    modes: crate::terminal::screen::InputModes::default(),
+                    scrollback_offset: 4,
+                    retained: 4,
+                }),
+                cols: 80,
+                rows: 12,
+                visible: vec!["current page".into()],
+                scrollback: vec!["even older".into()],
+                scrollback_capped: false,
+                total_output_bytes: 32,
+                log_truncated: false,
+            },
+        );
+        let frame = render(&mut app, 120, 30);
+        assert!(
+            frame.contains("cargo test"),
+            "the scrolled screen is what is drawn\n{frame}"
+        );
+        assert!(
+            !frame.contains("current page"),
+            "visible stays on the latest page and is not drawn\n{frame}"
+        );
+        let area = app
+            .pane_geometry
+            .iter()
+            .find(|(id, _)| id == "t1")
+            .expect("pane geometry")
+            .1;
+        let column = area.x;
+        let row = area.y;
+        app.copy_on_select = false;
+        app.on_mouse(down(column, row));
+        app.on_mouse(up(column, row));
+        app.on_mouse(down(column, row));
+        let (reversed, symbols, kept) = reversed_on_row(&mut app, 120, 30, row);
+        assert_eq!(
+            symbols, "cargo",
+            "the highlight sits on the drawn row\n{kept}"
+        );
+        assert_eq!(reversed, (column..column + 5).collect::<Vec<_>>(), "{kept}");
+        let ctrl_c = KeyEvent::new(
+            KeyCode::Char('c'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        );
+        assert_eq!(app.on_key(ctrl_c), KeyOutcome::Handled);
+        assert_eq!(app.last_copy(), "cargo", "{kept}");
+        assert_ne!(app.last_copy(), "current");
+
+        app.on_mouse(down(column, row));
+        app.on_mouse(drag(column + 4, row));
+        app.on_mouse(up(column + 4, row));
+        assert_eq!(app.on_key(ctrl_c), KeyOutcome::Handled);
+        assert_eq!(
+            app.last_copy(),
+            "cargo",
+            "a drag on the scrolled screen copies that row, including the release cell"
+        );
     }
 
     #[test]
