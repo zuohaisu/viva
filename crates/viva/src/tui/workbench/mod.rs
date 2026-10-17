@@ -70,10 +70,77 @@ const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_milli
 const MIN_PANE_WIDTH: u16 = 8;
 const MIN_PANE_HEIGHT: u16 = 3;
 
-/// Clip `text` to `max` characters (display width is approximated by char
-/// count; the sidebar rows are ASCII in practice).
+/// Clip `text` to `max` terminal columns. Scalars are not columns: a CJK
+/// character or emoji is wider than one cell.
 fn fit(text: &str, max: usize) -> String {
-    text.chars().take(max).collect()
+    crate::tui::text::truncate_end(text, max)
+}
+
+/// Workspaces, agents, and tasks. Each band is at least three rows when the
+/// sidebar is tall enough; a short sidebar splits the rows it has.
+fn sidebar_bands(area: Rect) -> [Rect; 3] {
+    let heights = sidebar_section_heights(area.height);
+    let mut y = area.y;
+    let mut bands = [Rect::default(); 3];
+    for (band, height) in bands.iter_mut().zip(heights) {
+        *band = Rect::new(area.x, y, area.width, height);
+        y = y.saturating_add(height);
+    }
+    bands
+}
+
+fn sidebar_section_heights(total: u16) -> [u16; 3] {
+    if total == 0 {
+        return [0, 0, 0];
+    }
+    // Spaces keep the upper half, which is what the two-band sidebar used.
+    // Agents and tasks share the lower half so the task list is on screen
+    // without scrolling the worktree list off the top.
+    if total >= 6 {
+        let top = total / 2;
+        let rest = total - top;
+        let agents = rest / 2;
+        let tasks = rest - agents;
+        return [top, agents, tasks];
+    }
+    let base = total / 3;
+    let extra = total % 3;
+    [
+        base + u16::from(extra > 0),
+        base + u16::from(extra > 1),
+        base,
+    ]
+}
+
+/// Scroll so the selected entity's first line is in the window. A two-line
+/// block that is taller than the viewport keeps the name, not the detail
+/// line that follows it.
+fn sidebar_reveal_offset(
+    section: &[(Line<'static>, Option<(Focus, usize)>)],
+    selected: Option<(Focus, usize)>,
+    height: usize,
+) -> usize {
+    if height == 0 || section.is_empty() {
+        return 0;
+    }
+    let Some(selected) = selected else {
+        return 0;
+    };
+    let Some(first) = section.iter().position(|(_, key)| *key == Some(selected)) else {
+        return 0;
+    };
+    let last = section
+        .iter()
+        .rposition(|(_, key)| *key == Some(selected))
+        .unwrap_or(first);
+    let block = last - first + 1;
+    let max_start = section.len().saturating_sub(height);
+    let start = if block >= height {
+        first
+    } else {
+        (last + 1).saturating_sub(height).min(first)
+    };
+    start.min(max_start)
 }
 
 // ---------------------------------------------------------------------------
@@ -1337,6 +1404,7 @@ impl WorkbenchApp {
     pub fn split_pane(&mut self, axis: SplitAxis, terminal_id: String) -> bool {
         self.layout_dirty = true;
         let content = PaneContent::Terminal(terminal_id);
+        let replaced_browser = self.grid == PaneNode::leaf(PaneContent::Browser);
         if self.grid.split(&self.pane_focus, axis, content.clone()) {
             if let Some(area) = self.last_pane_area {
                 // Every leaf must stay usable — not just the new one: the
@@ -1348,8 +1416,15 @@ impl WorkbenchApp {
                     .iter()
                     .any(|(_, r)| r.width < MIN_PANE_WIDTH || r.height < MIN_PANE_HEIGHT);
                 if too_small {
-                    // Undo: the new leaf collapses back into its sibling.
-                    self.grid.close(&content);
+                    // Undo. A lone browser is replaced in place rather than
+                    // split, and close() cannot remove the root leaf — put
+                    // the browser back, or the refusal leaves a terminal.
+                    if replaced_browser {
+                        self.grid = PaneNode::leaf(PaneContent::Browser);
+                        self.pane_focus = PaneContent::Browser;
+                    } else {
+                        self.grid.close(&content);
+                    }
                     self.set_status(format!(
                         "pane too small to split at this terminal size (min {MIN_PANE_WIDTH}×{MIN_PANE_HEIGHT})"
                     ));
@@ -3302,7 +3377,7 @@ impl WorkbenchApp {
         self.pane_geometry.clear();
         for (index, (content, rect)) in layout.iter().enumerate() {
             let content_area = if layout.len() >= 2 {
-                crate::tui::chrome::inner_rect(*rect)
+                crate::tui::chrome::content_rect(*rect)
             } else {
                 rects[index]
             };
@@ -3354,12 +3429,6 @@ impl WorkbenchApp {
             }
         }
 
-        if self.file_panel.is_some() {
-            self.draw_file_panel(frame);
-        }
-        if self.handoff_picker.is_some() {
-            self.draw_handoff_picker(frame);
-        }
         if self.show_key_help {
             self.draw_key_help(frame, main, &palette);
         }
@@ -3376,6 +3445,14 @@ impl WorkbenchApp {
             self.draw_pane_prompt(frame, &palette);
         }
         self.draw_status_bar(frame, rows[2], &palette);
+        // File and handoff overlays cover the status bar. Drawn earlier,
+        // the bar replaces their bottom border on a short terminal.
+        if self.file_panel.is_some() {
+            self.draw_file_panel(frame);
+        }
+        if self.handoff_picker.is_some() {
+            self.draw_handoff_picker(frame);
+        }
         if let Some(selected) = self.terminal_picker {
             let area = centered(frame.area(), 90, frame.area().height.saturating_sub(4));
             frame.render_widget(Clear, area);
@@ -4073,7 +4150,7 @@ impl WorkbenchApp {
                                 ratatui::style::Style::new().fg(dot_color),
                             ),
                             Span::styled(
-                                format!(" {}", fit(&worktree.branch, width.saturating_sub(5))),
+                                format!(" {}", fit(&worktree.branch, width.saturating_sub(6))),
                                 ratatui::style::Style::new().fg(palette.mauve),
                             ),
                         ],
@@ -4238,30 +4315,29 @@ impl WorkbenchApp {
             ));
         }
 
-        // Two stable regions; Tasks are an explicit alternate lower view.
-        let regions =
-            Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
+        // Three bands, all drawn. Tasks used to replace agents, and nothing
+        // could focus that hidden list, so the goals never appeared.
+        let regions = sidebar_bands(area);
         self.sidebar_hits.clear();
         for (range, rect) in [
             (0..agent_start, regions[0]),
-            (
-                if self.focus == Focus::Tasks {
-                    task_start..lines.len()
-                } else {
-                    agent_start..task_start
-                },
-                regions[1],
-            ),
+            (agent_start..task_start, regions[1]),
+            (task_start..lines.len(), regions[2]),
         ] {
+            if rect.height == 0 || rect.width == 0 {
+                continue;
+            }
             let section = &lines[range];
             let height = rect.height as usize;
             let selected_key = Some((self.focus, self.selected));
-            let last = section
-                .iter()
-                .rposition(|(_, key)| *key == selected_key)
-                .unwrap_or(0);
-            let offset = (last + 1).saturating_sub(height);
+            let offset = sidebar_reveal_offset(section, selected_key, height);
             let mut visible = Vec::new();
+            // The last column is the separator. Text stays in the columns
+            // before it, or a wide character overwrites the line.
+            let text_rect = Rect {
+                width: rect.width.saturating_sub(1),
+                ..rect
+            };
             for (y, (line, key)) in section.iter().skip(offset).take(height).enumerate() {
                 visible.push(line.clone());
                 if let Some((focus, index)) = key {
@@ -4272,7 +4348,7 @@ impl WorkbenchApp {
                     ));
                 }
             }
-            frame.render_widget(Paragraph::new(visible), rect);
+            frame.render_widget(Paragraph::new(visible), text_rect);
         }
         // herdr's sidebar separator: one dim vertical line on the right.
         let buffer = frame.buffer_mut();
@@ -4439,27 +4515,46 @@ impl WorkbenchApp {
     }
 
     /// One sidebar row: pad with the selection background when selected so
-    /// the highlight fills the row.
+    /// the highlight fills the row. The last column is reserved for the
+    /// separator, and the pad counts display columns.
     fn row(
-        mut spans: Vec<Span<'static>>,
+        spans: Vec<Span<'static>>,
         selected: bool,
         width: usize,
         palette: &Palette,
     ) -> Line<'static> {
+        let limit = width.saturating_sub(1);
+        let mut clipped = Vec::new();
+        let mut used = 0usize;
+        for span in spans {
+            if used >= limit {
+                break;
+            }
+            let raw = span.content.as_ref();
+            let room = limit - used;
+            let text = if crate::tui::text::display_width(raw) <= room {
+                raw.to_string()
+            } else {
+                fit(raw, room)
+            };
+            used += crate::tui::text::display_width(&text);
+            if !text.is_empty() {
+                clipped.push(Span::styled(text, span.style));
+            }
+        }
         if selected {
-            for span in spans.iter_mut() {
+            for span in clipped.iter_mut() {
                 span.style = span.style.bg(palette.selection_bg);
             }
-            let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-            let pad = width.saturating_sub(used);
+            let pad = limit.saturating_sub(used);
             if pad > 0 {
-                spans.push(Span::styled(
+                clipped.push(Span::styled(
                     " ".repeat(pad),
                     ratatui::style::Style::new().bg(palette.selection_bg),
                 ));
             }
         }
-        Line::from(spans)
+        Line::from(clipped)
     }
 
     /// Task status is a free string from the registry; known words map to
@@ -4540,6 +4635,11 @@ impl WorkbenchApp {
                 );
             }
             _ => {
+                let body = usize::from(area.height.saturating_sub(2));
+                let banner = usize::from(panel.truncated);
+                let slots = body.saturating_sub(banner);
+                let start =
+                    crate::tui::text::scroll_to_reveal(panel.rows.len(), panel.selected, slots);
                 let mut items: Vec<ListItem> = Vec::new();
                 if panel.truncated {
                     items.push(ListItem::new(Line::from(Span::styled(
@@ -4551,7 +4651,7 @@ impl WorkbenchApp {
                         ratatui::style::Style::new().gray(),
                     ))));
                 }
-                for (i, (path, status)) in panel.rows.iter().enumerate() {
+                for (i, (path, status)) in panel.rows.iter().enumerate().skip(start).take(slots) {
                     let marker = if panel.selected == i { "▶ " } else { "  " };
                     items.push(ListItem::new(Line::from(format!(
                         "{marker}{status:<6} {path}"
@@ -4579,10 +4679,14 @@ impl WorkbenchApp {
         };
         let area = centered(frame.area(), 50, (picker.agents.len() as u16 + 2).max(5));
         frame.render_widget(Clear, area);
+        let slots = usize::from(area.height.saturating_sub(2));
+        let start = crate::tui::text::scroll_to_reveal(picker.agents.len(), picker.selected, slots);
         let items: Vec<ListItem> = picker
             .agents
             .iter()
             .enumerate()
+            .skip(start)
+            .take(slots)
             .map(|(i, agent)| {
                 let marker = if picker.selected == i { "▶ " } else { "  " };
                 ListItem::new(Line::from(format!("{marker}{agent}")))
@@ -6653,6 +6757,198 @@ mod tests {
             frame.contains("agent/feat-11"),
             "the selected row must follow the viewport: {frame}"
         );
+    }
+
+    #[test]
+    fn tasks_are_drawn_and_a_click_focuses_them() {
+        let mut model = sample();
+        model.tasks[0].goal = "TASKGOAL".into();
+        let mut app = WorkbenchApp::new();
+        app.set_model(model);
+        let frame = render(&mut app, 100, 24);
+        assert!(
+            frame.contains("TASKGOAL"),
+            "the task band is on the default sidebar: {frame}"
+        );
+        assert_eq!(app.focus(), Focus::Worktrees);
+        let (_, _, rect) = app
+            .sidebar_hits
+            .iter()
+            .find(|(focus, _, _)| *focus == Focus::Tasks)
+            .cloned()
+            .expect("a task row is a click target");
+        app.on_mouse(ratatui::crossterm::event::MouseEvent {
+            kind: ratatui::crossterm::event::MouseEventKind::Down(
+                ratatui::crossterm::event::MouseButton::Left,
+            ),
+            column: rect.x,
+            row: rect.y,
+            modifiers: ratatui::crossterm::event::KeyModifiers::empty(),
+        });
+        assert_eq!(app.focus(), Focus::Tasks);
+    }
+
+    #[test]
+    fn file_and_handoff_lists_follow_the_selection() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.file_panel = Some(FilePanel {
+            worktree_id: "wt1".into(),
+            rows: (0..60).map(|i| (format!("f{i:02}"), "M".into())).collect(),
+            truncated: false,
+            total: 60,
+            selected: 59,
+            viewing: None,
+            full_path: None,
+            scroll: 0,
+        });
+        let files = render(&mut app, 100, 24);
+        assert!(files.contains("f59"), "{files}");
+        assert!(!files.contains("f00"), "{files}");
+        let wide = render(&mut app, 200, 50);
+        assert!(wide.contains("f59"), "{wide}");
+
+        app.file_panel = None;
+        app.handoff_picker = Some(HandoffPicker {
+            worktree_id: "wt1".into(),
+            agents: (0..50).map(|i| format!("ag{i:02}")).collect(),
+            selected: 49,
+        });
+        let handoff = render(&mut app, 100, 24);
+        assert!(handoff.contains("ag49"), "{handoff}");
+        assert!(!handoff.contains("ag00"), "{handoff}");
+    }
+
+    #[test]
+    fn overlay_bottom_border_is_not_replaced_by_the_status_bar() {
+        let mut app = WorkbenchApp::new();
+        app.file_panel = Some(FilePanel {
+            worktree_id: "wt1".into(),
+            rows: vec![("DIAGFILE".into(), "M".into())],
+            truncated: false,
+            total: 1,
+            selected: 0,
+            viewing: None,
+            full_path: None,
+            scroll: 0,
+        });
+        for (width, height) in [(20, 5), (60, 5)] {
+            let frame = render(&mut app, width, height);
+            assert!(frame.contains("files"), "{width}×{height}: {frame}");
+            let last = frame.lines().next_back().unwrap_or("");
+            assert!(
+                !last.contains("WORKBENCH") && last.contains('─'),
+                "{width}×{height} status bar covers the overlay: {frame}"
+            );
+        }
+        app.file_panel = None;
+        app.handoff_picker = Some(HandoffPicker {
+            worktree_id: "wt1".into(),
+            agents: (0..50).map(|i| format!("ag{i:02}")).collect(),
+            selected: 49,
+        });
+        let frame = render(&mut app, 40, 10);
+        let last = frame.lines().next_back().unwrap_or("");
+        assert!(last.contains('─'), "handoff bottom border: {frame}");
+        assert!(frame.contains("ag49"), "{frame}");
+    }
+
+    #[test]
+    fn refused_split_on_a_lone_browser_restores_it() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        for (width, height) in [(20, 5), (60, 5)] {
+            render(&mut app, width, height);
+            assert!(
+                !app.split_pane(SplitAxis::Horizontal, "term-new".into()),
+                "{width}×{height}"
+            );
+            assert_eq!(
+                app.grid.leaves(),
+                vec![PaneContent::Browser],
+                "{width}×{height} kept the replacement terminal"
+            );
+            assert!(
+                app.status_line.contains("too small"),
+                "{width}×{height}: {}",
+                app.status_line
+            );
+        }
+    }
+
+    #[test]
+    fn shrunk_layout_keeps_pane_content() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.grid = PaneNode::split_new(
+            PaneContent::Terminal("term-1".into()),
+            SplitAxis::Horizontal,
+            PaneContent::Terminal("term-2".into()),
+        );
+        app.set_snapshot("term-1", snapshot_with(&["LEFTPANE"]));
+        app.set_snapshot("term-2", snapshot_with(&["RIGHTPANE"]));
+        let frame = render(&mut app, 20, 5);
+        assert!(frame.contains("LEFTPANE"), "{frame}");
+        assert!(frame.contains("RIGHTPANE"), "{frame}");
+
+        app.grid = PaneNode::split_new(
+            PaneContent::Terminal("term-1".into()),
+            SplitAxis::Vertical,
+            PaneContent::Terminal("term-2".into()),
+        );
+        assert!(app.grid.set_ratio_at_path(&[], 10));
+        let frame = render(&mut app, 80, 24);
+        assert!(
+            frame.contains("LEFTPANE"),
+            "a 2-row pane still draws its text: {frame}"
+        );
+    }
+
+    #[test]
+    fn short_sidebar_shows_the_selected_agent_name() {
+        use crate::agents::AgentSessionRow;
+        let mut model = sample();
+        model.attention.clear();
+        model.agents.push(AgentSessionRow {
+            terminal_id: "term-1".into(),
+            tool: "pi".into(),
+            name: "AGENTMARK".into(),
+            worktree_id: Some("wt1".into()),
+            location: "work".into(),
+            live: Some(true),
+            records: vec![],
+            stale: false,
+            in_workspace: true,
+            report_capability: "report:unve".into(),
+        });
+        let mut app = WorkbenchApp::new();
+        app.set_model(model);
+        app.focus = Focus::Terminals;
+        let frame = render(&mut app, 60, 5);
+        assert!(
+            frame.contains("AGENTMARK"),
+            "the name line stays when only one row fits: {frame}"
+        );
+    }
+
+    #[test]
+    fn wide_branch_name_does_not_erase_the_sidebar_separator() {
+        let mut model = sample();
+        model.attention.clear();
+        model.worktrees[0].branch = "BRSEL项目🎉项目🎉项目🎉项目🎉".into();
+        let mut app = WorkbenchApp::new();
+        app.set_model(model);
+        let backend = TestBackend::new(60, 5);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        for y in 1..4 {
+            assert_eq!(
+                buffer[(25, y)].symbol(),
+                "│",
+                "row {y} lost the sidebar separator"
+            );
+        }
     }
 
     /// F4: the diff overlay closes with Esc (it used to be unclosable)

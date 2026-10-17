@@ -56,6 +56,17 @@ pub fn inner_rect(rect: Rect) -> Rect {
     }
 }
 
+/// A border plus one content cell needs three rows and three columns.
+/// Smaller rects stay full-bleed: drawing the frame would leave a content
+/// height of zero.
+pub fn content_rect(rect: Rect) -> Rect {
+    if rect.width >= 3 && rect.height >= 3 {
+        inner_rect(rect)
+    } else {
+        rect
+    }
+}
+
 /// Draw the merged border grid for all pane rects. `focused` is the index
 /// of the focused pane (its border cells get the accent color); titles are
 /// stamped onto the named panes' top border rows.
@@ -72,8 +83,9 @@ pub fn render_pane_borders(
     }
     let mut cells: HashMap<(u16, u16), CellFlags> = HashMap::new();
     for (index, rect) in rects.iter().enumerate() {
-        // Too small to hold a box: skip (the content still renders).
-        if rect.width < 2 || rect.height < 2 {
+        // Too small to hold a border plus one content cell: skip. The
+        // content pass draws the full rect instead of an empty frame.
+        if rect.width < 3 || rect.height < 3 {
             continue;
         }
         let focused = focused == Some(index);
@@ -135,30 +147,16 @@ pub fn render_pane_borders(
         } else {
             palette.overlay1
         });
-        let budget = rect.width.saturating_sub(4) as usize; // corners + padding
-        // Truncate with an ellipsis instead of cutting mid-word: the
-        // reported/screen labels in titles are an honesty boundary (QA P3)
-        // and must not silently lose their closing paren.
-        let full: String = format!(" {} ", title.text);
-        let text: String = if full.chars().count() > budget {
-            format!(
-                "{}…",
-                full.chars()
-                    .take(budget.saturating_sub(1))
-                    .collect::<String>()
-            )
+        let budget = usize::from(rect.width.saturating_sub(4)); // corners + padding
+        // Truncate by display width. A CJK title counted in scalars
+        // overruns the border and collides with the next pane.
+        let full = format!(" {} ", title.text);
+        let text = if crate::tui::text::display_width(&full) > budget {
+            crate::tui::text::truncate_end(&full, budget)
         } else {
             full
         };
-        for (offset, ch) in text.chars().enumerate() {
-            let x = rect.x + 1 + offset as u16;
-            if x >= rect.x + rect.width - 1 {
-                break;
-            }
-            if let Some(cell) = buffer.cell_mut(Position::new(x, rect.y)) {
-                cell.set_char(ch).set_style(style);
-            }
-        }
+        buffer.set_stringn(rect.x + 1, rect.y, text, budget, style);
     }
 }
 
