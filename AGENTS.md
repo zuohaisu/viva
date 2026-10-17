@@ -268,13 +268,15 @@ then through a pull request and a merge into the remote default branch.
   wrapper or platform packages) in a delivery PR, and do not open
   version-prep PRs. Agents do not choose or propose SemVer components.
 - Never reuse, overwrite, or force-update a released version or tag.
-- Reference for human-run (or explicitly authorized) releases: publish only
-  after merge, from the validated merged source, using the existing
-  `v<version>` tag flow in `.github/workflows/release.yml` and
-  `packaging/npm/README.md`. Tag, binary, npm wrapper, platform package, and
-  wrapper dependency versions must agree. Publish platform packages before
-  the wrapper; do not add a parallel publishing pipeline or change token
-  permissions to work around a failure.
+- Reference for human-run (or explicitly authorized) releases: a
+  `v<version>` tag push runs `.github/workflows/release.yml`, which builds
+  the macOS artifacts and creates the GitHub Release. That push does not
+  publish npm. npm publish is a separate manual run of
+  `.github/workflows/npm-publish.yml` for one existing tag that already has
+  a GitHub Release; see `packaging/npm/README.md`. Tag, binary, npm wrapper,
+  platform package, and wrapper dependency versions must agree. Publish
+  platform packages before the wrapper; do not add another publishing
+  workflow or change token permissions to work around a failure.
 - When an agent operates an authorized release, verify the official npm
   registry exposes the new version and expected `latest` tags for all
   release packages, then perform a clean install and confirm
