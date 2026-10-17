@@ -86,10 +86,19 @@ impl ConversationTreeApp {
     pub fn draw(&self, frame: &mut Frame) {
         let chunks =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
+        let framed = chunks[0].width >= 3 && chunks[0].height >= 3;
+        let slots = if framed {
+            usize::from(chunks[0].height.saturating_sub(2))
+        } else {
+            usize::from(chunks[0].height)
+        };
+        let start = super::text::scroll_to_reveal(self.rows.len(), self.selected, slots);
         let items: Vec<ListItem> = self
             .rows
             .iter()
             .enumerate()
+            .skip(start)
+            .take(slots)
             .map(|(i, row)| {
                 let marker = if self.selected == i { "▶ " } else { "  " };
                 let indent = "  ".repeat(row.depth);
@@ -119,14 +128,14 @@ impl ConversationTreeApp {
                 ]))
             })
             .collect();
-        frame.render_widget(
-            List::new(items).block(
-                Block::new()
-                    .title(" conversations — display name · harness · native ref · task ")
-                    .borders(Borders::ALL),
-            ),
-            chunks[0],
-        );
+        let block = if framed {
+            Block::new()
+                .title(" conversations — display name · harness · native ref · task ")
+                .borders(Borders::ALL)
+        } else {
+            Block::new()
+        };
+        frame.render_widget(List::new(items).block(block), chunks[0]);
         frame.render_widget(
             Paragraph::new(Line::from(self.status_line.clone()).gray()),
             chunks[1],
@@ -209,6 +218,52 @@ mod tests {
         assert_eq!(
             app.selected_node().map(|n| n.display_name.as_str()),
             Some("Theme A")
+        );
+    }
+
+    #[test]
+    fn tree_scrolls_the_selected_row_into_view() {
+        let mut rows = vec![ConversationRow {
+            node_id: "root".into(),
+            display_name: "CNODE".into(),
+            depth: 0,
+            harness: "pi".into(),
+            native_ref: None,
+            task_id: None,
+            archived: false,
+        }];
+        for i in 1..40 {
+            rows.push(ConversationRow {
+                node_id: format!("n{i}"),
+                display_name: if i == 1 {
+                    "CROW01".into()
+                } else if i == 39 {
+                    "DEEPNAME".into()
+                } else {
+                    format!("row{i:02}")
+                },
+                depth: 1,
+                harness: "pi".into(),
+                native_ref: None,
+                task_id: None,
+                archived: false,
+            });
+        }
+        let mut app = ConversationTreeApp::new();
+        app.set_rows(rows);
+        for _ in 0..39 {
+            app.on_key(KeyEvent::from(KeyCode::Char('j')));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        let view = terminal.backend().to_string();
+        assert!(
+            view.contains("DEEPNAME"),
+            "the selected leaf must be on screen: {view}"
+        );
+        assert!(
+            !view.contains("CNODE"),
+            "the window must leave the first page: {view}"
         );
     }
 

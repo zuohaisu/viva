@@ -32,6 +32,7 @@ use crate::foundation::error::Result;
 pub mod chrome;
 pub mod conversations;
 pub mod layout;
+mod text;
 pub mod theme;
 pub mod workbench;
 
@@ -255,20 +256,30 @@ impl<D: OverviewSource> TuiApp<D> {
         ])
         .split(frame.area());
 
-        // Header: the product name + which pane is focused.
+        // The focus tag stays on screen when the product name is wider than
+        // the terminal. It occupies its own columns on the right.
+        let tag = match self.focus {
+            Focus::Overview => "[overview]",
+            Focus::Tasks => "[tasks]",
+            Focus::Terminals => "[terminals]",
+        };
+        let tag_cols = text::display_width(tag).min(chunks[0].width as usize) as u16;
+        let head =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(tag_cols)]).split(chunks[0]);
+        let brand = " viva";
+        let rest_budget = (head[0].width as usize).saturating_sub(text::display_width(brand));
         let header = Line::from(vec![
-            Span::styled(" viva", ratatui::style::Style::new().bold()),
-            Span::raw(" — personal ai collaboration system  "),
-            Span::styled(
-                match self.focus {
-                    Focus::Overview => "[overview]",
-                    Focus::Tasks => "[tasks]",
-                    Focus::Terminals => "[terminals]",
-                },
-                ratatui::style::Style::new().bold(),
-            ),
+            Span::styled(brand, ratatui::style::Style::new().bold()),
+            Span::raw(text::truncate_end(
+                " — personal ai collaboration system",
+                rest_budget,
+            )),
         ]);
-        frame.render_widget(Paragraph::new(header), chunks[0]);
+        frame.render_widget(Paragraph::new(header), head[0]);
+        frame.render_widget(
+            Paragraph::new(Span::styled(tag, ratatui::style::Style::new().bold())),
+            head[1],
+        );
 
         match self.focus {
             Focus::Overview => self.draw_overview(frame, chunks[1]),
@@ -313,12 +324,8 @@ impl<D: OverviewSource> TuiApp<D> {
                 ListItem::new(Line::from(format!("{marker}project: {name}")))
             })
             .collect();
-        let members_list =
-            List::new(members).block(Block::new().title(" members ").borders(Borders::ALL));
-        frame.render_widget(members_list, rows[0]);
-        let projects_list =
-            List::new(projects).block(Block::new().title(" projects ").borders(Borders::ALL));
-        frame.render_widget(projects_list, rows[1]);
+        paint_list(frame, rows[0], " members ", members, self.selected);
+        paint_list(frame, rows[1], " projects ", projects, self.selected);
     }
 
     fn draw_tasks(&self, frame: &mut Frame, area: Rect) {
@@ -336,12 +343,7 @@ impl<D: OverviewSource> TuiApp<D> {
                 ]))
             })
             .collect();
-        let list = List::new(items).block(
-            Block::new()
-                .title(" tasks — goal · status ")
-                .borders(Borders::ALL),
-        );
-        frame.render_widget(list, area);
+        paint_list(frame, area, " tasks — goal · status ", items, self.selected);
     }
 
     fn draw_terminals(&self, frame: &mut Frame, area: Rect) {
@@ -366,12 +368,13 @@ impl<D: OverviewSource> TuiApp<D> {
                 )))
             })
             .collect();
-        let list = List::new(items).block(
-            Block::new()
-                .title(" terminals — purpose · owner · state · worktree ")
-                .borders(Borders::ALL),
+        paint_list(
+            frame,
+            area,
+            " terminals — purpose · owner · state · worktree ",
+            items,
+            self.selected,
         );
-        frame.render_widget(list, area);
     }
 
     fn draw_help(&self, frame: &mut Frame, area: Rect) {
@@ -398,7 +401,8 @@ impl<D: OverviewSource> TuiApp<D> {
 }
 
 fn centered_rect(area: Rect, percent_x: u16, height: u16) -> Rect {
-    let width = area.width * percent_x / 100;
+    // u32: 60% of a 1600-column terminal overflows u16 in debug builds.
+    let width = (u32::from(area.width) * u32::from(percent_x) / 100) as u16;
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     Rect {
@@ -407,6 +411,26 @@ fn centered_rect(area: Rect, percent_x: u16, height: u16) -> Rect {
         width: width.min(area.width),
         height: height.min(area.height),
     }
+}
+
+/// Draw `items` with the selected row inside the viewport. A rect shorter
+/// than a framed list (border + one content row + border) drops the frame
+/// so the row still lands in the buffer.
+fn paint_list(frame: &mut Frame, area: Rect, title: &str, items: Vec<ListItem>, selected: usize) {
+    let framed = area.width >= 3 && area.height >= 3;
+    let slots = if framed {
+        usize::from(area.height.saturating_sub(2))
+    } else {
+        usize::from(area.height)
+    };
+    let start = text::scroll_to_reveal(items.len(), selected, slots);
+    let visible: Vec<ListItem> = items.into_iter().skip(start).take(slots).collect();
+    let block = if framed {
+        Block::new().title(title).borders(Borders::ALL)
+    } else {
+        Block::new()
+    };
+    frame.render_widget(List::new(visible).block(block), area);
 }
 
 // ---------------------------------------------------------------------------
@@ -717,6 +741,81 @@ mod tests {
             app.on_key(KeyEvent::from(KeyCode::Char('x'))),
             KeyOutcome::Ignored,
             "typing text is not shell navigation; agent keys belong to terminals"
+        );
+    }
+
+    #[test]
+    fn task_list_scrolls_the_selected_row_into_view() {
+        let mut fixture = Fixture::sample();
+        fixture.tasks = (0..40)
+            .map(|i| TaskRow {
+                task_id: format!("t{i}"),
+                goal: format!("OGOAL{i:02}"),
+                status: "open".into(),
+            })
+            .collect();
+        let mut app = TuiApp::new(fixture);
+        app.refresh();
+        app.on_key(KeyEvent::from(KeyCode::Char('2')));
+        for _ in 0..39 {
+            app.on_key(KeyEvent::from(KeyCode::Char('j')));
+        }
+        let frame = render(&app, 80, 24);
+        assert!(
+            frame.contains("OGOAL39"),
+            "the selected task must be on screen: {frame}"
+        );
+        assert!(
+            !frame.contains("OGOAL00"),
+            "the window must leave the first page: {frame}"
+        );
+        let short = render(&app, 40, 10);
+        assert!(short.contains("OGOAL39"), "{short}");
+    }
+
+    #[test]
+    fn narrow_header_keeps_the_focus_tag_and_a_short_list_keeps_a_body_row() {
+        let mut app = TuiApp::new(Fixture::sample());
+        app.refresh();
+        let frame = render(&app, 20, 5);
+        assert!(
+            frame.contains("[overview]"),
+            "the focus tag survives a narrow title: {frame}"
+        );
+        assert!(
+            frame.contains("project:"),
+            "a 5-row overview still draws the project list: {frame}"
+        );
+        app.on_key(KeyEvent::from(KeyCode::Char('2')));
+        let tasks = render(&app, 40, 10);
+        assert!(tasks.contains("[tasks]"), "{tasks}");
+    }
+
+    #[test]
+    fn help_box_width_does_not_overflow_on_a_wide_terminal() {
+        let mut app = TuiApp::new(Fixture::sample());
+        app.refresh();
+        app.on_key(KeyEvent::from(KeyCode::Char('?')));
+        let backend = TestBackend::new(1600, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let mut column = None;
+        for y in 0..40 {
+            let mut row = String::new();
+            for x in 0..1600 {
+                row.push_str(buffer[(x, y)].symbol());
+            }
+            if let Some(index) = row.find("viva shell") {
+                column = Some(index);
+                break;
+            }
+        }
+        let column = column.expect("help text");
+        // 60% of 1600 is 960, centered at x = 320. The title sits just inside.
+        assert!(
+            (300..400).contains(&column),
+            "help box column {column} is not the 60% width"
         );
     }
 }

@@ -76,6 +76,47 @@ pub enum Direction {
     Down,
 }
 
+/// Divide `area` by `ratio` (first-child percent, clamped 10..=90).
+///
+/// The product is computed in `u32`. `u16` multiplication saturates at
+/// 65535, so a 1374-column pane at 50% used to draw 655 columns while the
+/// mouse divider, which already used `u32`, sat on column 687.
+fn split_pair(area: Rect, axis: SplitAxis, ratio: u16) -> (Rect, Rect) {
+    let ratio = u32::from(ratio.clamp(10, 90));
+    match axis {
+        SplitAxis::Horizontal => {
+            let first_width = ((u32::from(area.width) * ratio) / 100) as u16;
+            let second_width = area.width.saturating_sub(first_width);
+            (
+                Rect {
+                    width: first_width,
+                    ..area
+                },
+                Rect {
+                    x: area.x.saturating_add(first_width),
+                    width: second_width,
+                    ..area
+                },
+            )
+        }
+        SplitAxis::Vertical => {
+            let first_height = ((u32::from(area.height) * ratio) / 100) as u16;
+            let second_height = area.height.saturating_sub(first_height);
+            (
+                Rect {
+                    height: first_height,
+                    ..area
+                },
+                Rect {
+                    y: area.y.saturating_add(first_height),
+                    height: second_height,
+                    ..area
+                },
+            )
+        }
+    }
+}
+
 /// First/second split ratio as a percentage for the FIRST child
 /// (10..=90), so a user can never squeeze a pane to zero.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -200,39 +241,7 @@ impl PaneNode {
                 second,
                 ratio,
             } => {
-                let ratio = (*ratio).clamp(10, 90);
-                let (first_rect, second_rect) = match axis {
-                    SplitAxis::Horizontal => {
-                        let first_width = area.width.saturating_mul(ratio) / 100;
-                        let second_width = area.width.saturating_sub(first_width);
-                        (
-                            Rect {
-                                width: first_width,
-                                ..area
-                            },
-                            Rect {
-                                x: area.x + first_width,
-                                width: second_width,
-                                ..area
-                            },
-                        )
-                    }
-                    SplitAxis::Vertical => {
-                        let first_height = area.height.saturating_mul(ratio) / 100;
-                        let second_height = area.height.saturating_sub(first_height);
-                        (
-                            Rect {
-                                height: first_height,
-                                ..area
-                            },
-                            Rect {
-                                y: area.y + first_height,
-                                height: second_height,
-                                ..area
-                            },
-                        )
-                    }
-                };
+                let (first_rect, second_rect) = split_pair(area, *axis, *ratio);
                 let mut all = first.render_layout(first_rect);
                 all.extend(second.render_layout(second_rect));
                 all
@@ -255,39 +264,7 @@ impl PaneNode {
                 second,
                 ratio,
             } => {
-                let ratio = (*ratio).clamp(10, 90);
-                let (first_rect, second_rect) = match axis {
-                    SplitAxis::Horizontal => {
-                        let first_width = area.width.saturating_mul(ratio) / 100;
-                        let second_width = area.width.saturating_sub(first_width);
-                        (
-                            Rect {
-                                width: first_width,
-                                ..area
-                            },
-                            Rect {
-                                x: area.x + first_width,
-                                width: second_width,
-                                ..area
-                            },
-                        )
-                    }
-                    SplitAxis::Vertical => {
-                        let first_height = area.height.saturating_mul(ratio) / 100;
-                        let second_height = area.height.saturating_sub(first_height);
-                        (
-                            Rect {
-                                height: first_height,
-                                ..area
-                            },
-                            Rect {
-                                y: area.y + first_height,
-                                height: second_height,
-                                ..area
-                            },
-                        )
-                    }
-                };
+                let (first_rect, second_rect) = split_pair(area, *axis, *ratio);
                 let mut all = first.render_layout_chrome(first_rect);
                 let mut second_leaves = second.render_layout_chrome(second_rect);
                 // Steal the shared divider cell from the first side's edge
@@ -357,16 +334,10 @@ impl PaneNode {
             else {
                 return;
             };
-            let ratio = (*ratio).clamp(10, 90) as u32;
+            let (first_rect, second_rect) = split_pair(area, *axis, *ratio);
             let (first_len, second_len) = match axis {
-                SplitAxis::Horizontal => {
-                    let first_len = (area.width as u32 * ratio / 100) as u16;
-                    (first_len, area.width.saturating_sub(first_len))
-                }
-                SplitAxis::Vertical => {
-                    let first_len = (area.height as u32 * ratio / 100) as u16;
-                    (first_len, area.height.saturating_sub(first_len))
-                }
+                SplitAxis::Horizontal => (first_rect.width, second_rect.width),
+                SplitAxis::Vertical => (first_rect.height, second_rect.height),
             };
             // A degenerate side has no divider cell between the siblings —
             // nothing to grab (the chrome skips these rects too).
@@ -410,30 +381,6 @@ impl PaneNode {
                 hit_rect,
                 path: path.clone(),
             });
-            let (first_rect, second_rect) = match axis {
-                SplitAxis::Horizontal => (
-                    Rect {
-                        width: first_len,
-                        ..area
-                    },
-                    Rect {
-                        x: area.x + first_len,
-                        width: second_len,
-                        ..area
-                    },
-                ),
-                SplitAxis::Vertical => (
-                    Rect {
-                        height: first_len,
-                        ..area
-                    },
-                    Rect {
-                        y: area.y + first_len,
-                        height: second_len,
-                        ..area
-                    },
-                ),
-            };
             let mut first_path = path.clone();
             first_path.push(false);
             let mut second_path = path;
@@ -582,6 +529,21 @@ mod tests {
             width: 100,
             height: 40,
         }
+    }
+
+    #[test]
+    fn wide_half_split_matches_the_mouse_divider() {
+        // 1400 columns with a 26-column sidebar leaves a 1374-column pane
+        // area. 50% is 687. u16 multiplication saturates at 65535 and used
+        // to draw 655 while the divider sat at 687.
+        let tree = PaneNode::split_new(PaneContent::Browser, SplitAxis::Horizontal, term("t"));
+        let area = Rect::new(26, 1, 1374, 40);
+        let drawn = tree.render_layout(area);
+        assert_eq!(drawn[0].1.width, 687);
+        assert_eq!(drawn[1].1.width, 1374 - 687);
+        let chrome = tree.render_layout_chrome(area);
+        assert_eq!(chrome[0].1.width, 687, "chrome uses the same split");
+        assert_eq!(tree.splits(area)[0].pos, 26 + 687 - 1);
     }
 
     #[test]
