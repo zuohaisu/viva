@@ -8,8 +8,10 @@ name: CI
 # No `paths` filter on purpose: every PR reports every check, so required
 # status checks can be enabled later without a path-filtered workflow
 # silently never reporting on docs-only PRs. The Rust job costs ~1.5 min
-# warm (rust-cache). Releases stay in their own tag-triggered workflow
-# (release.yml) — different trigger surface, permissions, and secrets.
+# warm (rust-cache). GitHub Releases stay in the tag-triggered workflow
+# (release.yml). npm publish is the separate manual workflow
+# (npm-publish.yml). Both differ from this file in trigger, permissions,
+# and secrets.
 
 on:
   push:

@@ -20,12 +20,20 @@ delivery channel: the installed command stays `viva`.
 - One-time maintainer setup (human-only): on npmjs.com as `zuohaisu`,
   create a granular **automation** token with read/write for
   `@zuohaisu/*`, and add it as the repository secret `NPM_TOKEN`.
-- Publishing happens only on tag pushes (`v*`): the release workflow's
-  `npm-publish` job extracts the binaries from the released tarballs
-  (npm ships exactly the released bits), re-stages the packages via
-  `prepare-packages.py` with the tag version, then publishes platform
-  packages first and the wrapper last. Without `NPM_TOKEN` the job skips
-  with an honest note.
+- A `v*` tag push runs `.github/workflows/release.yml` only: it builds the
+  macOS tarballs and creates the GitHub Release. That push does not publish
+  npm.
+- npm publish is a separate manual run of `.github/workflows/npm-publish.yml`.
+  In Actions, choose "Publish npm", select the default branch as the
+  workflow source, and enter one existing tag such as `v0.3.9`. The tag
+  must already have a GitHub Release. The job checks the release checksums,
+  requires the tag version (without the leading `v`) to equal
+  `crates/viva/Cargo.toml`, then extracts those released binaries and
+  re-stages the packages via `prepare-packages.py`. Platform packages go
+  out first and the wrapper last. A missing `NPM_TOKEN`, a missing Release,
+  a version mismatch, or an npm version that already exists fails the run.
+  Nothing is published in those cases, and an existing version is not
+  overwritten.
 
 ## Updating
 

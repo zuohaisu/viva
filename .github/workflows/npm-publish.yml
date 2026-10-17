@@ -1,0 +1,106 @@
+name: Publish npm
+
+# A v* tag push creates the GitHub Release (release.yml) and stops there.
+# npm publish starts only when a person runs this workflow and names one
+# existing tag. The binaries are the ones already attached to that Release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing GitHub Release tag to publish, including the v prefix (for example v0.3.9)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Require a release tag whose version matches Cargo.toml
+        shell: bash
+        env:
+          PUBLISH_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          case "$PUBLISH_TAG" in
+            v[0-9]*) ;;
+            *)
+              echo "refusing: tag must look like v0.3.9 (got ${PUBLISH_TAG})"
+              exit 1
+              ;;
+          esac
+          version="${PUBLISH_TAG#v}"
+          cargo_version="$(python3 -c 'import pathlib, re, sys; q = chr(34); package = pathlib.Path("crates/viva/Cargo.toml").read_text().split("[lib]", 1)[0]; match = re.search("(?m)^version = " + q + "([^" + q + "]+)" + q, package); sys.exit("crates/viva/Cargo.toml has no package version") if match is None else print(match.group(1))')"
+          if [ "$version" != "$cargo_version" ]; then
+            echo "refusing: tag version ${version} does not match Cargo.toml ${cargo_version}"
+            exit 1
+          fi
+          echo "PUBLISH_VERSION=${version}" >> "$GITHUB_ENV"
+
+      - name: Download the GitHub Release binaries
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLISH_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          dest="${RUNNER_TEMP}/release"
+          mkdir -p "$dest"
+          gh release download "$PUBLISH_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$dest" \
+            --pattern "viva-macos-arm64.tar.gz" \
+            --pattern "viva-macos-arm64.tar.gz.sha256" \
+            --pattern "viva-macos-intel.tar.gz" \
+            --pattern "viva-macos-intel.tar.gz.sha256"
+          (
+            cd "$dest"
+            sha256sum -c viva-macos-arm64.tar.gz.sha256
+            sha256sum -c viva-macos-intel.tar.gz.sha256
+            tar -xzf viva-macos-arm64.tar.gz
+            tar -xzf viva-macos-intel.tar.gz
+          )
+          test -x "${RUNNER_TEMP}/release/viva-macos-arm64/viva"
+          test -x "${RUNNER_TEMP}/release/viva-macos-intel/viva"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org/
+
+      - name: Stage the npm packages from the released binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 packaging/npm/prepare-packages.py \
+            --version "$PUBLISH_VERSION" \
+            --bin-arm64 "${RUNNER_TEMP}/release/viva-macos-arm64/viva" \
+            --bin-x64 "${RUNNER_TEMP}/release/viva-macos-intel/viva"
+          python3 packaging/npm/check-staged-versions.py "$PUBLISH_VERSION"
+
+      - name: Publish to npm
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "refusing: the NPM_TOKEN secret is not set, so nothing was published"
+            exit 1
+          fi
+          for pkg in viva-darwin-arm64 viva-darwin-x64 viva; do
+            npm publish "packaging/npm/dist/$pkg" --access public
+          done
