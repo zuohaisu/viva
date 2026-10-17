@@ -99,6 +99,74 @@ struct ScrollThumb {
     len: u16,
 }
 
+/// How far into the thumb `row` sits, when the press landed on the thumb.
+pub(crate) fn scrollbar_grab(
+    offset: usize,
+    total: usize,
+    viewport: usize,
+    track: Rect,
+    row: u16,
+) -> Option<u16> {
+    let thumb = scrollbar_thumb(offset, total, viewport, track)?;
+    (row >= thumb.top && row < thumb.top.saturating_add(thumb.len)).then(|| row - thumb.top)
+}
+
+/// First visible row when a click should center the thumb on `row`.
+pub(crate) fn scrollbar_offset_from_row(
+    offset: usize,
+    total: usize,
+    viewport: usize,
+    track: Rect,
+    row: u16,
+) -> usize {
+    let Some(thumb) = scrollbar_thumb(offset, total, viewport, track) else {
+        return 0;
+    };
+    let clamped = row.clamp(track.y, track.bottom().saturating_sub(1));
+    let row_offset = usize::from(clamped.saturating_sub(track.y));
+    let desired = row_offset.saturating_sub(usize::from(thumb.len) / 2);
+    offset_from_thumb_top(offset, total, viewport, track, desired)
+}
+
+/// First visible row while dragging the thumb. `grab` is the row inside the
+/// thumb that the pointer grabbed, so the thumb does not jump.
+pub(crate) fn scrollbar_offset_from_drag(
+    offset: usize,
+    total: usize,
+    viewport: usize,
+    track: Rect,
+    row: u16,
+    grab: u16,
+) -> usize {
+    let clamped = row.clamp(track.y, track.bottom().saturating_sub(1));
+    let row_offset = usize::from(clamped.saturating_sub(track.y));
+    let desired = row_offset.saturating_sub(usize::from(grab));
+    offset_from_thumb_top(offset, total, viewport, track, desired)
+}
+
+fn offset_from_thumb_top(
+    offset: usize,
+    total: usize,
+    viewport: usize,
+    track: Rect,
+    desired_top: usize,
+) -> usize {
+    let max_offset = total.saturating_sub(viewport);
+    if max_offset == 0 {
+        return 0;
+    }
+    let thumb_len = scrollbar_thumb(offset, total, viewport, track)
+        .map(|thumb| usize::from(thumb.len))
+        .unwrap_or(1);
+    let max_top =
+        usize::from(track.height).saturating_sub(thumb_len.min(usize::from(track.height)));
+    if max_top == 0 {
+        return 0;
+    }
+    let desired = desired_top.min(max_top);
+    ((desired as f32 * max_offset as f32) / max_top as f32).round() as usize
+}
+
 fn scrollbar_thumb(
     offset: usize,
     total: usize,
@@ -354,5 +422,20 @@ mod tests {
             view.contains("…"),
             "a too-long title truncates gracefully: {view}"
         );
+    }
+
+    #[test]
+    fn dragging_the_thumb_down_increases_the_offset() {
+        let track = Rect::new(0, 0, 1, 10);
+        let top = scrollbar_offset_from_drag(0, 100, 10, track, 0, 0);
+        let bottom = scrollbar_offset_from_drag(0, 100, 10, track, 9, 0);
+        assert_eq!(top, 0);
+        assert!(
+            bottom > top,
+            "bottom of the track is further down: {bottom}"
+        );
+        let grabbed = scrollbar_grab(0, 100, 10, track, 0);
+        assert_eq!(grabbed, Some(0));
+        assert_eq!(scrollbar_grab(0, 100, 10, track, 5), None);
     }
 }
