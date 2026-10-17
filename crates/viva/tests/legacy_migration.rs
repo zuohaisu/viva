@@ -325,6 +325,7 @@ fn upgrade_renames_everything_and_keeps_every_row() {
                     ("memory".into(), 4),
                     ("skills".into(), 1),
                     ("knowledge".into(), 2),
+                    ("engagement".into(), 1),
                     ("tasks_executions".into(), 2),
                 ]);
                 assert_eq!(

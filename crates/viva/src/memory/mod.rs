@@ -160,6 +160,17 @@ impl LinkStatus {
     }
 }
 
+/// One fact visible under a recall filter, before text ranking.
+/// Opening projection uses this so a work session can list memories
+/// without inventing a search query.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VisibleMemory {
+    pub fact_id: String,
+    pub summary: String,
+    pub content: String,
+    pub knowledge_kind: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecalledFact {
     pub fact_id: String,
@@ -582,6 +593,26 @@ impl<'a> MemoryService<'a> {
         let candidates = self.scoped_candidates(viewer, project, query, limit * 3, filter)?;
         let ranked = retrieval::rerank(query, candidates, limit);
         self.pack_recall(viewer, project, ranked, max_total_bytes, filter)
+    }
+
+    /// Facts the filter already allows, with no query. Personal rows stay
+    /// out when `include_personal` is false.
+    pub fn list_visible(
+        &self,
+        viewer: &MemberId,
+        project: Option<&ProjectId>,
+        filter: &RecallFilter,
+    ) -> Result<Vec<VisibleMemory>> {
+        let rows = self.scoped_fact_rows(viewer, project, filter)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| VisibleMemory {
+                fact_id: row.fact_id,
+                summary: row.summary,
+                content: row.content,
+                knowledge_kind: row.knowledge_kind,
+            })
+            .collect())
     }
 
     pub fn probe(
