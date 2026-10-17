@@ -60,6 +60,34 @@ pub(crate) fn scroll_to_reveal(len: usize, selected: usize, height: usize) -> us
         .min(max_start)
 }
 
+/// A requested first row, clamped so `anchor` (first line, last line of the
+/// selected block) stays in the window. A request that already shows the
+/// block is kept. Without an anchor the request only clamps to the list.
+pub(crate) fn scroll_window(
+    len: usize,
+    requested: usize,
+    anchor: Option<(usize, usize)>,
+    height: usize,
+) -> usize {
+    if height == 0 || len == 0 {
+        return 0;
+    }
+    let max_start = len.saturating_sub(height);
+    let requested = requested.min(max_start);
+    let Some((first, last)) = anchor else {
+        return requested;
+    };
+    let first = first.min(len - 1);
+    let last = last.clamp(first, len - 1);
+    let block = last - first + 1;
+    if block >= height {
+        return first.min(max_start);
+    }
+    let low = last.saturating_add(1).saturating_sub(height);
+    let high = first.min(max_start);
+    requested.clamp(low, high.max(low))
+}
+
 /// Characters whose display cells overlap `[start, start + count)`.
 /// A wide character is kept whole when either of its columns is inside the span.
 pub(crate) fn slice_display_span(line: &str, start: usize, count: usize) -> String {
@@ -372,6 +400,15 @@ mod tests {
         assert_eq!(scroll_to_reveal(60, 59, 20), 40);
         assert_eq!(scroll_to_reveal(40, 39, 40), 0);
         assert_eq!(scroll_to_reveal(10, 9, 0), 0);
+    }
+
+    #[test]
+    fn scroll_window_moves_until_the_selection_would_leave() {
+        assert_eq!(scroll_window(40, 0, Some((4, 5)), 10), 0);
+        assert_eq!(scroll_window(40, 3, Some((4, 5)), 10), 3);
+        assert_eq!(scroll_window(40, 30, Some((4, 5)), 10), 4);
+        assert_eq!(scroll_window(40, 0, Some((30, 31)), 10), 22);
+        assert_eq!(scroll_window(40, 9, None, 10), 9);
     }
 
     fn col_of(line: &str, needle: &str) -> u16 {

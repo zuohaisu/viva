@@ -379,6 +379,9 @@ pub struct KeyMap {
     bindings: Vec<(Action, Chord)>,
     warnings: Vec<String>,
     onboarding_done: bool,
+    /// Herdr's `ui.copy_on_select`. True copies a drag or double-clicked
+    /// word on release. False leaves the highlight until Ctrl+C.
+    copy_on_select: bool,
     /// Builtin viva commands that are not `keys.*` actions.
     commands: Vec<(String, String, Option<Chord>)>,
 }
@@ -390,6 +393,7 @@ impl KeyMap {
             bindings: Vec::new(),
             warnings: Vec::new(),
             onboarding_done: false,
+            copy_on_select: true,
             commands: builtin_commands(),
         };
         for (field, spec) in DEFAULTS {
@@ -408,6 +412,11 @@ impl KeyMap {
 
     pub fn onboarding_done(&self) -> bool {
         self.onboarding_done
+    }
+
+    /// `copy_on_select` from config. Missing or illegal values stay true.
+    pub fn copy_on_select(&self) -> bool {
+        self.copy_on_select
     }
 
     pub fn prefix_label(&self) -> String {
@@ -569,6 +578,7 @@ impl KeyMap {
         let mut map = Self::builtin();
         let parsed = parse_config(text);
         map.onboarding_done = parsed.onboarding_done;
+        map.copy_on_select = parsed.copy_on_select;
         map.warnings.extend(parsed.warnings);
         if let Some(prefix) = parsed.prefix {
             match parse_prefix(&prefix) {
@@ -977,6 +987,7 @@ enum RawValue {
 
 struct ParsedConfig {
     onboarding_done: bool,
+    copy_on_select: bool,
     prefix: Option<String>,
     keys: Vec<(String, RawValue)>,
     commands: Vec<RawCommand>,
@@ -986,6 +997,7 @@ struct ParsedConfig {
 fn parse_config(text: &str) -> ParsedConfig {
     let mut parsed = ParsedConfig {
         onboarding_done: false,
+        copy_on_select: true,
         prefix: None,
         keys: Vec::new(),
         commands: Vec::new(),
@@ -1029,6 +1041,16 @@ fn parse_config(text: &str) -> ParsedConfig {
         if section.is_empty() && key == "onboarding" {
             saw_onboarding = true;
             parsed.onboarding_done = matches!(value, "false");
+            continue;
+        }
+        if section.is_empty() && key == "copy_on_select" {
+            match value {
+                "true" => parsed.copy_on_select = true,
+                "false" => parsed.copy_on_select = false,
+                _ => parsed
+                    .warnings
+                    .push("copy_on_select must be true or false; using true".into()),
+            }
             continue;
         }
         if section == "keys" {
@@ -1297,6 +1319,21 @@ mod tests {
                 )
             ),
             Some(Action::FocusPaneLeft)
+        );
+    }
+
+    #[test]
+    fn copy_on_select_defaults_true_and_parses_false() {
+        assert!(KeyMap::builtin().copy_on_select());
+        assert!(KeyMap::load_str("").copy_on_select());
+        assert!(!KeyMap::load_str("copy_on_select = false").copy_on_select());
+        assert!(KeyMap::load_str("copy_on_select = true").copy_on_select());
+        let bad = KeyMap::load_str("copy_on_select = maybe");
+        assert!(bad.copy_on_select());
+        assert!(
+            bad.warnings().iter().any(|w| w.contains("copy_on_select")),
+            "{:?}",
+            bad.warnings()
         );
     }
 
