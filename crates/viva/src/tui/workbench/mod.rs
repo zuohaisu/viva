@@ -3429,22 +3429,13 @@ impl WorkbenchApp {
             }
         }
 
-        if self.show_key_help {
-            self.draw_key_help(frame, main, &palette);
+        // Help, settings, goto, the pane menu, and rename cover the whole
+        // frame, including the status row. A screen that cannot hold the
+        // popup keeps the status bar and skips the popup.
+        let cover_status = self.overlay_drawable(frame.area());
+        if !cover_status {
+            self.draw_status_bar(frame, rows[2], &palette);
         }
-        if self.settings_open {
-            self.draw_settings(frame, main, &palette);
-        }
-        if self.goto.is_some() {
-            self.draw_goto(frame, main, &palette);
-        }
-        if self.context_menu.is_some() {
-            self.draw_context_menu(frame, &palette);
-        }
-        if self.pane_prompt.is_some() {
-            self.draw_pane_prompt(frame, &palette);
-        }
-        self.draw_status_bar(frame, rows[2], &palette);
         // File and handoff overlays cover the status bar. Drawn earlier,
         // the bar replaces their bottom border on a short terminal.
         if self.file_panel.is_some() {
@@ -3503,12 +3494,23 @@ impl WorkbenchApp {
             let area = centered(frame.area(), 80, 3 + listed as u16 + u16::from(listed > 0));
             frame.render_widget(Clear, area);
             let mut lines = vec![Line::from(format!("{}▏", prompt.text))];
+            let mut recent_start = 0;
+            let mut recent_slots = 0;
             if listed > 0 {
                 lines.push(Line::from(Span::styled(
                     "recent",
                     ratatui::style::Style::new().fg(palette.subtext0),
                 )));
-                for (i, w) in recent.iter().enumerate() {
+                // Input line plus the "recent" header sit above the items.
+                recent_slots = usize::from(area.height.saturating_sub(2)).saturating_sub(2);
+                let pick = prompt.pick.unwrap_or(0);
+                recent_start = crate::tui::text::scroll_to_reveal(listed, pick, recent_slots);
+                for (i, w) in recent
+                    .iter()
+                    .enumerate()
+                    .skip(recent_start)
+                    .take(recent_slots)
+                {
                     let marker = if prompt.pick == Some(i) { "›" } else { " " };
                     let current = if Some(&w.workspace_id) == self.model.workspace_id.as_ref() {
                         " (current)"
@@ -3527,9 +3529,36 @@ impl WorkbenchApp {
                 Paragraph::new(lines).block(Block::bordered().title(prompt.title())),
                 area,
             );
+            if listed > recent_slots && recent_slots > 0 {
+                self.paint_scrollbar(
+                    frame,
+                    popup_scroll_track(area, 2, recent_slots as u16),
+                    recent_start,
+                    listed,
+                    recent_slots,
+                );
+            }
         }
         if let Some(diff) = &self.diff_view {
             self.draw_diff(frame, frame.area(), diff);
+        }
+        if cover_status {
+            let screen = frame.area();
+            if self.show_key_help {
+                self.draw_key_help(frame, screen, &palette);
+            }
+            if self.settings_open {
+                self.draw_settings(frame, screen, &palette);
+            }
+            if self.goto.is_some() {
+                self.draw_goto(frame, screen, &palette);
+            }
+            if self.context_menu.is_some() {
+                self.draw_context_menu(frame, &palette);
+            }
+            if self.pane_prompt.is_some() {
+                self.draw_pane_prompt(frame, &palette);
+            }
         }
         self.note_focused_done();
     }
@@ -3750,7 +3779,52 @@ impl WorkbenchApp {
         }
     }
 
+    /// Help, settings, goto, the pane menu, and rename hide the status bar
+    /// and paint over that row. File and handoff already paint after the bar.
+    fn covers_status_bar(&self) -> bool {
+        self.show_key_help
+            || self.settings_open
+            || self.goto.is_some()
+            || self.context_menu.is_some()
+            || self.pane_prompt.is_some()
+    }
+
+    /// The popup can be drawn on this screen. Rename is a 3-row line; the
+    /// other chrome needs herdr's 6×4 minimum or it is left closed.
+    fn overlay_drawable(&self, screen: Rect) -> bool {
+        if !self.covers_status_bar() {
+            return false;
+        }
+        if self.pane_prompt.is_some() {
+            return screen.width >= 4 && screen.height >= 3;
+        }
+        popup_fits(screen)
+    }
+
+    fn paint_scrollbar(
+        &self,
+        frame: &mut Frame,
+        track: Rect,
+        offset: usize,
+        total: usize,
+        viewport: usize,
+    ) {
+        let palette = crate::tui::theme::Palette::catppuccin_mocha();
+        crate::tui::chrome::paint_scrollbar(
+            frame.buffer_mut(),
+            track,
+            offset,
+            total,
+            viewport,
+            palette.surface_dim,
+            palette.overlay0,
+        );
+    }
+
     fn draw_key_help(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        if !popup_fits(area) {
+            return;
+        }
         let body = self.keymap.help_text(&self.help_filter);
         let mut lines = vec![Line::from(Span::styled(
             format!(" keys · prefix {} · / filter ", self.keymap.prefix_label()),
@@ -3768,7 +3842,7 @@ impl WorkbenchApp {
                 ratatui::style::Style::new().fg(palette.subtext0),
             )));
         }
-        let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(1));
+        let height = (lines.len() as u16 + 2).min(area.height);
         let popup = centered(area, 90, height);
         frame.render_widget(Clear, popup);
         frame.render_widget(
@@ -3782,6 +3856,9 @@ impl WorkbenchApp {
     }
 
     fn draw_settings(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        if !popup_fits(area) {
+            return;
+        }
         let warnings = self.config_warnings();
         let mut body = format!(
             " settings\n prefix {}\n\n Enter or Esc continues and writes onboarding = false",
@@ -3804,6 +3881,9 @@ impl WorkbenchApp {
     }
 
     fn draw_goto(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        if !popup_fits(area) {
+            return;
+        }
         let rows = self.goto_rows();
         let cursor = self.goto.as_ref().map(|goto| goto.cursor).unwrap_or(0);
         let query = self
@@ -3811,27 +3891,44 @@ impl WorkbenchApp {
             .as_ref()
             .map(|goto| goto.query.clone())
             .unwrap_or_default();
-        let mut lines = vec![Line::from(format!(" goto  /{query}"))];
-        let mut last_group = String::new();
-        for (index, row) in rows
-            .iter()
-            .enumerate()
-            .take(area.height.saturating_sub(4) as usize)
-        {
-            if row.group != last_group {
-                last_group = row.group.clone();
-                lines.push(Line::from(Span::styled(
-                    format!(" {}", row.group),
-                    ratatui::style::Style::new().fg(palette.overlay0),
-                )));
-            }
-            let mark = if index == cursor { "▶" } else { " " };
-            lines.push(Line::from(format!(" {mark} {}", row.label)));
-        }
-        if rows.is_empty() {
-            lines.push(Line::from(" no terminals"));
-        }
         let popup = centered(area, 80, 18);
+        if !popup_fits(popup) {
+            return;
+        }
+        let mut entries: Vec<(Line<'static>, bool)> = Vec::new();
+        let mut last_group = String::new();
+        if rows.is_empty() {
+            entries.push((Line::from(" no terminals"), false));
+        }
+        for (index, row) in rows.iter().enumerate() {
+            if row.group != last_group {
+                last_group.clone_from(&row.group);
+                entries.push((
+                    Line::from(Span::styled(
+                        format!(" {}", row.group),
+                        ratatui::style::Style::new().fg(palette.overlay0),
+                    )),
+                    false,
+                ));
+            }
+            let selected = index == cursor;
+            let mark = if selected { "▶" } else { " " };
+            entries.push((Line::from(format!(" {mark} {}", row.label)), selected));
+        }
+        let slots = usize::from(popup.height.saturating_sub(2)).saturating_sub(1);
+        let selected_at = entries
+            .iter()
+            .position(|(_, selected)| *selected)
+            .unwrap_or(0);
+        let start = crate::tui::text::scroll_to_reveal(entries.len(), selected_at, slots);
+        let mut lines = vec![Line::from(format!(" goto  /{query}"))];
+        lines.extend(
+            entries
+                .iter()
+                .skip(start)
+                .take(slots)
+                .map(|(line, _)| line.clone()),
+        );
         frame.render_widget(Clear, popup);
         frame.render_widget(
             Paragraph::new(lines).block(
@@ -3841,20 +3938,32 @@ impl WorkbenchApp {
             ),
             popup,
         );
+        if entries.len() > slots && slots > 0 {
+            self.paint_scrollbar(
+                frame,
+                popup_scroll_track(popup, 1, slots as u16),
+                start,
+                entries.len(),
+                slots,
+            );
+        }
     }
 
     fn draw_context_menu(&mut self, frame: &mut Frame, palette: &Palette) {
         let Some(menu) = &self.context_menu else {
             return;
         };
+        let screen = frame.area();
+        if !popup_fits(screen) {
+            return;
+        }
         let labels = ["split right", "split down", "close", "rename", "zoom"];
         let selected = menu.selected;
         let column = menu.column;
         let row = menu.row;
-        let width = 18u16;
-        // Border, title row, one row per item, border.
-        let height = labels.len() as u16 + 3;
-        let screen = frame.area();
+        let width = 18u16.min(screen.width);
+        // Border, title row, one row per item, border. Shrink onto a short screen.
+        let height = (labels.len() as u16 + 3).min(screen.height);
         let x = column.min(screen.x.saturating_add(screen.width).saturating_sub(width));
         let y = row.min(
             screen
@@ -3863,9 +3972,11 @@ impl WorkbenchApp {
                 .saturating_sub(height),
         );
         let popup = Rect::new(x, y, width, height);
+        let item_slots = usize::from(height.saturating_sub(3)).max(1);
+        let start = crate::tui::text::scroll_to_reveal(labels.len(), selected, item_slots);
         let mut lines = vec![Line::from(" pane")];
         self.menu_hits.clear();
-        for (index, label) in labels.iter().enumerate() {
+        for (visible, index) in (start..labels.len()).take(item_slots).enumerate() {
             let style = if index == selected {
                 ratatui::style::Style::new()
                     .fg(palette.chip_fg())
@@ -3873,10 +3984,13 @@ impl WorkbenchApp {
             } else {
                 ratatui::style::Style::new().fg(palette.text)
             };
-            lines.push(Line::from(Span::styled(format!(" {label}"), style)));
+            lines.push(Line::from(Span::styled(
+                format!(" {}", labels[index]),
+                style,
+            )));
             self.menu_hits.push((
                 menu_actions()[index],
-                Rect::new(x, y.saturating_add(2 + index as u16), width, 1),
+                Rect::new(x, y.saturating_add(2 + visible as u16), width, 1),
             ));
         }
         frame.render_widget(Clear, popup);
@@ -3888,6 +4002,15 @@ impl WorkbenchApp {
             ),
             popup,
         );
+        if labels.len() > item_slots {
+            self.paint_scrollbar(
+                frame,
+                popup_scroll_track(popup, 1, item_slots as u16),
+                start,
+                labels.len(),
+                item_slots,
+            );
+        }
     }
 
     fn draw_pane_prompt(&self, frame: &mut Frame, palette: &Palette) {
@@ -4332,10 +4455,12 @@ impl WorkbenchApp {
             let selected_key = Some((self.focus, self.selected));
             let offset = sidebar_reveal_offset(section, selected_key, height);
             let mut visible = Vec::new();
-            // The last column is the separator. Text stays in the columns
-            // before it, or a wide character overwrites the line.
+            // The last column is the separator. A scrolling section keeps
+            // one more column for the thumb, so a wide character cannot
+            // cover either mark.
+            let overflow = section.len() > height && rect.width > 3;
             let text_rect = Rect {
-                width: rect.width.saturating_sub(1),
+                width: rect.width.saturating_sub(1 + u16::from(overflow)),
                 ..rect
             };
             for (y, (line, key)) in section.iter().skip(offset).take(height).enumerate() {
@@ -4344,11 +4469,20 @@ impl WorkbenchApp {
                     self.sidebar_hits.push((
                         *focus,
                         *index,
-                        Rect::new(rect.x, rect.y + y as u16, rect.width.saturating_sub(1), 1),
+                        Rect::new(rect.x, rect.y + y as u16, text_rect.width, 1),
                     ));
                 }
             }
             frame.render_widget(Paragraph::new(visible), text_rect);
+            if overflow {
+                self.paint_scrollbar(
+                    frame,
+                    Rect::new(text_rect.x + text_rect.width, rect.y, 1, rect.height),
+                    offset,
+                    section.len(),
+                    height,
+                );
+            }
         }
         // herdr's sidebar separator: one dim vertical line on the right.
         let buffer = frame.buffer_mut();
@@ -4668,6 +4802,15 @@ impl WorkbenchApp {
                     ),
                     area,
                 );
+                if panel.rows.len() > slots && slots > 0 {
+                    self.paint_scrollbar(
+                        frame,
+                        popup_scroll_track(area, 0, area.height.saturating_sub(2)),
+                        start,
+                        panel.rows.len(),
+                        slots,
+                    );
+                }
             }
         }
     }
@@ -4703,6 +4846,15 @@ impl WorkbenchApp {
             ),
             area,
         );
+        if picker.agents.len() > slots && slots > 0 {
+            self.paint_scrollbar(
+                frame,
+                popup_scroll_track(area, 0, area.height.saturating_sub(2)),
+                start,
+                picker.agents.len(),
+                slots,
+            );
+        }
     }
 
     fn draw_diff(&self, frame: &mut Frame, area: Rect, diff: &str) {
@@ -4775,6 +4927,32 @@ fn encode_char(modifiers: ratatui::crossterm::event::KeyModifiers, c: char) -> V
     }
     let mut buf = [0u8; 4];
     c.encode_utf8(&mut buf).as_bytes().to_vec()
+}
+
+/// Herdr refuses a popup that cannot be a 6×4 box. Below that the chrome
+/// would be the whole screen and the body would have no row.
+fn popup_fits(area: Rect) -> bool {
+    area.width >= 6 && area.height >= 4
+}
+
+/// Right-hand inner column of a bordered popup, `inset` rows below the
+/// inner top, `rows` tall. That is the list body, not the title border.
+fn popup_scroll_track(area: Rect, inset: u16, rows: u16) -> Rect {
+    Rect::new(
+        area.x + area.width.saturating_sub(2),
+        area.y.saturating_add(1).saturating_add(inset),
+        1,
+        rows,
+    )
+}
+
+/// A visible pane keeps a usable terminal grid. A 1×1 cell still hosts a
+/// 4×2 screen; a zero rect is not a pane.
+fn terminal_grid_size(rect: Rect) -> Option<(u16, u16)> {
+    if rect.width == 0 || rect.height == 0 {
+        return None;
+    }
+    Some((rect.width.max(4), rect.height.max(2)))
 }
 
 fn centered(area: Rect, percent_x: u16, height: u16) -> Rect {
@@ -5335,8 +5513,10 @@ fn run_client_inner(client: &mut crate::server::Client) -> Result<()> {
         polling.request(
             app.visible_geometry()
                 .iter()
-                .filter(|(_, r)| r.width > 0 && r.height > 0)
-                .map(|(id, r)| (id.clone(), r.width, r.height, app.scroll_offset(id)))
+                .filter_map(|(id, rect)| {
+                    terminal_grid_size(*rect)
+                        .map(|(cols, rows)| (id.clone(), cols, rows, app.scroll_offset(id)))
+                })
                 .collect(),
         );
         if !event::poll(std::time::Duration::from_millis(32))
@@ -8262,6 +8442,141 @@ mod v15_tui_fix_tests {
         assert!(!app.sidebar_hits.is_empty());
         super::tests::render(&mut app, 50, 30);
         assert!(app.sidebar_hits.is_empty());
+    }
+
+    #[test]
+    fn overlays_follow_the_selection_and_cover_the_status_bar() {
+        let mut model = sample();
+        for index in 0..40 {
+            model.terminals.push(TerminalRow {
+                terminal_id: format!("goto-{index:02}"),
+                worktree_id: Some("wt1".into()),
+                purpose: "shell".into(),
+                owner_label: "user_shell".into(),
+                live: Some(true),
+                agent_status: vec![],
+            });
+        }
+        model.workspaces = (0..8)
+            .map(|index| crate::workspaces::navigation::WorkspaceRow {
+                workspace_id: format!("ws-{index}"),
+                name: format!("WS{index}"),
+                source_path: None,
+                opened_at: format!("{index}"),
+            })
+            .collect();
+        let mut app = WorkbenchApp::new();
+        app.set_model(model);
+        let last = app.model().terminals.len() - 1;
+        app.goto = Some(GotoPicker {
+            query: String::new(),
+            searching: false,
+            cursor: last,
+            kind: None,
+        });
+        let frame = super::tests::render(&mut app, 80, 24);
+        assert!(
+            frame.contains("goto-39"),
+            "the last goto row must be on screen: {frame}"
+        );
+        assert!(
+            !frame.contains("▶ goto-00") && !frame.contains("▶ term-1"),
+            "the window must leave the first rows: {frame}"
+        );
+        assert!(
+            frame.contains('▕'),
+            "a scrolling goto list shows a thumb: {frame}"
+        );
+        assert!(
+            !frame.contains("ctrl+b  GOTO"),
+            "goto hides the status bar: {frame}"
+        );
+
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.show_key_help = true;
+        let frame = super::tests::render(&mut app, 80, 24);
+        assert!(frame.contains("keys"), "{frame}");
+        assert!(!frame.contains("ctrl+b  HELP"), "{frame}");
+        let tiny = super::tests::render(&mut app, 20, 3);
+        assert!(
+            tiny.contains("ctrl+b  HELP"),
+            "a screen under 6×4 keeps the status bar and skips the popup: {tiny}"
+        );
+
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.context_menu = Some(ContextMenu {
+            selected: 4,
+            column: 0,
+            row: 23,
+        });
+        let frame = super::tests::render(&mut app, 80, 24);
+        assert!(frame.contains("zoom"), "{frame}");
+        assert!(!frame.contains("ctrl+b  WORKBENCH"), "{frame}");
+
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.pane_prompt = Some("alpha".into());
+        let frame = super::tests::render(&mut app, 80, 24);
+        assert!(frame.contains("rename pane: alpha"), "{frame}");
+        assert!(!frame.contains("ctrl+b  WORKBENCH"), "{frame}");
+
+        let mut app = WorkbenchApp::new();
+        let mut model = sample();
+        model.workspaces = (0..8)
+            .map(|index| crate::workspaces::navigation::WorkspaceRow {
+                workspace_id: format!("ws-{index}"),
+                name: format!("WS{index}"),
+                source_path: None,
+                opened_at: format!("{index}"),
+            })
+            .collect();
+        app.set_model(model);
+        app.workspace_prompt = Some(WorkspacePrompt {
+            action: "open",
+            text: String::new(),
+            pick: Some(7),
+        });
+        let frame = super::tests::render(&mut app, 40, 10);
+        assert!(
+            frame.contains("WS0"),
+            "the picked recent row stays on a short popup: {frame}"
+        );
+        assert!(
+            !frame.contains("WS7"),
+            "rows above the window scroll off: {frame}"
+        );
+
+        let mut app = WorkbenchApp::new();
+        let mut model = sample();
+        for index in 0..30 {
+            model.worktrees.push(WorktreeRow {
+                worktree_id: format!("wt-{index}"),
+                project_id: "p1".into(),
+                path: format!("/wt/{index}"),
+                branch: format!("branch-{index}"),
+                dirty: Some(false),
+                task_id: None,
+                source: "created".into(),
+                pr_state: None,
+                ahead: None,
+                behind: None,
+            });
+        }
+        app.set_model(model);
+        let frame = super::tests::render(&mut app, 100, 24);
+        assert!(
+            frame.contains('▕'),
+            "the sidebar shows a thumb when the section overflows: {frame}"
+        );
+    }
+
+    #[test]
+    fn a_visible_sliver_still_hosts_a_two_by_four_terminal() {
+        assert_eq!(terminal_grid_size(Rect::new(0, 0, 1, 1)), Some((4, 2)));
+        assert_eq!(terminal_grid_size(Rect::new(0, 0, 0, 5)), None);
+        assert_eq!(terminal_grid_size(Rect::new(0, 0, 10, 8)), Some((10, 8)));
     }
 
     #[test]

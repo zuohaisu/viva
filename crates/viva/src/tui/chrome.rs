@@ -67,6 +67,65 @@ pub fn content_rect(rect: Rect) -> Rect {
     }
 }
 
+/// A one-column thumb on `track` when `total` rows do not fit in `viewport`.
+/// `offset` is the first visible row. The thumb sits at the top when the
+/// list is at the start and at the bottom when the last row is visible.
+pub fn paint_scrollbar(
+    buffer: &mut ratatui::buffer::Buffer,
+    track: Rect,
+    offset: usize,
+    total: usize,
+    viewport: usize,
+    track_color: ratatui::style::Color,
+    thumb_color: ratatui::style::Color,
+) {
+    let Some(thumb) = scrollbar_thumb(offset, total, viewport, track) else {
+        return;
+    };
+    for y in track.y..track.y.saturating_add(track.height) {
+        let color = if y >= thumb.top && y < thumb.top.saturating_add(thumb.len) {
+            thumb_color
+        } else {
+            track_color
+        };
+        if let Some(cell) = buffer.cell_mut(Position::new(track.x, y)) {
+            cell.set_char('▕').set_style(Style::new().fg(color));
+        }
+    }
+}
+
+struct ScrollThumb {
+    top: u16,
+    len: u16,
+}
+
+fn scrollbar_thumb(
+    offset: usize,
+    total: usize,
+    viewport: usize,
+    track: Rect,
+) -> Option<ScrollThumb> {
+    if viewport == 0 || total <= viewport || track.height == 0 || track.width == 0 {
+        return None;
+    }
+    let max_offset = total - viewport;
+    let offset = offset.min(max_offset);
+    let track_height = usize::from(track.height);
+    let thumb_len = ((viewport * track_height) as f32 / total as f32)
+        .round()
+        .clamp(1.0, track_height as f32) as u16;
+    let max_top = track.height - thumb_len;
+    let top = if max_top == 0 {
+        0
+    } else {
+        ((offset as f32 * f32::from(max_top)) / max_offset as f32).round() as u16
+    };
+    Some(ScrollThumb {
+        top: track.y.saturating_add(top),
+        len: thumb_len,
+    })
+}
+
 /// Draw the merged border grid for all pane rects. `focused` is the index
 /// of the focused pane (its border cells get the accent color); titles are
 /// stamped onto the named panes' top border rows.
