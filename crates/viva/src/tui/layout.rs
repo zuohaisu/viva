@@ -85,8 +85,7 @@ fn split_pair(area: Rect, axis: SplitAxis, ratio: u16) -> (Rect, Rect) {
     let ratio = u32::from(ratio.clamp(10, 90));
     match axis {
         SplitAxis::Horizontal => {
-            let first_width = ((u32::from(area.width) * ratio) / 100) as u16;
-            let second_width = area.width.saturating_sub(first_width);
+            let (first_width, second_width) = split_span(area.width, ratio);
             (
                 Rect {
                     width: first_width,
@@ -100,8 +99,7 @@ fn split_pair(area: Rect, axis: SplitAxis, ratio: u16) -> (Rect, Rect) {
             )
         }
         SplitAxis::Vertical => {
-            let first_height = ((u32::from(area.height) * ratio) / 100) as u16;
-            let second_height = area.height.saturating_sub(first_height);
+            let (first_height, second_height) = split_span(area.height, ratio);
             (
                 Rect {
                     height: first_height,
@@ -115,6 +113,20 @@ fn split_pair(area: Rect, axis: SplitAxis, ratio: u16) -> (Rect, Rect) {
             )
         }
     }
+}
+
+/// Integer percent split that keeps both sides on screen when `len >= 2`.
+///
+/// `len * 10 / 100` is 0 for every length under 10, which used to hand one
+/// pane a zero-width rect. A single cell cannot hold two panes; that case
+/// keeps the cell on the first side.
+fn split_span(len: u16, ratio: u32) -> (u16, u16) {
+    if len <= 1 {
+        return (len, 0);
+    }
+    let first = ((u32::from(len) * ratio) / 100) as u16;
+    let first = first.clamp(1, len - 1);
+    (first, len - first)
 }
 
 /// First/second split ratio as a percentage for the FIRST child
@@ -544,6 +556,27 @@ mod tests {
         let chrome = tree.render_layout_chrome(area);
         assert_eq!(chrome[0].1.width, 687, "chrome uses the same split");
         assert_eq!(tree.splits(area)[0].pos, 26 + 687 - 1);
+    }
+
+    #[test]
+    fn a_ten_percent_split_of_a_short_span_keeps_both_sides() {
+        let tree = PaneNode::Split {
+            axis: SplitAxis::Horizontal,
+            first: Box::new(PaneNode::leaf(PaneContent::Browser)),
+            second: Box::new(PaneNode::leaf(term("t"))),
+            ratio: 10,
+        };
+        let layout = tree.render_layout(Rect::new(0, 0, 9, 4));
+        assert_eq!(
+            layout[0].1.width, 1,
+            "10% of 9 columns is 0 without the clamp"
+        );
+        assert_eq!(layout[1].1.width, 8);
+        assert!(
+            layout
+                .iter()
+                .all(|(_, rect)| rect.width > 0 && rect.height > 0)
+        );
     }
 
     #[test]
