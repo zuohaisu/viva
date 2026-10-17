@@ -446,6 +446,7 @@ fn menu_actions() -> [MenuAction; 5] {
     ]
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DragSelect {
     id: String,
     area: Rect,
@@ -454,6 +455,9 @@ struct DragSelect {
     end_col: u16,
     end_row: u16,
     moved: bool,
+    /// Set when the selection is one double-clicked word. Ctrl+C copies
+    /// this text; a drag leaves it empty and slices the screen instead.
+    word: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -575,6 +579,12 @@ pub struct WorkbenchApp {
     tree_ops: Vec<crate::server::WorkbenchTreeOp>,
     pane_prompt: Option<String>,
     drag_select: Option<DragSelect>,
+    /// Herdr's `copy_on_select`. True copies when the drag is released.
+    /// False leaves the selection on screen until Ctrl+C copies it.
+    copy_on_select: bool,
+    retained_selection: Option<DragSelect>,
+    /// Previous content click, for double-click word selection.
+    last_text_click: Option<(std::time::Instant, u16, u16, String)>,
     last_copy: String,
     scrollback_edit: Option<String>,
     workspace_nav: usize,
@@ -644,6 +654,9 @@ impl WorkbenchApp {
             tree_ops: Vec::new(),
             pane_prompt: None,
             drag_select: None,
+            copy_on_select: true,
+            retained_selection: None,
+            last_text_click: None,
             last_copy: String::new(),
             scrollback_edit: None,
             workspace_nav: 0,
@@ -814,7 +827,13 @@ impl WorkbenchApp {
     fn input_modes(&self) -> crate::terminal::screen::InputModes {
         self.terminal_mode
             .as_ref()
-            .and_then(|id| self.snapshots.get(id))
+            .map(|id| self.pane_modes(id))
+            .unwrap_or_default()
+    }
+
+    fn pane_modes(&self, id: &str) -> crate::terminal::screen::InputModes {
+        self.snapshots
+            .get(id)
             .and_then(|s| s.screen.as_ref())
             .map(|s| s.modes.clone())
             .unwrap_or_default()
@@ -968,12 +987,15 @@ impl WorkbenchApp {
         }) {
             return None;
         }
-        if self.terminal_mode.as_deref() == Some(&id)
+        if self.pane_owns_mouse(&id)
             && !event.modifiers.contains(KeyModifiers::SHIFT)
             && self.scroll_offset(&id) == 0
         {
-            let modes = self.input_modes();
+            let modes = self.pane_modes(&id);
             if let Some(bytes) = terminal_view::mouse(event, rect, &modes) {
+                if self.terminal_mode.as_deref() != Some(id.as_str()) {
+                    self.enter_terminal_mode(id.clone());
+                }
                 return Some((id, bytes));
             }
         }
@@ -985,6 +1007,32 @@ impl WorkbenchApp {
         self.scroll_terminal(id, delta);
         None
     }
+
+    /// The focused terminal owns content clicks when its program asked for
+    /// the mouse. Sidebar focus, copy mode, and resize mode do not.
+    fn pane_owns_mouse(&self, id: &str) -> bool {
+        if self.copy_mode || self.resize_mode || self.navigate {
+            return self.terminal_mode.as_deref() == Some(id);
+        }
+        if self.focus == Focus::Panes {
+            return matches!(&self.pane_focus, PaneContent::Terminal(focused) if focused == id);
+        }
+        self.terminal_mode.as_deref() == Some(id)
+    }
+
+    /// Program mouse events are delivered and not also handled as selection
+    /// or a split drag. Anything else stays in the workbench.
+    fn dispatch_mouse(
+        &mut self,
+        mouse: ratatui::crossterm::event::MouseEvent,
+    ) -> Option<(String, Vec<u8>)> {
+        if let Some(forwarded) = self.terminal_mouse(mouse) {
+            return Some(forwarded);
+        }
+        self.on_mouse(mouse);
+        None
+    }
+
     /// Terminal ids currently placed in the pane tree (fetch budget: the
     /// tree never exceeds the layout cap).
     pub fn terminal_leaves(&self) -> Vec<String> {
@@ -1534,6 +1582,47 @@ impl WorkbenchApp {
         self.focus = Focus::Panes;
         self.remote_terminal = None;
         self.terminal_mode = Some(terminal_id.into());
+    }
+
+    /// When the pane focus is already a terminal, the next key belongs to
+    /// it. Sidebar, navigate, copy, and resize keep their own keys.
+    fn adopt_terminal_keyboard(&mut self) {
+        if self.terminal_mode.is_some()
+            || self.focus != Focus::Panes
+            || self.copy_mode
+            || self.resize_mode
+            || self.navigate
+        {
+            return;
+        }
+        if let PaneContent::Terminal(id) = self.pane_focus.clone() {
+            self.enter_terminal_mode(id);
+        }
+    }
+
+    /// `copy_on_select = false`: Ctrl+C copies the retained selection and
+    /// does not send 0x03. Any other key drops the highlight and still
+    /// goes to the pane. With `copy_on_select` on, Ctrl+C stays 0x03.
+    fn copy_retained_selection(&mut self, key: KeyEvent) -> bool {
+        use ratatui::crossterm::event::KeyModifiers;
+        if self.copy_on_select || self.retained_selection.is_none() {
+            return false;
+        }
+        let ctrl_c = key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'));
+        if !ctrl_c {
+            self.retained_selection = None;
+            return false;
+        }
+        let select = self.retained_selection.take().expect("checked above");
+        let text = select
+            .word
+            .clone()
+            .unwrap_or_else(|| self.selection_text(&select));
+        if !text.is_empty() {
+            self.copy_to_clipboard(&text);
+        }
+        true
     }
 
     pub fn leave_terminal_mode(&mut self) {
@@ -2639,6 +2728,9 @@ impl WorkbenchApp {
                 _ => KeyOutcome::Ignored,
             };
         }
+        // A focused terminal pane receives keys the way herdr's terminal
+        // mode does. Sidebar focus does not. Prefix still takes the next key.
+        self.adopt_terminal_keyboard();
         if self.navigate || self.terminal_mode.is_some() || self.copy_mode || self.resize_mode {
             if self.terminal_mode.is_some() && self.blocked_remote() {
                 return KeyOutcome::Handled;
@@ -2703,6 +2795,9 @@ impl WorkbenchApp {
                 return self.apply_action(action);
             }
             if self.terminal_mode.is_some() {
+                if self.copy_retained_selection(key) {
+                    return KeyOutcome::Handled;
+                }
                 if let Some(id) = self.terminal_mode.clone() {
                     self.scroll_offsets.insert(id, 0);
                 }
@@ -2999,7 +3094,12 @@ impl WorkbenchApp {
                     if select.moved {
                         let text = self.selection_text(&select);
                         if !text.is_empty() {
-                            self.copy_to_clipboard(&text);
+                            if self.copy_on_select {
+                                self.copy_to_clipboard(&text);
+                                self.retained_selection = None;
+                            } else {
+                                self.retained_selection = Some(select);
+                            }
                         }
                     }
                 }
@@ -3049,20 +3149,22 @@ impl WorkbenchApp {
         let Some(snap) = self.snapshots.get(&select.id) else {
             return String::new();
         };
-        let lines: Vec<&str> = snap
-            .scrollback
-            .iter()
-            .chain(snap.visible.iter())
-            .map(String::as_str)
-            .collect();
+        let (lines, origin) = viewport_lines(snap);
         if lines.is_empty() {
             return String::new();
         }
+        // A projected screen is already the viewport, so row 0 is the top
+        // drawn line. The plain visible fallback still clamps onto the
+        // last row when a drag runs past it.
+        let clamp = snap.screen.is_none();
         let row_of = |y: u16| -> usize {
-            let rel = y.saturating_sub(select.area.y) as usize;
-            let visible = snap.visible.len().max(1);
-            let start = lines.len().saturating_sub(visible);
-            (start + rel).min(lines.len().saturating_sub(1))
+            let rel = usize::from(y.saturating_sub(select.area.y));
+            let idx = origin.saturating_add(rel);
+            if clamp {
+                idx.min(lines.len().saturating_sub(1))
+            } else {
+                idx
+            }
         };
         let mut r1 = row_of(select.start_row.min(select.end_row));
         let mut r2 = row_of(select.start_row.max(select.end_row));
@@ -3078,21 +3180,109 @@ impl WorkbenchApp {
         } else {
             (c2, c1)
         };
+        let line = |idx: usize| lines.get(idx).map(String::as_str).unwrap_or("");
         if r1 == r2 {
-            let line = lines[r1];
-            return line
-                .chars()
-                .skip(c1.min(c2))
-                .take(c1.abs_diff(c2).max(1))
-                .collect();
+            let start = c1.min(c2);
+            let count = c1.abs_diff(c2).saturating_add(1);
+            return super::text::slice_display_span(line(r1), start, count);
         }
         let mut out = Vec::new();
-        out.push(lines[r1].chars().skip(c1).collect::<String>());
-        for line in lines.iter().take(r2).skip(r1 + 1) {
-            out.push((*line).to_string());
+        out.push(super::text::slice_display_span(
+            line(r1),
+            c1,
+            usize::MAX - c1,
+        ));
+        for idx in (r1 + 1)..r2 {
+            out.push(line(idx).to_string());
         }
-        out.push(lines[r2].chars().take(c2.max(1)).collect());
+        out.push(super::text::slice_display_span(
+            line(r2),
+            0,
+            c2.saturating_add(1),
+        ));
         out.join("\n")
+    }
+
+    /// Double-click on pane text copies one word. It does not rename the
+    /// pane or the tab. Divider and sidebar double-clicks are handled earlier.
+    fn double_click_copies_word(&mut self, id: &str, area: &Rect, column: u16, row: u16) -> bool {
+        let now = std::time::Instant::now();
+        let previous = self.last_text_click.take();
+        let Some((at, x, y, prev_id)) = previous else {
+            return false;
+        };
+        if prev_id != id || x != column || y != row || now.duration_since(at) > DOUBLE_CLICK_WINDOW
+        {
+            self.last_text_click = Some((at, x, y, prev_id));
+            return false;
+        }
+        self.drag_select = None;
+        self.pane_prompt = None;
+        let Some(span) = word_at_pane(self, id, *area, column, row) else {
+            return true;
+        };
+        if self.copy_on_select {
+            self.copy_to_clipboard(&span.text);
+            self.retained_selection = None;
+            self.set_status(format!("copied {}", span.text));
+        } else {
+            self.retained_selection = Some(DragSelect {
+                id: id.to_string(),
+                area: *area,
+                start_col: area.x.saturating_add(span.start),
+                start_row: row,
+                end_col: area.x.saturating_add(span.end),
+                end_row: row,
+                moved: true,
+                word: Some(span.text.clone()),
+            });
+            self.set_status(format!("selected {}", span.text));
+        }
+        true
+    }
+
+    fn paint_retained_selection(&self, frame: &mut Frame) {
+        let Some(sel) = &self.retained_selection else {
+            return;
+        };
+        let buffer = frame.buffer_mut();
+        let y0 = sel.start_row.min(sel.end_row);
+        let y1 = sel.start_row.max(sel.end_row);
+        for y in y0..=y1 {
+            let (x0, x1) = if y0 == y1 {
+                (
+                    sel.start_col.min(sel.end_col),
+                    sel.start_col.max(sel.end_col),
+                )
+            } else if y == y0 {
+                let left = if sel.start_row <= sel.end_row {
+                    sel.start_col
+                } else {
+                    sel.end_col
+                };
+                (
+                    left,
+                    sel.area.x.saturating_add(sel.area.width.saturating_sub(1)),
+                )
+            } else if y == y1 {
+                let right = if sel.start_row <= sel.end_row {
+                    sel.end_col
+                } else {
+                    sel.start_col
+                };
+                (sel.area.x, right)
+            } else {
+                (
+                    sel.area.x,
+                    sel.area.x.saturating_add(sel.area.width.saturating_sub(1)),
+                )
+            };
+            for x in x0..=x1 {
+                if let Some(cell) = buffer.cell_mut(ratatui::layout::Position::new(x, y)) {
+                    cell.set_style(ratatui::style::Style::new().reversed());
+                }
+            }
+        }
     }
 
     fn on_left_down(&mut self, column: u16, row: u16) {
@@ -3252,6 +3442,12 @@ impl WorkbenchApp {
                     .find(|(pane, _)| pane == id)
                     .cloned()
                 {
+                    if self.double_click_copies_word(id, &rect, column, row) {
+                        return;
+                    }
+                    self.retained_selection = None;
+                    self.last_text_click =
+                        Some((std::time::Instant::now(), column, row, id.clone()));
                     self.drag_select = Some(DragSelect {
                         id: id.clone(),
                         area: rect,
@@ -3260,6 +3456,7 @@ impl WorkbenchApp {
                         end_col: column,
                         end_row: row,
                         moved: false,
+                        word: None,
                     });
                 }
             }
@@ -3409,6 +3606,7 @@ impl WorkbenchApp {
                 }
             }
         }
+        self.paint_retained_selection(frame);
 
         // A live divider drag lights up the dragged line (herdr feedback):
         // restyle the shared divider cells over the drawn chrome. Overlays
@@ -5036,6 +5234,46 @@ fn centered(area: Rect, percent_x: u16, height: u16) -> Rect {
 
 /// Whether the cell (`x`, `y`) lies inside `rect` (zero-size rects contain
 /// nothing).
+/// Lines the pane is showing. A screen projection is that viewport, top to
+/// bottom. Without one, the window is the tail of scrollback plus `visible`.
+fn viewport_lines(snap: &crate::terminal::TerminalSnapshot) -> (Vec<String>, usize) {
+    if let Some(screen) = &snap.screen {
+        let lines = screen
+            .lines
+            .iter()
+            .map(|row| row.iter().map(|run| run.0.as_str()).collect())
+            .collect();
+        return (lines, 0);
+    }
+    let lines: Vec<String> = snap
+        .scrollback
+        .iter()
+        .chain(snap.visible.iter())
+        .cloned()
+        .collect();
+    let visible = snap.visible.len().max(1);
+    let origin = lines.len().saturating_sub(visible);
+    (lines, origin)
+}
+
+fn word_at_pane(
+    app: &WorkbenchApp,
+    id: &str,
+    area: Rect,
+    column: u16,
+    row: u16,
+) -> Option<super::text::WordSpan> {
+    let snap = app.snapshots.get(id)?;
+    let (lines, origin) = viewport_lines(snap);
+    if lines.is_empty() {
+        return None;
+    }
+    let rel = usize::from(row.saturating_sub(area.y));
+    let idx = origin.saturating_add(rel);
+    let line = lines.get(idx)?;
+    super::text::word_span_at_column(line, column.saturating_sub(area.x))
+}
+
 fn contains_point(rect: Rect, x: u16, y: u16) -> bool {
     x >= rect.x
         && y >= rect.y
@@ -5639,16 +5877,13 @@ fn run_client_inner(client: &mut crate::server::Client) -> Result<()> {
             }
             Event::Resize(_, _) => {}
             Event::Mouse(mouse) => {
-                if let Some((id, bytes)) = app.terminal_mouse(mouse) {
+                if let Some((id, bytes)) = app.dispatch_mouse(mouse) {
                     if let Err(e) = deliver_terminal_bytes(client, &mut app, &polling, &id, bytes) {
                         app.set_status(e);
                     }
-                } else {
-                    app.on_mouse(mouse);
-                    if let Some(action) = app.take_mouse_action() {
-                        if let Err(err) = apply_client_action(client, &mut app, action) {
-                            app.set_status(format!("navigation failed: {err}"));
-                        }
+                } else if let Some(action) = app.take_mouse_action() {
+                    if let Err(err) = apply_client_action(client, &mut app, action) {
+                        app.set_status(format!("navigation failed: {err}"));
                     }
                 }
             }
@@ -6157,6 +6392,37 @@ mod tests {
         terminal.backend().to_string()
     }
 
+    /// Reversed cells on one row, left to right, plus the glyphs in them.
+    fn reversed_on_row(
+        app: &mut WorkbenchApp,
+        w: u16,
+        h: u16,
+        row: u16,
+    ) -> (Vec<u16>, String, String) {
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|f| app.draw(f)).expect("draw");
+        let frame = terminal.backend().to_string();
+        let buffer = terminal.backend().buffer().clone();
+        let mut columns = Vec::new();
+        let mut symbols = String::new();
+        for x in 0..w {
+            let Some(cell) = buffer.cell(ratatui::layout::Position::new(x, row)) else {
+                continue;
+            };
+            if cell.modifier.contains(ratatui::style::Modifier::REVERSED) {
+                columns.push(x);
+                symbols.push_str(cell.symbol());
+            }
+        }
+        (columns, symbols, frame)
+    }
+
+    fn reversed_columns(app: &mut WorkbenchApp, w: u16, h: u16, row: u16) -> (Vec<u16>, String) {
+        let (columns, _symbols, frame) = reversed_on_row(app, w, h, row);
+        (columns, frame)
+    }
+
     pub(super) fn sample() -> WorkbenchModel {
         WorkbenchModel {
             projects: vec![ProjectRow {
@@ -6631,6 +6897,583 @@ mod tests {
             app.terminal_mouse(shifted).is_none(),
             "Shift reserves host scroll/selection"
         );
+    }
+
+    #[test]
+    fn focused_terminal_receives_ctrl_c_and_mouse_without_renaming() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let ctrl_c = KeyEvent::new(
+            KeyCode::Char('c'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        );
+
+        let mut idle = WorkbenchApp::new();
+        idle.pane_focus = PaneContent::Terminal("term-1".into());
+        assert_ne!(
+            idle.on_key(ctrl_c),
+            KeyOutcome::Forward(vec![0x03]),
+            "sidebar focus does not send Ctrl+C into a pane"
+        );
+        assert!(!idle.quit_requested());
+
+        let mut app = WorkbenchApp::new();
+        app.focus = Focus::Panes;
+        app.pane_focus = PaneContent::Terminal("term-1".into());
+        assert_eq!(app.on_key(ctrl_c), KeyOutcome::Forward(vec![0x03]));
+        assert!(!app.quit_requested(), "Ctrl+C does not detach");
+        assert_eq!(app.terminal_mode(), Some("term-1"));
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Esc)),
+            KeyOutcome::Forward(vec![27])
+        );
+        assert_eq!(app.terminal_mode(), Some("term-1"));
+        assert_eq!(
+            app.on_key(KeyEvent::new(
+                KeyCode::Char('b'),
+                ratatui::crossterm::event::KeyModifiers::CONTROL,
+            )),
+            KeyOutcome::Handled,
+            "prefix still takes the next key"
+        );
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('q'))),
+            KeyOutcome::QuitRequested,
+            "prefix+q still detaches"
+        );
+        assert!(app.quit_requested());
+
+        let mut app = app_with_terminal_pane();
+        app.set_snapshot(
+            "t1",
+            snapshot_with_modes(crate::terminal::screen::InputModes {
+                mouse_mode: 3,
+                mouse_encoding: 2,
+                ..Default::default()
+            }),
+        );
+        app.pane_geometry = vec![("t1".into(), Rect::new(0, 0, 100, 40))];
+        app.enter_terminal_mode("t1");
+        let divider = app.grid.splits(app.last_pane_area.unwrap())[0].pos;
+        let on_divider = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: divider,
+            row: 10,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        };
+        for column in [
+            divider.saturating_sub(1),
+            divider,
+            divider.saturating_add(1),
+        ] {
+            let event = MouseEvent {
+                column,
+                ..on_divider
+            };
+            assert!(
+                app.terminal_mouse(event).is_none(),
+                "column {column} on the divider band stays with the workbench"
+            );
+        }
+        let on_text = MouseEvent {
+            column: divider.saturating_add(8),
+            ..on_divider
+        };
+        let (id, bytes) = app.dispatch_mouse(on_text).expect("content click");
+        assert_eq!(id, "t1");
+        assert!(!bytes.is_empty(), "{bytes:?}");
+        assert!(
+            app.drag_select.is_none(),
+            "a reported click is not also a workbench selection"
+        );
+        let x = on_text.column + 1;
+        let y = on_text.row + 1;
+        let drag = MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            ..on_text
+        };
+        let (_, drag_bytes) = app.dispatch_mouse(drag).expect("drag goes to the program");
+        assert_eq!(
+            drag_bytes,
+            format!("\x1b[<32;{x};{y}M").into_bytes(),
+            "drag bytes {drag_bytes:?}"
+        );
+        assert!(app.drag_select.is_none(), "drag does not start a selection");
+        let wheel = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            ..on_text
+        };
+        let (_, wheel_bytes) = app
+            .dispatch_mouse(wheel)
+            .expect("wheel goes to the program");
+        assert_eq!(
+            wheel_bytes,
+            format!("\x1b[<64;{x};{y}M").into_bytes(),
+            "wheel bytes {wheel_bytes:?}"
+        );
+        let shifted = MouseEvent {
+            modifiers: ratatui::crossterm::event::KeyModifiers::SHIFT,
+            ..on_text
+        };
+        assert!(
+            app.terminal_mouse(shifted).is_none(),
+            "Shift+click stays here"
+        );
+        let right = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            ..on_text
+        };
+        assert!(app.terminal_mouse(right).is_none());
+        app.on_mouse(right);
+        assert!(
+            app.context_menu.is_some(),
+            "right click opens the workbench menu"
+        );
+        assert!(app.pane_prompt.is_none());
+
+        app.context_menu = None;
+        app.file_panel = Some(FilePanel {
+            worktree_id: "wt".into(),
+            rows: vec![("a".into(), "M".into())],
+            truncated: false,
+            total: 1,
+            selected: 0,
+            viewing: None,
+            full_path: None,
+            scroll: 0,
+        });
+        assert!(
+            app.terminal_mouse(on_text).is_none(),
+            "an open overlay keeps the click"
+        );
+
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.last_pane_area = Some(Rect::new(0, 0, 80, 24));
+        app.set_snapshot("t1", snapshot_with(&["alpha，beta"]));
+        app.pane_geometry = vec![("t1".into(), Rect::new(0, 0, 40, 10))];
+        app.enter_terminal_mode("t1");
+        if let Some(scene) = app.scenes.scenes.get_mut(&app.scenes.selected) {
+            if let Some(tab) = scene.tabs.iter_mut().find(|tab| tab.id == scene.active) {
+                tab.name = "session".into();
+                tab.pane_names.insert("t1".into(), "shell".into());
+            }
+        }
+        let beta = super::super::text::display_width("alpha，") as u16;
+        let word = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: beta,
+            row: 0,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        };
+        app.on_mouse(word);
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..word
+        });
+        app.on_mouse(word);
+        let frame = render(&mut app, 80, 24);
+        assert_eq!(
+            app.last_copy(),
+            "beta",
+            "double-click copies the word under the display column\n{frame}"
+        );
+        assert!(
+            app.pane_prompt.is_none(),
+            "double-click does not rename\n{frame}"
+        );
+        let (tab_name, pane_names) = active_labels(&app);
+        assert_eq!(tab_name, "session", "{frame}");
+        assert_eq!(pane_names.get("t1").map(String::as_str), Some("shell"));
+        let comma = MouseEvent {
+            column: beta - 1,
+            ..word
+        };
+        app.on_mouse(comma);
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..comma
+        });
+        app.on_mouse(comma);
+        assert_eq!(
+            app.last_copy(),
+            "beta",
+            "the second column of ， is not the next word"
+        );
+        assert!(app.pane_prompt.is_none());
+        assert_eq!(active_labels(&app).0, "session");
+
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::Split {
+            axis: SplitAxis::Horizontal,
+            first: Box::new(PaneNode::leaf(PaneContent::Browser)),
+            second: Box::new(PaneNode::leaf(PaneContent::Terminal("t1".into()))),
+            ratio: 70,
+        };
+        let pos = app.grid.splits(app.last_pane_area.unwrap())[0].pos;
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: pos,
+            row: 8,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        };
+        app.on_mouse(click);
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..click
+        });
+        app.on_mouse(click);
+        assert!(matches!(app.grid, PaneNode::Split { ratio: 50, .. }));
+
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.last_pane_area = Some(Rect::new(0, 0, 80, 24));
+        app.copy_on_select = false;
+        app.set_snapshot("t1", snapshot_with(&["abcdef"]));
+        app.pane_geometry = vec![("t1".into(), Rect::new(0, 10, 20, 5))];
+        app.enter_terminal_mode("t1");
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 10,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        });
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 2,
+            row: 10,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        });
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 2,
+            row: 10,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        });
+        assert!(
+            app.last_copy().is_empty(),
+            "the selection stays until Ctrl+C"
+        );
+        assert!(app.retained_selection.is_some());
+        let (reversed, kept) = reversed_columns(&mut app, 80, 24, 10);
+        assert_eq!(
+            reversed,
+            vec![0, 1, 2],
+            "the highlight includes the cell under the pointer\n{kept}"
+        );
+        assert_eq!(app.on_key(ctrl_c), KeyOutcome::Handled);
+        assert_eq!(
+            app.last_copy(),
+            "abc",
+            "Ctrl+C copies the highlighted cells"
+        );
+        assert!(app.retained_selection.is_none());
+        assert!(!app.quit_requested());
+        assert_eq!(app.on_key(ctrl_c), KeyOutcome::Forward(vec![0x03]));
+    }
+
+    #[test]
+    fn drag_copies_the_release_cell_and_a_scrolled_screen_row() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let down = |column, row| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        };
+        let drag = |column, row| MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column,
+            row,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        };
+        let up = |column, row| MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column,
+            row,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        };
+
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.last_pane_area = Some(Rect::new(0, 0, 80, 24));
+        app.set_snapshot("t1", snapshot_with(&["abcdef", "ghijkl"]));
+        app.pane_geometry = vec![("t1".into(), Rect::new(0, 10, 20, 5))];
+        app.enter_terminal_mode("t1");
+        app.on_mouse(down(0, 10));
+        app.on_mouse(drag(2, 10));
+        app.on_mouse(up(2, 10));
+        assert_eq!(
+            app.last_copy(),
+            "abc",
+            "releasing on column 2 copies a, b, and c"
+        );
+
+        app.last_text_click = None;
+        app.on_mouse(down(0, 10));
+        app.on_mouse(drag(2, 11));
+        app.on_mouse(up(2, 11));
+        assert_eq!(app.last_copy(), "abcdef\nghi");
+
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.focus = Focus::Panes;
+        app.sidebar_collapsed = true;
+        app.scroll_offsets.insert("t1".into(), 4);
+        app.set_snapshot(
+            "t1",
+            TerminalSnapshot {
+                screen: Some(crate::terminal::screen::ScreenView {
+                    lines: vec![vec![crate::terminal::screen::Run(
+                        "cargo test".into(),
+                        10,
+                        0,
+                        0,
+                        0,
+                    )]],
+                    cursor: (0, 0),
+                    cursor_visible: false,
+                    modes: crate::terminal::screen::InputModes::default(),
+                    scrollback_offset: 4,
+                    retained: 4,
+                }),
+                cols: 80,
+                rows: 12,
+                visible: vec!["current page".into()],
+                scrollback: vec!["even older".into()],
+                scrollback_capped: false,
+                total_output_bytes: 32,
+                log_truncated: false,
+            },
+        );
+        let frame = render(&mut app, 120, 30);
+        assert!(
+            frame.contains("cargo test"),
+            "the scrolled screen is what is drawn\n{frame}"
+        );
+        assert!(
+            !frame.contains("current page"),
+            "visible stays on the latest page and is not drawn\n{frame}"
+        );
+        let area = app
+            .pane_geometry
+            .iter()
+            .find(|(id, _)| id == "t1")
+            .expect("pane geometry")
+            .1;
+        let column = area.x;
+        let row = area.y;
+        app.copy_on_select = false;
+        app.on_mouse(down(column, row));
+        app.on_mouse(up(column, row));
+        app.on_mouse(down(column, row));
+        let (reversed, symbols, kept) = reversed_on_row(&mut app, 120, 30, row);
+        assert_eq!(
+            symbols, "cargo",
+            "the highlight sits on the drawn row\n{kept}"
+        );
+        assert_eq!(reversed, (column..column + 5).collect::<Vec<_>>(), "{kept}");
+        let ctrl_c = KeyEvent::new(
+            KeyCode::Char('c'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        );
+        assert_eq!(app.on_key(ctrl_c), KeyOutcome::Handled);
+        assert_eq!(app.last_copy(), "cargo", "{kept}");
+        assert_ne!(app.last_copy(), "current");
+
+        app.on_mouse(down(column, row));
+        app.on_mouse(drag(column + 4, row));
+        app.on_mouse(up(column + 4, row));
+        assert_eq!(app.on_key(ctrl_c), KeyOutcome::Handled);
+        assert_eq!(
+            app.last_copy(),
+            "cargo",
+            "a drag on the scrolled screen copies that row, including the release cell"
+        );
+    }
+
+    #[test]
+    fn focused_pane_mouse_reports_without_a_prior_key() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.focus = Focus::Panes;
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        assert!(app.terminal_mode().is_none());
+        app.set_snapshot(
+            "t1",
+            snapshot_with_modes(crate::terminal::screen::InputModes {
+                mouse_mode: 3,
+                mouse_encoding: 2,
+                ..Default::default()
+            }),
+        );
+        app.pane_geometry = vec![("t1".into(), Rect::new(2, 1, 40, 12))];
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 6,
+            row: 4,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        };
+        let (id, bytes) = app.dispatch_mouse(click).expect("focused pane click");
+        assert_eq!(id, "t1");
+        assert_eq!(bytes, b"\x1b[<0;5;4M");
+        assert_eq!(app.terminal_mode(), Some("t1"));
+        assert!(app.drag_select.is_none());
+
+        let mut sidebar = app_with_terminal_pane();
+        sidebar.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        sidebar.focus = Focus::Worktrees;
+        sidebar.pane_focus = PaneContent::Terminal("t1".into());
+        sidebar.set_snapshot(
+            "t1",
+            snapshot_with_modes(crate::terminal::screen::InputModes {
+                mouse_mode: 3,
+                mouse_encoding: 2,
+                ..Default::default()
+            }),
+        );
+        sidebar.pane_geometry = vec![("t1".into(), Rect::new(2, 1, 40, 12))];
+        assert!(
+            sidebar.dispatch_mouse(click).is_none(),
+            "sidebar focus does not hand the click to the program"
+        );
+    }
+
+    #[test]
+    fn mouse_reporting_blocks_word_selection_and_keeps_shift_click() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.focus = Focus::Panes;
+        let mut snap = snapshot_with(&["alpha，beta"]);
+        snap.screen = Some(crate::terminal::screen::ScreenView {
+            lines: vec![],
+            cursor: (0, 0),
+            cursor_visible: true,
+            modes: crate::terminal::screen::InputModes {
+                mouse_mode: 3,
+                mouse_encoding: 2,
+                ..Default::default()
+            },
+            scrollback_offset: 0,
+            retained: 0,
+        });
+        app.set_snapshot("t1", snap);
+        app.pane_geometry = vec![("t1".into(), Rect::new(0, 0, 40, 10))];
+        app.enter_terminal_mode("t1");
+        let beta = super::super::text::display_width("alpha，") as u16;
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: beta,
+            row: 0,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        };
+        assert!(app.dispatch_mouse(click).is_some());
+        app.dispatch_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..click
+        });
+        assert!(app.dispatch_mouse(click).is_some());
+        let frame = render(&mut app, 60, 16);
+        assert!(
+            app.last_copy().is_empty(),
+            "mouse reporting does not also copy a word\n{frame}"
+        );
+        assert!(app.pane_prompt.is_none(), "{frame}");
+        let shifted = MouseEvent {
+            modifiers: ratatui::crossterm::event::KeyModifiers::SHIFT,
+            ..click
+        };
+        assert!(
+            app.dispatch_mouse(shifted).is_none(),
+            "Shift+click stays with the workbench"
+        );
+    }
+
+    #[test]
+    fn retained_word_is_copied_by_ctrl_c_not_by_the_double_click() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let ctrl_c = KeyEvent::new(
+            KeyCode::Char('c'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        );
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.focus = Focus::Panes;
+        app.copy_on_select = false;
+        app.set_snapshot("t1", snapshot_with(&["alpha，beta"]));
+        app.pane_geometry = vec![("t1".into(), Rect::new(0, 0, 40, 10))];
+        app.enter_terminal_mode("t1");
+        let beta = super::super::text::display_width("alpha，") as u16;
+        let word = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: beta,
+            row: 0,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        };
+        app.on_mouse(word);
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..word
+        });
+        app.on_mouse(word);
+        assert!(app.last_copy().is_empty());
+        assert_eq!(
+            app.retained_selection
+                .as_ref()
+                .and_then(|sel| sel.word.as_deref()),
+            Some("beta")
+        );
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('x'))),
+            KeyOutcome::Forward(b"x".to_vec()),
+            "a normal key still reaches the pane"
+        );
+        assert!(
+            app.retained_selection.is_none(),
+            "any other key clears the retained selection"
+        );
+        assert!(app.last_copy().is_empty());
+        app.on_mouse(word);
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..word
+        });
+        app.on_mouse(word);
+        let frame = render(&mut app, 60, 16);
+        assert!(
+            app.last_copy().is_empty(),
+            "copy_on_select off leaves the word on screen\n{frame}"
+        );
+        assert_eq!(
+            app.retained_selection
+                .as_ref()
+                .and_then(|sel| sel.word.as_deref()),
+            Some("beta"),
+            "{frame}"
+        );
+        assert!(app.pane_prompt.is_none(), "{frame}");
+        assert_eq!(app.on_key(ctrl_c), KeyOutcome::Handled);
+        assert_eq!(app.last_copy(), "beta");
+        assert!(app.retained_selection.is_none());
+        assert!(!app.quit_requested());
+        assert_eq!(app.on_key(ctrl_c), KeyOutcome::Forward(vec![0x03]));
+    }
+
+    fn active_labels(app: &WorkbenchApp) -> (String, std::collections::BTreeMap<String, String>) {
+        let scene = app.scenes.scenes.get(&app.scenes.selected).expect("scene");
+        let tab = scene
+            .tabs
+            .iter()
+            .find(|tab| tab.id == scene.active)
+            .expect("tab");
+        (tab.name.clone(), tab.pane_names.clone())
     }
 
     #[test]
