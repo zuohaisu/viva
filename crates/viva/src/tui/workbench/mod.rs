@@ -455,6 +455,9 @@ struct DragSelect {
     end_col: u16,
     end_row: u16,
     moved: bool,
+    /// Set when the selection is one double-clicked word. Ctrl+C copies
+    /// this text; a drag leaves it empty and slices the screen instead.
+    word: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -820,7 +823,13 @@ impl WorkbenchApp {
     fn input_modes(&self) -> crate::terminal::screen::InputModes {
         self.terminal_mode
             .as_ref()
-            .and_then(|id| self.snapshots.get(id))
+            .map(|id| self.pane_modes(id))
+            .unwrap_or_default()
+    }
+
+    fn pane_modes(&self, id: &str) -> crate::terminal::screen::InputModes {
+        self.snapshots
+            .get(id)
             .and_then(|s| s.screen.as_ref())
             .map(|s| s.modes.clone())
             .unwrap_or_default()
@@ -974,12 +983,15 @@ impl WorkbenchApp {
         }) {
             return None;
         }
-        if self.terminal_mode.as_deref() == Some(&id)
+        if self.pane_owns_mouse(&id)
             && !event.modifiers.contains(KeyModifiers::SHIFT)
             && self.scroll_offset(&id) == 0
         {
-            let modes = self.input_modes();
+            let modes = self.pane_modes(&id);
             if let Some(bytes) = terminal_view::mouse(event, rect, &modes) {
+                if self.terminal_mode.as_deref() != Some(id.as_str()) {
+                    self.enter_terminal_mode(id.clone());
+                }
                 return Some((id, bytes));
             }
         }
@@ -991,6 +1003,32 @@ impl WorkbenchApp {
         self.scroll_terminal(id, delta);
         None
     }
+
+    /// The focused terminal owns content clicks when its program asked for
+    /// the mouse. Sidebar focus, copy mode, and resize mode do not.
+    fn pane_owns_mouse(&self, id: &str) -> bool {
+        if self.copy_mode || self.resize_mode || self.navigate {
+            return self.terminal_mode.as_deref() == Some(id);
+        }
+        if self.focus == Focus::Panes {
+            return matches!(&self.pane_focus, PaneContent::Terminal(focused) if focused == id);
+        }
+        self.terminal_mode.as_deref() == Some(id)
+    }
+
+    /// Program mouse events are delivered and not also handled as selection
+    /// or a split drag. Anything else stays in the workbench.
+    fn dispatch_mouse(
+        &mut self,
+        mouse: ratatui::crossterm::event::MouseEvent,
+    ) -> Option<(String, Vec<u8>)> {
+        if let Some(forwarded) = self.terminal_mouse(mouse) {
+            return Some(forwarded);
+        }
+        self.on_mouse(mouse);
+        None
+    }
+
     /// Terminal ids currently placed in the pane tree (fetch budget: the
     /// tree never exceeds the layout cap).
     pub fn terminal_leaves(&self) -> Vec<String> {
@@ -1559,18 +1597,24 @@ impl WorkbenchApp {
     }
 
     /// `copy_on_select = false`: Ctrl+C copies the retained selection and
-    /// does not send 0x03. Any other state leaves Ctrl+C for the pane.
+    /// does not send 0x03. Any other key drops the highlight and still
+    /// goes to the pane. With `copy_on_select` on, Ctrl+C stays 0x03.
     fn copy_retained_selection(&mut self, key: KeyEvent) -> bool {
         use ratatui::crossterm::event::KeyModifiers;
-        let ctrl_c = key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'));
-        if !ctrl_c || self.copy_on_select {
+        if self.copy_on_select || self.retained_selection.is_none() {
             return false;
         }
-        let Some(select) = self.retained_selection.take() else {
+        let ctrl_c = key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'));
+        if !ctrl_c {
+            self.retained_selection = None;
             return false;
-        };
-        let text = self.selection_text(&select);
+        }
+        let select = self.retained_selection.take().expect("checked above");
+        let text = select
+            .word
+            .clone()
+            .unwrap_or_else(|| self.selection_text(&select));
         if !text.is_empty() {
             self.copy_to_clipboard(&text);
         }
@@ -3120,19 +3164,20 @@ impl WorkbenchApp {
             (c2, c1)
         };
         if r1 == r2 {
-            let line = lines[r1];
-            return line
-                .chars()
-                .skip(c1.min(c2))
-                .take(c1.abs_diff(c2).max(1))
-                .collect();
+            let start = c1.min(c2);
+            let count = c1.abs_diff(c2).max(1);
+            return super::text::slice_display_span(lines[r1], start, count);
         }
         let mut out = Vec::new();
-        out.push(lines[r1].chars().skip(c1).collect::<String>());
+        out.push(super::text::slice_display_span(
+            lines[r1],
+            c1,
+            usize::MAX - c1,
+        ));
         for line in lines.iter().take(r2).skip(r1 + 1) {
             out.push((*line).to_string());
         }
-        out.push(lines[r2].chars().take(c2.max(1)).collect());
+        out.push(super::text::slice_display_span(lines[r2], 0, c2.max(1)));
         out.join("\n")
     }
 
@@ -3149,14 +3194,28 @@ impl WorkbenchApp {
             self.last_text_click = Some((at, x, y, prev_id));
             return false;
         }
-        let Some(word) = word_at_pane(self, id, *area, column, row) else {
-            return true;
-        };
-        self.copy_to_clipboard(&word);
-        self.retained_selection = None;
         self.drag_select = None;
         self.pane_prompt = None;
-        self.set_status(format!("copied {word}"));
+        let Some(span) = word_at_pane(self, id, *area, column, row) else {
+            return true;
+        };
+        if self.copy_on_select {
+            self.copy_to_clipboard(&span.text);
+            self.retained_selection = None;
+            self.set_status(format!("copied {}", span.text));
+        } else {
+            self.retained_selection = Some(DragSelect {
+                id: id.to_string(),
+                area: *area,
+                start_col: area.x.saturating_add(span.start),
+                start_row: row,
+                end_col: area.x.saturating_add(span.end),
+                end_row: row,
+                moved: true,
+                word: Some(span.text.clone()),
+            });
+            self.set_status(format!("selected {}", span.text));
+        }
         true
     }
 
@@ -3371,6 +3430,7 @@ impl WorkbenchApp {
                         end_col: column,
                         end_row: row,
                         moved: false,
+                        word: None,
                     });
                 }
             }
@@ -4924,7 +4984,13 @@ fn centered(area: Rect, percent_x: u16, height: u16) -> Rect {
 
 /// Whether the cell (`x`, `y`) lies inside `rect` (zero-size rects contain
 /// nothing).
-fn word_at_pane(app: &WorkbenchApp, id: &str, area: Rect, column: u16, row: u16) -> Option<String> {
+fn word_at_pane(
+    app: &WorkbenchApp,
+    id: &str,
+    area: Rect,
+    column: u16,
+    row: u16,
+) -> Option<super::text::WordSpan> {
     let snap = app.snapshots.get(id)?;
     let lines: Vec<&str> = snap
         .scrollback
@@ -4939,57 +5005,7 @@ fn word_at_pane(app: &WorkbenchApp, id: &str, area: Rect, column: u16, row: u16)
     let visible = snap.visible.len().max(1);
     let start = lines.len().saturating_sub(visible);
     let line = lines.get(start.saturating_add(rel))?;
-    let col = column.saturating_sub(area.x) as usize;
-    word_at_column(line, col)
-}
-
-/// Whitespace and punctuation, including CJK punctuation, split words.
-fn is_word_separator(ch: char) -> bool {
-    ch.is_whitespace()
-        || ch.is_ascii_punctuation()
-        || matches!(
-            ch,
-            '，' | '。'
-                | '、'
-                | '；'
-                | '：'
-                | '！'
-                | '？'
-                | '（'
-                | '）'
-                | '【'
-                | '】'
-                | '「'
-                | '」'
-                | '『'
-                | '』'
-                | '《'
-                | '》'
-                | '〈'
-                | '〉'
-                | '…'
-                | '—'
-                | '–'
-                | '·'
-                | '．'
-        )
-}
-
-fn word_at_column(line: &str, col: usize) -> Option<String> {
-    let chars: Vec<char> = line.chars().collect();
-    let ch = *chars.get(col)?;
-    if is_word_separator(ch) {
-        return None;
-    }
-    let mut start = col;
-    while start > 0 && !is_word_separator(chars[start - 1]) {
-        start -= 1;
-    }
-    let mut end = col;
-    while end + 1 < chars.len() && !is_word_separator(chars[end + 1]) {
-        end += 1;
-    }
-    Some(chars[start..=end].iter().collect())
+    super::text::word_span_at_column(line, column.saturating_sub(area.x))
 }
 
 fn contains_point(rect: Rect, x: u16, y: u16) -> bool {
@@ -5593,16 +5609,13 @@ fn run_client_inner(client: &mut crate::server::Client) -> Result<()> {
             }
             Event::Resize(_, _) => {}
             Event::Mouse(mouse) => {
-                if let Some((id, bytes)) = app.terminal_mouse(mouse) {
+                if let Some((id, bytes)) = app.dispatch_mouse(mouse) {
                     if let Err(e) = deliver_terminal_bytes(client, &mut app, &polling, &id, bytes) {
                         app.set_status(e);
                     }
-                } else {
-                    app.on_mouse(mouse);
-                    if let Some(action) = app.take_mouse_action() {
-                        if let Err(err) = apply_client_action(client, &mut app, action) {
-                            app.set_status(format!("navigation failed: {err}"));
-                        }
+                } else if let Some(action) = app.take_mouse_action() {
+                    if let Err(err) = apply_client_action(client, &mut app, action) {
+                        app.set_status(format!("navigation failed: {err}"));
                     }
                 }
             }
@@ -6615,6 +6628,20 @@ mod tests {
             KeyOutcome::Forward(vec![27])
         );
         assert_eq!(app.terminal_mode(), Some("term-1"));
+        assert_eq!(
+            app.on_key(KeyEvent::new(
+                KeyCode::Char('b'),
+                ratatui::crossterm::event::KeyModifiers::CONTROL,
+            )),
+            KeyOutcome::Handled,
+            "prefix still takes the next key"
+        );
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('q'))),
+            KeyOutcome::QuitRequested,
+            "prefix+q still detaches"
+        );
+        assert!(app.quit_requested());
 
         let mut app = app_with_terminal_pane();
         app.set_snapshot(
@@ -6634,17 +6661,56 @@ mod tests {
             row: 10,
             modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
         };
-        assert!(
-            app.terminal_mouse(on_divider).is_none(),
-            "the divider stays with the workbench"
-        );
+        for column in [
+            divider.saturating_sub(1),
+            divider,
+            divider.saturating_add(1),
+        ] {
+            let event = MouseEvent {
+                column,
+                ..on_divider
+            };
+            assert!(
+                app.terminal_mouse(event).is_none(),
+                "column {column} on the divider band stays with the workbench"
+            );
+        }
         let on_text = MouseEvent {
             column: divider.saturating_add(8),
             ..on_divider
         };
-        let (id, bytes) = app.terminal_mouse(on_text).expect("content click");
+        let (id, bytes) = app.dispatch_mouse(on_text).expect("content click");
         assert_eq!(id, "t1");
         assert!(!bytes.is_empty(), "{bytes:?}");
+        assert!(
+            app.drag_select.is_none(),
+            "a reported click is not also a workbench selection"
+        );
+        let x = on_text.column + 1;
+        let y = on_text.row + 1;
+        let drag = MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            ..on_text
+        };
+        let (_, drag_bytes) = app.dispatch_mouse(drag).expect("drag goes to the program");
+        assert_eq!(
+            drag_bytes,
+            format!("\x1b[<32;{x};{y}M").into_bytes(),
+            "drag bytes {drag_bytes:?}"
+        );
+        assert!(app.drag_select.is_none(), "drag does not start a selection");
+        let wheel = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            ..on_text
+        };
+        let (_, wheel_bytes) = app
+            .dispatch_mouse(wheel)
+            .expect("wheel goes to the program");
+        assert_eq!(
+            wheel_bytes,
+            format!("\x1b[<64;{x};{y}M").into_bytes(),
+            "wheel bytes {wheel_bytes:?}"
+        );
         let shifted = MouseEvent {
             modifiers: ratatui::crossterm::event::KeyModifiers::SHIFT,
             ..on_text
@@ -6688,9 +6754,16 @@ mod tests {
         app.set_snapshot("t1", snapshot_with(&["alpha，beta"]));
         app.pane_geometry = vec![("t1".into(), Rect::new(0, 0, 40, 10))];
         app.enter_terminal_mode("t1");
+        if let Some(scene) = app.scenes.scenes.get_mut(&app.scenes.selected) {
+            if let Some(tab) = scene.tabs.iter_mut().find(|tab| tab.id == scene.active) {
+                tab.name = "session".into();
+                tab.pane_names.insert("t1".into(), "shell".into());
+            }
+        }
+        let beta = super::super::text::display_width("alpha，") as u16;
         let word = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: 6,
+            column: beta,
             row: 0,
             modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
         };
@@ -6700,8 +6773,36 @@ mod tests {
             ..word
         });
         app.on_mouse(word);
-        assert_eq!(app.last_copy(), "beta", "double-click copies the word");
-        assert!(app.pane_prompt.is_none(), "double-click does not rename");
+        let frame = render(&mut app, 80, 24);
+        assert_eq!(
+            app.last_copy(),
+            "beta",
+            "double-click copies the word under the display column\n{frame}"
+        );
+        assert!(
+            app.pane_prompt.is_none(),
+            "double-click does not rename\n{frame}"
+        );
+        let (tab_name, pane_names) = active_labels(&app);
+        assert_eq!(tab_name, "session", "{frame}");
+        assert_eq!(pane_names.get("t1").map(String::as_str), Some("shell"));
+        let comma = MouseEvent {
+            column: beta - 1,
+            ..word
+        };
+        app.on_mouse(comma);
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..comma
+        });
+        app.on_mouse(comma);
+        assert_eq!(
+            app.last_copy(),
+            "beta",
+            "the second column of ， is not the next word"
+        );
+        assert!(app.pane_prompt.is_none());
+        assert_eq!(active_labels(&app).0, "session");
 
         let mut app = app_with_terminal_pane();
         app.grid = PaneNode::Split {
@@ -6766,6 +6867,187 @@ mod tests {
         assert!(app.retained_selection.is_none());
         assert!(!app.quit_requested());
         assert_eq!(app.on_key(ctrl_c), KeyOutcome::Forward(vec![0x03]));
+    }
+
+    #[test]
+    fn focused_pane_mouse_reports_without_a_prior_key() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.focus = Focus::Panes;
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        assert!(app.terminal_mode().is_none());
+        app.set_snapshot(
+            "t1",
+            snapshot_with_modes(crate::terminal::screen::InputModes {
+                mouse_mode: 3,
+                mouse_encoding: 2,
+                ..Default::default()
+            }),
+        );
+        app.pane_geometry = vec![("t1".into(), Rect::new(2, 1, 40, 12))];
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 6,
+            row: 4,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        };
+        let (id, bytes) = app.dispatch_mouse(click).expect("focused pane click");
+        assert_eq!(id, "t1");
+        assert_eq!(bytes, b"\x1b[<0;5;4M");
+        assert_eq!(app.terminal_mode(), Some("t1"));
+        assert!(app.drag_select.is_none());
+
+        let mut sidebar = app_with_terminal_pane();
+        sidebar.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        sidebar.focus = Focus::Worktrees;
+        sidebar.pane_focus = PaneContent::Terminal("t1".into());
+        sidebar.set_snapshot(
+            "t1",
+            snapshot_with_modes(crate::terminal::screen::InputModes {
+                mouse_mode: 3,
+                mouse_encoding: 2,
+                ..Default::default()
+            }),
+        );
+        sidebar.pane_geometry = vec![("t1".into(), Rect::new(2, 1, 40, 12))];
+        assert!(
+            sidebar.dispatch_mouse(click).is_none(),
+            "sidebar focus does not hand the click to the program"
+        );
+    }
+
+    #[test]
+    fn mouse_reporting_blocks_word_selection_and_keeps_shift_click() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.focus = Focus::Panes;
+        let mut snap = snapshot_with(&["alpha，beta"]);
+        snap.screen = Some(crate::terminal::screen::ScreenView {
+            lines: vec![],
+            cursor: (0, 0),
+            cursor_visible: true,
+            modes: crate::terminal::screen::InputModes {
+                mouse_mode: 3,
+                mouse_encoding: 2,
+                ..Default::default()
+            },
+            scrollback_offset: 0,
+            retained: 0,
+        });
+        app.set_snapshot("t1", snap);
+        app.pane_geometry = vec![("t1".into(), Rect::new(0, 0, 40, 10))];
+        app.enter_terminal_mode("t1");
+        let beta = super::super::text::display_width("alpha，") as u16;
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: beta,
+            row: 0,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        };
+        assert!(app.dispatch_mouse(click).is_some());
+        app.dispatch_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..click
+        });
+        assert!(app.dispatch_mouse(click).is_some());
+        let frame = render(&mut app, 60, 16);
+        assert!(
+            app.last_copy().is_empty(),
+            "mouse reporting does not also copy a word\n{frame}"
+        );
+        assert!(app.pane_prompt.is_none(), "{frame}");
+        let shifted = MouseEvent {
+            modifiers: ratatui::crossterm::event::KeyModifiers::SHIFT,
+            ..click
+        };
+        assert!(
+            app.dispatch_mouse(shifted).is_none(),
+            "Shift+click stays with the workbench"
+        );
+    }
+
+    #[test]
+    fn retained_word_is_copied_by_ctrl_c_not_by_the_double_click() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let ctrl_c = KeyEvent::new(
+            KeyCode::Char('c'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        );
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.focus = Focus::Panes;
+        app.copy_on_select = false;
+        app.set_snapshot("t1", snapshot_with(&["alpha，beta"]));
+        app.pane_geometry = vec![("t1".into(), Rect::new(0, 0, 40, 10))];
+        app.enter_terminal_mode("t1");
+        let beta = super::super::text::display_width("alpha，") as u16;
+        let word = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: beta,
+            row: 0,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        };
+        app.on_mouse(word);
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..word
+        });
+        app.on_mouse(word);
+        assert!(app.last_copy().is_empty());
+        assert_eq!(
+            app.retained_selection
+                .as_ref()
+                .and_then(|sel| sel.word.as_deref()),
+            Some("beta")
+        );
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('x'))),
+            KeyOutcome::Forward(b"x".to_vec()),
+            "a normal key still reaches the pane"
+        );
+        assert!(
+            app.retained_selection.is_none(),
+            "any other key clears the retained selection"
+        );
+        assert!(app.last_copy().is_empty());
+        app.on_mouse(word);
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..word
+        });
+        app.on_mouse(word);
+        let frame = render(&mut app, 60, 16);
+        assert!(
+            app.last_copy().is_empty(),
+            "copy_on_select off leaves the word on screen\n{frame}"
+        );
+        assert_eq!(
+            app.retained_selection
+                .as_ref()
+                .and_then(|sel| sel.word.as_deref()),
+            Some("beta"),
+            "{frame}"
+        );
+        assert!(app.pane_prompt.is_none(), "{frame}");
+        assert_eq!(app.on_key(ctrl_c), KeyOutcome::Handled);
+        assert_eq!(app.last_copy(), "beta");
+        assert!(app.retained_selection.is_none());
+        assert!(!app.quit_requested());
+        assert_eq!(app.on_key(ctrl_c), KeyOutcome::Forward(vec![0x03]));
+    }
+
+    fn active_labels(app: &WorkbenchApp) -> (String, std::collections::BTreeMap<String, String>) {
+        let scene = app.scenes.scenes.get(&app.scenes.selected).expect("scene");
+        let tab = scene
+            .tabs
+            .iter()
+            .find(|tab| tab.id == scene.active)
+            .expect("tab");
+        (tab.name.clone(), tab.pane_names.clone())
     }
 
     #[test]
