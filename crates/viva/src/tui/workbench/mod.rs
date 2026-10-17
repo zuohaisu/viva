@@ -446,6 +446,7 @@ fn menu_actions() -> [MenuAction; 5] {
     ]
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DragSelect {
     id: String,
     area: Rect,
@@ -572,6 +573,12 @@ pub struct WorkbenchApp {
     tree_ops: Vec<crate::server::WorkbenchTreeOp>,
     pane_prompt: Option<String>,
     drag_select: Option<DragSelect>,
+    /// Herdr's `copy_on_select`. True copies when the drag is released.
+    /// False leaves the selection on screen until Ctrl+C copies it.
+    copy_on_select: bool,
+    retained_selection: Option<DragSelect>,
+    /// Previous content click, for double-click word selection.
+    last_text_click: Option<(std::time::Instant, u16, u16, String)>,
     last_copy: String,
     scrollback_edit: Option<String>,
     workspace_nav: usize,
@@ -640,6 +647,9 @@ impl WorkbenchApp {
             tree_ops: Vec::new(),
             pane_prompt: None,
             drag_select: None,
+            copy_on_select: true,
+            retained_selection: None,
+            last_text_click: None,
             last_copy: String::new(),
             scrollback_edit: None,
             workspace_nav: 0,
@@ -1530,6 +1540,41 @@ impl WorkbenchApp {
         self.focus = Focus::Panes;
         self.remote_terminal = None;
         self.terminal_mode = Some(terminal_id.into());
+    }
+
+    /// When the pane focus is already a terminal, the next key belongs to
+    /// it. Sidebar, navigate, copy, and resize keep their own keys.
+    fn adopt_terminal_keyboard(&mut self) {
+        if self.terminal_mode.is_some()
+            || self.focus != Focus::Panes
+            || self.copy_mode
+            || self.resize_mode
+            || self.navigate
+        {
+            return;
+        }
+        if let PaneContent::Terminal(id) = self.pane_focus.clone() {
+            self.enter_terminal_mode(id);
+        }
+    }
+
+    /// `copy_on_select = false`: Ctrl+C copies the retained selection and
+    /// does not send 0x03. Any other state leaves Ctrl+C for the pane.
+    fn copy_retained_selection(&mut self, key: KeyEvent) -> bool {
+        use ratatui::crossterm::event::KeyModifiers;
+        let ctrl_c = key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'));
+        if !ctrl_c || self.copy_on_select {
+            return false;
+        }
+        let Some(select) = self.retained_selection.take() else {
+            return false;
+        };
+        let text = self.selection_text(&select);
+        if !text.is_empty() {
+            self.copy_to_clipboard(&text);
+        }
+        true
     }
 
     pub fn leave_terminal_mode(&mut self) {
@@ -2631,6 +2676,9 @@ impl WorkbenchApp {
                 _ => KeyOutcome::Ignored,
             };
         }
+        // A focused terminal pane receives keys the way herdr's terminal
+        // mode does. Sidebar focus does not. Prefix still takes the next key.
+        self.adopt_terminal_keyboard();
         if self.navigate || self.terminal_mode.is_some() || self.copy_mode || self.resize_mode {
             if self.terminal_mode.is_some() && self.blocked_remote() {
                 return KeyOutcome::Handled;
@@ -2695,6 +2743,9 @@ impl WorkbenchApp {
                 return self.apply_action(action);
             }
             if self.terminal_mode.is_some() {
+                if self.copy_retained_selection(key) {
+                    return KeyOutcome::Handled;
+                }
                 if let Some(id) = self.terminal_mode.clone() {
                     self.scroll_offsets.insert(id, 0);
                 }
@@ -2984,7 +3035,12 @@ impl WorkbenchApp {
                     if select.moved {
                         let text = self.selection_text(&select);
                         if !text.is_empty() {
-                            self.copy_to_clipboard(&text);
+                            if self.copy_on_select {
+                                self.copy_to_clipboard(&text);
+                                self.retained_selection = None;
+                            } else {
+                                self.retained_selection = Some(select);
+                            }
                         }
                     }
                 }
@@ -3078,6 +3134,74 @@ impl WorkbenchApp {
         }
         out.push(lines[r2].chars().take(c2.max(1)).collect());
         out.join("\n")
+    }
+
+    /// Double-click on pane text copies one word. It does not rename the
+    /// pane or the tab. Divider and sidebar double-clicks are handled earlier.
+    fn double_click_copies_word(&mut self, id: &str, area: &Rect, column: u16, row: u16) -> bool {
+        let now = std::time::Instant::now();
+        let previous = self.last_text_click.take();
+        let Some((at, x, y, prev_id)) = previous else {
+            return false;
+        };
+        if prev_id != id || x != column || y != row || now.duration_since(at) > DOUBLE_CLICK_WINDOW
+        {
+            self.last_text_click = Some((at, x, y, prev_id));
+            return false;
+        }
+        let Some(word) = word_at_pane(self, id, *area, column, row) else {
+            return true;
+        };
+        self.copy_to_clipboard(&word);
+        self.retained_selection = None;
+        self.drag_select = None;
+        self.pane_prompt = None;
+        self.set_status(format!("copied {word}"));
+        true
+    }
+
+    fn paint_retained_selection(&self, frame: &mut Frame) {
+        let Some(sel) = &self.retained_selection else {
+            return;
+        };
+        let buffer = frame.buffer_mut();
+        let y0 = sel.start_row.min(sel.end_row);
+        let y1 = sel.start_row.max(sel.end_row);
+        for y in y0..=y1 {
+            let (x0, x1) = if y0 == y1 {
+                (
+                    sel.start_col.min(sel.end_col),
+                    sel.start_col.max(sel.end_col),
+                )
+            } else if y == y0 {
+                let left = if sel.start_row <= sel.end_row {
+                    sel.start_col
+                } else {
+                    sel.end_col
+                };
+                (
+                    left,
+                    sel.area.x.saturating_add(sel.area.width.saturating_sub(1)),
+                )
+            } else if y == y1 {
+                let right = if sel.start_row <= sel.end_row {
+                    sel.end_col
+                } else {
+                    sel.start_col
+                };
+                (sel.area.x, right)
+            } else {
+                (
+                    sel.area.x,
+                    sel.area.x.saturating_add(sel.area.width.saturating_sub(1)),
+                )
+            };
+            for x in x0..=x1 {
+                if let Some(cell) = buffer.cell_mut(ratatui::layout::Position::new(x, y)) {
+                    cell.set_style(ratatui::style::Style::new().reversed());
+                }
+            }
+        }
     }
 
     fn on_left_down(&mut self, column: u16, row: u16) {
@@ -3233,6 +3357,12 @@ impl WorkbenchApp {
                     .find(|(pane, _)| pane == id)
                     .cloned()
                 {
+                    if self.double_click_copies_word(id, &rect, column, row) {
+                        return;
+                    }
+                    self.retained_selection = None;
+                    self.last_text_click =
+                        Some((std::time::Instant::now(), column, row, id.clone()));
                     self.drag_select = Some(DragSelect {
                         id: id.clone(),
                         area: rect,
@@ -3389,6 +3519,7 @@ impl WorkbenchApp {
                 }
             }
         }
+        self.paint_retained_selection(frame);
 
         // A live divider drag lights up the dragged line (herdr feedback):
         // restyle the shared divider cells over the drawn chrome. Overlays
@@ -4793,6 +4924,74 @@ fn centered(area: Rect, percent_x: u16, height: u16) -> Rect {
 
 /// Whether the cell (`x`, `y`) lies inside `rect` (zero-size rects contain
 /// nothing).
+fn word_at_pane(app: &WorkbenchApp, id: &str, area: Rect, column: u16, row: u16) -> Option<String> {
+    let snap = app.snapshots.get(id)?;
+    let lines: Vec<&str> = snap
+        .scrollback
+        .iter()
+        .chain(snap.visible.iter())
+        .map(String::as_str)
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let rel = row.saturating_sub(area.y) as usize;
+    let visible = snap.visible.len().max(1);
+    let start = lines.len().saturating_sub(visible);
+    let line = lines.get(start.saturating_add(rel))?;
+    let col = column.saturating_sub(area.x) as usize;
+    word_at_column(line, col)
+}
+
+/// Whitespace and punctuation, including CJK punctuation, split words.
+fn is_word_separator(ch: char) -> bool {
+    ch.is_whitespace()
+        || ch.is_ascii_punctuation()
+        || matches!(
+            ch,
+            '，' | '。'
+                | '、'
+                | '；'
+                | '：'
+                | '！'
+                | '？'
+                | '（'
+                | '）'
+                | '【'
+                | '】'
+                | '「'
+                | '」'
+                | '『'
+                | '』'
+                | '《'
+                | '》'
+                | '〈'
+                | '〉'
+                | '…'
+                | '—'
+                | '–'
+                | '·'
+                | '．'
+        )
+}
+
+fn word_at_column(line: &str, col: usize) -> Option<String> {
+    let chars: Vec<char> = line.chars().collect();
+    let ch = *chars.get(col)?;
+    if is_word_separator(ch) {
+        return None;
+    }
+    let mut start = col;
+    while start > 0 && !is_word_separator(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = col;
+    while end + 1 < chars.len() && !is_word_separator(chars[end + 1]) {
+        end += 1;
+    }
+    Some(chars[start..=end].iter().collect())
+}
+
 fn contains_point(rect: Rect, x: u16, y: u16) -> bool {
     x >= rect.x
         && y >= rect.y
@@ -6386,6 +6585,187 @@ mod tests {
             app.terminal_mouse(shifted).is_none(),
             "Shift reserves host scroll/selection"
         );
+    }
+
+    #[test]
+    fn focused_terminal_receives_ctrl_c_and_mouse_without_renaming() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let ctrl_c = KeyEvent::new(
+            KeyCode::Char('c'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        );
+
+        let mut idle = WorkbenchApp::new();
+        idle.pane_focus = PaneContent::Terminal("term-1".into());
+        assert_ne!(
+            idle.on_key(ctrl_c),
+            KeyOutcome::Forward(vec![0x03]),
+            "sidebar focus does not send Ctrl+C into a pane"
+        );
+        assert!(!idle.quit_requested());
+
+        let mut app = WorkbenchApp::new();
+        app.focus = Focus::Panes;
+        app.pane_focus = PaneContent::Terminal("term-1".into());
+        assert_eq!(app.on_key(ctrl_c), KeyOutcome::Forward(vec![0x03]));
+        assert!(!app.quit_requested(), "Ctrl+C does not detach");
+        assert_eq!(app.terminal_mode(), Some("term-1"));
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Esc)),
+            KeyOutcome::Forward(vec![27])
+        );
+        assert_eq!(app.terminal_mode(), Some("term-1"));
+
+        let mut app = app_with_terminal_pane();
+        app.set_snapshot(
+            "t1",
+            snapshot_with_modes(crate::terminal::screen::InputModes {
+                mouse_mode: 3,
+                mouse_encoding: 2,
+                ..Default::default()
+            }),
+        );
+        app.pane_geometry = vec![("t1".into(), Rect::new(0, 0, 100, 40))];
+        app.enter_terminal_mode("t1");
+        let divider = app.grid.splits(app.last_pane_area.unwrap())[0].pos;
+        let on_divider = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: divider,
+            row: 10,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        };
+        assert!(
+            app.terminal_mouse(on_divider).is_none(),
+            "the divider stays with the workbench"
+        );
+        let on_text = MouseEvent {
+            column: divider.saturating_add(8),
+            ..on_divider
+        };
+        let (id, bytes) = app.terminal_mouse(on_text).expect("content click");
+        assert_eq!(id, "t1");
+        assert!(!bytes.is_empty(), "{bytes:?}");
+        let shifted = MouseEvent {
+            modifiers: ratatui::crossterm::event::KeyModifiers::SHIFT,
+            ..on_text
+        };
+        assert!(
+            app.terminal_mouse(shifted).is_none(),
+            "Shift+click stays here"
+        );
+        let right = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            ..on_text
+        };
+        assert!(app.terminal_mouse(right).is_none());
+        app.on_mouse(right);
+        assert!(
+            app.context_menu.is_some(),
+            "right click opens the workbench menu"
+        );
+        assert!(app.pane_prompt.is_none());
+
+        app.context_menu = None;
+        app.file_panel = Some(FilePanel {
+            worktree_id: "wt".into(),
+            rows: vec![("a".into(), "M".into())],
+            truncated: false,
+            total: 1,
+            selected: 0,
+            viewing: None,
+            full_path: None,
+            scroll: 0,
+        });
+        assert!(
+            app.terminal_mouse(on_text).is_none(),
+            "an open overlay keeps the click"
+        );
+
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.last_pane_area = Some(Rect::new(0, 0, 80, 24));
+        app.set_snapshot("t1", snapshot_with(&["alpha，beta"]));
+        app.pane_geometry = vec![("t1".into(), Rect::new(0, 0, 40, 10))];
+        app.enter_terminal_mode("t1");
+        let word = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 6,
+            row: 0,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        };
+        app.on_mouse(word);
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..word
+        });
+        app.on_mouse(word);
+        assert_eq!(app.last_copy(), "beta", "double-click copies the word");
+        assert!(app.pane_prompt.is_none(), "double-click does not rename");
+
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::Split {
+            axis: SplitAxis::Horizontal,
+            first: Box::new(PaneNode::leaf(PaneContent::Browser)),
+            second: Box::new(PaneNode::leaf(PaneContent::Terminal("t1".into()))),
+            ratio: 70,
+        };
+        let pos = app.grid.splits(app.last_pane_area.unwrap())[0].pos;
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: pos,
+            row: 8,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        };
+        app.on_mouse(click);
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..click
+        });
+        app.on_mouse(click);
+        assert!(matches!(app.grid, PaneNode::Split { ratio: 50, .. }));
+
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.last_pane_area = Some(Rect::new(0, 0, 80, 24));
+        app.copy_on_select = false;
+        app.set_snapshot("t1", snapshot_with(&["abcdef"]));
+        app.pane_geometry = vec![("t1".into(), Rect::new(0, 0, 20, 5))];
+        app.enter_terminal_mode("t1");
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        });
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 2,
+            row: 0,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        });
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 2,
+            row: 0,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        });
+        assert!(
+            app.last_copy().is_empty(),
+            "the selection stays until Ctrl+C"
+        );
+        assert!(app.retained_selection.is_some());
+        let kept = render(&mut app, 40, 8);
+        assert!(
+            kept.contains("ab"),
+            "the retained selection is still drawn: {kept}"
+        );
+        assert_eq!(app.on_key(ctrl_c), KeyOutcome::Handled);
+        assert_eq!(app.last_copy(), "ab");
+        assert!(app.retained_selection.is_none());
+        assert!(!app.quit_requested());
+        assert_eq!(app.on_key(ctrl_c), KeyOutcome::Forward(vec![0x03]));
     }
 
     #[test]
