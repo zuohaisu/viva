@@ -521,6 +521,9 @@ pub struct WorkbenchApp {
     /// loop always draws before reading keys, so it never hits that gap;
     /// tests may set the area directly.
     last_pane_area: Option<Rect>,
+    /// The whole frame last drawn. Menu hits from a larger frame are not
+    /// reused once this rectangle cannot hold the menu.
+    last_screen: Option<Rect>,
     /// The sidebar's right edge as last drawn (the pane area's first
     /// column); None while the sidebar is hidden (narrow terminal). The
     /// sidebar drag band sits on this column and the one before it.
@@ -604,6 +607,7 @@ impl WorkbenchApp {
             cleanup_armed: None,
             diff_scroll: 0,
             last_pane_area: None,
+            last_screen: None,
             last_sidebar_edge: None,
             sidebar_width: SIDEBAR_WIDTH,
             drag: DragState::None,
@@ -2477,6 +2481,10 @@ impl WorkbenchApp {
             return KeyOutcome::Handled;
         }
         if self.context_menu.is_some() {
+            if self.menu_blocked_by_screen() {
+                self.close_context_menu();
+                return KeyOutcome::Handled;
+            }
             return self.on_menu_key(key);
         }
         if self.goto.is_some() {
@@ -2937,6 +2945,13 @@ impl WorkbenchApp {
         self.menu_hits.clear();
     }
 
+    /// The last drawn frame cannot hold a 6×4 menu. Hit rectangles from a
+    /// wider frame must not activate, and a new right-click must not open
+    /// a menu the next frame will refuse to paint.
+    fn menu_blocked_by_screen(&self) -> bool {
+        self.last_screen.is_some_and(|screen| !popup_fits(screen))
+    }
+
     /// An overlay that owns the mouse: clicks and wheel events do not
     /// reach the panes or the sidebar behind it.
     fn modal_open(&self) -> bool {
@@ -3002,7 +3017,7 @@ impl WorkbenchApp {
     }
 
     fn on_right_down(&mut self, column: u16, row: u16) {
-        if self.context_menu.is_some() {
+        if self.context_menu.is_some() || self.menu_blocked_by_screen() {
             self.close_context_menu();
             return;
         }
@@ -3084,6 +3099,10 @@ impl WorkbenchApp {
         // The pane menu takes the click: an item runs, anything else
         // closes the menu. Nothing reaches the grid underneath.
         if self.context_menu.is_some() {
+            if self.menu_blocked_by_screen() {
+                self.close_context_menu();
+                return;
+            }
             let hit = self
                 .menu_hits
                 .iter()
@@ -3310,6 +3329,7 @@ impl WorkbenchApp {
     /// facts card now — the lists live in the sidebar. Overlays (file
     /// panel, handoff picker, diff) sit on top of everything.
     pub fn draw(&mut self, frame: &mut Frame) {
+        self.last_screen = Some(frame.area());
         let palette = crate::tui::theme::Palette::catppuccin_mocha();
         let rows = Layout::vertical([
             Constraint::Length(1),
@@ -3430,8 +3450,13 @@ impl WorkbenchApp {
         }
 
         // Help, settings, goto, the pane menu, and rename cover the whole
-        // frame, including the status row. A screen that cannot hold the
-        // popup keeps the status bar and skips the popup.
+        // frame, including the status row, only when that popup is actually
+        // painted. A centered box that comes out below the minimum leaves
+        // the status bar in place. A menu that cannot be painted is closed
+        // so a previous frame's hit rectangles cannot still fire.
+        if self.context_menu.is_some() && !popup_fits(frame.area()) {
+            self.close_context_menu();
+        }
         let cover_status = self.overlay_drawable(frame.area());
         if !cover_status {
             self.draw_status_bar(frame, rows[2], &palette);
@@ -3779,26 +3804,37 @@ impl WorkbenchApp {
         }
     }
 
-    /// Help, settings, goto, the pane menu, and rename hide the status bar
-    /// and paint over that row. File and handoff already paint after the bar.
-    fn covers_status_bar(&self) -> bool {
-        self.show_key_help
-            || self.settings_open
-            || self.goto.is_some()
-            || self.context_menu.is_some()
-            || self.pane_prompt.is_some()
+    /// True when at least one open overlay will actually be painted.
+    /// Hiding the status bar follows that rectangle, not the raw screen:
+    /// a 7-column frame is 6×4 on paper, but an 80% goto box is only 5
+    /// columns and must leave the status row alone.
+    fn overlay_drawable(&self, screen: Rect) -> bool {
+        (self.show_key_help && self.help_popup_rect(screen).is_some())
+            || (self.settings_open && settings_popup_rect(screen).is_some())
+            || (self.goto.is_some() && goto_popup_rect(screen).is_some())
+            || (self.context_menu.is_some() && popup_fits(screen))
+            || (self.pane_prompt.is_some() && rename_popup_rect(screen).is_some())
     }
 
-    /// The popup can be drawn on this screen. Rename is a 3-row line; the
-    /// other chrome needs herdr's 6×4 minimum or it is left closed.
-    fn overlay_drawable(&self, screen: Rect) -> bool {
-        if !self.covers_status_bar() {
-            return false;
+    /// Help hides the status bar only when the centered box has a key row.
+    /// A 4-line screen has a title and borders and nothing under them.
+    fn help_popup_rect(&self, screen: Rect) -> Option<Rect> {
+        if !popup_fits(screen) {
+            return None;
         }
-        if self.pane_prompt.is_some() {
-            return screen.width >= 4 && screen.height >= 3;
+        let body_slots = screen.height.saturating_sub(4);
+        if body_slots == 0 {
+            return None;
         }
-        popup_fits(screen)
+        let body = self.keymap.help_text(&self.help_filter);
+        let body_rows = body.lines().take(body_slots as usize).count();
+        if body_rows == 0 {
+            return None;
+        }
+        let content_lines = 1 + usize::from(self.help_filtering) + body_rows;
+        let height = (content_lines as u16).saturating_add(2).min(screen.height);
+        let popup = centered(screen, 90, height);
+        popup_fits(popup).then_some(popup)
     }
 
     fn paint_scrollbar(
@@ -3822,9 +3858,9 @@ impl WorkbenchApp {
     }
 
     fn draw_key_help(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
-        if !popup_fits(area) {
+        let Some(popup) = self.help_popup_rect(area) else {
             return;
-        }
+        };
         let body = self.keymap.help_text(&self.help_filter);
         let mut lines = vec![Line::from(Span::styled(
             format!(" keys · prefix {} · / filter ", self.keymap.prefix_label()),
@@ -3842,8 +3878,6 @@ impl WorkbenchApp {
                 ratatui::style::Style::new().fg(palette.subtext0),
             )));
         }
-        let height = (lines.len() as u16 + 2).min(area.height);
-        let popup = centered(area, 90, height);
         frame.render_widget(Clear, popup);
         frame.render_widget(
             Paragraph::new(lines).block(
@@ -3856,9 +3890,9 @@ impl WorkbenchApp {
     }
 
     fn draw_settings(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
-        if !popup_fits(area) {
+        let Some(popup) = settings_popup_rect(area) else {
             return;
-        }
+        };
         let warnings = self.config_warnings();
         let mut body = format!(
             " settings\n prefix {}\n\n Enter or Esc continues and writes onboarding = false",
@@ -3868,7 +3902,6 @@ impl WorkbenchApp {
             body.push_str("\n\n");
             body.push_str(&warnings.join("\n"));
         }
-        let popup = centered(area, 72, 14);
         frame.render_widget(Clear, popup);
         frame.render_widget(
             Paragraph::new(body).block(
@@ -3881,9 +3914,9 @@ impl WorkbenchApp {
     }
 
     fn draw_goto(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
-        if !popup_fits(area) {
+        let Some(popup) = goto_popup_rect(area) else {
             return;
-        }
+        };
         let rows = self.goto_rows();
         let cursor = self.goto.as_ref().map(|goto| goto.cursor).unwrap_or(0);
         let query = self
@@ -3891,10 +3924,6 @@ impl WorkbenchApp {
             .as_ref()
             .map(|goto| goto.query.clone())
             .unwrap_or_default();
-        let popup = centered(area, 80, 18);
-        if !popup_fits(popup) {
-            return;
-        }
         let mut entries: Vec<(Line<'static>, bool)> = Vec::new();
         let mut last_group = String::new();
         if rows.is_empty() {
@@ -3950,17 +3979,19 @@ impl WorkbenchApp {
     }
 
     fn draw_context_menu(&mut self, frame: &mut Frame, palette: &Palette) {
-        let Some(menu) = &self.context_menu else {
+        if self.context_menu.is_none() {
             return;
-        };
+        }
         let screen = frame.area();
         if !popup_fits(screen) {
+            self.close_context_menu();
             return;
         }
         let labels = ["split right", "split down", "close", "rename", "zoom"];
-        let selected = menu.selected;
-        let column = menu.column;
-        let row = menu.row;
+        let (selected, column, row) = {
+            let menu = self.context_menu.as_ref().expect("menu checked above");
+            (menu.selected, menu.column, menu.row)
+        };
         let width = 18u16.min(screen.width);
         // Border, title row, one row per item, border. Shrink onto a short screen.
         let height = (labels.len() as u16 + 3).min(screen.height);
@@ -4014,8 +4045,10 @@ impl WorkbenchApp {
     }
 
     fn draw_pane_prompt(&self, frame: &mut Frame, palette: &Palette) {
+        let Some(popup) = rename_popup_rect(frame.area()) else {
+            return;
+        };
         let value = self.pane_prompt.clone().unwrap_or_default();
-        let popup = centered(frame.area(), 60, 3);
         frame.render_widget(Clear, popup);
         frame.render_widget(
             Paragraph::new(format!(" rename pane: {value}")).block(
@@ -4933,6 +4966,38 @@ fn encode_char(modifiers: ratatui::crossterm::event::KeyModifiers, c: char) -> V
 /// would be the whole screen and the body would have no row.
 fn popup_fits(area: Rect) -> bool {
     area.width >= 6 && area.height >= 4
+}
+
+/// Goto is an 80% × 18 box. The status bar follows this rectangle: a
+/// 6- or 7-column screen passes the raw 6×4 check and still cannot hold it.
+fn goto_popup_rect(screen: Rect) -> Option<Rect> {
+    if !popup_fits(screen) {
+        return None;
+    }
+    let popup = centered(screen, 80, 18);
+    popup_fits(popup).then_some(popup)
+}
+
+/// Settings is a 72% × 14 box. Same rule as goto: the centered result
+/// has to be a real 6×4 popup.
+fn settings_popup_rect(screen: Rect) -> Option<Rect> {
+    if !popup_fits(screen) {
+        return None;
+    }
+    let popup = centered(screen, 72, 14);
+    popup_fits(popup).then_some(popup)
+}
+
+/// Rename is a 60% × 3 line. Borders take two columns and two rows; a
+/// box with no cell inside is not drawn.
+fn rename_popup_rect(screen: Rect) -> Option<Rect> {
+    if screen.width < 4 || screen.height < 3 {
+        return None;
+    }
+    let popup = centered(screen, 60, 3);
+    let inner_width = popup.width.saturating_sub(2);
+    let inner_height = popup.height.saturating_sub(2);
+    (inner_width >= 1 && inner_height >= 1).then_some(popup)
 }
 
 /// Right-hand inner column of a bordered popup, `inset` rows below the
@@ -8569,6 +8634,130 @@ mod v15_tui_fix_tests {
         assert!(
             frame.contains('▕'),
             "the sidebar shows a thumb when the section overflows: {frame}"
+        );
+    }
+
+    fn bottom_row(frame: &str) -> &str {
+        frame
+            .trim_end_matches('\n')
+            .lines()
+            .next_back()
+            .unwrap_or("")
+    }
+
+    #[test]
+    fn a_popup_that_does_not_fit_keeps_the_status_bar_and_drops_the_menu() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.goto = Some(GotoPicker {
+            query: String::new(),
+            searching: false,
+            cursor: 0,
+            kind: None,
+        });
+        for width in [6u16, 7] {
+            let frame = super::tests::render(&mut app, width, 24);
+            assert!(
+                !frame.contains("goto  /") && !frame.contains('┌'),
+                "{width} columns must not paint a goto box: {frame}"
+            );
+            assert!(
+                bottom_row(&frame).contains("ctrl"),
+                "{width} columns keeps the status prefix: {frame}"
+            );
+            assert_eq!(
+                app.on_key(KeyEvent::from(KeyCode::Char('j'))),
+                KeyOutcome::Handled
+            );
+            assert!(app.goto_open());
+        }
+        let wide_enough = super::tests::render(&mut app, 8, 24);
+        assert!(
+            wide_enough.contains('┌'),
+            "8 columns is the first width whose 80% box is 6: {wide_enough}"
+        );
+        assert!(
+            !bottom_row(&wide_enough).contains("ctrl"),
+            "a painted goto still hides the status row: {wide_enough}"
+        );
+
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.show_key_help = true;
+        let four = super::tests::render(&mut app, 20, 4);
+        assert!(
+            four.contains("ctrl+b  HELP"),
+            "no key row means the status bar stays: {four}"
+        );
+        assert!(
+            !four.contains("keys ·"),
+            "a 4-line help must not paint a title-only box: {four}"
+        );
+        let five = super::tests::render(&mut app, 20, 5);
+        assert!(five.contains("keys ·"), "{five}");
+        assert!(!five.contains("ctrl+b  HELP"), "{five}");
+
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.pane_prompt = Some("alpha".into());
+        let tiny = super::tests::render(&mut app, 4, 3);
+        assert!(!tiny.contains("rename"), "{tiny}");
+        assert!(!tiny.contains('┌'), "{tiny}");
+        assert!(
+            bottom_row(&tiny).contains('c'),
+            "the status row stays when rename has no cell: {tiny}"
+        );
+        let room = super::tests::render(&mut app, 20, 10);
+        assert!(room.contains("rename pa"), "{room}");
+        assert!(!room.contains("WORKBENCH"), "{room}");
+
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        app.settings_open = true;
+        let settings = super::tests::render(&mut app, 6, 24);
+        assert!(
+            !settings.contains("onboarding"),
+            "a 6-column settings box is 4 wide and must not paint: {settings}"
+        );
+        assert!(
+            bottom_row(&settings).contains("ctrl"),
+            "settings that cannot paint leave the status row: {settings}"
+        );
+
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        super::tests::render(&mut app, 40, 24);
+        app.on_mouse(mouse_right(4, 8));
+        let open = super::tests::render(&mut app, 40, 24);
+        assert!(open.contains("split right"), "{open}");
+        let hit = app.menu_hits[0].1;
+        assert_eq!(app.menu_hits[0].0, MenuAction::SplitRight);
+        let shrunk = super::tests::render(&mut app, 5, 24);
+        assert!(!shrunk.contains("split right"), "{shrunk}");
+        assert!(app.context_menu.is_none());
+        assert!(app.menu_hits.is_empty());
+        app.on_mouse(mouse_down(hit.x, hit.y));
+        assert_ne!(app.take_mouse_action(), Some(WorkbenchAction::SplitRight));
+        app.on_mouse(mouse_down(4, 8));
+        assert_ne!(app.take_mouse_action(), Some(WorkbenchAction::SplitRight));
+        assert!(!app.split_pane(SplitAxis::Horizontal, "spawned".into()));
+
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        super::tests::render(&mut app, 5, 24);
+        app.on_mouse(mouse_right(1, 2));
+        assert!(app.context_menu.is_none());
+        app.context_menu = Some(ContextMenu {
+            selected: 0,
+            column: 1,
+            row: 2,
+        });
+        let hidden = super::tests::render(&mut app, 5, 24);
+        assert!(!hidden.contains("split right"), "{hidden}");
+        assert!(app.context_menu.is_none());
+        assert_ne!(
+            app.on_key(KeyEvent::from(KeyCode::Enter)),
+            KeyOutcome::Action(WorkbenchAction::SplitRight)
         );
     }
 
