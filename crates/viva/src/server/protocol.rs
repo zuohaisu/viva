@@ -281,6 +281,18 @@ pub enum RequestKind {
         worktree_id: String,
         path: String,
     },
+    /// The pull request's net file list (GitHub Files changed) for one
+    /// worktree. Read-only. No pull request, or a failed `gh`, comes back
+    /// as data with a reason — not as a guessed branch diff.
+    WorktreePrFiles {
+        worktree_id: String,
+    },
+    /// One file's patch inside that pull request. The patch is the one
+    /// GitHub returned; a missing patch stays missing.
+    WorktreePrFile {
+        worktree_id: String,
+        path: String,
+    },
     /// V15-2: release + remove a worktree whose PR is MERGED (re-checked
     /// live). The caller confirmed the exact path in the UI.
     WorktreeCleanup {
