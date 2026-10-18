@@ -57,6 +57,9 @@ brief, and offers controlled actions through the `viva` CLI.
 | `VIVA_GRANT_ID` | Live per-task dispatch grant, when Viva holds one |
 | `VIVA_HOME` | Viva home the CLI calls operate on |
 | `VIVA_BIN` | `viva` binary override (tests) |
+| `VIVA_PROJECTION_DIR` | This execution's projection directory (soul symlink, skills, principles) |
+| `VIVA_SOUL_PATH` | Canonical `soul.md` for the member. Claude Code is given the same path |
+| `VIVA_EXECUTION_ID` | Execution whose existing task brief the projection reused |
 
 ## Pi version and types
 

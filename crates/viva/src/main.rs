@@ -83,6 +83,8 @@ fn run(args: &[String]) -> Result<()> {
         Some("tools") => cmd_tools(args.get(1..).unwrap_or(&[])),
         Some("memory") => cmd_memory(args.get(1..).unwrap_or(&[])),
         Some("skill") => cmd_skill(args.get(1..).unwrap_or(&[])),
+        Some("member") => cmd_member(args.get(1..).unwrap_or(&[])),
+        Some("project") => cmd_project(args.get(1..).unwrap_or(&[])),
         Some("harness") => cmd_harness(args.get(1..).unwrap_or(&[])),
         Some("workflow") => cmd_workflow(args.get(1..).unwrap_or(&[])),
         Some("maintenance") => cmd_maintenance(args.get(1..).unwrap_or(&[])),
@@ -1069,6 +1071,19 @@ USAGE:
         `get` and `project` read the current version for callbacks and
         member projection.
 
+    viva member soul set --member <id> --file <path>
+    viva member soul show --member <id>
+        Replace or print that member's canonical soul.md. Only Haisu (no
+        member session) can set it. A running member session is refused.
+
+    viva project --member <id> --execution <id> --harness <pi|claude-code>
+                 --cwd <abs> [--state personal]
+        Project that member into an execution-scoped directory for Pi or
+        Claude Code. Both harnesses read the same soul.md and skill files.
+        Does not write AGENTS.md or CLAUDE.md. Natal skills over 10 fail
+        before any projection file is written. Omit --state to exclude
+        personal knowledge.
+
     viva memory search --member <id> [--project <id>] --query <text>
         Search the linked external memory for one member's scope
         (read-only). Unavailable stores say so; unclaimable hits are
@@ -2011,6 +2026,115 @@ fn cmd_control_grant(args: &[String]) -> Result<()> {
     let grant = engine.issue_root_grant(member, task, vec![action], mode, expires)?;
     println!("{}", serde_json::to_string_pretty(&grant)?);
     Ok(())
+}
+
+fn cmd_member(args: &[String]) -> Result<()> {
+    match args.first().map(String::as_str) {
+        Some("soul") => cmd_member_soul(args.get(1..).unwrap_or(&[])),
+        _ => Err(Error::Validation(
+            "usage: viva member soul set --member <id> --file <path> | viva member soul show --member <id>"
+                .into(),
+        )),
+    }
+}
+
+fn cmd_member_soul(args: &[String]) -> Result<()> {
+    use std::str::FromStr as _;
+
+    let action = args.first().map(String::as_str);
+    let flags = named_flags(args.get(1..).unwrap_or(&[]))?;
+    let member = viva::foundation::ids::MemberId::from_str(
+        flags
+            .get("member")
+            .ok_or_else(|| Error::Validation("soul needs --member <id>".into()))?,
+    )?;
+    let store = open_store()?;
+    viva::members::MemberRegistry::new(&store).require(&member)?;
+    let home = viva_home(None);
+    match action {
+        Some("show") => {
+            println!("{}", viva::projection::read_soul(&home, &member)?);
+            Ok(())
+        }
+        Some("set") => {
+            let file = flags
+                .get("file")
+                .ok_or_else(|| Error::Validation("soul set needs --file <path>".into()))?;
+            let body = std::fs::read_to_string(file)?;
+            let editor = match std::env::var("VIVA_MEMBER_ID") {
+                Ok(id) if !id.trim().is_empty() => viva::projection::SoulEditor::MemberSession,
+                _ => viva::projection::SoulEditor::Owner,
+            };
+            viva::projection::write_soul(&home, &member, &body, editor)?;
+            println!("{}", viva::projection::soul_path(&home, &member).display());
+            Ok(())
+        }
+        _ => Err(Error::Validation(
+            "usage: viva member soul set --member <id> --file <path> | show --member <id>".into(),
+        )),
+    }
+}
+
+fn cmd_project(args: &[String]) -> Result<()> {
+    use std::str::FromStr as _;
+
+    let flags = named_flags(args)?;
+    let member = viva::foundation::ids::MemberId::from_str(
+        flags
+            .get("member")
+            .ok_or_else(|| Error::Validation("project needs --member <id>".into()))?,
+    )?;
+    let execution = viva::foundation::ids::ExecutionId::from_str(
+        flags
+            .get("execution")
+            .ok_or_else(|| Error::Validation("project needs --execution <id>".into()))?,
+    )?;
+    let harness =
+        viva::projection::SessionHarness::parse(flags.get("harness").ok_or_else(|| {
+            Error::Validation("project needs --harness <pi|claude-code>".into())
+        })?)?;
+    let cwd = std::path::PathBuf::from(
+        flags
+            .get("cwd")
+            .ok_or_else(|| Error::Validation("project needs --cwd <absolute-dir>".into()))?,
+    );
+    let dialog = viva::projection::DialogState::parse(flags.get("state").map(String::as_str));
+    let store = open_store()?;
+    let home = viva_home(None);
+    let manifest = viva::projection::project(
+        &store,
+        &home,
+        &viva::projection::ProjectRequest {
+            member_id: &member,
+            execution_id: &execution,
+            harness,
+            dialog,
+            work_dir: &cwd,
+        },
+    )?;
+    println!("{}", serde_json::to_string_pretty(&manifest)?);
+    Ok(())
+}
+
+fn named_flags(args: &[String]) -> Result<std::collections::HashMap<String, String>> {
+    let mut named = std::collections::HashMap::new();
+    let mut i = 0;
+    while i < args.len() {
+        let token = args[i].as_str();
+        let Some(key) = token.strip_prefix("--") else {
+            return Err(Error::Validation(format!("unexpected argument `{token}`")));
+        };
+        if key.is_empty() {
+            return Err(Error::Validation("expected a flag name".into()));
+        }
+        i += 1;
+        let value = args
+            .get(i)
+            .ok_or_else(|| Error::Validation(format!("flag --{key} needs a value")))?;
+        named.insert(key.to_string(), value.clone());
+        i += 1;
+    }
+    Ok(named)
 }
 
 /// `viva skill …` — team skill body versioning (#140) and member skill sets (#139).

@@ -36,6 +36,10 @@ export interface VivaEnv {
   taskId?: string;
   grantId?: string;
   vivaBin: string;
+  /** Shared projection directory for this execution. Absent when the session was not projected. */
+  projectionDir?: string;
+  /** Canonical soul.md. Same file Claude Code is given. */
+  soulPath?: string;
 }
 
 /**
@@ -55,6 +59,8 @@ export function readEnv(raw: NodeJS.ProcessEnv): VivaEnv | null {
     taskId: raw.VIVA_TASK_ID || undefined,
     grantId: raw.VIVA_GRANT_ID || undefined,
     vivaBin: raw.VIVA_BIN || "viva",
+    projectionDir: raw.VIVA_PROJECTION_DIR || undefined,
+    soulPath: raw.VIVA_SOUL_PATH || undefined,
   };
 }
 

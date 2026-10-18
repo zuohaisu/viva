@@ -1908,14 +1908,17 @@ fn harness_open_in_worktree(
     worktree_id: &str,
     harness: &str,
 ) -> Result<serde_json::Value> {
-    let harness = harness.trim();
-    if harness != "pi" {
-        return Err(Error::Validation(format!(
-            "harness `{harness}` has no Viva launch combination yet; \
-             use workbench handoff (`h`) for bare agent CLIs, or `viva harness matrix` \
-             for supported capabilities"
-        )));
-    }
+    let harness_name = harness.trim();
+    let session_harness = match crate::projection::SessionHarness::parse(harness_name) {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            return Err(Error::Validation(format!(
+                "harness `{harness_name}` has no Viva launch combination yet; \
+                 use workbench handoff (`h`) for bare agent CLIs, or `viva harness matrix` \
+                 for supported capabilities"
+            )));
+        }
+    };
     let worktree_id = WorktreeId::from_str(worktree_id)?;
     let store = shared.store.lock().expect("store");
     let service = crate::git::worktrees::WorktreeService::new(
@@ -1936,33 +1939,107 @@ fn harness_open_in_worktree(
     })?;
     let member = MemberRegistry::new(&store).require(&member_id)?;
     let binding = MemberRegistry::new(&store).binding(&member_id)?;
-    let pi = crate::harness::pi::PiHarness::for_installation();
-    match pi.availability() {
-        crate::harness::pi::Availability::Unavailable { reason } => {
-            return Err(Error::Validation(format!("pi is unavailable: {reason}")));
+    let binding = binding.ok_or_else(|| {
+        Error::Validation(
+            "this member has no role/model binding — set one before launching a harness".into(),
+        )
+    })?;
+    match session_harness {
+        crate::projection::SessionHarness::Pi => {
+            let pi = crate::harness::pi::PiHarness::for_installation();
+            match pi.availability() {
+                crate::harness::pi::Availability::Unavailable { reason } => {
+                    return Err(Error::Validation(format!("pi is unavailable: {reason}")));
+                }
+                crate::harness::pi::Availability::Available => {}
+            }
+            if !pi.extension_path.is_file() {
+                return Err(Error::Validation(format!(
+                    "pi extension not found at {}",
+                    pi.extension_path.display()
+                )));
+            }
         }
-        crate::harness::pi::Availability::Available => {}
+        crate::projection::SessionHarness::ClaudeCode => {
+            let claude = crate::harness::claude_code::ClaudeCodeHarness::for_installation();
+            match claude.availability() {
+                crate::harness::pi::Availability::Unavailable { reason } => {
+                    return Err(Error::Validation(format!(
+                        "claude code is unavailable: {reason}"
+                    )));
+                }
+                crate::harness::pi::Availability::Available => {}
+            }
+        }
     }
-    if !pi.extension_path.is_file() {
-        return Err(Error::Validation(format!(
-            "pi extension not found at {}",
-            pi.extension_path.display()
-        )));
-    }
-    let spec = pi.launch(
-        &member,
-        binding.as_ref(),
-        Some(&task),
-        &record.worktree_path,
-        None,
+    let attribution = crate::foundation::records::AttributionSnapshot::capture(
+        member.member_id.clone(),
+        binding.role.clone(),
+        binding.model_binding.clone(),
+        session_harness.as_str(),
+    );
+    let started = TaskRegistry::new(&store).begin_execution(
+        &task.task_id,
+        &attribution,
+        format!("c0-projection-{}", uuid::Uuid::new_v4()),
     )?;
+    let execution_id = match started {
+        crate::tasks::ExecutionStart::Created(intent)
+        | crate::tasks::ExecutionStart::Replayed(intent) => {
+            intent.execution_id.ok_or_else(|| {
+                Error::Validation("launch intent has no execution; projection did not start".into())
+            })?
+        }
+    };
+    let manifest = crate::projection::project(
+        &store,
+        &shared.home,
+        &crate::projection::ProjectRequest {
+            member_id: &member.member_id,
+            execution_id: &execution_id,
+            harness: session_harness,
+            dialog: crate::projection::DialogState::Unconfirmed,
+            work_dir: &record.worktree_path,
+        },
+    )?;
+    let spec = match session_harness {
+        crate::projection::SessionHarness::Pi => {
+            let pi = crate::harness::pi::PiHarness::for_installation();
+            let spec = pi.launch(
+                &member,
+                Some(&binding),
+                Some(&task),
+                &record.worktree_path,
+                None,
+            )?;
+            crate::projection::inject_projection_env(spec, &manifest)
+        }
+        crate::projection::SessionHarness::ClaudeCode => {
+            crate::harness::claude_code::ClaudeCodeHarness::for_installation().launch(
+                &member,
+                Some(&binding),
+                Some(&task),
+                &record.worktree_path,
+                &crate::harness::claude_code::ClaudeProjection {
+                    soul_path: &manifest.soul_path,
+                    projection_dir: &manifest.projection_dir,
+                    execution_id: &manifest.execution_id,
+                },
+            )?
+        }
+    };
     let mut term = crate::terminal::TerminalSpec::new(spec.argv.clone(), spec.cwd.clone())?;
     term.env = spec.env.clone();
     let (terminal_id, handle) = shared.terminals.spawn(
         term,
         TerminalOwner::AgentCli,
         Some(worktree_id.clone()),
-        format!("pi · {} · {}", member.display_name, record.branch),
+        format!(
+            "{} · {} · {}",
+            session_harness.as_str(),
+            member.display_name,
+            record.branch
+        ),
         None,
         Some(&store),
     )?;
@@ -4943,6 +5020,13 @@ mod s6_harness_open_tests {
                     .expect("binding");
                 m
             });
+        crate::projection::write_soul(
+            &host.home,
+            &member.member_id,
+            "## 职责\n- harness open\n\n## 说话方式\n- terse\n\n## 边界\n- do not merge\n\n## 本命技能\n",
+            crate::projection::SoulEditor::Owner,
+        )
+        .expect("soul");
         let task = TaskRegistry::new(&store)
             .create_task(
                 format!("harness open {wt_name}"),

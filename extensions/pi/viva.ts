@@ -22,6 +22,9 @@
  * tools it registers.
  */
 
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
@@ -35,6 +38,47 @@ import {
 } from "./lib.ts";
 import { registerComputerTools } from "./computer/computer.ts";
 import { registerMemoryTools } from "./memory/memory.ts";
+
+/** Text both harnesses take from the one projection directory. */
+export function projectionAppendix(dir: string | undefined): string {
+  if (!dir || !existsSync(dir)) return "";
+  const parts: string[] = [];
+  const soul = join(dir, "soul.md");
+  if (existsSync(soul)) {
+    parts.push(readFileSync(soul, "utf8").trimEnd());
+  }
+  const principlesPath = join(dir, "principles.json");
+  if (existsSync(principlesPath)) {
+    const text = readFileSync(principlesPath, "utf8").trim();
+    parts.push(
+      text === "[]" || text === ""
+        ? "Approved principles: none."
+        : `Approved principles:\n${text}`,
+    );
+  }
+  const manifestPath = join(dir, "manifest.json");
+  if (existsSync(manifestPath)) {
+    try {
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+        skills?: { skill_id?: string; natal?: boolean; path?: string }[];
+      };
+      const skills = manifest.skills ?? [];
+      if (skills.length === 0) {
+        parts.push("Projected skills: none.");
+      } else {
+        parts.push(
+          "Projected skills:\n" +
+            skills
+              .map((skill) => `- ${skill.skill_id ?? ""}${skill.natal ? " (natal)" : ""} ${skill.path ?? ""}`)
+              .join("\n"),
+        );
+      }
+    } catch {
+      parts.push("Projected skill manifest could not be read.");
+    }
+  }
+  return parts.filter((part) => part.length > 0).join("\n\n");
+}
 
 export default function viva(pi: PiHost): void {
   const env: VivaEnv | null = readEnv(process.env);
@@ -72,7 +116,27 @@ export default function viva(pi: PiHost): void {
         "External memory: could not reach Viva memory status — recall/remember may be unavailable.",
       );
     }
+    const appendix = projectionAppendix(env.projectionDir);
+    if (appendix) {
+      lines.push(appendix);
+    }
     ctx.ui.notify(lines.join("\n"), "info");
+  });
+
+  pi.on("before_agent_start", async (event) => {
+    const appendix = projectionAppendix(env.projectionDir);
+    if (!appendix) return;
+    const previous = event.systemPromptOptions.appendSystemPrompt ?? "";
+    event.systemPromptOptions.appendSystemPrompt = previous
+      ? `${previous}\n\n${appendix}`
+      : appendix;
+  });
+
+  pi.on("resources_discover", async () => {
+    if (!env.projectionDir) return;
+    const skills = join(env.projectionDir, "skills");
+    if (!existsSync(skills)) return;
+    return { skillPaths: [skills] };
   });
 
   pi.registerTool({

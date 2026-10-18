@@ -10,10 +10,20 @@
 //! that silently swaps an unavailable harness for another one.
 //!
 //! Pi specialization lives in [`pi`]: it knows the extension path, the
-//! default binary name and how to probe availability honestly.
+//! default binary name and how to probe availability honestly. Claude Code
+//! lives in [`claude_code`] and reads the same projection directory Pi does.
 
 pub mod capabilities;
+pub mod claude_code;
 pub mod pi;
+
+/// Projection directory for this member execution. Pi and Claude Code both
+/// receive this path; neither gets its own copy of the member assets.
+pub const ENV_PROJECTION_DIR: &str = "VIVA_PROJECTION_DIR";
+/// Canonical `soul.md` (the file the projection symlink points at).
+pub const ENV_SOUL_PATH: &str = "VIVA_SOUL_PATH";
+/// Execution whose task brief the projection reused.
+pub const ENV_EXECUTION_ID: &str = "VIVA_EXECUTION_ID";
 
 use std::path::PathBuf;
 

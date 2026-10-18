@@ -29,7 +29,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -200,4 +200,83 @@ test("real Pi loads the conversations sub-extension and registers its 3 tools", 
   t.diagnostic(`real Pi ${VERSION}`);
   const load = await loadInRealPi(CONVERSATIONS_ENTRY, true);
   assertLoadsCleanlyWithTools(load, CONVERSATIONS_TOOLS, "conversations/index.ts");
+});
+
+test("real Pi session reads the projected soul into the prompt", async (t) => {
+  t.diagnostic(`real Pi ${VERSION}`);
+  const sandbox = mkdtempSync(join(tmpdir(), "viva-real-pi-project-"));
+  const agentDir = join(sandbox, "agent");
+  const cwd = join(sandbox, "cwd");
+  const vivaHome = join(sandbox, "viva-home");
+  const projection = join(sandbox, "projection");
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(cwd, { recursive: true });
+  mkdirSync(vivaHome, { recursive: true });
+  mkdirSync(join(projection, "skills", "review-duty"), { recursive: true });
+  const duty = "职责: keep the grant boundary";
+  const boundary = "边界: do not merge and do not approve your own PR";
+  writeFileSync(join(projection, "soul.md"), `# soul\n\n## 职责\n${duty}\n\n## 边界\n${boundary}\n`);
+  writeFileSync(join(projection, "principles.json"), "[]\n");
+  writeFileSync(
+    join(projection, "manifest.json"),
+    JSON.stringify({
+      skills: [{ skill_id: "review-duty", natal: true, path: "skills/review-duty/SKILL.md" }],
+    }),
+  );
+  writeFileSync(join(projection, "skills", "review-duty", "SKILL.md"), "# review\n");
+
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.startsWith("VIVA_") && !key.startsWith("PI_")) env[key] = value;
+  }
+  Object.assign(env, {
+    HOME: sandbox,
+    PI_OFFLINE: "1",
+    PI_CODING_AGENT_DIR: agentDir,
+    ...harnessEnvironment(vivaHome),
+    VIVA_PROJECTION_DIR: projection,
+    VIVA_SOUL_PATH: join(projection, "soul.md"),
+  });
+  const saved = process.env;
+  process.env = env;
+  try {
+    const loader = new DefaultResourceLoader({
+      cwd,
+      agentDir,
+      additionalExtensionPaths: [HARNESS_ENTRY],
+      noExtensions: true,
+      noSkills: true,
+      noPromptTemplates: true,
+      noThemes: true,
+      noContextFiles: true,
+    });
+    await loader.reload();
+    const { session } = await createAgentSession({
+      cwd,
+      agentDir,
+      resourceLoader: loader,
+      sessionManager: SessionManager.inMemory(cwd),
+    });
+    try {
+      const started = await session.extensionRunner.emitBeforeAgentStart(
+        { messageType: "user", prompt: "quote your responsibilities and boundaries" },
+        { cwd },
+      );
+      const prompt = started.systemPromptOptions.appendSystemPrompt ?? "";
+      assert.match(prompt, new RegExp(duty));
+      assert.match(prompt, new RegExp(boundary));
+      assert.match(prompt, /Approved principles: none/);
+      assert.match(prompt, /review-duty/);
+      const discovered = await session.extensionRunner.emitResourcesDiscover(cwd, "startup");
+      assert.ok(
+        discovered.skillPaths.some((entry) => entry.path === join(projection, "skills")),
+        `Pi did not discover the projected skill directory: ${JSON.stringify(discovered.skillPaths)}`,
+      );
+    } finally {
+      session.dispose();
+    }
+  } finally {
+    process.env = saved;
+    rmSync(sandbox, { recursive: true, force: true });
+  }
 });

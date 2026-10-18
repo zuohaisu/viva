@@ -18,12 +18,12 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { readEnv, planDispatch, runEnvelope } from "../lib.ts";
-import viva from "../viva.ts";
+import viva, { projectionAppendix } from "../viva.ts";
 import { callTool, createFakePi, emit, textOf, toolNamed } from "./fake-pi.ts";
 
 function withEnv(raw: NodeJS.ProcessEnv, fn: () => void | Promise<void>): Promise<void> | void {
@@ -251,6 +251,35 @@ test("the session_start handler tells the user who the member is, at the real 'i
     assert.match(notices[0]?.message ?? "", /you are Samuel \(member mem-1\)/);
     assert.match(notices[0]?.message ?? "", /Current task: task-1/);
   });
+});
+
+test("session_start shows the projected soul when Viva set a projection directory", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "viva-projection-"));
+  mkdirSync(join(dir, "skills"), { recursive: true });
+  writeFileSync(join(dir, "soul.md"), "## 职责\n- DUTY-LINE\n\n## 边界\n- BOUNDARY-LINE\n");
+  writeFileSync(join(dir, "principles.json"), "[]\n");
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify({ skills: [] }));
+  try {
+    assert.match(projectionAppendix(dir), /DUTY-LINE/);
+    assert.match(projectionAppendix(dir), /BOUNDARY-LINE/);
+    assert.match(projectionAppendix(dir), /Approved principles: none/);
+    await withEnv({ ...BASE_ENV, VIVA_PROJECTION_DIR: dir }, async () => {
+      const fake = createFakePi();
+      viva(fake.host);
+      const notices: string[] = [];
+      await emit(fake, "session_start", { type: "session_start", reason: "startup" }, {
+        ui: {
+          notify(message: string) {
+            notices.push(message);
+          },
+        },
+      });
+      assert.match(notices.join("\n"), /DUTY-LINE/);
+      assert.match(notices.join("\n"), /BOUNDARY-LINE/);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("the extension stays inert without Viva context", () => {
