@@ -24,6 +24,13 @@ use crate::git::evidence::{EvidenceState, GhRunner};
 /// How many file rows the panel keeps. The true total is still reported.
 pub const PR_FILE_LIMIT: usize = 500;
 
+/// `gh pr view --json commits` asks for `commits(first: 100)` and does not
+/// ask for another page. A length of 100 is not a complete total.
+const GH_VIEW_COMMIT_CAP: u64 = 100;
+
+/// Marker [`crate::git::cli::bounded_output`] appends when stdout is cut.
+const OUTPUT_TRUNCATED: &str = "… [output truncated]";
+
 /// How much of one file's patch the panel keeps. The true byte size is
 /// still reported when GitHub sent more.
 pub const PR_PATCH_LIMIT: usize = 64 * 1024;
@@ -177,7 +184,11 @@ impl PrInfo {
             parts.push(format!("{} ← {}", self.base_ref, self.head_ref));
         }
         if let Some(commits) = self.commits {
-            parts.push(format!("{commits} commits"));
+            if commits >= GH_VIEW_COMMIT_CAP {
+                parts.push(format!("at least {commits} commits"));
+            } else {
+                parts.push(format!("{commits} commits"));
+            }
         }
         if !self.head_sha.is_empty() {
             parts.push(format!("head {}", short_sha(&self.head_sha)));
@@ -492,7 +503,13 @@ pub struct PrFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatchBody {
     Diff(String),
-    Truncated { text: String, bytes: usize },
+    /// `bytes` is the full patch size when the text was received whole.
+    /// `None` means the capture ended inside the patch, so the size is
+    /// not known.
+    Truncated {
+        text: String,
+        bytes: Option<usize>,
+    },
     Absent,
 }
 
@@ -514,14 +531,20 @@ impl PrFile {
     }
 
     /// `(kind, text)` for the file view. `kind` is `diff`, `truncated`,
-    /// or `binary`.
+    /// or `no patch`. A missing patch is not called binary: GitHub omits
+    /// it for binaries and for text diffs that are too large.
     pub fn view(&self) -> (&'static str, String) {
         match &self.patch {
             PatchBody::Diff(text) => ("diff", text.clone()),
-            PatchBody::Truncated { text, bytes } => {
-                ("truncated", format!("{text}\n… [{bytes} bytes]"))
-            }
-            PatchBody::Absent => ("binary", "binary — GitHub returned no patch".into()),
+            PatchBody::Truncated {
+                text,
+                bytes: Some(bytes),
+            } => ("truncated", format!("{text}\n… [{bytes} bytes]")),
+            PatchBody::Truncated { text, bytes: None } => (
+                "truncated",
+                format!("{text}\n… [patch truncated, full size unknown]"),
+            ),
+            PatchBody::Absent => ("no patch", "no patch — GitHub returned no patch".into()),
         }
     }
 }
@@ -539,23 +562,289 @@ fn status_mark(status: &str) -> &str {
     }
 }
 
-/// The file list for PR `number`, paged through the read-only `gh api`
-/// allowlist. The list is GitHub's net diff: a file edited in several
-/// commits is one row, and a file added then deleted is absent.
+/// One fetch of the net file list. `files` is at most [`PR_FILE_LIMIT`]
+/// rows. `total` counts every file the pages identified. `complete` is
+/// false when a page could not be read to the end, so `total` is only
+/// what was recovered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrFileFetch {
+    pub files: Vec<PrFile>,
+    pub total: usize,
+    pub complete: bool,
+}
+
+/// The file list for PR `number`. Pages are separate `gh api` GETs so a
+/// multi-megabyte JSON array is not cut into one unparseable buffer.
+/// The list is GitHub's net diff: a file edited in several commits is
+/// one row, and a file added then deleted is absent.
 pub fn fetch_pr_files(
     repo_root: &Path,
     owner: &str,
     repo: &str,
     number: u64,
     gh_program: &str,
-) -> EvidenceState<Vec<PrFile>> {
-    let Some(path) = crate::git::evidence::pull_files_api_path(owner, repo, number) else {
+) -> EvidenceState<PrFileFetch> {
+    if crate::git::evidence::pull_files_api_path(owner, repo, number).is_none() {
         return EvidenceState::Unavailable {
             reason: "pull request URL is not a files API path".into(),
         };
-    };
+    }
     let gh = GhRunner::with_program(gh_program);
-    gh.read(repo_root, &["api", "--paginate", &path], parse_pr_files)
+    // Ten files fit under the 1 MiB capture when each patch is modest.
+    // A cut page is retried one file at a time from the same index.
+    let mut per_page: u64 = 10;
+    let mut index: u64 = 0;
+    let mut kept = Vec::new();
+    let mut total = 0usize;
+    let mut complete = true;
+    let mut fetched_at = String::new();
+    loop {
+        if index >= 10_000 {
+            complete = false;
+            break;
+        }
+        let page = if per_page == 1 {
+            index + 1
+        } else {
+            index / per_page + 1
+        };
+        let Some(path) =
+            crate::git::evidence::pull_files_page_path(owner, repo, number, per_page, page)
+        else {
+            return EvidenceState::Unavailable {
+                reason: "pull request URL is not a files API path".into(),
+            };
+        };
+        let stdout = match gh.capture(repo_root, &["api", &path]) {
+            EvidenceState::Fetched {
+                payload,
+                fetched_at: at,
+            } => {
+                if fetched_at.is_empty() {
+                    fetched_at = at;
+                }
+                payload
+            }
+            EvidenceState::Unavailable { reason } => {
+                if total == 0 {
+                    return EvidenceState::Unavailable { reason };
+                }
+                complete = false;
+                break;
+            }
+        };
+        let page_files = match files_from_captured_stdout(&stdout) {
+            Ok(page) => page,
+            Err(err) => {
+                if total == 0 {
+                    return EvidenceState::Unavailable {
+                        reason: err.to_string(),
+                    };
+                }
+                complete = false;
+                break;
+            }
+        };
+        if page_files.cut && per_page > 1 {
+            per_page = 1;
+            continue;
+        }
+        if page_files.files.is_empty() {
+            if page_files.cut {
+                complete = false;
+            }
+            break;
+        }
+        let count = page_files.files.len();
+        total += count;
+        for file in page_files.files {
+            if kept.len() < PR_FILE_LIMIT {
+                kept.push(file);
+            }
+        }
+        index += count as u64;
+        if !page_files.cut && count < per_page as usize {
+            break;
+        }
+    }
+    if fetched_at.is_empty() {
+        fetched_at = crate::foundation::ids::utc_now();
+    }
+    EvidenceState::Fetched {
+        payload: PrFileFetch {
+            files: kept,
+            total,
+            complete,
+        },
+        fetched_at,
+    }
+}
+
+struct CapturedPage {
+    files: Vec<PrFile>,
+    cut: bool,
+}
+
+/// Parse one `gh` stdout. A capture cut at 1 MiB keeps every file object
+/// that finished, and the file whose patch was sliced in half, instead
+/// of failing the page.
+fn files_from_captured_stdout(stdout: &str) -> Result<CapturedPage> {
+    if let Ok(files) = parse_pr_files(stdout) {
+        return Ok(CapturedPage { files, cut: false });
+    }
+    if !stdout.contains(OUTPUT_TRUNCATED) {
+        return Err(Error::Validation(
+            "pull request files: response was not a JSON array".into(),
+        ));
+    }
+    let raw = stdout
+        .trim_end()
+        .trim_end_matches(OUTPUT_TRUNCATED)
+        .trim_end();
+    Ok(CapturedPage {
+        files: salvage_files(raw),
+        cut: true,
+    })
+}
+
+fn salvage_files(text: &str) -> Vec<PrFile> {
+    let start = text.find('[').map(|index| index + 1).unwrap_or(0);
+    let mut rest = &text[start..];
+    let mut files = Vec::new();
+    loop {
+        rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == ',');
+        if rest.is_empty() || rest.starts_with(']') {
+            break;
+        }
+        let Some((value, tail)) = split_json_value(rest) else {
+            if let Some(file) = file_from_partial(rest) {
+                files.push(file);
+            }
+            break;
+        };
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(value) {
+            if let Some(file) = file_from_value(&parsed) {
+                files.push(file);
+            }
+        }
+        rest = tail;
+    }
+    files
+}
+
+/// Split one complete JSON object or array off the front. The remainder
+/// starts after that value. An unfinished value returns `None`.
+fn split_json_value(text: &str) -> Option<(&str, &str)> {
+    let bytes = text.as_bytes();
+    if bytes
+        .first()
+        .is_none_or(|byte| !matches!(byte, b'{' | b'['))
+    {
+        return None;
+    }
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    for (index, byte) in bytes.iter().enumerate() {
+        if in_string {
+            if escape {
+                escape = false;
+                continue;
+            }
+            match byte {
+                b'\\' => escape = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    let end = index + 1;
+                    return Some((&text[..end], &text[end..]));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn file_from_partial(text: &str) -> Option<PrFile> {
+    let filename = json_string_field(text, "filename", false)?;
+    if filename.is_empty() {
+        return None;
+    }
+    let status = json_string_field(text, "status", false).unwrap_or_default();
+    let patch = match json_string_field(text, "patch", true) {
+        Some(text) if text.as_bytes().contains(&0) => PatchBody::Absent,
+        Some(text) if !text.is_empty() => {
+            let shown = crate::git::cli::bounded_output(text.as_bytes(), PR_PATCH_LIMIT);
+            PatchBody::Truncated {
+                text: shown,
+                bytes: None,
+            }
+        }
+        _ => PatchBody::Absent,
+    };
+    Some(PrFile {
+        filename,
+        status,
+        additions: json_i64_field(text, "additions").unwrap_or(0),
+        deletions: json_i64_field(text, "deletions").unwrap_or(0),
+        previous_filename: json_string_field(text, "previous_filename", false)
+            .filter(|value| !value.is_empty()),
+        patch,
+    })
+}
+
+fn json_string_field(text: &str, key: &str, allow_unterminated: bool) -> Option<String> {
+    let marker = format!("\"{key}\"");
+    let index = text.find(&marker)?;
+    let after = text[index + marker.len()..].trim_start();
+    let after = after.strip_prefix(':')?.trim_start();
+    if after.starts_with("null") {
+        return None;
+    }
+    let after = after.strip_prefix('"')?;
+    let mut out = String::new();
+    let mut chars = after.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => {
+                let Some(next) = chars.next() else {
+                    break;
+                };
+                out.push(match next {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    other => other,
+                });
+            }
+            '"' => return Some(out),
+            other => out.push(other),
+        }
+    }
+    allow_unterminated.then_some(out)
+}
+
+fn json_i64_field(text: &str, key: &str) -> Option<i64> {
+    let marker = format!("\"{key}\"");
+    let index = text.find(&marker)?;
+    let after = text[index + marker.len()..].trim_start();
+    let after = after.strip_prefix(':')?.trim_start();
+    let end = after
+        .find(|ch: char| !ch.is_ascii_digit() && ch != '-')
+        .unwrap_or(after.len());
+    if end == 0 || end == after.len() {
+        return None;
+    }
+    after[..end].parse().ok()
 }
 
 pub fn parse_pr_files(stdout: &str) -> Result<Vec<PrFile>> {
@@ -563,36 +852,30 @@ pub fn parse_pr_files(stdout: &str) -> Result<Vec<PrFile>> {
         return Ok(Vec::new());
     }
     let rows: Vec<serde_json::Value> = serde_json::from_str(stdout)?;
-    let mut files = Vec::with_capacity(rows.len());
-    for row in rows {
-        let filename = row
-            .get("filename")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if filename.is_empty() {
-            continue;
-        }
-        let status = row
+    Ok(rows.iter().filter_map(file_from_value).collect())
+}
+
+fn file_from_value(row: &serde_json::Value) -> Option<PrFile> {
+    let filename = row.get("filename").and_then(|v| v.as_str()).unwrap_or("");
+    if filename.is_empty() {
+        return None;
+    }
+    Some(PrFile {
+        filename: filename.to_string(),
+        status: row
             .get("status")
             .and_then(|v| v.as_str())
             .unwrap_or("")
-            .to_string();
-        let patch = row.get("patch").and_then(|v| v.as_str());
-        files.push(PrFile {
-            filename,
-            status,
-            additions: row.get("additions").and_then(|v| v.as_i64()).unwrap_or(0),
-            deletions: row.get("deletions").and_then(|v| v.as_i64()).unwrap_or(0),
-            previous_filename: row
-                .get("previous_filename")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
-            patch: bound_patch(patch),
-        });
-    }
-    Ok(files)
+            .to_string(),
+        additions: row.get("additions").and_then(|v| v.as_i64()).unwrap_or(0),
+        deletions: row.get("deletions").and_then(|v| v.as_i64()).unwrap_or(0),
+        previous_filename: row
+            .get("previous_filename")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        patch: bound_patch(row.get("patch").and_then(|v| v.as_str())),
+    })
 }
 
 fn bound_patch(patch: Option<&str>) -> PatchBody {
@@ -605,7 +888,10 @@ fn bound_patch(patch: Option<&str>) -> PatchBody {
     let bytes = patch.len();
     if bytes > PR_PATCH_LIMIT {
         let text = crate::git::cli::bounded_output(patch.as_bytes(), PR_PATCH_LIMIT);
-        return PatchBody::Truncated { text, bytes };
+        return PatchBody::Truncated {
+            text,
+            bytes: Some(bytes),
+        };
     }
     PatchBody::Diff(patch.to_string())
 }
@@ -624,7 +910,7 @@ pub fn page_files(mut files: Vec<PrFile>) -> (Vec<PrFile>, usize, bool) {
 pub struct CachedPrFiles {
     pub head_sha: String,
     pub fetched_at: String,
-    pub files: Vec<PrFile>,
+    pub fetch: PrFileFetch,
 }
 
 #[cfg(test)]
@@ -837,6 +1123,73 @@ echo '{"number":9,"title":"conflict","state":"OPEN","isDraft":false,"url":"https
     }
 
     #[test]
+    fn a_hundred_commits_is_not_reported_as_a_complete_total() {
+        let info = parse_pr_view(
+            &serde_json::json!({
+                "number": 4,
+                "state": "OPEN",
+                "url": "https://github.com/example/repo/pull/4",
+                "baseRefName": "main",
+                "headRefName": "long",
+                "commits": (0..100).map(|n| serde_json::json!({"oid": n.to_string()})).collect::<Vec<_>>()
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(info.meta_line().contains("at least 100 commits"));
+        let short = parse_pr_view(
+            &serde_json::json!({
+                "number": 5,
+                "state": "OPEN",
+                "url": "https://github.com/example/repo/pull/5",
+                "commits": [{"oid": "a"}, {"oid": "b"}, {"oid": "c"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(short.meta_line().contains("3 commits"));
+        assert!(!short.meta_line().contains("at least"));
+    }
+
+    #[test]
+    fn a_captured_page_cut_at_one_mebibyte_keeps_the_files_already_read() {
+        let huge = "x".repeat(1_200_000);
+        let body = serde_json::json!([
+            {"filename": "a.rs", "status": "modified", "additions": 1, "deletions": 0, "patch": "@@\n+a\n"},
+            {"filename": "b.rs", "status": "modified", "additions": 2, "deletions": 1, "patch": huge},
+            {"filename": "c.rs", "status": "renamed", "additions": 3, "deletions": 0, "previous_filename": "old.rs", "patch": "@@\n+c\n"}
+        ])
+        .to_string();
+        assert!(body.len() > crate::git::cli::MAX_CAPTURED_OUTPUT);
+        let captured =
+            crate::git::cli::bounded_output(body.as_bytes(), crate::git::cli::MAX_CAPTURED_OUTPUT);
+        let whole = parse_pr_files(&captured);
+        assert!(whole.is_err(), "the cut buffer is not valid JSON");
+        let page = files_from_captured_stdout(&captured).expect("a cut page is not a failure");
+        assert!(page.cut);
+        assert!(
+            page.files.iter().any(|file| file.filename == "a.rs"),
+            "the finished file stays: {:?}",
+            page.files
+                .iter()
+                .map(|file| file.filename.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            page.files.iter().any(|file| file.filename == "b.rs"),
+            "the file whose patch was sliced stays"
+        );
+        let sliced = page
+            .files
+            .iter()
+            .find(|file| file.filename == "b.rs")
+            .unwrap();
+        assert_eq!(sliced.view().0, "truncated");
+        assert!(sliced.view().1.contains("full size unknown"));
+        assert!(!sliced.view().1.contains("binary"));
+    }
+
+    #[test]
     fn files_are_the_net_github_list_with_rename_and_bounds() {
         let patch = format!("@@ -1 +1 @@\n-{}\n+final\n", "x".repeat(PR_PATCH_LIMIT));
         let stdout = serde_json::json!([
@@ -891,8 +1244,9 @@ echo '{"number":9,"title":"conflict","state":"OPEN","isDraft":false,"url":"https
             files[2].label(),
             "R  old/path.rs → src/new.rs  +10 \u{2212}4"
         );
-        assert_eq!(files[3].view().0, "binary");
-        assert!(files[3].view().1.contains("binary"));
+        assert_eq!(files[3].view().0, "no patch");
+        assert!(files[3].view().1.contains("no patch"));
+        assert!(!files[3].view().1.contains("binary"));
         assert!(!files[3].view().1.contains("@@"));
         assert_eq!(files[4].view().0, "truncated");
         assert!(files[4].view().1.contains("bytes"));
@@ -924,14 +1278,19 @@ echo '{"number":9,"title":"conflict","state":"OPEN","isDraft":false,"url":"https
         let gh = write_gh(dir.path(), &script);
         let state = fetch_pr_files(dir.path(), "example", "repo", 418, &gh.to_string_lossy());
         match state {
-            EvidenceState::Fetched { payload, .. } => assert!(payload.is_empty()),
+            EvidenceState::Fetched { payload, .. } => {
+                assert!(payload.files.is_empty());
+                assert_eq!(payload.total, 0);
+                assert!(payload.complete);
+            }
             EvidenceState::Unavailable { reason } => panic!("{reason}"),
         }
         let text = std::fs::read_to_string(&log).unwrap();
         assert!(
-            text.contains("api --paginate repos/example/repo/pulls/418/files"),
+            text.contains("api repos/example/repo/pulls/418/files?per_page=10&page=1"),
             "{text}"
         );
+        assert!(!text.contains("--paginate"), "{text}");
         assert!(!text.contains("merge"));
         assert!(!text.contains("comment"));
         assert!(!text.contains("review"));

@@ -383,9 +383,14 @@ pub struct FilePanel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PrPanel {
     worktree_id: String,
+    /// The full scan line: review, merge, and the file counts live here.
+    /// The sidebar is too narrow to show them.
+    summary: String,
     heading: String,
     meta: String,
     note: Option<String>,
+    /// A page of the file list could not be read to the end.
+    incomplete: bool,
     /// `(filename, label)` rows. `filename` is the GitHub path used to
     /// fetch the patch. The label already includes the status mark and
     /// the rename arrow.
@@ -626,6 +631,36 @@ pub struct WorkbenchApp {
     /// for the focused pane. The key is the terminal id; the value is
     /// that record's `updated_at`. It is not written to the scene book.
     seen_done: std::collections::HashMap<String, String>,
+}
+
+/// Pack a ` · `-separated scan line into rows that fit the panel.
+fn wrap_summary(text: &str, width: usize) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for part in text.split(" · ") {
+        let next = if current.is_empty() {
+            crate::tui::text::display_width(part)
+        } else {
+            crate::tui::text::display_width(&current)
+                + crate::tui::text::display_width(" · ")
+                + crate::tui::text::display_width(part)
+        };
+        if !current.is_empty() && next > width {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push_str(" · ");
+        }
+        current.push_str(part);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
 impl WorkbenchApp {
@@ -5203,11 +5238,15 @@ impl WorkbenchApp {
                 );
             }
             _ => {
-                let mut banners = vec![panel.meta.clone()];
+                let inner = usize::from(area.width.saturating_sub(4)).max(8);
+                let mut banners = wrap_summary(&panel.summary, inner);
+                banners.extend(wrap_summary(&panel.meta, inner));
                 if let Some(note) = &panel.note {
                     banners.push(note.clone());
                 }
-                if panel.truncated {
+                if panel.incomplete {
+                    banners.push(format!("list cut off after {} files", panel.total));
+                } else if panel.truncated {
                     banners.push(format!(
                         "— showing {} of {} files (truncated) —",
                         panel.rows.len(),
@@ -6379,6 +6418,11 @@ fn apply_client_action(
             app.file_view = None;
             app.pr_panel = Some(PrPanel {
                 worktree_id,
+                summary: value
+                    .get("summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 heading: value
                     .get("heading")
                     .and_then(|v| v.as_str())
@@ -6393,6 +6437,10 @@ fn apply_client_action(
                     .get("note")
                     .and_then(|v| v.as_str())
                     .map(str::to_string),
+                incomplete: value
+                    .get("incomplete")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 rows,
                 truncated,
                 total,
@@ -6416,7 +6464,7 @@ fn apply_client_action(
             let text = value
                 .get("text")
                 .and_then(|v| v.as_str())
-                .unwrap_or("binary — GitHub returned no patch")
+                .unwrap_or("no patch — GitHub returned no patch")
                 .to_string();
             if let Some(panel) = app.pr_panel.as_mut() {
                 panel.viewing = Some(path);
@@ -7932,6 +7980,10 @@ mod tests {
             "the summary starts on the worktree row: {view}"
         );
         assert!(view.contains("checks failing"), "{view}");
+        assert!(
+            !view.contains("review pending"),
+            "the sidebar cannot hold the rest of the scan line: {view}"
+        );
     }
 
     #[test]
@@ -7954,10 +8006,14 @@ mod tests {
         let mut app = WorkbenchApp::new();
         app.pr_panel = Some(PrPanel {
             worktree_id: "wt1".into(),
+            summary:
+                "#418 · open · checks failing · review pending · merge clean · 12 files +340 −28"
+                    .into(),
             heading: "#418  track pull request files".into(),
             meta: "main ← pr-files · 3 commits · head aaaaaaaaaaaa · fetched 2026-10-18T00:00:00Z"
                 .into(),
             note: Some("列表来自 GitHub 上的这份 PR".into()),
+            incomplete: false,
             rows: vec![
                 ("src/git/pr.rs".into(), "M  src/git/pr.rs  +40 −2".into()),
                 (
@@ -7973,6 +8029,9 @@ mod tests {
         });
         let view = render(&mut app, 160, 40);
         assert!(view.contains("#418  track pull request files"), "{view}");
+        assert!(view.contains("review pending"), "{view}");
+        assert!(view.contains("merge clean"), "{view}");
+        assert!(view.contains("12 files"), "{view}");
         assert!(view.contains("main ← pr-files"), "{view}");
         assert!(view.contains("列表来自 GitHub 上的这份 PR"), "{view}");
         assert!(view.contains("old/path.rs → src/new.rs"), "{view}");

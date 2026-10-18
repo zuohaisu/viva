@@ -3811,13 +3811,13 @@ fn pr_files_for(
     worktree_id: &str,
     info: &crate::git::pr::PrInfo,
     repo_root: &std::path::Path,
-) -> crate::git::evidence::EvidenceState<Vec<crate::git::pr::PrFile>> {
+) -> crate::git::evidence::EvidenceState<crate::git::pr::PrFileFetch> {
     if !info.head_sha.is_empty() {
         let cache = shared.pr_files.lock().expect("pr files");
         if let Some(hit) = cache.get(worktree_id) {
             if hit.head_sha == info.head_sha {
                 return crate::git::evidence::EvidenceState::Fetched {
-                    payload: hit.files.clone(),
+                    payload: hit.fetch.clone(),
                     fetched_at: hit.fetched_at.clone(),
                 };
             }
@@ -3847,7 +3847,7 @@ fn pr_files_for(
                 crate::git::pr::CachedPrFiles {
                     head_sha: info.head_sha.clone(),
                     fetched_at: fetched_at.clone(),
-                    files: payload.clone(),
+                    fetch: payload.clone(),
                 },
             );
         }
@@ -3899,8 +3899,10 @@ fn worktree_pr_files(shared: &Shared, worktree_id: &str) -> Result<serde_json::V
     info.fetched_at = fetched_at.clone();
     let local = crate::git::pr::local_head(&checkout.worktree_path);
     let differs = crate::git::pr::local_head_differs(&info.head_sha, local.as_deref());
-    let (page, total, truncated) = crate::git::pr::page_files(payload);
-    let files: Vec<serde_json::Value> = page
+    let total = payload.total;
+    let truncated = !payload.complete || total > payload.files.len();
+    let files: Vec<serde_json::Value> = payload
+        .files
         .iter()
         .map(|file| {
             serde_json::json!({
@@ -3923,6 +3925,7 @@ fn worktree_pr_files(shared: &Shared, worktree_id: &str) -> Result<serde_json::V
         "local_head_differs": differs,
         "note": if differs { Some(crate::git::pr::LOCAL_HEAD_NOTE) } else { None },
         "truncated": truncated,
+        "incomplete": !payload.complete,
         "total": total,
         "files": files,
     }))
@@ -3947,7 +3950,7 @@ fn worktree_pr_file(shared: &Shared, worktree_id: &str, path: &str) -> Result<se
             return Err(Error::Validation(reason));
         }
     };
-    let Some(file) = payload.iter().find(|file| file.filename == path) else {
+    let Some(file) = payload.files.iter().find(|file| file.filename == path) else {
         return Err(Error::NotFound {
             entity: "pull request file",
             id: path.to_string(),

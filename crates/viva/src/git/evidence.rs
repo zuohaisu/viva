@@ -69,6 +69,10 @@ fn is_pull_read_get(args: &[&str]) -> bool {
 }
 
 fn is_pull_read_path(path: &str) -> bool {
+    let (path, query) = match path.split_once('?') {
+        Some((path, query)) => (path, query),
+        None => (path, ""),
+    };
     let Some(rest) = path.strip_prefix("repos/") else {
         return false;
     };
@@ -85,12 +89,44 @@ fn is_pull_read_path(path: &str) -> bool {
     if parts.next().is_some() {
         return false;
     }
-    pulls == "pulls"
-        && matches!(leaf, "comments" | "files")
-        && is_github_name(owner)
-        && is_github_name(repo)
-        && !number.is_empty()
-        && number.chars().all(|c| c.is_ascii_digit())
+    if pulls != "pulls" || !is_github_name(owner) || !is_github_name(repo) {
+        return false;
+    }
+    if number.is_empty() || !number.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    match leaf {
+        "comments" => query.is_empty(),
+        // One files page. `per_page` and `page` are the only query this
+        // read accepts, so a caller cannot turn the GET into something else.
+        "files" => query.is_empty() || is_files_page_query(query),
+        _ => false,
+    }
+}
+
+/// `per_page=<digits>&page=<digits>`, nothing else.
+fn is_files_page_query(query: &str) -> bool {
+    let mut parts = query.split('&');
+    let (Some(per_page), Some(page)) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+    is_decimal_param(per_page, "per_page") && is_decimal_param(page, "page")
+}
+
+fn is_decimal_param(part: &str, name: &str) -> bool {
+    let Some(value) = part
+        .strip_prefix(name)
+        .and_then(|rest| rest.strip_prefix('='))
+    else {
+        return false;
+    };
+    !value.is_empty()
+        && value.len() <= 6
+        && !value.starts_with('0')
+        && value.chars().all(|c| c.is_ascii_digit())
 }
 
 fn is_github_name(name: &str) -> bool {
@@ -114,6 +150,22 @@ pub(crate) fn pull_review_comments_api_path(
 /// `GET repos/{owner}/{repo}/pulls/{n}/files` — GitHub's net file list.
 pub(crate) fn pull_files_api_path(owner: &str, repo: &str, number: u64) -> Option<String> {
     pull_api_path(owner, repo, number, "files")
+}
+
+/// One page of that file list. The page size stays small so one `gh`
+/// response can be parsed before the 1 MiB capture limit cuts it.
+pub(crate) fn pull_files_page_path(
+    owner: &str,
+    repo: &str,
+    number: u64,
+    per_page: u64,
+    page: u64,
+) -> Option<String> {
+    if per_page == 0 || page == 0 {
+        return None;
+    }
+    let path = format!("repos/{owner}/{repo}/pulls/{number}/files?per_page={per_page}&page={page}");
+    is_pull_read_path(&path).then_some(path)
 }
 
 fn pull_api_path(owner: &str, repo: &str, number: u64, leaf: &str) -> Option<String> {
@@ -253,6 +305,32 @@ impl GhRunner {
                 Err(err) => EvidenceState::Unavailable {
                     reason: err.to_string(),
                 },
+            },
+            Err(GitFailure::AuthMissing { detail }) => EvidenceState::Unavailable {
+                reason: format!("gh authentication missing: {detail}"),
+            },
+            Err(GitFailure::Network { detail }) => EvidenceState::Unavailable {
+                reason: format!("network unreachable: {detail}"),
+            },
+            Err(other) => EvidenceState::Unavailable {
+                reason: other.to_string(),
+            },
+        }
+    }
+
+    /// Whitelisted read that returns stdout as captured. A 1 MiB cut is
+    /// still `Fetched`: the marker stays in the text so the caller can
+    /// keep the rows it already has instead of failing the whole list.
+    pub fn capture(&self, cwd: &Path, args: &[&str]) -> EvidenceState<String> {
+        if let Err(rejection) = Self::validate_read_args(args) {
+            return EvidenceState::Unavailable {
+                reason: rejection.to_string(),
+            };
+        }
+        match self.runner.run(self.program(), cwd, args) {
+            Ok(out) => EvidenceState::Fetched {
+                payload: out.stdout,
+                fetched_at: utc_now(),
             },
             Err(GitFailure::AuthMissing { detail }) => EvidenceState::Unavailable {
                 reason: format!("gh authentication missing: {detail}"),
@@ -519,6 +597,24 @@ mod tests {
             .is_ok()
         );
         assert!(GhRunner::validate_read_args(&["api", "repos/o/r/pulls/1/files"]).is_ok());
+        assert!(
+            GhRunner::validate_read_args(&["api", "repos/o/r/pulls/1/files?per_page=10&page=2"])
+                .is_ok()
+        );
+        assert!(
+            GhRunner::validate_read_args(&["api", "repos/o/r/pulls/1/files?per_page=10"]).is_err()
+        );
+        assert!(
+            GhRunner::validate_read_args(&[
+                "api",
+                "repos/o/r/pulls/1/files?per_page=10&page=1&foo=1"
+            ])
+            .is_err()
+        );
+        assert!(
+            GhRunner::validate_read_args(&["api", "repos/o/r/pulls/1/comments?per_page=10&page=1"])
+                .is_err()
+        );
         assert!(
             GhRunner::validate_read_args(&[
                 "api",
