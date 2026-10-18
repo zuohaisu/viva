@@ -36,6 +36,22 @@ import {
 import { registerComputerTools } from "./computer/computer.ts";
 import { registerMemoryTools } from "./memory/memory.ts";
 
+/** Bodies from `viva principle approved`. Anything else in the payload is ignored. */
+export function approvedPrincipleBodies(payload: unknown): string[] {
+  if (!payload || typeof payload !== "object") return [];
+  const list = (payload as { principles?: unknown }).principles;
+  if (!Array.isArray(list)) return [];
+  const bodies: string[] = [];
+  for (const item of list) {
+    if (!item || typeof item !== "object") continue;
+    const body = (item as { body?: unknown }).body;
+    if (typeof body !== "string") continue;
+    const text = body.trim();
+    if (text) bodies.push(text);
+  }
+  return bodies;
+}
+
 export default function viva(pi: PiHost): void {
   const env: VivaEnv | null = readEnv(process.env);
   // Not launched by Viva: stay silent and claim nothing.
@@ -70,6 +86,18 @@ export default function viva(pi: PiHost): void {
     } catch {
       lines.push(
         "External memory: could not reach Viva memory status — recall/remember may be unavailable.",
+      );
+    }
+    try {
+      const approved = await runEnvelope(env, ["principle", "approved", "--member", env.memberId]);
+      const bodies = approvedPrincipleBodies(approved);
+      if (bodies.length > 0) {
+        lines.push("Approved principles (current versions):");
+        for (const body of bodies) lines.push(body);
+      }
+    } catch {
+      lines.push(
+        "Approved principles: unavailable — Viva did not return the current approved list.",
       );
     }
     ctx.ui.notify(lines.join("\n"), "info");

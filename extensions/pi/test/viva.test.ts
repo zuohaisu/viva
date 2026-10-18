@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { readEnv, planDispatch, runEnvelope } from "../lib.ts";
-import viva from "../viva.ts";
+import viva, { approvedPrincipleBodies } from "../viva.ts";
 import { callTool, createFakePi, emit, textOf, toolNamed } from "./fake-pi.ts";
 
 function withEnv(raw: NodeJS.ProcessEnv, fn: () => void | Promise<void>): Promise<void> | void {
@@ -250,6 +250,41 @@ test("the session_start handler tells the user who the member is, at the real 'i
     assert.equal(notices[0]?.level, "info");
     assert.match(notices[0]?.message ?? "", /you are Samuel \(member mem-1\)/);
     assert.match(notices[0]?.message ?? "", /Current task: task-1/);
+  });
+});
+
+test("approvedPrincipleBodies keeps only current approved text", () => {
+  assert.deepEqual(
+    approvedPrincipleBodies({
+      principles: [{ body: "  Ask which repository before editing.  " }],
+      candidates: [{ statement: "Ship without a recorded execution." }],
+    }),
+    ["Ask which repository before editing."],
+  );
+  assert.deepEqual(approvedPrincipleBodies({ principles: [] }), []);
+});
+
+test("the session notice shows approved principles and not other payload fields", async () => {
+  const bin = fakeViva(`#!/bin/sh
+case "$1 $2" in
+  "principle approved")
+    echo '{"principles":[{"body":"Ask which repository before editing."}],"candidates":[{"statement":"Ship without a recorded execution."}]}'
+    ;;
+  *)
+    echo '{"ok":true}'
+    ;;
+esac
+`);
+  await withEnv({ ...BASE_ENV, VIVA_BIN: bin }, async () => {
+    const fake = createFakePi();
+    viva(fake.host);
+    const notices: string[] = [];
+    await emit(fake, "session_start", { type: "session_start", reason: "startup" }, {
+      ui: { notify(message: string) { notices.push(message); } },
+    });
+    const notice = notices.join("\n");
+    assert.match(notice, /Ask which repository before editing\./);
+    assert.doesNotMatch(notice, /Ship without a recorded execution/);
   });
 });
 

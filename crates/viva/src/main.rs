@@ -83,6 +83,7 @@ fn run(args: &[String]) -> Result<()> {
         Some("tools") => cmd_tools(args.get(1..).unwrap_or(&[])),
         Some("memory") => cmd_memory(args.get(1..).unwrap_or(&[])),
         Some("skill") => cmd_skill(args.get(1..).unwrap_or(&[])),
+        Some("principle") => cmd_principle(args.get(1..).unwrap_or(&[])),
         Some("harness") => cmd_harness(args.get(1..).unwrap_or(&[])),
         Some("workflow") => cmd_workflow(args.get(1..).unwrap_or(&[])),
         Some("maintenance") => cmd_maintenance(args.get(1..).unwrap_or(&[])),
@@ -1069,6 +1070,35 @@ USAGE:
         `get` and `project` read the current version for callbacks and
         member projection.
 
+    viva principle digest --member <id> [--experience <file.json>]
+        [--statement <text> --execution <id> ...] [--now <rfc3339>]
+        Summarize principle candidates from experience excerpts. Each
+        candidate cites its source executions. The same normalized
+        statement and execution set is not proposed again after a pending,
+        rejected, expired, or approved record. A different statement on
+        that same set is a new candidate and names what it would replace.
+        Pending candidates older than 4 weeks (28 days) expire when this
+        command runs, including after Viva was stopped. No scheduler.
+
+    viva principle approve --candidate <id> [--body <text>]
+    viva principle reject --candidate <id> --reason <text>
+    viva principle edit (--candidate <id> | --principle <id>) --body <text>
+    viva principle rollback <member> <principle> <version>
+        Owner-only. Pass --as-member <id> to record a non-owner attempt;
+        it is refused. Reject requires a reason. Approve and edit append
+        a version. Rollback appends a restored version and keeps newer ones.
+
+    viva principle approved --member <id>
+    viva principle project --member <id> --out <dir>
+        Current approved bodies only. project writes Pi and Claude Code
+        files under <dir>/pi and <dir>/claude. Pending, rejected, and
+        expired candidates are omitted.
+
+    viva principle version-get --principle <id> --version <n>
+    viva principle audit --member <id>
+        Read one historical body, or the approval record (including
+        denials), back to the source executions.
+
     viva memory search --member <id> [--project <id>] --query <text>
         Search the linked external memory for one member's scope
         (read-only). Unavailable stores say so; unclaimable hits are
@@ -2011,6 +2041,207 @@ fn cmd_control_grant(args: &[String]) -> Result<()> {
     let grant = engine.issue_root_grant(member, task, vec![action], mode, expires)?;
     println!("{}", serde_json::to_string_pretty(&grant)?);
     Ok(())
+}
+
+/// `viva principle …` — owner approval and rollback of member principles (#120).
+fn cmd_principle(args: &[String]) -> Result<()> {
+    use std::str::FromStr as _;
+
+    #[derive(serde::Deserialize)]
+    struct ExcerptFile {
+        execution_id: String,
+        statement: String,
+    }
+
+    let mut named: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut positional: Vec<String> = Vec::new();
+    let mut executions: Vec<String> = Vec::new();
+    let mut as_member: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let token = args[i].as_str();
+        if token == "--" {
+            return Err(Error::Validation(
+                "principle does not take a bare argument list after --".into(),
+            ));
+        }
+        if token.starts_with("--") {
+            i += 1;
+            let value = args
+                .get(i)
+                .cloned()
+                .ok_or_else(|| Error::Validation(format!("flag {token} needs a value")))?;
+            if token == "--execution" {
+                executions.push(value);
+            } else if token == "--as-member" {
+                as_member = Some(value);
+            } else {
+                named.insert(token.to_string(), value);
+            }
+            i += 1;
+        } else {
+            positional.push(args[i].clone());
+            i += 1;
+        }
+    }
+    let get = |key: &str| named.get(&format!("--{key}")).cloned();
+    let require = |key: &str| -> Result<String> {
+        get(key).ok_or_else(|| Error::Validation(format!("principle needs --{key}")))
+    };
+    let actor = match as_member {
+        Some(id) => viva::principles::PrincipleActor::Member(
+            viva::foundation::ids::MemberId::from_str(&id)?,
+        ),
+        None => viva::principles::PrincipleActor::Owner,
+    };
+    let store = open_store()?;
+    let principles = viva::principles::PrincipleStore::new(&store);
+    match positional.first().map(String::as_str) {
+        Some("digest") => {
+            let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
+            let now_text = get("now").unwrap_or_else(viva::foundation::ids::utc_now);
+            let mut batch = Vec::new();
+            if let Some(path) = get("experience") {
+                let text = std::fs::read_to_string(&path).map_err(|err| {
+                    Error::Validation(format!("could not read --experience {path}: {err}"))
+                })?;
+                let rows: Vec<ExcerptFile> = serde_json::from_str(&text).map_err(|err| {
+                    Error::Validation(format!(
+                        "experience file must be a JSON array of {{execution_id, statement}}: {err}"
+                    ))
+                })?;
+                for row in rows {
+                    batch.push(viva::principles::ExperienceExcerpt {
+                        execution_id: viva::foundation::ids::ExecutionId::from_str(
+                            &row.execution_id,
+                        )?,
+                        statement: row.statement,
+                    });
+                }
+            }
+            if get("statement").is_some() || !executions.is_empty() {
+                let statement = get("statement").ok_or_else(|| {
+                    Error::Validation("digest --execution needs --statement".into())
+                })?;
+                if executions.is_empty() {
+                    return Err(Error::Validation(
+                        "digest --statement needs at least one --execution".into(),
+                    ));
+                }
+                for id in &executions {
+                    batch.push(viva::principles::ExperienceExcerpt {
+                        execution_id: viva::foundation::ids::ExecutionId::from_str(id)?,
+                        statement: statement.clone(),
+                    });
+                }
+            }
+            let report = principles.digest(&member, &batch, &now_text, &actor)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        Some("approve") => {
+            let candidate = require("candidate")?;
+            let current = principles.approve(&candidate, get("body").as_deref(), &actor)?;
+            println!("{}", serde_json::to_string_pretty(&current)?);
+            Ok(())
+        }
+        Some("reject") => {
+            let candidate = require("candidate")?;
+            let reason = require("reason")?;
+            let updated = principles.reject(&candidate, &reason, &actor)?;
+            println!("{}", serde_json::to_string_pretty(&updated)?);
+            Ok(())
+        }
+        Some("edit") => {
+            let body = require("body")?;
+            let candidate = get("candidate");
+            let principle = get("principle");
+            match (candidate, principle) {
+                (Some(candidate), None) => {
+                    let updated = principles.edit_candidate(&candidate, &body, &actor)?;
+                    println!("{}", serde_json::to_string_pretty(&updated)?);
+                    Ok(())
+                }
+                (None, Some(principle)) => {
+                    let current = principles.edit_principle(&principle, &body, &actor)?;
+                    println!("{}", serde_json::to_string_pretty(&current)?);
+                    Ok(())
+                }
+                _ => Err(Error::Validation(
+                    "principle edit needs exactly one of --candidate or --principle".into(),
+                )),
+            }
+        }
+        Some("rollback") => {
+            let member = positional.get(1).cloned().ok_or_else(|| {
+                Error::Validation(
+                    "usage: viva principle rollback <member> <principle> <version>".into(),
+                )
+            })?;
+            let principle = positional.get(2).cloned().ok_or_else(|| {
+                Error::Validation(
+                    "usage: viva principle rollback <member> <principle> <version>".into(),
+                )
+            })?;
+            let version_text = positional.get(3).cloned().ok_or_else(|| {
+                Error::Validation(
+                    "usage: viva principle rollback <member> <principle> <version>".into(),
+                )
+            })?;
+            let version: u32 = version_text.parse().map_err(|_| {
+                Error::Validation("rollback version must be a number".into())
+            })?;
+            let member = viva::foundation::ids::MemberId::from_str(&member)?;
+            let current = principles.rollback(&member, &principle, version, &actor)?;
+            println!("{}", serde_json::to_string_pretty(&current)?);
+            Ok(())
+        }
+        Some("approved") => {
+            let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
+            let rows = principles.approved_current(&member)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "member_id": member,
+                    "principles": rows,
+                }))?
+            );
+            Ok(())
+        }
+        Some("project") => {
+            let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
+            let out = require("out")?;
+            let written = principles.write_projections(&member, std::path::Path::new(&out))?;
+            println!("{}", serde_json::to_string_pretty(&written)?);
+            Ok(())
+        }
+        Some("version-get") => {
+            let principle = require("principle")?;
+            let version: u32 = require("version")?
+                .parse()
+                .map_err(|_| Error::Validation("--version must be a number".into()))?;
+            match principles.version(&principle, version)? {
+                Some(row) => println!("{}", serde_json::to_string_pretty(&row)?),
+                None => {
+                    return Err(Error::NotFound {
+                        entity: "principle_version",
+                        id: format!("{principle}@{version}"),
+                    });
+                }
+            }
+            Ok(())
+        }
+        Some("audit") => {
+            let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
+            let rows = principles.audit(&member)?;
+            println!("{}", serde_json::to_string_pretty(&rows)?);
+            Ok(())
+        }
+        _ => Err(Error::Validation(
+            "principle needs digest | approve | reject | edit | rollback | approved | project | version-get | audit"
+                .into(),
+        )),
+    }
 }
 
 /// `viva skill …` — team skill body versioning (#140) and member skill sets (#139).

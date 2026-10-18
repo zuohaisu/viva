@@ -65,6 +65,7 @@ pub const DOMAIN_MAINTENANCE: Domain = Domain::new("maintenance");
 pub const DOMAIN_TOOLS_COMPUTER: Domain = Domain::new("tools_computer");
 pub const DOMAIN_MEMORY: Domain = Domain::new("memory");
 pub const DOMAIN_SKILLS: Domain = Domain::new("skills");
+pub const DOMAIN_PRINCIPLES: Domain = Domain::new("principles");
 
 /// Every domain V01 knows about; used by the CLI to validate event domains.
 pub const KNOWN_DOMAINS: &[Domain] = &[
@@ -81,6 +82,7 @@ pub const KNOWN_DOMAINS: &[Domain] = &[
     DOMAIN_TOOLS_COMPUTER,
     DOMAIN_MEMORY,
     DOMAIN_SKILLS,
+    DOMAIN_PRINCIPLES,
 ];
 
 /// Map a domain name read from the database back to a `Domain`. Known domains

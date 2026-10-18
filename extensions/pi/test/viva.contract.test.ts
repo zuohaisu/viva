@@ -348,3 +348,68 @@ test("viva_dispatch is recognised by the real CLI", async () => {
   });
   assertRecognisedButRefused(result, "dispatch");
 });
+
+test("Pi session notice and both harness projections show only an approved principle", async () => {
+  assert.ok(fx);
+  const home = mkdtempSync(join(tmpdir(), "viva-principle-pi-"));
+  const out = join(home, "projection");
+  const member = "mem-00000000000000000000000000000002";
+  const statement = "Ask which repository before editing.";
+  const sourceA = "exec-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const sourceB = "exec-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  try {
+    const init = runViva(fx.bin, home, ["init"]);
+    assert.equal(init.status, 0, init.stderr);
+    const digest = runVivaJson(fx.bin, home, [
+      "principle",
+      "digest",
+      "--member",
+      member,
+      "--statement",
+      statement,
+      "--execution",
+      sourceA,
+      "--execution",
+      sourceB,
+    ]);
+    const proposed = digest.proposed as Array<{ candidate_id: string }>;
+    assert.equal(proposed.length, 1);
+    const candidateId = proposed[0].candidate_id;
+
+    runVivaJson(fx.bin, home, ["principle", "project", "--member", member, "--out", out]);
+    const piBefore = readFileSync(join(out, "pi", "principles.md"), "utf8");
+    const claudeBefore = readFileSync(join(out, "claude", "principles.md"), "utf8");
+    assert.doesNotMatch(piBefore, /Ask which repository/);
+    assert.doesNotMatch(claudeBefore, /Ask which repository/);
+
+    const env = cleanEnv({
+      VIVA_BIN: fx.bin,
+      VIVA_HOME: home,
+      [harnessConstant("ENV_MEMBER_ID")]: member,
+      [harnessConstant("ENV_MEMBER_NAME")]: "Contract Member",
+    });
+    const before = loadExtension(env, fx.extensionFactory);
+    const beforeNotices: string[] = [];
+    await emit(before, "session_start", {}, {
+      ui: { notify: (text: string) => beforeNotices.push(text) },
+    });
+    assert.doesNotMatch(beforeNotices.join("\n"), /Ask which repository/);
+
+    runVivaJson(fx.bin, home, ["principle", "approve", "--candidate", candidateId]);
+    runVivaJson(fx.bin, home, ["principle", "project", "--member", member, "--out", out]);
+    const piAfter = readFileSync(join(out, "pi", "principles.md"), "utf8");
+    const claudeAfter = readFileSync(join(out, "claude", "principles.md"), "utf8");
+    assert.match(piAfter, /Ask which repository before editing\./);
+    assert.match(claudeAfter, /Ask which repository before editing\./);
+    assert.equal(piAfter.split("\n").slice(1).join("\n"), claudeAfter.split("\n").slice(1).join("\n"));
+
+    const after = loadExtension(env, fx.extensionFactory);
+    const afterNotices: string[] = [];
+    await emit(after, "session_start", {}, {
+      ui: { notify: (text: string) => afterNotices.push(text) },
+    });
+    assert.match(afterNotices.join("\n"), /Ask which repository before editing\./);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

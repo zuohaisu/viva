@@ -10,6 +10,9 @@ brief, and offers controlled actions through the `viva` CLI.
   launches `pi --extension <this file>` with member/task context in environment
   variables. The extension surfaces that identity at session start. The
   member is configuration data; no member name is hard-coded here.
+- **Approved principles**: session start calls `viva principle approved` and
+  shows only the current approved bodies. Pending, rejected, and expired
+  candidates are not requested and do not appear.
 - **Status query tools**: `viva_status` and `viva_task_brief`
   read real Viva records (read-only).
 - **Controlled dispatch**: `viva_dispatch` requires a live grant

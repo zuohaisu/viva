@@ -175,6 +175,7 @@ pub fn migrations() -> &'static crate::foundation::store::FrozenMigrations {
         let registry = crate::tools::computer::register_migrations(registry);
         let registry = crate::memory::register_migrations(registry);
         let registry = crate::skills::register_migrations(registry);
+        let registry = crate::principles::register_migrations(registry);
         let registry = registry.register(DOMAIN_HOST, 2, "host v2 (settings)", HOST_V2_SQL);
         let registry = registry.register(DOMAIN_HOST, 3, "host v3 (recovery plans)", HOST_V3_SQL);
         let registry = registry.register(
