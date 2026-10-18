@@ -1909,7 +1909,7 @@ fn harness_open_in_worktree(
     harness: &str,
 ) -> Result<serde_json::Value> {
     let harness = harness.trim();
-    if harness != "pi" {
+    if harness != "pi" && harness != "claude" {
         return Err(Error::Validation(format!(
             "harness `{harness}` has no Viva launch combination yet; \
              use workbench handoff (`h`) for bare agent CLIs, or `viva harness matrix` \
@@ -1936,33 +1936,57 @@ fn harness_open_in_worktree(
     })?;
     let member = MemberRegistry::new(&store).require(&member_id)?;
     let binding = MemberRegistry::new(&store).binding(&member_id)?;
-    let pi = crate::harness::pi::PiHarness::for_installation();
-    match pi.availability() {
-        crate::harness::pi::Availability::Unavailable { reason } => {
-            return Err(Error::Validation(format!("pi is unavailable: {reason}")));
+    let spec = if harness == "pi" {
+        let pi = crate::harness::pi::PiHarness::for_installation();
+        match pi.availability() {
+            crate::harness::pi::Availability::Unavailable { reason } => {
+                return Err(Error::Validation(format!("pi is unavailable: {reason}")));
+            }
+            crate::harness::pi::Availability::Available => {}
         }
-        crate::harness::pi::Availability::Available => {}
+        if !pi.extension_path.is_file() {
+            return Err(Error::Validation(format!(
+                "pi extension not found at {}",
+                pi.extension_path.display()
+            )));
+        }
+        pi.launch(
+            &member,
+            binding.as_ref(),
+            Some(&task),
+            &record.worktree_path,
+            None,
+        )?
+    } else {
+        let claude = crate::harness::claude::ClaudeHarness::for_installation();
+        match claude.availability() {
+            crate::harness::pi::Availability::Unavailable { reason } => {
+                return Err(Error::Validation(format!(
+                    "claude is unavailable: {reason}"
+                )));
+            }
+            crate::harness::pi::Availability::Available => {}
+        }
+        claude.launch(&member, Some(&task), &record.worktree_path, None, None)?
+    };
+    let execution =
+        crate::callback::open_member_execution(&store, &member, &task, binding.as_ref(), harness)?;
+    let grant = crate::authority::AuthorityEngine::new(&store)
+        .latest_live_grant_for(&member.member_id, &task.task_id)?;
+    let mut spec = spec.with_env(
+        crate::harness::pi::ENV_EXECUTION_ID,
+        execution.execution_id.to_string(),
+    );
+    if let Some(grant) = grant.as_ref() {
+        spec = spec.with_env(crate::harness::pi::ENV_GRANT_ID, grant.grant_id.to_string());
     }
-    if !pi.extension_path.is_file() {
-        return Err(Error::Validation(format!(
-            "pi extension not found at {}",
-            pi.extension_path.display()
-        )));
-    }
-    let spec = pi.launch(
-        &member,
-        binding.as_ref(),
-        Some(&task),
-        &record.worktree_path,
-        None,
-    )?;
     let mut term = crate::terminal::TerminalSpec::new(spec.argv.clone(), spec.cwd.clone())?;
     term.env = spec.env.clone();
     let (terminal_id, handle) = shared.terminals.spawn(
         term,
         TerminalOwner::AgentCli,
         Some(worktree_id.clone()),
-        format!("pi · {} · {}", member.display_name, record.branch),
+        format!("{harness} · {} · {}", member.display_name, record.branch),
         None,
         Some(&store),
     )?;
@@ -1976,6 +2000,7 @@ fn harness_open_in_worktree(
         "harness": harness,
         "member_id": member.member_id.to_string(),
         "task_id": task.task_id.to_string(),
+        "execution_id": execution.execution_id.to_string(),
     }))
 }
 

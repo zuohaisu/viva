@@ -13,6 +13,7 @@
 //! default binary name and how to probe availability honestly.
 
 pub mod capabilities;
+pub mod claude;
 pub mod pi;
 
 use std::path::PathBuf;

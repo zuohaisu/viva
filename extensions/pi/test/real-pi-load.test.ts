@@ -50,10 +50,16 @@ const CONVERSATIONS_ENTRY = join(EXTENSION_ROOT, "conversations", "index.ts");
 
 const HARNESS_ENTRY_TOOLS = [
   "viva_computer_audit",
+  "viva_dialog_state_get",
+  "viva_dialog_state_set",
   "viva_dispatch",
   "viva_handoff",
+  "viva_memory_recall",
   "viva_memory_remember",
   "viva_memory_search",
+  "viva_skill_get",
+  "viva_skill_list",
+  "viva_skill_search",
   "viva_status",
   "viva_task_brief",
 ];
@@ -190,7 +196,7 @@ test("control: a bare Pi run loads the extension inertly (why the harness inject
   );
 });
 
-test("real Pi loads the harness entry (viva.ts) and registers its 7 tools", async (t) => {
+test("real Pi loads the harness entry (viva.ts) and registers its 13 tools", async (t) => {
   t.diagnostic(`real Pi ${VERSION}`);
   const load = await loadInRealPi(HARNESS_ENTRY, true);
   assertLoadsCleanlyWithTools(load, HARNESS_ENTRY_TOOLS, "viva.ts");

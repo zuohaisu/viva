@@ -121,12 +121,8 @@ test("memory remember records provenance even when chat omits it", async () => {
     assert.deepEqual(argv, [
       "memory",
       "remember",
-      "--member",
-      "mem-1",
       "--content",
       "The demo is on Fridays",
-      "--source",
-      "chat by Samuel (task task-1)",
     ]);
   });
 });

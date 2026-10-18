@@ -11,6 +11,7 @@
 
 pub mod agents;
 pub mod authority;
+pub mod callback;
 pub mod conversations;
 pub mod foundation;
 pub mod git;

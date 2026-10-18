@@ -64,6 +64,15 @@ fn static_rows() -> Vec<HarnessCapabilityRow> {
                      but are not loaded in production viva.ts — use handoff. \
                      Pi-native session resume is Pi-owned, not Viva-owned.",
                 )
+            } else if agent == "claude" {
+                (
+                    CapabilityEvidence::Unknown,
+                    CapabilityEvidence::Unknown,
+                    CapabilityEvidence::Unknown,
+                    "Viva can spawn claude with the same execution and grant env as Pi. \
+                     Callback commands are walked with that env against the real viva binary. \
+                     A live Claude Code session is not checked here, so launch stays unknown.",
+                )
             } else {
                 (
                     CapabilityEvidence::Unknown,
@@ -189,5 +198,12 @@ mod tests {
         assert_eq!(codex.launch, CapabilityEvidence::Unknown);
         assert_eq!(codex.interactive, CapabilityEvidence::Unknown);
         assert_eq!(codex.handoff, CapabilityEvidence::Unknown);
+        let claude = m
+            .rows
+            .iter()
+            .find(|r| r.harness == "claude")
+            .expect("claude");
+        assert_eq!(claude.launch, CapabilityEvidence::Unknown);
+        assert!(claude.notes.contains("execution and grant"));
     }
 }

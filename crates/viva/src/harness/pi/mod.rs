@@ -35,6 +35,8 @@ pub const ENV_MEMBER_ID: &str = "VIVA_MEMBER_ID";
 pub const ENV_MEMBER_NAME: &str = "VIVA_MEMBER_NAME";
 pub const ENV_TASK_ID: &str = "VIVA_TASK_ID";
 pub const ENV_GRANT_ID: &str = "VIVA_GRANT_ID";
+/// Current execution. Callback commands derive the member from this, not from `--member`.
+pub const ENV_EXECUTION_ID: &str = "VIVA_EXECUTION_ID";
 pub const ENV_MODEL_BINDING: &str = "VIVA_MODEL_BINDING";
 /// Overrides the `viva` binary the extension calls (tests use a fake).
 pub const ENV_VIVA_BIN: &str = "VIVA_BIN";
@@ -149,48 +151,52 @@ impl PiHarness {
     /// actually happened. A missing or failing binary is `Unavailable` —
     /// the caller must surface that, never substitute another harness.
     pub fn availability(&self) -> Availability {
-        let mut child = match Command::new(&self.pi_binary)
-            .arg("--version")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(err) => {
+        probe_program(&self.pi_binary)
+    }
+}
+
+/// Honest `<program> --version` probe shared by harness launchers.
+pub fn probe_program(program: &str) -> Availability {
+    let mut child = match Command::new(program)
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => {
+            return Availability::Unavailable {
+                reason: format!("`{program}` could not be started: {err}"),
+            };
+        }
+    };
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    return Availability::Available;
+                }
                 return Availability::Unavailable {
-                    reason: format!("`{}` could not be started: {err}", self.pi_binary),
+                    reason: format!("`{program} --version` exited with {status}"),
                 };
             }
-        };
-        let deadline = Instant::now() + PROBE_TIMEOUT;
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    if status.success() {
-                        return Availability::Available;
-                    }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
                     return Availability::Unavailable {
-                        reason: format!("`{} --version` exited with {status}", self.pi_binary),
+                        reason: format!(
+                            "`{program} --version` did not answer within {PROBE_TIMEOUT:?}"
+                        ),
                     };
                 }
-                Ok(None) => {
-                    if Instant::now() >= deadline {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Availability::Unavailable {
-                            reason: format!(
-                                "`{} --version` did not answer within {PROBE_TIMEOUT:?}",
-                                self.pi_binary
-                            ),
-                        };
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                Err(err) => {
-                    return Availability::Unavailable {
-                        reason: format!("probe failed: {err}"),
-                    };
-                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(err) => {
+                return Availability::Unavailable {
+                    reason: format!("probe failed: {err}"),
+                };
             }
         }
     }

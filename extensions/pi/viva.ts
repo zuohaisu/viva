@@ -34,6 +34,7 @@ import {
   type PiHost,
 } from "./lib.ts";
 import { registerComputerTools } from "./computer/computer.ts";
+import { registerCallbackTools } from "./callback/callback.ts";
 import { registerMemoryTools } from "./memory/memory.ts";
 
 export default function viva(pi: PiHost): void {
@@ -206,4 +207,8 @@ export default function viva(pi: PiHost): void {
   // F04 (issue #26): Viva-linked external memory tools (scoped recall
   // with provenance; exits stay Viva-side).
   registerMemoryTools(pi, env);
+
+  // C2 (issue #117): recall / state / skill through the same CLI.
+  // Remember stays in the memory module and only proposes a candidate.
+  registerCallbackTools(pi, env);
 }

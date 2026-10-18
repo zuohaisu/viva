@@ -322,6 +322,7 @@ fn upgrade_renames_everything_and_keeps_every_row() {
                     ("host".into(), 4),
                     ("memory".into(), 3),
                     ("memory".into(), 4),
+                    ("memory".into(), 5),
                     ("skills".into(), 1),
                     ("knowledge".into(), 2),
                 ]);

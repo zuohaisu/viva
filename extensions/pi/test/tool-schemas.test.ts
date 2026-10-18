@@ -3,7 +3,7 @@
  *
  * Real Pi takes a TypeBox schema per tool and validates the model's call
  * against it before `execute` runs. The schemas used to be hand-written
- * JSON-schema-like objects that nothing checked. This pins, for all 10 tools,
+ * JSON-schema-like objects that nothing checked. This pins, for every tool,
  * the contract the model sees: which fields are required, and that unknown
  * fields are rejected. Validation uses TypeBox itself (the library Pi
  * validates with), so a schema that only looks right does not pass.
@@ -34,6 +34,12 @@ const REQUIRED: Record<string, string[]> = {
   viva_computer_audit: [],
   viva_memory_search: ["query"],
   viva_memory_remember: ["content"],
+  viva_memory_recall: ["query"],
+  viva_dialog_state_get: [],
+  viva_dialog_state_set: ["domain"],
+  viva_skill_list: [],
+  viva_skill_search: ["query"],
+  viva_skill_get: ["skill"],
   viva_conversations_fork: ["display_name", "parent_node_id"],
   viva_conversations_rename: ["node_id", "display_name"],
   viva_conversations_handoff: ["node_id", "to_harness"],
@@ -48,6 +54,12 @@ const VALID_CALL: Record<string, Record<string, unknown>> = {
   viva_computer_audit: {},
   viva_memory_search: { query: "q", project_id: "p-1" },
   viva_memory_remember: { content: "c", source: "s", project_id: "p-1" },
+  viva_memory_recall: { query: "q" },
+  viva_dialog_state_get: {},
+  viva_dialog_state_set: { domain: "work" },
+  viva_skill_list: {},
+  viva_skill_search: { query: "deploy", team: true },
+  viva_skill_get: { skill: "skill-1" },
   viva_conversations_fork: { display_name: "n", parent_node_id: "node-1" },
   viva_conversations_rename: { node_id: "node-1", display_name: "n" },
   viva_conversations_handoff: {
@@ -72,7 +84,7 @@ function allTools(): Map<string, RegisteredTool> {
   }
 }
 
-test("all 10 tools are registered, each with a label and description", () => {
+test("every registered tool has a label and description", () => {
   const tools = allTools();
   assert.deepEqual([...tools.keys()].sort(), Object.keys(REQUIRED).sort());
   for (const [name, tool] of tools) {

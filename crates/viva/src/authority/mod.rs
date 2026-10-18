@@ -230,6 +230,21 @@ const READ_ACTIONS: &[&str] = &[
     "list_worktrees",
 ];
 
+/// Member-callback actions (issue #117). They are not plain-chat reads:
+/// a missing grant is a refusal. Writes need at least PROPOSE.
+pub const ACTION_CALLBACK_RECALL: &str = "callback_recall";
+pub const ACTION_CALLBACK_REMEMBER: &str = "callback_remember";
+pub const ACTION_CALLBACK_STATE_READ: &str = "callback_state_read";
+pub const ACTION_CALLBACK_STATE_WRITE: &str = "callback_state_write";
+pub const ACTION_CALLBACK_SKILL_READ: &str = "callback_skill_read";
+pub const ACTION_CALLBACK_SKILL_WRITE: &str = "callback_skill_write";
+
+const PROPOSE_ACTIONS: &[&str] = &[
+    ACTION_CALLBACK_REMEMBER,
+    ACTION_CALLBACK_STATE_WRITE,
+    ACTION_CALLBACK_SKILL_WRITE,
+];
+
 // ---------------------------------------------------------------------------
 // Authority engine
 // ---------------------------------------------------------------------------
@@ -470,6 +485,10 @@ impl<'a> AuthorityEngine<'a> {
         if Self::is_dispatch(action) && grant.mode < GrantMode::ActWithApproval {
             return Ok(Err(DenialReason::ModeInsufficient));
         }
+        // Callback writes propose a candidate or a dialog state; READ is not enough.
+        if Self::is_propose(action) && grant.mode < GrantMode::Propose {
+            return Ok(Err(DenialReason::ModeInsufficient));
+        }
         Ok(Ok(()))
     }
 
@@ -563,12 +582,48 @@ impl<'a> AuthorityEngine<'a> {
             },
             Actor::Worker { credential_id } => format!("worker:{credential_id}"),
         };
+        self.audit_denial(&subject, action, &reason.to_string())
+    }
+
+    /// Append one refusal to `grant_denials`. This is the `authority.refused`
+    /// ledger row: every rejected authorization leaves its reason.
+    pub fn audit_denial(&self, subject: &str, action: &str, reason: &str) -> Result<()> {
         self.store.connection().execute(
             "INSERT INTO grant_denials(subject, action, reason, occurred_at)
              VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![subject, action, reason.to_string(), utc_now()],
+            rusqlite::params![subject, action, reason, utc_now()],
         )?;
         Ok(())
+    }
+
+    /// Newest live, unexpired grant for this member on this task, if one exists.
+    pub fn latest_live_grant_for(
+        &self,
+        member: &MemberId,
+        task_id: &TaskId,
+    ) -> Result<Option<Grant>> {
+        let mut stmt = self.store.connection().prepare(
+            "SELECT grant_id, parent_grant_id, principal_member_id, issued_by, task_id,
+                    actions_json, mode, status, expires_at, created_at, revoked_at, revoke_reason
+             FROM grants
+             WHERE principal_member_id = ?1 AND task_id = ?2 AND status = 'live'
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![member.as_str(), task_id.as_str()],
+            map_grant,
+        )?;
+        let now = utc_now();
+        for row in rows {
+            let grant = row?;
+            if let Some(expires_at) = &grant.expires_at {
+                if expires_at.as_str() <= now.as_str() {
+                    continue;
+                }
+            }
+            return Ok(Some(grant));
+        }
+        Ok(None)
     }
 
     /// Recent denials, newest first (audit view).
@@ -639,6 +694,10 @@ impl<'a> AuthorityEngine<'a> {
 
     fn is_read_action(action: &str) -> bool {
         READ_ACTIONS.contains(&action)
+    }
+
+    fn is_propose(action: &str) -> bool {
+        PROPOSE_ACTIONS.contains(&action)
     }
 }
 

@@ -3,12 +3,10 @@
  * (F04, issue #26).
  *
  * What this module does — and honestly does not:
- * - Registers two tools over Viva's memory link layer:
- *   `viva_memory_search` (read-only recall scoped to this session's
- *   member, with a context budget) and `viva_memory_remember` (an
- *   explicit write that always records provenance). Both go through the
- *   viva CLI, which filters by the member/project namespace and logs
- *   usage evidence.
+ * - Registers tools over Viva's memory link layer:
+ *   `viva_memory_search` (legacy read scoped with --member) and
+ *   `viva_memory_remember` (a proposed candidate only; the CLI takes
+ *   the member from the current execution, not from this tool).
  * - It does NOT expose memory exit as a chat tool: archive/restore are
  *   Viva-side commands with recorded reasons, and the physical delete
  *   of the underlying provider is never offered — archive is the exit,
@@ -60,9 +58,9 @@ export function registerMemoryTools(pi: PiHost, env: VivaEnv): void {
     name: "viva_memory_remember",
     label: "Viva memory remember",
     description:
-      "Write one durable fact into the Viva-linked external memory with provenance. " +
-      "The source records who wrote it and from where; without a source Viva " +
-      "refuses the write.",
+      "Submit one proposed memory candidate for this execution. " +
+      "It does not become knowledge until curation admits it. " +
+      "Identity comes from the execution and grant, not from a member id.",
     parameters: Type.Object(
       {
         content: Type.String({ description: "The fact, stated once and concretely." }),
@@ -81,69 +79,15 @@ export function registerMemoryTools(pi: PiHost, env: VivaEnv): void {
       if (!content) {
         return toolFailure("memory write needs non-empty content");
       }
-      const source = params.source?.trim()
-        ? params.source.trim()
-        : `chat by ${env.memberName}` + (env.taskId ? ` (task ${env.taskId})` : "");
-      const cliArgs = [
-        "memory",
-        "remember",
-        "--member",
-        env.memberId,
-        "--content",
-        content,
-        "--source",
-        source,
-      ];
+      const cliArgs = ["memory", "remember", "--content", content];
+      if (params.source?.trim()) {
+        cliArgs.push("--source", params.source.trim());
+      }
       if (params.project_id) {
         cliArgs.push("--project", params.project_id);
       }
       try {
-        const proposed = await runEnvelope(env, cliArgs);
-        const candidateId =
-          typeof proposed === "object" &&
-          proposed !== null &&
-          "candidate_id" in proposed &&
-          typeof (proposed as { candidate_id: unknown }).candidate_id === "string"
-            ? (proposed as { candidate_id: string }).candidate_id
-            : null;
-        if (!candidateId) {
-          return toolSuccess(proposed);
-        }
-        const admitted = await runEnvelope(env, [
-          "memory",
-          "admit",
-          "--candidate",
-          candidateId,
-        ]);
-        const status =
-          typeof admitted === "object" &&
-          admitted !== null &&
-          "candidate_status" in admitted &&
-          typeof (admitted as { candidate_status: unknown }).candidate_status === "string"
-            ? (admitted as { candidate_status: string }).candidate_status
-            : null;
-        if (status === "rejected") {
-          let detail = "admission gate rejected this candidate";
-          if (
-            typeof admitted === "object" &&
-            admitted !== null &&
-            "decision" in admitted &&
-            typeof (admitted as { decision: unknown }).decision === "object"
-          ) {
-            const decision = (admitted as { decision: Record<string, unknown> }).decision;
-            const reject = decision.Reject ?? decision.reject;
-            if (
-              reject &&
-              typeof reject === "object" &&
-              "reasons" in reject &&
-              Array.isArray((reject as { reasons: unknown }).reasons)
-            ) {
-              detail = (reject as { reasons: string[] }).reasons.join("; ");
-            }
-          }
-          return toolFailure(`memory admission rejected: ${detail}`);
-        }
-        return toolSuccess(admitted);
+        return toolSuccess(await runEnvelope(env, cliArgs));
       } catch (err) {
         return toolFailure(`memory write refused: ${String(err)}`);
       }

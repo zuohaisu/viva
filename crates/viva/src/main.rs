@@ -1069,14 +1069,32 @@ USAGE:
         `get` and `project` read the current version for callbacks and
         member projection.
 
+    viva memory recall --query <text> [--project <id>] [--member <id>]
+        Member callback. Identity is the current execution plus a live
+        grant (VIVA_EXECUTION_ID, VIVA_GRANT_ID), not --member. Results
+        are not_ready, no_match (both exit 0) or backend_error (non-zero).
+        A work session does not include personal knowledge unless this
+        execution's dialog state was explicitly set to personal.
+
+    viva memory state get
+    viva memory state set --domain <work|personal> [--project <id>]
+                          [--interlocutor <text>] [--activity <text>]
+                          [--by <command|haisu>]
+        Read or store the explicit dialog state on this execution.
+        Nothing here infers a state, and a write cannot name a project
+        the execution is not on.
+
     viva memory search --member <id> [--project <id>] --query <text>
         Search the linked external memory for one member's scope
         (read-only). Unavailable stores say so; unclaimable hits are
         counted, not silently mixed in.
 
-    viva memory remember --member <id> [--project <id>] --content <text>
-                         --source <provenance> [--category <c>] [--tags <t>]
-        Write one native fact with mandatory provenance.
+    viva memory remember --content <text> [--source <note>] [--kind <k>]
+        From a member session, submit one proposed candidate tied to the
+        current execution. It does not become knowledge. Without an
+        execution, the owner form is:
+        viva memory remember --member <id> [--project <id>] --content <text>
+                             --source <provenance>
 
     viva memory archive|restore --fact <id> --reason <text>
         Exit paths over Viva's link layer. Nothing here deletes.
@@ -2079,6 +2097,19 @@ fn cmd_skill(args: &[String]) -> Result<()> {
     };
 
     let store = open_store()?;
+    let callback_identity = if viva::callback::context_active() {
+        let action = match positional.first().map(String::as_str) {
+            Some("list" | "search" | "get") => viva::authority::ACTION_CALLBACK_SKILL_READ,
+            _ => viva::authority::ACTION_CALLBACK_SKILL_WRITE,
+        };
+        Some(viva::callback::authorize(
+            &store,
+            action,
+            get("member").as_deref(),
+        )?)
+    } else {
+        None
+    };
     let skills = viva::skills::SkillBodyStore::new(&store);
     match positional.first().map(String::as_str) {
         Some("create") => {
@@ -2103,7 +2134,13 @@ fn cmd_skill(args: &[String]) -> Result<()> {
             Ok(())
         }
         Some("get") => {
-            if get("member").is_some() {
+            if let Some(identity) = &callback_identity {
+                let skill_id = require("skill")?;
+                let sets = viva::knowledge::SkillSetService::new(&store);
+                let read =
+                    sets.get_body(&identity.member_id, &skill_id, &identity.execution_id, 1.0)?;
+                println!("{}", serde_json::to_string_pretty(&read)?);
+            } else if get("member").is_some() {
                 let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
                 let skill_id = require("skill")?;
                 let execution =
@@ -2126,7 +2163,11 @@ fn cmd_skill(args: &[String]) -> Result<()> {
             Ok(())
         }
         Some("list") => {
-            let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
+            let member = if let Some(identity) = &callback_identity {
+                identity.member_id.clone()
+            } else {
+                viva::foundation::ids::MemberId::from_str(&require("member")?)?
+            };
             let sets = viva::knowledge::SkillSetService::new(&store);
             let knowledge = viva::knowledge::KnowledgeRegistry::new(&store);
             let rows = sets.list_member_skills(&member)?;
@@ -2144,7 +2185,11 @@ fn cmd_skill(args: &[String]) -> Result<()> {
             Ok(())
         }
         Some("search") => {
-            let member = viva::foundation::ids::MemberId::from_str(&require("member")?)?;
+            let member = if let Some(identity) = &callback_identity {
+                identity.member_id.clone()
+            } else {
+                viva::foundation::ids::MemberId::from_str(&require("member")?)?
+            };
             let query = require("query")?;
             let team = get("team").is_some();
             let sets = viva::knowledge::SkillSetService::new(&store);
@@ -2273,6 +2318,185 @@ fn cmd_skill(args: &[String]) -> Result<()> {
 /// recoverable exit (no delete). The adapter subprocess always receives
 /// an explicit db path.
 fn cmd_memory(args: &[String]) -> Result<()> {
+    let rest = args.get(1..).unwrap_or(&[]);
+    match args.first().map(String::as_str) {
+        Some("recall") => return cmd_memory_recall(rest),
+        Some("state") => return cmd_memory_state(rest),
+        Some("remember") if viva::callback::context_active() => {
+            return cmd_memory_remember_callback(rest);
+        }
+        // Legacy search/probe stay for owner use. Inside a member session
+        // they use the same execution, grant, and dialog-state ceiling as recall,
+        // so a work session cannot read personal knowledge through the old verb.
+        Some("search") if viva::callback::context_active() => return cmd_memory_recall(rest),
+        Some("probe") if viva::callback::context_active() => {
+            return cmd_memory_probe_callback(rest);
+        }
+        Some("status") => {}
+        Some(_) if viva::callback::context_active() => {
+            return cmd_memory_owner_forbidden(args);
+        }
+        _ => {}
+    }
+    cmd_memory_owner(args)
+}
+
+fn cmd_memory_probe_callback(args: &[String]) -> Result<()> {
+    let named = flag_map(args)?;
+    let entity = named
+        .get("entity")
+        .cloned()
+        .ok_or_else(|| Error::Validation("memory probe needs --entity".into()))?;
+    let mut forwarded = vec!["--query".into(), entity];
+    if let Some(member) = named.get("member") {
+        forwarded.extend(["--member".into(), member.clone()]);
+    }
+    if let Some(project) = named.get("project") {
+        forwarded.extend(["--project".into(), project.clone()]);
+    }
+    cmd_memory_recall(&forwarded)
+}
+
+fn cmd_memory_owner_forbidden(args: &[String]) -> Result<()> {
+    let named = flag_map(args.get(1..).unwrap_or(&[]))?;
+    let store = open_store()?;
+    let command = args.first().map(String::as_str).unwrap_or("memory");
+    viva::callback::refuse_owner_command(&store, command, named.get("member").map(String::as_str))
+}
+
+fn cmd_memory_recall(args: &[String]) -> Result<()> {
+    let named = flag_map(args)?;
+    let store = open_store()?;
+    match viva::callback::recall(
+        &store,
+        named.get("query").map(String::as_str),
+        named.get("member").map(String::as_str),
+        named.get("project").map(String::as_str),
+    )? {
+        viva::callback::RecallFinish::Done(value) => {
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(())
+        }
+        viva::callback::RecallFinish::Backend(value) => {
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Err(Error::Validation(
+                value
+                    .get("reason")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("backend_error")
+                    .to_string(),
+            ))
+        }
+    }
+}
+
+fn cmd_memory_state(args: &[String]) -> Result<()> {
+    let (positional, named) = split_flags(args)?;
+    let store = open_store()?;
+    let claimed = named.get("member").map(String::as_str);
+    match positional.first().map(String::as_str) {
+        Some("get") => {
+            let value = viva::callback::read_state(&store, claimed)?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(())
+        }
+        Some("set") => {
+            let domain = named.get("domain").map(String::as_str).ok_or_else(|| {
+                Error::Validation("memory state set needs --domain work|personal".into())
+            })?;
+            let value = viva::callback::write_state(
+                &store,
+                viva::callback::StateWrite {
+                    domain,
+                    project: named.get("project").map(String::as_str),
+                    interlocutor: named.get("interlocutor").map(String::as_str),
+                    activity: named.get("activity").map(String::as_str),
+                    written_by: named.get("by").map(String::as_str).unwrap_or("command"),
+                    claimed_member: claimed,
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(())
+        }
+        _ => Err(Error::Validation(
+            "memory state needs get | set --domain <work|personal>".into(),
+        )),
+    }
+}
+
+fn cmd_memory_remember_callback(args: &[String]) -> Result<()> {
+    let named = flag_map(args)?;
+    let store = open_store()?;
+    let kind = match named
+        .get("kind")
+        .map(String::as_str)
+        .unwrap_or("personal_memory")
+    {
+        "project_knowledge" => viva::memory::KnowledgeKind::ProjectKnowledge,
+        "team_knowledge" => viva::memory::KnowledgeKind::TeamKnowledge,
+        _ => viva::memory::KnowledgeKind::PersonalMemory,
+    };
+    let content = named
+        .get("content")
+        .map(String::as_str)
+        .ok_or_else(|| Error::Validation("memory remember needs --content".into()))?;
+    let value = viva::callback::remember(
+        &store,
+        viva::callback::RememberInput {
+            content,
+            source: named.get("source").map(String::as_str),
+            category: named
+                .get("category")
+                .map(String::as_str)
+                .unwrap_or("general"),
+            tags: named.get("tags").map(String::as_str).unwrap_or(""),
+            kind,
+            emphasis: named.contains_key("emphasis"),
+            claimed_member: named.get("member").map(String::as_str),
+            claimed_project: named.get("project").map(String::as_str),
+        },
+    )?;
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
+fn flag_map(args: &[String]) -> Result<std::collections::HashMap<String, String>> {
+    let (_, named) = split_flags(args)?;
+    Ok(named)
+}
+
+fn split_flags(
+    args: &[String],
+) -> Result<(Vec<String>, std::collections::HashMap<String, String>)> {
+    let mut positional = Vec::new();
+    let mut named = std::collections::HashMap::new();
+    let mut i = 0;
+    while i < args.len() {
+        let token = args[i].as_str();
+        if let Some(key) = token.strip_prefix("--") {
+            if key == "emphasis" {
+                named.insert(key.to_string(), "true".into());
+                i += 1;
+                continue;
+            }
+            i += 1;
+            let value = args
+                .get(i)
+                .cloned()
+                .ok_or_else(|| Error::Validation(format!("flag --{key} needs a value")))?;
+            named.insert(key.to_string(), value);
+            i += 1;
+        } else {
+            positional.push(args[i].clone());
+            i += 1;
+        }
+    }
+    Ok((positional, named))
+}
+
+/// Owner-side `viva memory` (F04 / #116). Member sessions with an execution
+/// or grant use the callback commands instead of trusting `--member`.
+fn cmd_memory_owner(args: &[String]) -> Result<()> {
     use std::str::FromStr as _;
 
     let mut named: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -2474,7 +2698,7 @@ fn cmd_memory(args: &[String]) -> Result<()> {
             Ok(())
         }
         _ => Err(Error::Validation(
-            "memory needs search | probe | link | remember | admit | curate | record-use | archive | restore | status".into(),
+            "memory needs recall | state | search | probe | link | remember | admit | curate | record-use | archive | restore | status".into(),
         )),
     }
 }

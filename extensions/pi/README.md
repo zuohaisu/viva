@@ -16,15 +16,14 @@ brief, and offers controlled actions through the `viva` CLI.
   reference. Without one it refuses with a proposal to ask the user — chat
   never self-authorizes, and Viva's dispatch endpoint re-checks the
   grant server-side at the moment of effect.
-- **External memory tools (F04, issue #26)**: `viva_memory_search`
-  (read-only recall scoped to this session's member) and
-  `viva_memory_remember` (an explicit write that always records provenance)
-  go through `viva memory` into Viva's native store and link layer (see
-  [memory/README.md](memory/README.md)). No Hermes checkout or Python is
-  required. Recall and writes happen only when a tool is called; nothing is
-  recalled or written automatically. Since #101 they register against the
-  real Pi API; of all the tools, only `viva_status` and `viva_task_brief`
-  have been exercised end to end in real Pi so far.
+- **External memory and member callback**: `viva_memory_search` and
+  `viva_memory_remember` go through `viva memory`. Remember submits a
+  proposed candidate and does not admit it. `viva_memory_recall`,
+  `viva_dialog_state_get`, `viva_dialog_state_set`, `viva_skill_list`,
+  `viva_skill_search`, and `viva_skill_get` are the session callback
+  (issue #117). They do not pass a member id; the CLI uses the execution
+  and grant in the environment. Nothing is recalled or written
+  automatically.
 - **Explicit handoff**: `viva_handoff` records a member-reported
   summary for the current task. It is stored as a fact ("member X reported
   this"), never as a completion verdict and never as acceptance PASS.

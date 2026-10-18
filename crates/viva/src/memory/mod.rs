@@ -50,7 +50,24 @@ pub fn register_migrations(registry: MigrationRegistry) -> MigrationRegistry {
             "memory v4 curation candidates lifecycle",
             migrate_v4::apply_memory_v4,
         )
+        .register(DOMAIN_MEMORY, 5, "memory v5 dialog state", MEMORY_V5_SQL)
 }
+
+/// Explicit dialog state for one execution (issue #117). No inference.
+pub const MEMORY_V5_SQL: &str = r#"
+CREATE TABLE dialog_states (
+    execution_id   TEXT PRIMARY KEY,
+    session_id     TEXT,
+    member_id      TEXT NOT NULL,
+    domain         TEXT NOT NULL CHECK (domain IN ('work', 'personal')),
+    project_id     TEXT,
+    interlocutor   TEXT,
+    activity       TEXT,
+    since_at       TEXT NOT NULL,
+    written_by     TEXT NOT NULL CHECK (written_by IN ('command', 'haisu')),
+    recorded_at    TEXT NOT NULL
+);
+"#;
 
 pub const MEMORY_V1_SQL: &str = r#"
 CREATE TABLE memory_links (
@@ -1022,6 +1039,11 @@ impl<'a> MemoryService<'a> {
             .collect();
         let rows = stmt.query_map(param_refs.as_slice(), map_fact_row_v4)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Curation ledger from #116. Absent means recall is `not_ready`, not an empty hit.
+    pub fn curation_ready(&self) -> Result<bool> {
+        self.memory_v4_enabled()
     }
 
     fn memory_v4_enabled(&self) -> Result<bool> {
