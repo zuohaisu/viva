@@ -385,12 +385,19 @@ pub struct KeyMap {
 
 impl KeyMap {
     pub fn builtin() -> Self {
+        let commands = builtin_commands();
+        let mut bindings = Vec::new();
+        for (id, _, chord) in &commands {
+            if let Some(chord) = *chord {
+                bindings.push((Action::Command(id.clone()), chord));
+            }
+        }
         let mut map = Self {
             prefixes: vec![parse_stroke("ctrl+b").expect("default prefix")],
-            bindings: Vec::new(),
+            bindings,
             warnings: Vec::new(),
             onboarding_done: false,
-            commands: builtin_commands(),
+            commands,
         };
         for (field, spec) in DEFAULTS {
             if spec.is_empty() {
@@ -685,9 +692,12 @@ impl KeyMap {
             }
         };
         if let Some(chord) = chord {
-            if self.bindings.iter().any(|(_, existing)| {
-                existing.prefix == chord.prefix && existing.stroke == chord.stroke
-            }) {
+            let taken = self.bindings.iter().any(|(action, existing)| {
+                existing.prefix == chord.prefix
+                    && existing.stroke == chord.stroke
+                    && !matches!(action, Action::Command(id) if id == &command.command)
+            });
+            if taken {
                 self.warnings.push(format!(
                     "keys.command `{}` cannot override {}",
                     command.command,
@@ -695,6 +705,9 @@ impl KeyMap {
                 ));
             } else {
                 let id = command.command.clone();
+                self.bindings.retain(
+                    |(action, _)| !matches!(action, Action::Command(existing) if existing == &id),
+                );
                 self.bindings.push((Action::Command(id.clone()), chord));
                 if let Some(row) = self
                     .commands
@@ -765,15 +778,19 @@ fn field_actions(field: &str) -> Vec<Action> {
 }
 
 fn builtin_commands() -> Vec<(String, String, Option<Chord>)> {
+    // `prefix+f` is not a herdr prefix binding. The other viva commands
+    // stay unbound until a config assigns them.
+    let pr = parse_one("prefix+f").expect("prefix+f");
     [
-        ("viva.diff", "show the worktree diff"),
-        ("viva.files", "browse worktree files"),
-        ("viva.handoff", "hand a worktree to another agent"),
-        ("viva.auto-pull", "toggle auto-pull"),
-        ("viva.cleanup", "clean up a merged worktree"),
+        ("viva.diff", "show the worktree diff", None),
+        ("viva.files", "browse worktree files", None),
+        ("viva.handoff", "hand a worktree to another agent", None),
+        ("viva.auto-pull", "toggle auto-pull", None),
+        ("viva.cleanup", "clean up a merged worktree", None),
+        ("viva.pr", "show the pull request change set", Some(pr)),
     ]
     .into_iter()
-    .map(|(id, description)| (id.into(), description.into(), None))
+    .map(|(id, description, chord)| (id.into(), description.into(), chord))
     .collect()
 }
 
@@ -1237,6 +1254,15 @@ mod tests {
             commands
                 .iter()
                 .any(|row| row.id == "viva.diff" && row.binding == "unbound")
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|row| row.id == "viva.pr" && row.binding == "prefix+f")
+        );
+        assert_eq!(
+            follow(&map, KeyCode::Char('f'), KeyModifiers::empty()),
+            Some(Action::Command("viva.pr".into()))
         );
         assert!(commands.iter().all(|row| {
             !row.description.to_ascii_lowercase().contains("open pi") && !row.id.contains("打开")

@@ -2,8 +2,9 @@
 //! (V08, issue #17).
 //!
 //! - The only `gh` surface here is a **read whitelist** (pr/issue/run list
-//!   and view, pr status) plus one GET: `gh api [--paginate]
-//!   repos/{owner}/{repo}/pulls/{n}/comments`. Write subcommands, other
+//!   and view, pr status) plus two GETs: `gh api [--paginate]
+//!   repos/{owner}/{repo}/pulls/{n}/comments` and the same path with
+//!   `files` (the pull request's net file list). Write subcommands, other
 //!   `gh api` paths, and method/body flags are rejected structurally at
 //!   the entry — they cannot reach the CLI.
 //! - Evidence rows record the queried subject, the head SHA it belongs to,
@@ -26,9 +27,10 @@ use crate::foundation::ids::{TaskId, WorktreeId, utc_now};
 use crate::foundation::store::Store;
 use crate::git::cli::{CliRunner, GitFailure};
 
-/// The exhaustive `gh` read surface, apart from one GET of
-/// `repos/{owner}/{repo}/pulls/{n}/comments`. Anything outside this tree
-/// is a write or an admin operation and is rejected before spawning.
+/// The exhaustive `gh` read surface, apart from GET of
+/// `repos/{owner}/{repo}/pulls/{n}/comments` and `.../files`. Anything
+/// outside this tree is a write or an admin operation and is rejected
+/// before spawning.
 pub const READ_WHITELIST: &[&[&str]] = &[
     &["pr", "list"],
     &["pr", "status"],
@@ -42,9 +44,9 @@ pub const READ_WHITELIST: &[&[&str]] = &[
 ];
 
 /// `gh api` defaults to GET and can also POST. Only the pull-request
-/// review-comment list is allowed, with an optional `--paginate` and no
-/// method, field, or input flags.
-fn is_pull_review_comments_get(args: &[&str]) -> bool {
+/// review-comment list and the pull-request file list are allowed, with
+/// an optional `--paginate` and no method, field, or input flags.
+fn is_pull_read_get(args: &[&str]) -> bool {
     if args.first() != Some(&"api") {
         return false;
     }
@@ -63,15 +65,15 @@ fn is_pull_review_comments_get(args: &[&str]) -> bool {
         }
         path = Some(*arg);
     }
-    path.is_some_and(is_review_comments_path)
+    path.is_some_and(is_pull_read_path)
 }
 
-fn is_review_comments_path(path: &str) -> bool {
+fn is_pull_read_path(path: &str) -> bool {
     let Some(rest) = path.strip_prefix("repos/") else {
         return false;
     };
     let mut parts = rest.split('/');
-    let (Some(owner), Some(repo), Some(pulls), Some(number), Some(comments)) = (
+    let (Some(owner), Some(repo), Some(pulls), Some(number), Some(leaf)) = (
         parts.next(),
         parts.next(),
         parts.next(),
@@ -84,7 +86,7 @@ fn is_review_comments_path(path: &str) -> bool {
         return false;
     }
     pulls == "pulls"
-        && comments == "comments"
+        && matches!(leaf, "comments" | "files")
         && is_github_name(owner)
         && is_github_name(repo)
         && !number.is_empty()
@@ -99,15 +101,24 @@ fn is_github_name(name: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-/// Path for the one allowed `gh api` read, or `None` when `owner` / `repo`
-/// would not pass the allowlist.
+/// Path for an allowed pull-request `gh api` read, or `None` when
+/// `owner` / `repo` would not pass the allowlist.
 pub(crate) fn pull_review_comments_api_path(
     owner: &str,
     repo: &str,
     number: u64,
 ) -> Option<String> {
-    let path = format!("repos/{owner}/{repo}/pulls/{number}/comments");
-    is_review_comments_path(&path).then_some(path)
+    pull_api_path(owner, repo, number, "comments")
+}
+
+/// `GET repos/{owner}/{repo}/pulls/{n}/files` — GitHub's net file list.
+pub(crate) fn pull_files_api_path(owner: &str, repo: &str, number: u64) -> Option<String> {
+    pull_api_path(owner, repo, number, "files")
+}
+
+fn pull_api_path(owner: &str, repo: &str, number: u64, leaf: &str) -> Option<String> {
+    let path = format!("repos/{owner}/{repo}/pulls/{number}/{leaf}");
+    is_pull_read_path(&path).then_some(path)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,13 +205,14 @@ impl GhRunner {
                 detail: "gh requires a subcommand tree (e.g. `pr view`)".into(),
             });
         }
-        if is_pull_review_comments_get(args) {
+        if is_pull_read_get(args) {
             return Ok(());
         }
         if args[0] == "api" {
             return Err(GhRejection::WriteAttempt {
                 detail: "gh api is limited to GET repos/{owner}/{repo}/pulls/{n}/comments \
-                         (optional --paginate); other API calls are outside the read-only surface"
+                         and .../files (optional --paginate); other API calls are outside \
+                         the read-only surface"
                     .into(),
             });
         }
@@ -474,6 +486,8 @@ mod tests {
     #[test]
     fn write_commands_never_pass_the_readonly_entry() {
         assert!(GhRunner::validate_read_args(&["pr", "merge", "123"]).is_err());
+        assert!(GhRunner::validate_read_args(&["pr", "comment", "123", "--body", "x"]).is_err());
+        assert!(GhRunner::validate_read_args(&["pr", "review", "123", "--approve"]).is_err());
         assert!(GhRunner::validate_read_args(&["pr", "create"]).is_err());
         assert!(GhRunner::validate_read_args(&["issue", "close", "5"]).is_err());
         assert!(GhRunner::validate_read_args(&["repo", "delete"]).is_err());
@@ -499,6 +513,15 @@ mod tests {
         assert!(
             GhRunner::validate_read_args(&[
                 "api",
+                "--paginate",
+                "repos/zuohaisu/viva/pulls/418/files"
+            ])
+            .is_ok()
+        );
+        assert!(GhRunner::validate_read_args(&["api", "repos/o/r/pulls/1/files"]).is_ok());
+        assert!(
+            GhRunner::validate_read_args(&[
+                "api",
                 "--method",
                 "POST",
                 "repos/o/r/pulls/1/comments"
@@ -514,6 +537,10 @@ mod tests {
                 .is_err()
         );
         assert!(GhRunner::validate_read_args(&["api", "repos/o/r/pulls/1/reviews"]).is_err());
+        assert!(
+            GhRunner::validate_read_args(&["api", "--method", "POST", "repos/o/r/pulls/1/files"])
+                .is_err()
+        );
         assert!(GhRunner::validate_read_args(&["api", "repos/../r/pulls/1/comments"]).is_err());
         assert!(
             GhRunner::validate_read_args(&[

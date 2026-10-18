@@ -321,10 +321,11 @@ impl<'a> MorningRollup<'a> {
     }
 }
 
-/// Check conclusions that mean the check failed. `conclusion` is a CheckRun
-/// field; `state` is a StatusContext field. Real `gh pr view` returns
-/// `statusCheckRollup` as an array of those nodes, not a `{state}` object.
-const CHECK_FAILURES: &[&str] = &["FAILURE", "ERROR", "TIMED_OUT", "STARTUP_FAILURE"];
+/// Check conclusions that mean the check failed. The tokens live in
+/// [`crate::git::pr::token_is_check_failure`] so the workbench cannot
+/// grow a second meaning. `conclusion` is a CheckRun field; `state` is a
+/// StatusContext field. Real `gh pr view` returns `statusCheckRollup` as
+/// an array of those nodes, not a `{state}` object.
 
 #[derive(Debug, Deserialize)]
 struct PrDetail {
@@ -441,13 +442,7 @@ fn checks_failed_from(checks: Option<&[StatusCheck]>) -> Option<bool> {
 }
 
 fn check_failed(value: Option<&str>) -> bool {
-    value
-        .map(|token| {
-            CHECK_FAILURES
-                .iter()
-                .any(|failure| token.eq_ignore_ascii_case(failure))
-        })
-        .unwrap_or(false)
+    crate::git::pr::token_is_check_failure(value)
 }
 
 fn merge_conflict_from(mergeable: Option<&str>) -> Option<bool> {
@@ -517,20 +512,7 @@ fn parse_pr_timeline(stdout: &str) -> Result<PrTimeline> {
 }
 
 fn repo_from_pr_url(url: &str) -> Option<(String, String)> {
-    let (_scheme, rest) = url.split_once("://")?;
-    let mut parts = rest.split('/');
-    let _host = parts.next()?;
-    let owner = parts.next()?;
-    let repo = parts.next()?;
-    let kind = parts.next()?;
-    let number = parts.next()?;
-    if parts.next().is_some() || (kind != "pull" && kind != "pulls") {
-        return None;
-    }
-    if number.is_empty() || !number.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    Some((owner.to_string(), repo.to_string()))
+    crate::git::pr::github_repo(url)
 }
 
 fn fetch_review_comments(

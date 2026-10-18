@@ -213,9 +213,10 @@ pub struct Shared {
     /// Paused (S6): no NEW dispatch, no maintenance cycles; running
     /// executions are untouched. Owner-controlled, explicitly.
     pub paused: AtomicBool,
-    /// V15-2: cached PR status per worktree (60s TTL; gh is external).
-    pub pr_cache:
-        Mutex<std::collections::HashMap<String, (Instant, Option<crate::git::pr::PrInfo>)>>,
+    /// Cached PR status per worktree (60s TTL; gh is external). The file
+    /// list is a separate cache, dropped when the PR head SHA changes.
+    pub pr_cache: Mutex<std::collections::HashMap<String, (Instant, crate::git::pr::PrLookup)>>,
+    pr_files: Mutex<std::collections::HashMap<String, crate::git::pr::CachedPrFiles>>,
     /// V15-4: the last automatic sync cycle and its human summary.
     pub last_sync: Mutex<Option<Instant>>,
     pub last_sync_note: Mutex<Option<String>>,
@@ -321,6 +322,7 @@ impl Host {
             agent_processes: Mutex::new(std::collections::HashMap::new()),
             paused: AtomicBool::new(persisted_pause),
             pr_cache: Mutex::new(std::collections::HashMap::new()),
+            pr_files: Mutex::new(std::collections::HashMap::new()),
             last_sync: Mutex::new(None),
             last_sync_note: Mutex::new(None),
             last_recovery_sweep: Mutex::new(None),
@@ -887,6 +889,10 @@ fn handle_request(shared: Arc<Shared>, request: &Request) -> Result<serde_json::
         RequestKind::WorktreeFileContent { worktree_id, path } => {
             worktree_file_content(&shared, worktree_id, path)
         }
+        RequestKind::WorktreePrFiles { worktree_id } => worktree_pr_files(&shared, worktree_id),
+        RequestKind::WorktreePrFile { worktree_id, path } => {
+            worktree_pr_file(&shared, worktree_id, path)
+        }
         RequestKind::WorktreeCleanup { worktree_id } => worktree_cleanup(
             &shared,
             worktree_id,
@@ -1360,7 +1366,6 @@ fn workbench_view(shared: Arc<Shared>) -> Result<serde_json::Value> {
     }
     drop(store);
 
-    use std::collections::hash_map::Entry;
     for row in &mut model.worktrees {
         let Some((_, record)) = records.iter().find(|(id, _)| id == &row.worktree_id) else {
             continue;
@@ -1373,37 +1378,11 @@ fn workbench_view(shared: Arc<Shared>) -> Result<serde_json::Value> {
             row.behind = Some(behind);
             row.ahead = Some(ahead);
         }
-        let mut cache = shared.pr_cache.lock().expect("pr cache");
-        let info = match cache.entry(row.worktree_id.clone()) {
-            Entry::Occupied(mut occupied) => {
-                let (at, info) = occupied.get_mut();
-                if at.elapsed() < Duration::from_secs(60) {
-                    info.clone()
-                } else {
-                    let fresh = crate::git::pr::pr_status_for_branch_using(
-                        &record.repo_root,
-                        &record.branch,
-                        gh_program_for(&shared).as_str(),
-                    );
-                    *at = Instant::now();
-                    *info = fresh.clone();
-                    fresh
-                }
-            }
-            Entry::Vacant(vacant) => {
-                let fresh = crate::git::pr::pr_status_for_branch_using(
-                    &record.repo_root,
-                    &record.branch,
-                    gh_program_for(&shared).as_str(),
-                );
-                vacant.insert((Instant::now(), fresh.clone()));
-                fresh
-            }
-        };
-        drop(cache);
-        if let Some(pr) = info {
-            row.pr_state = Some(pr.state);
-        }
+        // The cache lock is not held across `gh`. A slow lookup must not
+        // stall every other worktree's read of the same map.
+        let lookup = cached_pr_lookup(&shared, &row.worktree_id, &record.repo_root, &record.branch);
+        row.pr_summary = Some(lookup.summary_line());
+        row.pr_state = lookup.state_word().map(str::to_string);
     }
 
     model.machines = crate::machines::with_local(
@@ -3774,6 +3753,214 @@ fn sweep_recovery_plans(shared: &Shared) {
     }
 }
 
+/// PR status for the sidebar. A hit younger than 60 seconds is reused.
+/// The `gh` call runs without the cache lock.
+fn cached_pr_lookup(
+    shared: &Shared,
+    worktree_id: &str,
+    repo_root: &std::path::Path,
+    branch: &str,
+) -> crate::git::pr::PrLookup {
+    {
+        let cache = shared.pr_cache.lock().expect("pr cache");
+        if let Some((at, lookup)) = cache.get(worktree_id) {
+            if at.elapsed() < Duration::from_secs(60) {
+                return lookup.clone();
+            }
+        }
+    }
+    let fresh = crate::git::pr::pr_status_for_branch_using(
+        repo_root,
+        branch,
+        gh_program_for(shared).as_str(),
+    );
+    let mut cache = shared.pr_cache.lock().expect("pr cache");
+    cache.insert(worktree_id.to_string(), (Instant::now(), fresh.clone()));
+    fresh
+}
+
+struct WorktreeCheckout {
+    repo_root: std::path::PathBuf,
+    worktree_path: std::path::PathBuf,
+    branch: String,
+}
+
+/// Look up a worktree and drop the store lock before any `gh` call.
+fn worktree_checkout(shared: &Shared, worktree_id: &str) -> Result<WorktreeCheckout> {
+    let wid = WorktreeId::from_str(worktree_id)?;
+    let store = shared.store.lock().expect("store");
+    let service = crate::git::worktrees::WorktreeService::new(
+        &store,
+        crate::git::worktrees::ProtectedRefs::new(vec![]),
+    );
+    let record = service.record(&wid)?.ok_or_else(|| Error::NotFound {
+        entity: "worktree",
+        id: worktree_id.to_string(),
+    })?;
+    Ok(WorktreeCheckout {
+        repo_root: record.repo_root,
+        worktree_path: record.worktree_path,
+        branch: record.branch,
+    })
+}
+
+/// File list for the PR panel. A cached list is reused only while the PR
+/// head SHA is unchanged. The store lock is not held here.
+fn pr_files_for(
+    shared: &Shared,
+    worktree_id: &str,
+    info: &crate::git::pr::PrInfo,
+    repo_root: &std::path::Path,
+) -> crate::git::evidence::EvidenceState<Vec<crate::git::pr::PrFile>> {
+    if !info.head_sha.is_empty() {
+        let cache = shared.pr_files.lock().expect("pr files");
+        if let Some(hit) = cache.get(worktree_id) {
+            if hit.head_sha == info.head_sha {
+                return crate::git::evidence::EvidenceState::Fetched {
+                    payload: hit.files.clone(),
+                    fetched_at: hit.fetched_at.clone(),
+                };
+            }
+        }
+    }
+    let Some((owner, repo)) = crate::git::pr::github_repo(&info.url) else {
+        return crate::git::evidence::EvidenceState::Unavailable {
+            reason: "pull request URL is not a GitHub pull URL".into(),
+        };
+    };
+    let fetched = crate::git::pr::fetch_pr_files(
+        repo_root,
+        &owner,
+        &repo,
+        info.number,
+        gh_program_for(shared).as_str(),
+    );
+    if let crate::git::evidence::EvidenceState::Fetched {
+        payload,
+        fetched_at,
+    } = &fetched
+    {
+        if !info.head_sha.is_empty() {
+            let mut cache = shared.pr_files.lock().expect("pr files");
+            cache.insert(
+                worktree_id.to_string(),
+                crate::git::pr::CachedPrFiles {
+                    head_sha: info.head_sha.clone(),
+                    fetched_at: fetched_at.clone(),
+                    files: payload.clone(),
+                },
+            );
+        }
+    }
+    fetched
+}
+
+fn pr_lookup_live(shared: &Shared, checkout: &WorktreeCheckout) -> crate::git::pr::PrLookup {
+    crate::git::pr::pr_status_for_branch_using(
+        &checkout.repo_root,
+        &checkout.branch,
+        gh_program_for(shared).as_str(),
+    )
+}
+
+/// The pull request's net file list for one worktree. Uncommitted files
+/// in the worktree are not added. Approve, merge, and comment are not
+/// offered here.
+fn worktree_pr_files(shared: &Shared, worktree_id: &str) -> Result<serde_json::Value> {
+    let checkout = worktree_checkout(shared, worktree_id)?;
+    let lookup = pr_lookup_live(shared, &checkout);
+    let mut info = match lookup {
+        crate::git::pr::PrLookup::Found(info) => info,
+        other => {
+            return Ok(serde_json::json!({
+                "kind": if matches!(other, crate::git::pr::PrLookup::NoPr) {
+                    "no_pr"
+                } else {
+                    "unknown"
+                },
+                "summary": other.summary_line(),
+            }));
+        }
+    };
+    let (payload, fetched_at) = match pr_files_for(shared, worktree_id, &info, &checkout.repo_root)
+    {
+        crate::git::evidence::EvidenceState::Fetched {
+            payload,
+            fetched_at,
+        } => (payload, fetched_at),
+        crate::git::evidence::EvidenceState::Unavailable { reason } => {
+            return Ok(serde_json::json!({
+                "kind": "unknown",
+                "summary": info.summary_line(),
+                "reason": reason,
+            }));
+        }
+    };
+    info.fetched_at = fetched_at.clone();
+    let local = crate::git::pr::local_head(&checkout.worktree_path);
+    let differs = crate::git::pr::local_head_differs(&info.head_sha, local.as_deref());
+    let (page, total, truncated) = crate::git::pr::page_files(payload);
+    let files: Vec<serde_json::Value> = page
+        .iter()
+        .map(|file| {
+            serde_json::json!({
+                "filename": file.filename,
+                "label": file.label(),
+                "status": file.status,
+                "additions": file.additions,
+                "deletions": file.deletions,
+                "previous_filename": file.previous_filename,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "kind": "change_set",
+        "summary": info.summary_line(),
+        "heading": info.heading(),
+        "meta": info.meta_line(),
+        "fetched_at": fetched_at,
+        "head_sha": info.head_sha,
+        "local_head_differs": differs,
+        "note": if differs { Some(crate::git::pr::LOCAL_HEAD_NOTE) } else { None },
+        "truncated": truncated,
+        "total": total,
+        "files": files,
+    }))
+}
+
+/// One file's GitHub patch. A path that is not in the current file list
+/// is refused. The patch is not replaced with a local `git diff`.
+fn worktree_pr_file(shared: &Shared, worktree_id: &str, path: &str) -> Result<serde_json::Value> {
+    if path.starts_with('/') || path.split('/').any(|part| part == "..") {
+        return Err(Error::Validation(
+            "file paths must be relative to the worktree and may not contain `..`".into(),
+        ));
+    }
+    let checkout = worktree_checkout(shared, worktree_id)?;
+    let lookup = pr_lookup_live(shared, &checkout);
+    let crate::git::pr::PrLookup::Found(info) = lookup else {
+        return Err(Error::Validation(lookup.summary_line()));
+    };
+    let payload = match pr_files_for(shared, worktree_id, &info, &checkout.repo_root) {
+        crate::git::evidence::EvidenceState::Fetched { payload, .. } => payload,
+        crate::git::evidence::EvidenceState::Unavailable { reason } => {
+            return Err(Error::Validation(reason));
+        }
+    };
+    let Some(file) = payload.iter().find(|file| file.filename == path) else {
+        return Err(Error::NotFound {
+            entity: "pull request file",
+            id: path.to_string(),
+        });
+    };
+    let (kind, text) = file.view();
+    Ok(serde_json::json!({
+        "kind": kind,
+        "path": path,
+        "text": text,
+    }))
+}
+
 /// V15-1: the file inventory of one worktree — every tracked file plus
 /// untracked entries, each with its porcelain status. Clean files are
 /// marked `clean`; there is no second guessing of git's verdicts.
@@ -3976,11 +4163,15 @@ fn worktree_cleanup(
         &branch,
         gh_program_for(shared).as_str(),
     );
-    let pr_number = pr.as_ref().map(|info| info.number);
-    let state = pr
-        .as_ref()
-        .map(|info| info.state.clone())
-        .unwrap_or_else(|| "unknown".into());
+    let pr_number = match &pr {
+        crate::git::pr::PrLookup::Found(info) => Some(info.number),
+        crate::git::pr::PrLookup::NoPr | crate::git::pr::PrLookup::Unknown { .. } => None,
+    };
+    let state = match &pr {
+        crate::git::pr::PrLookup::Found(info) => info.state.clone(),
+        crate::git::pr::PrLookup::NoPr => "no pr".into(),
+        crate::git::pr::PrLookup::Unknown { reason } => format!("unknown ({reason})"),
+    };
     if state != "merged" {
         // The refusal is a fact too (#53 boundary: every outcome audited).
         let store = shared.store.lock().expect("store");
@@ -7364,6 +7555,216 @@ mod v15_tests {
         }
         drop(host);
         drop(dir);
+    }
+
+    /// Issue #182: the workbench reads PR status and GitHub's net file
+    /// list through a fake `gh`. Uncommitted files stay on the file
+    /// panel. A new head SHA drops the cached list. The log shows no
+    /// write subcommand.
+    #[test]
+    fn pr_change_set_uses_github_files_and_does_not_write() {
+        let host = start_host();
+        let (_task, wt_path) = seed_repo_worktree(&host, "pr-files");
+        let repo = host.dir.path().join("repo");
+        for (branch, dir_name) in [("pr-none", "wt-none"), ("pr-auth", "wt-auth")] {
+            let wt = host.dir.path().join(dir_name);
+            git(
+                &repo,
+                &["worktree", "add", wt.to_str().unwrap(), "-b", branch],
+            );
+            let store = Store::open(
+                &crate::foundation::paths::database_path(&host.home),
+                migrations(),
+            )
+            .expect("store");
+            let task_id = store
+                .connection()
+                .query_row("SELECT task_id FROM task_worktrees LIMIT 1", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .expect("task");
+            crate::git::worktrees::WorktreeService::new(
+                &store,
+                crate::git::worktrees::ProtectedRefs::new(vec![]),
+            )
+            .adopt_existing(
+                &repo,
+                &wt,
+                &crate::foundation::ids::TaskId::from_str(&task_id).expect("task id"),
+            )
+            .expect("adopt");
+        }
+
+        let bin = host.home.join("fakebin");
+        std::fs::create_dir_all(&bin).expect("fake bin");
+        std::fs::write(bin.join("head"), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").expect("head");
+        std::fs::write(
+            bin.join("files.json"),
+            r#"[{"filename":"src/git/pr.rs","status":"modified","additions":40,"deletions":2,"patch":"@@ -1 +1 @@\n-old\n+final\n"},{"filename":"src/new.rs","status":"renamed","additions":10,"deletions":4,"previous_filename":"old/path.rs","patch":"@@\n+renamed\n"}]"#,
+        )
+        .expect("files");
+        let gh = bin.join("gh");
+        std::fs::write(
+            &gh,
+            r#"#!/bin/sh
+dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+printf '%s\n' "$*" >> "$dir/gh.log"
+if [ "$1" = pr ] && [ "$2" = view ]; then
+  case "$3" in
+    pr-files)
+      head=$(tr -d '\n' < "$dir/head")
+      printf '{"number":418,"title":"track pull request files","state":"OPEN","isDraft":false,"url":"https://github.com/example/repo/pull/418","mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[{"conclusion":"FAILURE","status":"COMPLETED"}],"additions":50,"deletions":6,"changedFiles":2,"commits":[{"oid":"a"},{"oid":"b"},{"oid":"c"}],"baseRefName":"main","headRefName":"pr-files","headRefOid":"%s"}\n' "$head"
+      exit 0
+      ;;
+    pr-none)
+      echo 'no pull requests found for branch "pr-none"' >&2
+      exit 1
+      ;;
+    pr-auth)
+      echo 'HTTP 401: Bad credentials (gh auth login)' >&2
+      exit 1
+      ;;
+  esac
+fi
+if [ "$1" = api ]; then
+  cat "$dir/files.json"
+  exit 0
+fi
+echo "unexpected gh $*" >&2
+exit 1
+"#,
+        )
+        .expect("write gh");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        *host
+            .shared
+            .as_ref()
+            .expect("shared")
+            .gh_bin
+            .lock()
+            .expect("gh bin") = Some(gh.display().to_string());
+
+        let mut client = host.client();
+        let view = client.call(RequestKind::WorkbenchView).expect("view");
+        let summary = |branch: &str| -> String {
+            view.get("worktrees")
+                .and_then(|v| v.as_array())
+                .and_then(|rows| {
+                    rows.iter()
+                        .find(|row| row.get("branch").and_then(|v| v.as_str()) == Some(branch))
+                })
+                .and_then(|row| row.get("pr_summary").and_then(|v| v.as_str()))
+                .unwrap_or("")
+                .to_string()
+        };
+        assert_eq!(
+            summary("pr-files"),
+            "#418 · open · checks failing · review pending · merge clean · 2 files +50 −6"
+        );
+        assert_eq!(summary("pr-none"), "no pr");
+        assert_eq!(summary("pr-auth"), "unknown · gh is not logged in");
+
+        let files_id = worktree_id_for(&mut client, "wt");
+        let listed = client
+            .call(RequestKind::WorktreePrFiles {
+                worktree_id: files_id.clone(),
+            })
+            .expect("change set");
+        let body = format!("{listed}");
+        assert_eq!(
+            listed.get("kind").and_then(|v| v.as_str()),
+            Some("change_set")
+        );
+        assert!(body.contains("M  src/git/pr.rs  +40 −2"), "{body}");
+        assert!(
+            body.contains("R  old/path.rs → src/new.rs  +10 −4"),
+            "{body}"
+        );
+        assert!(body.contains("3 commits"), "{body}");
+        assert!(body.contains("列表来自 GitHub 上的这份 PR"), "{body}");
+        assert!(!body.contains("gone.txt"), "{body}");
+        assert!(!body.contains("DIRTY-notes.txt"), "{body}");
+        assert_eq!(
+            listed
+                .get("files")
+                .and_then(|v| v.as_array())
+                .map(|rows| rows.len()),
+            Some(2)
+        );
+
+        let patch = client
+            .call(RequestKind::WorktreePrFile {
+                worktree_id: files_id.clone(),
+                path: "src/git/pr.rs".into(),
+            })
+            .expect("patch");
+        let patch_text = patch.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(patch_text.contains("+final"), "{patch_text}");
+        assert!(!patch_text.contains("+intermediate"), "{patch_text}");
+
+        std::fs::write(wt_path.join("DIRTY-notes.txt"), "not committed\n").expect("dirty");
+        let workspace = client
+            .call(RequestKind::WorktreeFiles {
+                worktree_id: files_id.clone(),
+            })
+            .expect("workspace files");
+        assert!(
+            format!("{workspace}").contains("DIRTY-notes.txt"),
+            "dirty files stay on the file panel: {workspace}"
+        );
+        let still = client
+            .call(RequestKind::WorktreePrFiles {
+                worktree_id: files_id.clone(),
+            })
+            .expect("change set again");
+        assert!(
+            !format!("{still}").contains("DIRTY-notes.txt"),
+            "dirty files are not part of the pull request: {still}"
+        );
+
+        std::fs::write(bin.join("head"), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            .expect("new head");
+        std::fs::write(
+            bin.join("files.json"),
+            r#"[{"filename":"other.rs","status":"added","additions":1,"deletions":0,"patch":"@@\n+other\n"}]"#,
+        )
+        .expect("new files");
+        let refreshed = client
+            .call(RequestKind::WorktreePrFiles {
+                worktree_id: files_id.clone(),
+            })
+            .expect("refetched");
+        let refreshed_body = format!("{refreshed}");
+        assert!(refreshed_body.contains("other.rs"), "{refreshed_body}");
+        assert!(
+            !refreshed_body.contains("src/git/pr.rs"),
+            "the previous head's files are gone: {refreshed_body}"
+        );
+
+        let none_id = worktree_id_for(&mut client, "wt-none");
+        let none = client
+            .call(RequestKind::WorktreePrFiles {
+                worktree_id: none_id,
+            })
+            .expect("no pr");
+        assert_eq!(none.get("kind").and_then(|v| v.as_str()), Some("no_pr"));
+
+        let log = std::fs::read_to_string(bin.join("gh.log")).expect("log");
+        for line in log.lines() {
+            let mut parts = line.split_whitespace();
+            let command = parts.next();
+            let sub = parts.next();
+            assert!(
+                !(command == Some("pr")
+                    && matches!(sub, Some("merge") | Some("comment") | Some("review"))),
+                "write subcommand reached gh: {line}"
+            );
+        }
+        host.shutdown();
     }
 }
 

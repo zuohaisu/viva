@@ -166,9 +166,13 @@ pub struct WorktreeRow {
     pub task_id: Option<String>,
     /// created (Viva allocated) or adopted (explicitly selected).
     pub source: String,
-    /// V15-2: the branch's PR state via gh (`open`/`merged`/`closed`).
+    /// The branch's PR state word via gh (`draft`/`open`/`merged`/`closed`).
+    /// Absent when there is no PR or gh could not be read.
     #[serde(default)]
     pub pr_state: Option<String>,
+    /// Sidebar scan line: the PR summary, `no pr`, or `unknown · reason`.
+    #[serde(default)]
+    pub pr_summary: Option<String>,
     /// V15-4: distance vs `origin/<branch>`; None = unknown.
     #[serde(default)]
     pub ahead: Option<u32>,
@@ -292,6 +296,13 @@ pub enum WorkbenchAction {
         worktree_id: String,
         path: String,
     },
+    /// Open the pull request's net file list for a worktree.
+    BrowsePr(String),
+    /// View one file's patch inside that pull request.
+    ViewPrFile {
+        worktree_id: String,
+        path: String,
+    },
     /// V15-1: open the viewed file with the system opener.
     OpenInEditor {
         full_path: String,
@@ -365,6 +376,25 @@ pub struct FilePanel {
     pub full_path: Option<String>,
     /// QA F6 residual: scroll offset into the viewed material.
     pub scroll: usize,
+}
+
+/// The pull-request file list for one worktree. Layout matches the file
+/// panel: a centered list, Enter opens one bounded patch, Esc returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrPanel {
+    worktree_id: String,
+    heading: String,
+    meta: String,
+    note: Option<String>,
+    /// `(filename, label)` rows. `filename` is the GitHub path used to
+    /// fetch the patch. The label already includes the status mark and
+    /// the rename arrow.
+    rows: Vec<(String, String)>,
+    truncated: bool,
+    total: usize,
+    selected: usize,
+    viewing: Option<String>,
+    scroll: usize,
 }
 
 /// The `h` handoff target picker (V15-3): a minimal overlay over the
@@ -511,6 +541,10 @@ pub struct WorkbenchApp {
     file_panel: Option<FilePanel>,
     /// V15-1: the viewed file's material (diff or bounded content).
     file_view: Option<String>,
+    /// The pull-request change set for one worktree.
+    pr_panel: Option<PrPanel>,
+    /// The patch currently shown in the pull-request panel.
+    pr_view: Option<String>,
     /// V15-3: the handoff target picker.
     handoff_picker: Option<HandoffPicker>,
     /// V15-2: armed cleanup — the first `D` names the exact path, the
@@ -613,6 +647,8 @@ impl WorkbenchApp {
             layout_dirty: false,
             file_panel: None,
             file_view: None,
+            pr_panel: None,
+            pr_view: None,
             handoff_picker: None,
             cleanup_armed: None,
             diff_scroll: 0,
@@ -1575,6 +1611,15 @@ impl WorkbenchApp {
         }
     }
 
+    /// The worktree whose pull request the panel should open. A selected
+    /// sidebar row wins while spaces has focus; otherwise the open scene.
+    fn pr_target(&self) -> Option<String> {
+        if self.focus == Focus::Worktrees {
+            return self.selected_worktree();
+        }
+        self.focused_worktree_id()
+    }
+
     /// Explicitly enter terminal-forwarding mode (run loop decides when —
     /// usually the Enter key on a terminals row, executed as
     /// [`WorkbenchAction::EnterTerminal`]).
@@ -2096,6 +2141,13 @@ impl WorkbenchApp {
                     KeyOutcome::Handled
                 }
             },
+            "viva.pr" => match self.pr_target() {
+                Some(id) => KeyOutcome::Action(WorkbenchAction::BrowsePr(id)),
+                None => {
+                    self.set_status("pull request needs a worktree");
+                    KeyOutcome::Handled
+                }
+            },
             "viva.handoff" => match worktree {
                 Some(id) => {
                     self.handoff_picker = Some(HandoffPicker {
@@ -2582,7 +2634,73 @@ impl WorkbenchApp {
         if self.show_key_help {
             return self.on_help_key(key);
         }
-        // Overlays own the keyboard first (V15-1 file panel).
+        // Overlays own the keyboard first (V15-1 file panel, PR panel).
+        if self.pr_panel.is_some() {
+            let viewing = self.pr_panel.as_ref().unwrap().viewing.is_some();
+            return match key.code {
+                KeyCode::Esc => {
+                    let panel = self.pr_panel.as_mut().unwrap();
+                    if viewing {
+                        panel.viewing = None;
+                        panel.scroll = 0;
+                        self.pr_view = None;
+                        self.set_status("back to the pull request");
+                    } else {
+                        self.pr_panel = None;
+                        self.pr_view = None;
+                        self.set_status("pull request closed");
+                    }
+                    KeyOutcome::Handled
+                }
+                KeyCode::Up | KeyCode::Char('k') if !viewing => {
+                    let panel = self.pr_panel.as_mut().unwrap();
+                    panel.selected = panel.selected.saturating_sub(1);
+                    KeyOutcome::Handled
+                }
+                KeyCode::Down | KeyCode::Char('j') if !viewing => {
+                    let panel = self.pr_panel.as_mut().unwrap();
+                    if panel.selected + 1 < panel.rows.len() {
+                        panel.selected += 1;
+                    }
+                    KeyOutcome::Handled
+                }
+                KeyCode::Enter if !viewing => {
+                    let panel = self.pr_panel.as_ref().unwrap();
+                    match panel.rows.get(panel.selected) {
+                        Some((path, _)) => {
+                            let (worktree_id, path) = (panel.worktree_id.clone(), path.clone());
+                            KeyOutcome::Action(WorkbenchAction::ViewPrFile { worktree_id, path })
+                        }
+                        None => KeyOutcome::Ignored,
+                    }
+                }
+                KeyCode::Up if viewing => {
+                    if let Some(panel) = self.pr_panel.as_mut() {
+                        panel.scroll = panel.scroll.saturating_sub(1);
+                    }
+                    KeyOutcome::Handled
+                }
+                KeyCode::Down if viewing => {
+                    if let Some(panel) = self.pr_panel.as_mut() {
+                        panel.scroll = panel.scroll.saturating_add(1);
+                    }
+                    KeyOutcome::Handled
+                }
+                KeyCode::PageUp if viewing => {
+                    if let Some(panel) = self.pr_panel.as_mut() {
+                        panel.scroll = panel.scroll.saturating_sub(20);
+                    }
+                    KeyOutcome::Handled
+                }
+                KeyCode::PageDown if viewing => {
+                    if let Some(panel) = self.pr_panel.as_mut() {
+                        panel.scroll = panel.scroll.saturating_add(20);
+                    }
+                    KeyOutcome::Handled
+                }
+                _ => KeyOutcome::Ignored,
+            };
+        }
         if self.file_panel.is_some() {
             let viewing = self.file_panel.as_ref().unwrap().viewing.is_some();
             return match key.code {
@@ -3055,6 +3173,7 @@ impl WorkbenchApp {
             || self.tab_prompt.is_some()
             || self.pane_prompt.is_some()
             || self.file_panel.is_some()
+            || self.pr_panel.is_some()
             || self.handoff_picker.is_some()
             || self.diff_view.is_some()
             || self.terminal_picker.is_some()
@@ -3663,6 +3782,9 @@ impl WorkbenchApp {
         // the bar replaces their bottom border on a short terminal.
         if self.file_panel.is_some() {
             self.draw_file_panel(frame);
+        }
+        if self.pr_panel.is_some() {
+            self.draw_pr_panel(frame);
         }
         if self.handoff_picker.is_some() {
             self.draw_handoff_picker(frame);
@@ -4514,19 +4636,20 @@ impl WorkbenchApp {
                     ),
                     Some((Focus::Worktrees, *index)),
                 ));
-                let mut detail = format!(
-                    "{continuation}{}",
-                    match worktree.dirty {
-                        Some(true) => "dirty",
-                        Some(false) => "clean",
-                        None => "unknown",
-                    }
-                );
+                let mut detail = continuation.to_string();
+                if let Some(summary) = &worktree.pr_summary {
+                    detail.push_str(summary);
+                    detail.push_str(" · ");
+                } else if let Some(pr) = &worktree.pr_state {
+                    detail.push_str(&format!("pr:{pr} · "));
+                }
+                detail.push_str(match worktree.dirty {
+                    Some(true) => "dirty",
+                    Some(false) => "clean",
+                    None => "unknown",
+                });
                 if let Some(task) = &worktree.task_id {
                     detail.push_str(&format!(" · task:{task}"));
-                }
-                if let Some(pr) = &worktree.pr_state {
-                    detail.push_str(&format!(" · pr:{pr}"));
                 }
                 if let (Some(ahead), Some(behind)) = (worktree.ahead, worktree.behind) {
                     detail.push_str(&format!(" · ↑{ahead}↓{behind}"));
@@ -5046,6 +5169,75 @@ impl WorkbenchApp {
         }
     }
 
+    /// The pull-request change set: header, net file list, then one patch.
+    /// Approve, merge, and comment are not on this panel.
+    fn draw_pr_panel(&self, frame: &mut Frame) {
+        let Some(panel) = &self.pr_panel else {
+            return;
+        };
+        let area = centered(
+            frame.area(),
+            90,
+            frame.area().height.saturating_sub(4).max(6),
+        );
+        frame.render_widget(Clear, area);
+        match (&panel.viewing, self.pr_view.as_ref()) {
+            (Some(path), Some(text)) => {
+                let lines: Vec<Line> = text.lines().map(Line::from).collect();
+                let view_height = area.height.saturating_sub(2).max(1) as usize;
+                let max_scroll = lines.len().saturating_sub(view_height);
+                let offset = panel.scroll.min(max_scroll);
+                let shown: Vec<Line> = lines
+                    .iter()
+                    .skip(offset)
+                    .take(view_height.max(1))
+                    .cloned()
+                    .collect();
+                frame.render_widget(
+                    Paragraph::new(shown).block(
+                        Block::new()
+                            .title(format!(" {path} — Esc back · ↑↓ scroll "))
+                            .borders(Borders::ALL),
+                    ),
+                    area,
+                );
+            }
+            _ => {
+                let mut banners = vec![panel.meta.clone()];
+                if let Some(note) = &panel.note {
+                    banners.push(note.clone());
+                }
+                if panel.truncated {
+                    banners.push(format!(
+                        "— showing {} of {} files (truncated) —",
+                        panel.rows.len(),
+                        panel.total
+                    ));
+                }
+                let body = usize::from(area.height.saturating_sub(2));
+                let slots = body.saturating_sub(banners.len());
+                let start =
+                    crate::tui::text::scroll_to_reveal(panel.rows.len(), panel.selected, slots);
+                let mut items: Vec<ListItem> = banners
+                    .into_iter()
+                    .map(|line| ListItem::new(Line::from(line)))
+                    .collect();
+                for (i, (_path, label)) in panel.rows.iter().enumerate().skip(start).take(slots) {
+                    let marker = if panel.selected == i { "▶ " } else { "  " };
+                    items.push(ListItem::new(Line::from(format!("{marker}{label}"))));
+                }
+                frame.render_widget(
+                    List::new(items).block(
+                        Block::new()
+                            .title(format!(" {} — Enter view · Esc close ", panel.heading))
+                            .borders(Borders::ALL),
+                    ),
+                    area,
+                );
+            }
+        }
+    }
+
     /// Draw the handoff target picker (V15-3).
     fn draw_handoff_picker(&self, frame: &mut Frame) {
         let Some(picker) = &self.handoff_picker else {
@@ -5373,6 +5565,7 @@ impl<'a> WorkbenchStore<'a> {
                     task_id: Some(r.task_id.to_string()),
                     source: r.source.as_str().to_string(),
                     pr_state: None,
+                    pr_summary: None,
                     ahead: None,
                     behind: None,
                 }
@@ -5483,6 +5676,7 @@ impl<'a> WorkbenchStore<'a> {
                     task_id: None,
                     source: "discovered (read-only)".into(),
                     pr_state: None,
+                    pr_summary: None,
                     ahead: None,
                     behind: None,
                 });
@@ -5503,6 +5697,7 @@ impl<'a> WorkbenchStore<'a> {
                     task_id: None,
                     source: "directory".into(),
                     pr_state: None,
+                    pr_summary: None,
                     ahead: None,
                     behind: None,
                 });
@@ -6137,6 +6332,99 @@ fn apply_client_action(
             app.file_view = Some(format!("[{kind}]\n{text}"));
             Ok(())
         }
+        WorkbenchAction::BrowsePr(worktree_id) => {
+            let value = client.call(crate::server::RequestKind::WorktreePrFiles {
+                worktree_id: worktree_id.clone(),
+            })?;
+            let kind = value.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+            if kind != "change_set" {
+                let summary = value
+                    .get("summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let reason = value.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+                app.pr_panel = None;
+                app.pr_view = None;
+                app.set_status(if reason.is_empty() {
+                    summary.to_string()
+                } else {
+                    format!("{summary} · {reason}")
+                });
+                return Ok(());
+            }
+            let rows = value
+                .get("files")
+                .and_then(|v| v.as_array())
+                .map(|files| {
+                    files
+                        .iter()
+                        .filter_map(|file| {
+                            Some((
+                                file.get("filename")?.as_str()?.to_string(),
+                                file.get("label")?.as_str()?.to_string(),
+                            ))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let truncated = value
+                .get("truncated")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let total = value
+                .get("total")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(rows.len() as u64) as usize;
+            app.file_panel = None;
+            app.file_view = None;
+            app.pr_panel = Some(PrPanel {
+                worktree_id,
+                heading: value
+                    .get("heading")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("pull request")
+                    .to_string(),
+                meta: value
+                    .get("meta")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                note: value
+                    .get("note")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                rows,
+                truncated,
+                total,
+                selected: 0,
+                viewing: None,
+                scroll: 0,
+            });
+            app.pr_view = None;
+            Ok(())
+        }
+        WorkbenchAction::ViewPrFile { worktree_id, path } => {
+            let value = client.call(crate::server::RequestKind::WorktreePrFile {
+                worktree_id,
+                path: path.clone(),
+            })?;
+            let kind = value
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let text = value
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("binary — GitHub returned no patch")
+                .to_string();
+            if let Some(panel) = app.pr_panel.as_mut() {
+                panel.viewing = Some(path);
+                panel.scroll = 0;
+            }
+            app.pr_view = Some(format!("[{kind}]\n{text}"));
+            Ok(())
+        }
         WorkbenchAction::OpenInEditor { full_path } => {
             let opener = if cfg!(target_os = "macos") {
                 "open"
@@ -6439,6 +6727,7 @@ mod tests {
                 task_id: Some("t1".into()),
                 source: "created".into(),
                 pr_state: None,
+                pr_summary: None,
                 ahead: None,
                 behind: None,
             }],
@@ -7611,6 +7900,7 @@ mod tests {
             task_id: None,
             source: "created".into(),
             pr_state: Some("open".into()),
+            pr_summary: None,
             ahead: Some(1),
             behind: Some(2),
         });
@@ -7624,6 +7914,89 @@ mod tests {
         assert!(view.contains("agent/feat-y"));
         assert!(view.contains("pr:open"), "PR state is a fact: {view}");
         assert!(view.contains("↑1↓2"), "git distance is a fact: {view}");
+    }
+
+    #[test]
+    fn pull_request_summary_is_the_worktree_second_line() {
+        let mut model = sample();
+        model.worktrees[0].pr_summary = Some(
+            "#418 · open · checks failing · review pending · merge clean · 12 files +340 −28"
+                .into(),
+        );
+        let mut app = WorkbenchApp::new();
+        app.sidebar_width = 36;
+        app.set_model(model);
+        let view = render(&mut app, 160, 40);
+        assert!(
+            view.contains("#418"),
+            "the summary starts on the worktree row: {view}"
+        );
+        assert!(view.contains("checks failing"), "{view}");
+    }
+
+    #[test]
+    fn prefix_f_opens_the_pull_request_panel_for_the_selected_worktree() {
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        let prefix = KeyEvent::new(
+            KeyCode::Char('b'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        );
+        app.on_key(prefix);
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Char('f'))),
+            KeyOutcome::Action(WorkbenchAction::BrowsePr("wt1".into()))
+        );
+    }
+
+    #[test]
+    fn pull_request_panel_lists_net_files_and_opens_one_patch() {
+        let mut app = WorkbenchApp::new();
+        app.pr_panel = Some(PrPanel {
+            worktree_id: "wt1".into(),
+            heading: "#418  track pull request files".into(),
+            meta: "main ← pr-files · 3 commits · head aaaaaaaaaaaa · fetched 2026-10-18T00:00:00Z"
+                .into(),
+            note: Some("列表来自 GitHub 上的这份 PR".into()),
+            rows: vec![
+                ("src/git/pr.rs".into(), "M  src/git/pr.rs  +40 −2".into()),
+                (
+                    "src/new.rs".into(),
+                    "R  old/path.rs → src/new.rs  +10 −4".into(),
+                ),
+            ],
+            truncated: false,
+            total: 2,
+            selected: 1,
+            viewing: None,
+            scroll: 0,
+        });
+        let view = render(&mut app, 160, 40);
+        assert!(view.contains("#418  track pull request files"), "{view}");
+        assert!(view.contains("main ← pr-files"), "{view}");
+        assert!(view.contains("列表来自 GitHub 上的这份 PR"), "{view}");
+        assert!(view.contains("old/path.rs → src/new.rs"), "{view}");
+        assert!(!view.contains("Approve"));
+        assert!(!view.contains("Merge"));
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Enter)),
+            KeyOutcome::Action(WorkbenchAction::ViewPrFile {
+                worktree_id: "wt1".into(),
+                path: "src/new.rs".into(),
+            })
+        );
+        app.pr_panel.as_mut().unwrap().viewing = Some("src/new.rs".into());
+        app.pr_view = Some("[diff]\n+renamed\n".into());
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Esc)),
+            KeyOutcome::Handled
+        );
+        assert!(app.pr_panel.as_ref().unwrap().viewing.is_none());
+        assert_eq!(
+            app.on_key(KeyEvent::from(KeyCode::Esc)),
+            KeyOutcome::Handled
+        );
+        assert!(app.pr_panel.is_none());
     }
 
     #[test]
@@ -7830,6 +8203,7 @@ mod tests {
                 task_id: None,
                 source: "created".into(),
                 pr_state: None,
+                pr_summary: None,
                 ahead: None,
                 behind: None,
             });
@@ -8807,6 +9181,7 @@ mod v15_tui_fix_tests {
                 task_id: Some("t1".into()),
                 source: "created".into(),
                 pr_state: None,
+                pr_summary: None,
                 ahead: None,
                 behind: None,
             }],
@@ -9468,6 +9843,7 @@ mod v15_tui_fix_tests {
                 task_id: None,
                 source: "created".into(),
                 pr_state: None,
+                pr_summary: None,
                 ahead: None,
                 behind: None,
             });
