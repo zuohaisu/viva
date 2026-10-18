@@ -1113,16 +1113,17 @@ impl WorkbenchApp {
         })
     }
 
-    /// The focused terminal owns content clicks when its program asked for
-    /// the mouse. Sidebar focus, copy mode, and resize mode do not.
+    /// The focused pane owns content clicks when its program asked for the
+    /// mouse. Sidebar focus does not, even if keyboard forwarding is still
+    /// aimed at that pane (`prefix+o` leaves `terminal_mode` set).
     fn pane_owns_mouse(&self, id: &str) -> bool {
         if self.copy_mode || self.resize_mode || self.navigate {
             return self.terminal_mode.as_deref() == Some(id);
         }
-        if self.focus == Focus::Panes {
-            return matches!(&self.pane_focus, PaneContent::Terminal(focused) if focused == id);
+        if self.focus != Focus::Panes {
+            return false;
         }
-        self.terminal_mode.as_deref() == Some(id)
+        matches!(&self.pane_focus, PaneContent::Terminal(focused) if focused == id)
     }
 
     /// Program mouse events are delivered and not also handled as selection
@@ -2150,11 +2151,13 @@ impl WorkbenchApp {
     fn reload_config(&mut self) -> KeyOutcome {
         let Some(path) = self.config_path.clone() else {
             self.keymap = keys::KeyMap::builtin();
+            self.copy_on_select = self.keymap.copy_on_select();
             self.set_status("no config file; defaults restored");
             return KeyOutcome::Handled;
         };
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         self.keymap = keys::KeyMap::load_str(&text);
+        self.copy_on_select = self.keymap.copy_on_select();
         self.onboarding_pending = !self.keymap.onboarding_done();
         if self.keymap.warnings().is_empty() {
             self.set_status(format!("reloaded {}", path.display()));
@@ -4059,9 +4062,12 @@ impl WorkbenchApp {
             match content {
                 PaneContent::Browser => self.draw_overview(frame, content_area),
                 PaneContent::Terminal(id) => {
-                    self.pane_geometry.push((id.clone(), content_area));
-                    self.draw_terminal_pane(frame, content_area, id);
-                    self.paint_pane_scrollbar(frame, content_area, id);
+                    let (body, gutter) = self.terminal_body(content_area, id);
+                    self.pane_geometry.push((id.clone(), body));
+                    self.draw_terminal_pane(frame, body, id);
+                    if let Some(track) = gutter {
+                        self.paint_pane_scrollbar(frame, track, id);
+                    }
                 }
             }
         }
@@ -4353,22 +4359,37 @@ impl WorkbenchApp {
         frame.render_widget(Paragraph::new(lines), area);
     }
 
-    /// A thumb on the pane's right edge while that terminal has scrollback.
-    /// Dragging it changes `scroll_offset` (0 is the live bottom).
-    fn paint_pane_scrollbar(&mut self, frame: &mut Frame, area: Rect, id: &str) {
-        let retained = self.pane_retained(id);
-        if retained == 0 || area.width < 2 || area.height == 0 {
-            return;
+    /// Content rect plus the one-column gutter when this pane has scrollback.
+    /// The gutter is not part of the grid sent to the PTY.
+    fn terminal_body(&self, area: Rect, id: &str) -> (Rect, Option<Rect>) {
+        if self.pane_retained(id) == 0 || area.width < 2 || area.height == 0 {
+            return (area, None);
         }
-        let viewport = usize::from(area.height);
-        let total = retained.saturating_add(viewport);
-        let from_top = retained.saturating_sub(self.scroll_offset(id).min(retained));
         let track = Rect::new(
             area.x.saturating_add(area.width.saturating_sub(1)),
             area.y,
             1,
             area.height,
         );
+        (
+            Rect {
+                width: area.width.saturating_sub(1),
+                ..area
+            },
+            Some(track),
+        )
+    }
+
+    /// A thumb in the reserved gutter while that terminal has scrollback.
+    /// Dragging it changes `scroll_offset` (0 is the live bottom).
+    fn paint_pane_scrollbar(&mut self, frame: &mut Frame, track: Rect, id: &str) {
+        let retained = self.pane_retained(id);
+        if retained == 0 || track.width == 0 || track.height == 0 {
+            return;
+        }
+        let viewport = usize::from(track.height);
+        let total = retained.saturating_add(viewport);
+        let from_top = retained.saturating_sub(self.scroll_offset(id).min(retained));
         self.paint_scrollbar(frame, track, from_top, total, viewport);
         self.remember_scroll(ScrollRegion {
             target: ScrollTarget::Pane(id.to_string()),
@@ -8650,6 +8671,206 @@ mod tests {
             .expect("the next click is reported");
         assert_eq!(id, "t1");
         assert_eq!(bytes, b"\x1b[<0;5;4M");
+    }
+
+    #[test]
+    fn scrollbar_column_is_outside_the_terminal_grid() {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        use ratatui::layout::Position;
+        let mut app = app_with_terminal_pane();
+        app.set_model(sample());
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.focus = Focus::Panes;
+        app.enter_terminal_mode("t1");
+        let zs = "Z".repeat(80);
+        app.set_snapshot(
+            "t1",
+            TerminalSnapshot {
+                screen: Some(crate::terminal::screen::ScreenView {
+                    lines: vec![vec![crate::terminal::screen::Run(zs, 80, 0, 0, 0)]],
+                    cursor: (0, 0),
+                    cursor_visible: false,
+                    modes: crate::terminal::screen::InputModes {
+                        mouse_mode: 3,
+                        mouse_encoding: 2,
+                        ..Default::default()
+                    },
+                    scrollback_offset: 0,
+                    retained: 30,
+                }),
+                cols: 80,
+                rows: 24,
+                visible: vec!["Z".repeat(80)],
+                scrollback: vec![],
+                scrollback_capped: false,
+                total_output_bytes: 80,
+                log_truncated: false,
+            },
+        );
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let area = app
+            .visible_geometry()
+            .iter()
+            .find(|(id, _)| id == "t1")
+            .map(|(_, rect)| *rect)
+            .expect("geometry");
+        let glyph = |x, y| {
+            buffer
+                .cell(Position::new(x, y))
+                .map(|cell| cell.symbol().to_string())
+                .unwrap_or_default()
+        };
+        let gutter = area.x + area.width;
+        assert_eq!(area, Rect::new(26, 2, 53, 21), "{area:?}");
+        assert_eq!(glyph(gutter, area.y), "▕");
+        assert_eq!(glyph(gutter - 1, area.y), "Z");
+        assert_eq!(app.scroll_offset("t1"), 0);
+        let content = pointer(MouseEventKind::Down(MouseButton::Left), gutter - 1, area.y);
+        assert!(
+            app.dispatch_mouse(content).is_some(),
+            "a click on the last drawn character reaches the program"
+        );
+        let thumb = pointer(MouseEventKind::Down(MouseButton::Left), gutter, area.y);
+        assert!(
+            app.dispatch_mouse(thumb).is_none(),
+            "a click on the gutter does not reach the program"
+        );
+        app.on_mouse(pointer(
+            MouseEventKind::Drag(MouseButton::Left),
+            gutter,
+            area.y + area.height - 1,
+        ));
+        assert!(
+            app.scroll_offset("t1") > 0,
+            "dragging the gutter still changes scrollback"
+        );
+    }
+
+    #[test]
+    fn prefix_o_click_focuses_the_mouse_pane_without_forwarding() {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = app_with_terminal_pane();
+        app.set_model(sample());
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.enter_terminal_mode("t1");
+        app.set_snapshot(
+            "t1",
+            snapshot_with_modes(crate::terminal::screen::InputModes {
+                mouse_mode: 3,
+                mouse_encoding: 2,
+                ..Default::default()
+            }),
+        );
+        let _ = render(&mut app, 80, 24);
+        let area = app.visible_geometry()[0].1;
+        app.on_key(KeyEvent::new(
+            KeyCode::Char('b'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        ));
+        assert_eq!(
+            app.on_key(KeyEvent::new(
+                KeyCode::Char('o'),
+                ratatui::crossterm::event::KeyModifiers::empty(),
+            )),
+            KeyOutcome::Handled
+        );
+        assert_eq!(app.focus(), Focus::Terminals);
+        assert_eq!(app.terminal_mode(), Some("t1"));
+        let down = pointer(
+            MouseEventKind::Down(MouseButton::Left),
+            area.x + 3,
+            area.y + 1,
+        );
+        assert!(
+            app.dispatch_mouse(down).is_none(),
+            "sidebar focus does not hand this click to the program"
+        );
+        assert_eq!(app.focus(), Focus::Panes);
+        assert_eq!(app.terminal_mode(), Some("t1"));
+        let drag = pointer(
+            MouseEventKind::Drag(MouseButton::Left),
+            area.x + 4,
+            area.y + 2,
+        );
+        assert!(
+            app.dispatch_mouse(drag).is_none(),
+            "the rest of the focusing gesture stays here"
+        );
+        app.on_mouse(pointer(
+            MouseEventKind::Up(MouseButton::Left),
+            area.x + 4,
+            area.y + 2,
+        ));
+        assert!(app.dispatch_mouse(down).is_some());
+    }
+
+    #[test]
+    fn reload_config_applies_copy_on_select() {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        let ctrl_c = KeyEvent::new(
+            KeyCode::Char('c'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        );
+        let prefix = KeyEvent::new(
+            KeyCode::Char('b'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        );
+        let reload = KeyEvent::new(
+            KeyCode::Char('R'),
+            ratatui::crossterm::event::KeyModifiers::SHIFT,
+        );
+        let path =
+            std::env::temp_dir().join(format!("viva-copy-on-select-{}.toml", std::process::id()));
+        std::fs::write(&path, "onboarding = false\ncopy_on_select = true\n").unwrap();
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.focus = Focus::Panes;
+        app.enter_terminal_mode("t1");
+        app.load_config_str(&std::fs::read_to_string(&path).unwrap(), Some(path.clone()));
+        app.pane_geometry = vec![("t1".into(), Rect::new(0, 10, 40, 5))];
+        let drag = |app: &mut WorkbenchApp, text: &str| {
+            app.set_snapshot("t1", snapshot_with(&[text]));
+            let end = text.chars().count() as u16 - 1;
+            app.on_mouse(pointer(MouseEventKind::Down(MouseButton::Left), 0, 10));
+            app.on_mouse(pointer(MouseEventKind::Drag(MouseButton::Left), end, 10));
+            app.on_mouse(pointer(MouseEventKind::Up(MouseButton::Left), end, 10));
+        };
+        drag(&mut app, "alpha beta gamma");
+        assert_eq!(app.last_copy(), "alpha beta gamma");
+        std::fs::write(&path, "onboarding = false\ncopy_on_select = false\n").unwrap();
+        app.on_key(prefix);
+        assert_eq!(app.on_key(reload), KeyOutcome::Handled);
+        assert!(!app.copy_on_select);
+        drag(&mut app, "one two three");
+        assert_eq!(
+            app.last_copy(),
+            "alpha beta gamma",
+            "a reload to false leaves the selection until Ctrl+C"
+        );
+        assert!(app.retained_selection.is_some());
+        assert_eq!(app.on_key(ctrl_c), KeyOutcome::Handled);
+        assert_eq!(app.last_copy(), "one two three");
+        assert!(!app.quit_requested());
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.focus = Focus::Panes;
+        app.enter_terminal_mode("t1");
+        app.load_config_str("onboarding = false\ncopy_on_select = false\n", None);
+        assert!(!app.copy_on_select);
+        app.pane_geometry = vec![("t1".into(), Rect::new(0, 10, 40, 5))];
+        app.on_key(prefix);
+        assert_eq!(app.on_key(reload), KeyOutcome::Handled);
+        assert!(app.copy_on_select);
+        drag(&mut app, "back to default");
+        assert_eq!(app.last_copy(), "back to default");
     }
 
     #[test]
