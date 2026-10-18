@@ -112,37 +112,6 @@ fn sidebar_section_heights(total: u16) -> [u16; 3] {
     ]
 }
 
-/// Scroll so the selected entity's first line is in the window. A two-line
-/// block that is taller than the viewport keeps the name, not the detail
-/// line that follows it.
-fn sidebar_reveal_offset(
-    section: &[(Line<'static>, Option<(Focus, usize)>)],
-    selected: Option<(Focus, usize)>,
-    height: usize,
-) -> usize {
-    if height == 0 || section.is_empty() {
-        return 0;
-    }
-    let Some(selected) = selected else {
-        return 0;
-    };
-    let Some(first) = section.iter().position(|(_, key)| *key == Some(selected)) else {
-        return 0;
-    };
-    let last = section
-        .iter()
-        .rposition(|(_, key)| *key == Some(selected))
-        .unwrap_or(first);
-    let block = last - first + 1;
-    let max_start = section.len().saturating_sub(height);
-    let start = if block >= height {
-        first
-    } else {
-        (last + 1).saturating_sub(height).min(first)
-    };
-    start.min(max_start)
-}
-
 // ---------------------------------------------------------------------------
 // Projections (read-only facts assembled by the store-backed source)
 // ---------------------------------------------------------------------------
@@ -340,6 +309,41 @@ enum DragState {
     },
     /// Dragging the sidebar's right edge to resize it.
     Sidebar,
+    /// Dragging a list or pane thumb. Metrics are the frame the grab
+    /// started on, so a repaint cannot move the track under the pointer.
+    Scrollbar {
+        target: ScrollTarget,
+        track: Rect,
+        offset: usize,
+        total: usize,
+        viewport: usize,
+        anchor: Option<(usize, usize)>,
+        grab: u16,
+    },
+}
+
+/// One scrolling surface. A pane's offset is lines from the top of its
+/// scrollback; every other target's offset is the first visible row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScrollTarget {
+    Sidebar(usize),
+    Goto,
+    Files,
+    Handoff,
+    Pane(String),
+}
+
+#[derive(Debug, Clone)]
+struct ScrollRegion {
+    target: ScrollTarget,
+    /// Wheel area. A pane uses only its thumb track, so content wheels
+    /// stay with the terminal.
+    rect: Rect,
+    track: Option<Rect>,
+    offset: usize,
+    total: usize,
+    viewport: usize,
+    anchor: Option<(usize, usize)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -414,12 +418,16 @@ enum MenuAction {
     Close,
     Rename,
     Zoom,
+    /// Toggle whether a later right-click in this pane goes to the program.
+    RightClickToPane,
 }
 
 struct ContextMenu {
     selected: usize,
     column: u16,
     row: u16,
+    /// Terminal the menu was opened on. `None` is the browser leaf.
+    pane_id: Option<String>,
 }
 
 struct GotoPicker {
@@ -436,13 +444,21 @@ struct GotoRow {
     label: String,
 }
 
-fn menu_actions() -> [MenuAction; 5] {
-    [
-        MenuAction::SplitRight,
-        MenuAction::SplitDown,
-        MenuAction::Close,
-        MenuAction::Rename,
-        MenuAction::Zoom,
+fn menu_rows(right_clicks_to_pane: bool) -> Vec<(&'static str, MenuAction)> {
+    vec![
+        ("split right", MenuAction::SplitRight),
+        ("split down", MenuAction::SplitDown),
+        ("close", MenuAction::Close),
+        ("rename", MenuAction::Rename),
+        ("zoom", MenuAction::Zoom),
+        (
+            if right_clicks_to_pane {
+                "workbench right-click"
+            } else {
+                "right-clicks to pane"
+            },
+            MenuAction::RightClickToPane,
+        ),
     ]
 }
 
@@ -458,6 +474,17 @@ struct DragSelect {
     /// Set when the selection is one double-clicked word. Ctrl+C copies
     /// this text; a drag leaves it empty and slices the screen instead.
     word: Option<String>,
+    /// Set after a double-click. Further dragging grows the range by words
+    /// from this anchor to the word under the pointer.
+    word_anchor: Option<WordAnchor>,
+}
+
+/// The word a double-click landed on, in screen cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WordAnchor {
+    row: u16,
+    start_col: u16,
+    end_col: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -581,7 +608,19 @@ pub struct WorkbenchApp {
     drag_select: Option<DragSelect>,
     /// Herdr's `copy_on_select`. True copies when the drag is released.
     /// False leaves the selection on screen until Ctrl+C copies it.
+    /// Loaded from `copy_on_select` in config; missing values stay true.
     copy_on_select: bool,
+    /// Terminals whose right-click goes to the program instead of the menu.
+    right_click_panes: std::collections::HashSet<String>,
+    /// The left press that moved focus onto a mouse-reporting pane. The
+    /// rest of that gesture stays here; the next press may go to the program.
+    pane_focus_press: bool,
+    sidebar_scroll: [usize; 3],
+    goto_scroll: usize,
+    file_list_scroll: usize,
+    handoff_scroll: usize,
+    scroll_regions: Vec<ScrollRegion>,
+    tab_bar_area: Option<Rect>,
     retained_selection: Option<DragSelect>,
     /// Previous content click, for double-click word selection.
     last_text_click: Option<(std::time::Instant, u16, u16, String)>,
@@ -655,6 +694,14 @@ impl WorkbenchApp {
             pane_prompt: None,
             drag_select: None,
             copy_on_select: true,
+            right_click_panes: std::collections::HashSet::new(),
+            pane_focus_press: false,
+            sidebar_scroll: [0, 0, 0],
+            goto_scroll: 0,
+            file_list_scroll: 0,
+            handoff_scroll: 0,
+            scroll_regions: Vec::new(),
+            tab_bar_area: None,
             retained_selection: None,
             last_text_click: None,
             last_copy: String::new(),
@@ -706,6 +753,7 @@ impl WorkbenchApp {
 
     pub fn load_config_str(&mut self, text: &str, path: Option<std::path::PathBuf>) {
         self.keymap = keys::KeyMap::load_str(text);
+        self.copy_on_select = self.keymap.copy_on_select();
         self.config_path = path;
         self.onboarding_pending = !self.keymap.onboarding_done();
         if self.onboarding_pending {
@@ -962,14 +1010,21 @@ impl WorkbenchApp {
         event: ratatui::crossterm::event::MouseEvent,
     ) -> Option<(String, Vec<u8>)> {
         use ratatui::crossterm::event::{KeyModifiers, MouseEventKind};
-        if matches!(
+        if self.pane_focus_press {
+            return None;
+        }
+        let right = matches!(
             event.kind,
             MouseEventKind::Down(ratatui::crossterm::event::MouseButton::Right)
                 | MouseEventKind::Up(ratatui::crossterm::event::MouseButton::Right)
-        ) {
-            return None;
+        );
+        if right {
+            return self.forward_right_click(event);
         }
         if self.modal_open() || !matches!(self.drag, DragState::None) {
+            return None;
+        }
+        if self.scroll_track_at(event.column, event.row).is_some() {
             return None;
         }
         let (id, rect) = self
@@ -1008,16 +1063,67 @@ impl WorkbenchApp {
         None
     }
 
-    /// The focused terminal owns content clicks when its program asked for
-    /// the mouse. Sidebar focus, copy mode, and resize mode do not.
+    /// Right-click reaches the program only after the menu item is on, the
+    /// pane already has focus, and the program asked for the mouse. Shift
+    /// still opens the workbench menu so the item can be turned off.
+    fn forward_right_click(
+        &mut self,
+        event: ratatui::crossterm::event::MouseEvent,
+    ) -> Option<(String, Vec<u8>)> {
+        use ratatui::crossterm::event::KeyModifiers;
+        if self.modal_open()
+            || !matches!(self.drag, DragState::None)
+            || event.modifiers.contains(KeyModifiers::SHIFT)
+            || self.scroll_track_at(event.column, event.row).is_some()
+        {
+            return None;
+        }
+        let (id, rect) = self
+            .pane_geometry
+            .iter()
+            .find(|(_, area)| contains_point(*area, event.column, event.row))
+            .cloned()?;
+        if !self.right_click_panes.contains(&id)
+            || !self.pane_owns_mouse(&id)
+            || self.scroll_offset(&id) != 0
+        {
+            return None;
+        }
+        if self.on_divider(event.column, event.row) {
+            return None;
+        }
+        let modes = self.pane_modes(&id);
+        let bytes = terminal_view::mouse(event, rect, &modes)?;
+        if self.terminal_mode.as_deref() != Some(id.as_str()) {
+            self.enter_terminal_mode(id.clone());
+        }
+        Some((id, bytes))
+    }
+
+    fn on_divider(&self, column: u16, row: u16) -> bool {
+        self.last_pane_area.is_some_and(|area| {
+            !self.zoomed
+                && self.grid.splits(area).iter().any(|hit| {
+                    contains_point(hit.hit_rect, column, row)
+                        || match hit.axis {
+                            SplitAxis::Horizontal => column.abs_diff(hit.pos) <= 1,
+                            SplitAxis::Vertical => row.abs_diff(hit.pos) <= 1,
+                        }
+                })
+        })
+    }
+
+    /// The focused pane owns content clicks when its program asked for the
+    /// mouse. Sidebar focus does not, even if keyboard forwarding is still
+    /// aimed at that pane (`prefix+o` leaves `terminal_mode` set).
     fn pane_owns_mouse(&self, id: &str) -> bool {
         if self.copy_mode || self.resize_mode || self.navigate {
             return self.terminal_mode.as_deref() == Some(id);
         }
-        if self.focus == Focus::Panes {
-            return matches!(&self.pane_focus, PaneContent::Terminal(focused) if focused == id);
+        if self.focus != Focus::Panes {
+            return false;
         }
-        self.terminal_mode.as_deref() == Some(id)
+        matches!(&self.pane_focus, PaneContent::Terminal(focused) if focused == id)
     }
 
     /// Program mouse events are delivered and not also handled as selection
@@ -2045,11 +2151,13 @@ impl WorkbenchApp {
     fn reload_config(&mut self) -> KeyOutcome {
         let Some(path) = self.config_path.clone() else {
             self.keymap = keys::KeyMap::builtin();
+            self.copy_on_select = self.keymap.copy_on_select();
             self.set_status("no config file; defaults restored");
             return KeyOutcome::Handled;
         };
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         self.keymap = keys::KeyMap::load_str(&text);
+        self.copy_on_select = self.keymap.copy_on_select();
         self.onboarding_pending = !self.keymap.onboarding_done();
         if self.keymap.warnings().is_empty() {
             self.set_status(format!("reloaded {}", path.display()));
@@ -2845,19 +2953,44 @@ impl WorkbenchApp {
     }
 
     fn on_menu_key(&mut self, key: KeyEvent) -> KeyOutcome {
-        let Some(menu) = self.context_menu.as_mut() else {
+        if self.context_menu.is_none() {
             return KeyOutcome::Ignored;
-        };
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.close_context_menu(),
-            KeyCode::Up | KeyCode::Char('k') => menu.selected = menu.selected.saturating_sub(1),
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(menu) = self.context_menu.as_mut() {
+                    menu.selected = menu.selected.saturating_sub(1);
+                }
+            }
             KeyCode::Down | KeyCode::Char('j') => {
-                menu.selected = (menu.selected + 1).min(menu_actions().len() - 1);
+                let pane = self
+                    .context_menu
+                    .as_ref()
+                    .and_then(|menu| menu.pane_id.clone());
+                let last = self.menu_for(pane.as_deref()).len().saturating_sub(1);
+                if let Some(menu) = self.context_menu.as_mut() {
+                    menu.selected = (menu.selected + 1).min(last);
+                }
             }
             KeyCode::Enter => {
-                let selected = menu.selected;
+                let selected = self
+                    .context_menu
+                    .as_ref()
+                    .map(|menu| menu.selected)
+                    .unwrap_or(0);
+                let pane = self
+                    .context_menu
+                    .as_ref()
+                    .and_then(|menu| menu.pane_id.clone());
+                let action = self
+                    .menu_for(pane.as_deref())
+                    .get(selected)
+                    .map(|(_, action)| *action);
                 self.close_context_menu();
-                return self.activate_menu(menu_actions()[selected]);
+                if let Some(action) = action {
+                    return self.activate_menu(action, pane);
+                }
             }
             _ => {}
         }
@@ -3005,10 +3138,32 @@ impl WorkbenchApp {
         rows
     }
 
-    fn activate_menu(&mut self, action: MenuAction) -> KeyOutcome {
+    fn menu_for(&self, pane: Option<&str>) -> Vec<(&'static str, MenuAction)> {
+        menu_rows(pane.is_some_and(|id| self.right_click_panes.contains(id)))
+    }
+
+    fn toggle_right_click(&mut self, pane: Option<String>) {
+        let Some(id) = pane else {
+            self.set_status("right-click stays with the workbench on this pane");
+            return;
+        };
+        if self.right_click_panes.contains(&id) {
+            self.right_click_panes.remove(&id);
+            self.set_status("right-click opens the workbench menu");
+        } else {
+            self.right_click_panes.insert(id);
+            self.set_status("right-click goes to the pane");
+        }
+    }
+
+    fn activate_menu(&mut self, action: MenuAction, pane: Option<String>) -> KeyOutcome {
         match action {
             MenuAction::SplitRight => KeyOutcome::Action(WorkbenchAction::SplitRight),
             MenuAction::SplitDown => KeyOutcome::Action(WorkbenchAction::SplitBelow),
+            MenuAction::RightClickToPane => {
+                self.toggle_right_click(pane);
+                KeyOutcome::Handled
+            }
             MenuAction::Close => {
                 let pane_id = Self::pane_key(&self.pane_focus);
                 self.close_pane();
@@ -3081,15 +3236,16 @@ impl WorkbenchApp {
     }
 
     /// Handle one mouse event (herdr-parity interaction). Left button
-    /// drags a pane divider, drags the sidebar edge, clicks a pane into
-    /// focus, and double-clicks a divider to reset. Scroll wheels and
-    /// other buttons are not wired (later interaction slices).
+    /// drags a pane divider, the sidebar edge, or a scrollbar, clicks a
+    /// pane into focus, and double-clicks a divider to reset. The wheel
+    /// scrolls the sidebar, the tab bar, and the open lists.
     pub fn on_mouse(&mut self, mouse: ratatui::crossterm::event::MouseEvent) {
         use ratatui::crossterm::event::{MouseButton, MouseEventKind};
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => self.on_left_down(mouse.column, mouse.row),
             MouseEventKind::Drag(MouseButton::Left) => self.on_left_drag(mouse.column, mouse.row),
             MouseEventKind::Up(MouseButton::Left) => {
+                self.pane_focus_press = false;
                 if let Some(select) = self.drag_select.take() {
                     if select.moved {
                         let text = self.selection_text(&select);
@@ -3112,6 +3268,8 @@ impl WorkbenchApp {
                 self.drag = DragState::None;
             }
             MouseEventKind::Down(MouseButton::Right) => self.on_right_down(mouse.column, mouse.row),
+            MouseEventKind::ScrollUp => self.on_wheel(mouse.column, mouse.row, -1),
+            MouseEventKind::ScrollDown => self.on_wheel(mouse.column, mouse.row, 1),
             _ => {}
         }
     }
@@ -3134,6 +3292,10 @@ impl WorkbenchApp {
         let Some(target) = target else {
             return;
         };
+        let pane_id = match &target {
+            PaneContent::Terminal(id) => Some(id.clone()),
+            PaneContent::Browser => None,
+        };
         if target != self.pane_focus {
             self.queue_focus(&target);
             self.pane_focus = target;
@@ -3142,6 +3304,7 @@ impl WorkbenchApp {
             selected: 0,
             column,
             row,
+            pane_id,
         });
     }
 
@@ -3221,21 +3384,32 @@ impl WorkbenchApp {
         let Some(span) = word_at_pane(self, id, *area, column, row) else {
             return true;
         };
+        let anchor = WordAnchor {
+            row,
+            start_col: area.x.saturating_add(span.start),
+            end_col: area.x.saturating_add(span.end),
+        };
+        let select = DragSelect {
+            id: id.to_string(),
+            area: *area,
+            start_col: anchor.start_col,
+            start_row: row,
+            end_col: anchor.end_col,
+            end_row: row,
+            moved: false,
+            word: Some(span.text.clone()),
+            word_anchor: Some(anchor),
+        };
+        // The drag stays armed so the next motion grows the range by words.
+        self.drag_select = Some(select.clone());
         if self.copy_on_select {
             self.copy_to_clipboard(&span.text);
             self.retained_selection = None;
             self.set_status(format!("copied {}", span.text));
         } else {
-            self.retained_selection = Some(DragSelect {
-                id: id.to_string(),
-                area: *area,
-                start_col: area.x.saturating_add(span.start),
-                start_row: row,
-                end_col: area.x.saturating_add(span.end),
-                end_row: row,
-                moved: true,
-                word: Some(span.text.clone()),
-            });
+            let mut kept = select;
+            kept.moved = true;
+            self.retained_selection = Some(kept);
             self.set_status(format!("selected {}", span.text));
         }
         true
@@ -3293,6 +3467,10 @@ impl WorkbenchApp {
                 self.close_context_menu();
                 return;
             }
+            let pane = self
+                .context_menu
+                .as_ref()
+                .and_then(|menu| menu.pane_id.clone());
             let hit = self
                 .menu_hits
                 .iter()
@@ -3300,10 +3478,13 @@ impl WorkbenchApp {
                 .map(|(action, _)| *action);
             self.close_context_menu();
             if let Some(action) = hit {
-                if let KeyOutcome::Action(action) = self.activate_menu(action) {
+                if let KeyOutcome::Action(action) = self.activate_menu(action, pane) {
                     self.mouse_action = Some(action);
                 }
             }
+            return;
+        }
+        if self.begin_scroll_press(column, row) {
             return;
         }
         // Overlays are modal: clicks must not fall through to the grid.
@@ -3425,6 +3606,14 @@ impl WorkbenchApp {
             .find(|(_, rect)| contains_point(*rect, column, row))
             .map(|(content, _)| content);
         if let Some(content) = hit_leaf {
+            let focus_only = match &content {
+                PaneContent::Terminal(id) => {
+                    !self.pane_owns_mouse(id)
+                        && self.pane_modes(id).mouse_mode != 0
+                        && self.scroll_offset(id) == 0
+                }
+                PaneContent::Browser => false,
+            };
             self.focus = Focus::Panes;
             self.queue_focus(&content);
             if self.pane_focus != content {
@@ -3434,6 +3623,14 @@ impl WorkbenchApp {
             match &content {
                 PaneContent::Terminal(id) => self.enter_terminal_mode(id.clone()),
                 PaneContent::Browser => self.leave_terminal_mode(),
+            }
+            // The press that takes focus does not also start a selection
+            // or a program mouse event. The following drag and release of
+            // this gesture stay with the workbench.
+            if focus_only {
+                self.pane_focus_press = true;
+                self.drag_select = None;
+                return;
             }
             if let PaneContent::Terminal(id) = &content {
                 if let Some((_, rect)) = self
@@ -3457,6 +3654,7 @@ impl WorkbenchApp {
                         end_row: row,
                         moved: false,
                         word: None,
+                        word_anchor: None,
                     });
                 }
             }
@@ -3464,6 +3662,14 @@ impl WorkbenchApp {
     }
 
     fn on_left_drag(&mut self, column: u16, row: u16) {
+        if self
+            .drag_select
+            .as_ref()
+            .is_some_and(|select| select.word_anchor.is_some())
+        {
+            self.drag_word_selection(column, row);
+            return;
+        }
         if let Some(select) = self.drag_select.as_mut() {
             if column != select.start_col || row != select.start_row {
                 select.moved = true;
@@ -3476,6 +3682,30 @@ impl WorkbenchApp {
         }
         match self.drag.clone() {
             DragState::None => {}
+            DragState::Scrollbar {
+                target,
+                track,
+                offset,
+                total,
+                viewport,
+                anchor,
+                grab,
+            } => {
+                let jumped = crate::tui::chrome::scrollbar_offset_from_drag(
+                    offset, total, viewport, track, row, grab,
+                );
+                let next = match &target {
+                    ScrollTarget::Pane(_) => jumped.min(total.saturating_sub(viewport)),
+                    _ => super::text::scroll_window(total, jumped, anchor, viewport),
+                };
+                if next != offset {
+                    self.write_scroll(&target, next, total, viewport);
+                    self.drag_moved = true;
+                    if let DragState::Scrollbar { offset, .. } = &mut self.drag {
+                        *offset = next;
+                    }
+                }
+            }
             DragState::Sidebar => {
                 let width = column.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
                 if self.sidebar_width != width {
@@ -3520,12 +3750,248 @@ impl WorkbenchApp {
         }
     }
 
+    fn scroll_target_active(&self, target: &ScrollTarget) -> bool {
+        if self.goto.is_some() {
+            return matches!(target, ScrollTarget::Goto);
+        }
+        if self.file_panel.is_some() {
+            return matches!(target, ScrollTarget::Files)
+                && self
+                    .file_panel
+                    .as_ref()
+                    .is_some_and(|panel| panel.viewing.is_none());
+        }
+        if self.handoff_picker.is_some() {
+            return matches!(target, ScrollTarget::Handoff);
+        }
+        if self.modal_open() {
+            return false;
+        }
+        matches!(target, ScrollTarget::Sidebar(_) | ScrollTarget::Pane(_))
+    }
+
+    fn scroll_track_at(&self, column: u16, row: u16) -> Option<ScrollRegion> {
+        self.scroll_regions
+            .iter()
+            .rev()
+            .find(|region| {
+                self.scroll_target_active(&region.target)
+                    && region
+                        .track
+                        .is_some_and(|track| contains_point(track, column, row))
+            })
+            .cloned()
+    }
+
+    fn scroll_region_at(&self, column: u16, row: u16) -> Option<ScrollRegion> {
+        self.scroll_regions
+            .iter()
+            .rev()
+            .find(|region| {
+                self.scroll_target_active(&region.target)
+                    && contains_point(region.rect, column, row)
+            })
+            .cloned()
+    }
+
+    fn write_scroll(
+        &mut self,
+        target: &ScrollTarget,
+        offset: usize,
+        total: usize,
+        viewport: usize,
+    ) {
+        match target {
+            ScrollTarget::Sidebar(index) => {
+                if let Some(slot) = self.sidebar_scroll.get_mut(*index) {
+                    *slot = offset;
+                }
+            }
+            ScrollTarget::Goto => self.goto_scroll = offset,
+            ScrollTarget::Files => self.file_list_scroll = offset,
+            ScrollTarget::Handoff => self.handoff_scroll = offset,
+            ScrollTarget::Pane(id) => {
+                let retained = total.saturating_sub(viewport);
+                let from_top = offset.min(retained);
+                self.scroll_offsets
+                    .insert(id.clone(), retained.saturating_sub(from_top));
+            }
+        }
+    }
+
+    fn begin_scroll_press(&mut self, column: u16, row: u16) -> bool {
+        let Some(region) = self.scroll_track_at(column, row) else {
+            return false;
+        };
+        let Some(track) = region.track else {
+            return false;
+        };
+        self.last_divider_click = None;
+        self.drag_select = None;
+        self.drag_moved = false;
+        // A press on the thumb keeps the offset it grabbed. A press on the
+        // empty track jumps first; the drag must compare against that new
+        // offset, or a later move that lands on the old one is discarded.
+        let mut offset = region.offset;
+        let grab = crate::tui::chrome::scrollbar_grab(
+            region.offset,
+            region.total,
+            region.viewport,
+            track,
+            row,
+        )
+        .unwrap_or_else(|| {
+            let jumped = crate::tui::chrome::scrollbar_offset_from_row(
+                region.offset,
+                region.total,
+                region.viewport,
+                track,
+                row,
+            );
+            let next = match &region.target {
+                ScrollTarget::Pane(_) => jumped.min(region.total.saturating_sub(region.viewport)),
+                _ => {
+                    super::text::scroll_window(region.total, jumped, region.anchor, region.viewport)
+                }
+            };
+            self.write_scroll(&region.target, next, region.total, region.viewport);
+            offset = next;
+            crate::tui::chrome::scrollbar_grab(next, region.total, region.viewport, track, row)
+                .unwrap_or(0)
+        });
+        self.drag = DragState::Scrollbar {
+            target: region.target,
+            track,
+            offset,
+            total: region.total,
+            viewport: region.viewport,
+            anchor: region.anchor,
+            grab,
+        };
+        true
+    }
+
+    fn on_wheel(&mut self, column: u16, row: u16, delta: isize) {
+        if let Some(region) = self.scroll_region_at(column, row) {
+            let requested = region.offset.saturating_add_signed(delta.saturating_mul(3));
+            let next = match &region.target {
+                ScrollTarget::Pane(_) => {
+                    requested.min(region.total.saturating_sub(region.viewport))
+                }
+                _ => super::text::scroll_window(
+                    region.total,
+                    requested,
+                    region.anchor,
+                    region.viewport,
+                ),
+            };
+            self.write_scroll(&region.target, next, region.total, region.viewport);
+            return;
+        }
+        if self.modal_open() {
+            return;
+        }
+        if self
+            .tab_bar_area
+            .is_some_and(|area| contains_point(area, column, row))
+        {
+            self.wheel_tabs(delta);
+        }
+    }
+
+    fn wheel_tabs(&mut self, delta: isize) {
+        let Some(scene) = self.scenes.scenes.get(&self.scenes.selected) else {
+            return;
+        };
+        let ids: Vec<String> = scene
+            .tabs
+            .iter()
+            .filter(|tab| !tab.hidden)
+            .map(|tab| tab.id.clone())
+            .collect();
+        let current = ids.iter().position(|id| id == &scene.active).unwrap_or(0);
+        let next = if delta > 0 {
+            current.saturating_add(1).min(ids.len().saturating_sub(1))
+        } else {
+            current.saturating_sub(1)
+        };
+        if next != current {
+            if let Some(id) = ids.get(next).cloned() {
+                self.switch_tab(&id);
+            }
+        }
+    }
+
+    fn drag_word_selection(&mut self, column: u16, row: u16) {
+        let Some(mut select) = self.drag_select.clone() else {
+            return;
+        };
+        let Some(anchor) = select.word_anchor else {
+            return;
+        };
+        let (word_start, word_end) = self
+            .word_cols(&select, column, row)
+            .unwrap_or((column, column));
+        let (start_row, start_col) = (anchor.row, anchor.start_col).min((row, word_start));
+        let (end_row, end_col) = (anchor.row, anchor.end_col).max((row, word_end));
+        if (start_row, start_col, end_row, end_col)
+            != (
+                select.start_row,
+                select.start_col,
+                select.end_row,
+                select.end_col,
+            )
+        {
+            select.moved = true;
+            select.word = None;
+        }
+        select.start_row = start_row;
+        select.start_col = start_col;
+        select.end_row = end_row;
+        select.end_col = end_col;
+        if !self.copy_on_select && select.moved {
+            self.retained_selection = Some(select.clone());
+        }
+        self.drag_select = Some(select);
+    }
+
+    fn word_cols(&self, select: &DragSelect, column: u16, row: u16) -> Option<(u16, u16)> {
+        let span = word_at_pane(self, &select.id, select.area, column, row)?;
+        Some((
+            select.area.x.saturating_add(span.start),
+            select.area.x.saturating_add(span.end),
+        ))
+    }
+
+    fn pane_retained(&self, id: &str) -> usize {
+        let Some(snap) = self.snapshots.get(id) else {
+            return 0;
+        };
+        if let Some(screen) = &snap.screen {
+            screen.retained
+        } else {
+            snap.scrollback.len()
+        }
+    }
+
+    fn remember_scroll(&mut self, mut region: ScrollRegion) {
+        if region.viewport == 0 || region.rect.height == 0 || region.rect.width == 0 {
+            return;
+        }
+        if region.total <= region.viewport {
+            region.track = None;
+        }
+        self.scroll_regions.push(region);
+    }
+
     /// Draw one frame from the caches, herdr-style: the sidebar (spaces /
     /// agents / tasks) on the left, the pane grid on the right with merged
     /// borders, one status/mode bar at the bottom. The browser leaf is a
     /// facts card now — the lists live in the sidebar. Overlays (file
     /// panel, handoff picker, diff) sit on top of everything.
     pub fn draw(&mut self, frame: &mut Frame) {
+        self.scroll_regions.clear();
+        self.tab_bar_area = None;
         self.last_screen = Some(frame.area());
         let palette = crate::tui::theme::Palette::catppuccin_mocha();
         let rows = Layout::vertical([
@@ -3601,8 +4067,12 @@ impl WorkbenchApp {
             match content {
                 PaneContent::Browser => self.draw_overview(frame, content_area),
                 PaneContent::Terminal(id) => {
-                    self.pane_geometry.push((id.clone(), content_area));
-                    self.draw_terminal_pane(frame, content_area, id);
+                    let (body, gutter) = self.terminal_body(content_area, id);
+                    self.pane_geometry.push((id.clone(), body));
+                    self.draw_terminal_pane(frame, body, id);
+                    if let Some(track) = gutter {
+                        self.paint_pane_scrollbar(frame, track, id);
+                    }
                 }
             }
         }
@@ -3894,6 +4364,49 @@ impl WorkbenchApp {
         frame.render_widget(Paragraph::new(lines), area);
     }
 
+    /// Content rect plus the one-column gutter when this pane has scrollback.
+    /// The gutter is not part of the grid sent to the PTY.
+    fn terminal_body(&self, area: Rect, id: &str) -> (Rect, Option<Rect>) {
+        if self.pane_retained(id) == 0 || area.width < 2 || area.height == 0 {
+            return (area, None);
+        }
+        let track = Rect::new(
+            area.x.saturating_add(area.width.saturating_sub(1)),
+            area.y,
+            1,
+            area.height,
+        );
+        (
+            Rect {
+                width: area.width.saturating_sub(1),
+                ..area
+            },
+            Some(track),
+        )
+    }
+
+    /// A thumb in the reserved gutter while that terminal has scrollback.
+    /// Dragging it changes `scroll_offset` (0 is the live bottom).
+    fn paint_pane_scrollbar(&mut self, frame: &mut Frame, track: Rect, id: &str) {
+        let retained = self.pane_retained(id);
+        if retained == 0 || track.width == 0 || track.height == 0 {
+            return;
+        }
+        let viewport = usize::from(track.height);
+        let total = retained.saturating_add(viewport);
+        let from_top = retained.saturating_sub(self.scroll_offset(id).min(retained));
+        self.paint_scrollbar(frame, track, from_top, total, viewport);
+        self.remember_scroll(ScrollRegion {
+            target: ScrollTarget::Pane(id.to_string()),
+            rect: track,
+            track: Some(track),
+            offset: from_top,
+            total,
+            viewport,
+            anchor: None,
+        });
+    }
+
     /// The pane title shows the badge this client displays: the winning
     /// source only. A screen reading does not sit beside a controlled one.
     fn terminal_title(&self, id: &str) -> String {
@@ -4111,7 +4624,7 @@ impl WorkbenchApp {
         );
     }
 
-    fn draw_goto(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+    fn draw_goto(&mut self, frame: &mut Frame, area: Rect, palette: &Palette) {
         let Some(popup) = goto_popup_rect(area) else {
             return;
         };
@@ -4147,7 +4660,9 @@ impl WorkbenchApp {
             .iter()
             .position(|(_, selected)| *selected)
             .unwrap_or(0);
-        let start = crate::tui::text::scroll_to_reveal(entries.len(), selected_at, slots);
+        let anchor = (selected_at < entries.len()).then_some((selected_at, selected_at));
+        let start = super::text::scroll_window(entries.len(), self.goto_scroll, anchor, slots);
+        self.goto_scroll = start;
         let mut lines = vec![Line::from(format!(" goto  /{query}"))];
         lines.extend(
             entries
@@ -4165,6 +4680,23 @@ impl WorkbenchApp {
             ),
             popup,
         );
+        let body = Rect::new(
+            popup.x,
+            popup.y.saturating_add(1),
+            popup.width,
+            popup.height.saturating_sub(1),
+        );
+        if slots > 0 {
+            self.remember_scroll(ScrollRegion {
+                target: ScrollTarget::Goto,
+                rect: body,
+                track: Some(popup_scroll_track(popup, 1, slots as u16)),
+                offset: start,
+                total: entries.len(),
+                viewport: slots,
+                anchor,
+            });
+        }
         if entries.len() > slots && slots > 0 {
             self.paint_scrollbar(
                 frame,
@@ -4185,12 +4717,18 @@ impl WorkbenchApp {
             self.close_context_menu();
             return;
         }
-        let labels = ["split right", "split down", "close", "rename", "zoom"];
-        let (selected, column, row) = {
+        let (selected, column, row, pane) = {
             let menu = self.context_menu.as_ref().expect("menu checked above");
-            (menu.selected, menu.column, menu.row)
+            (menu.selected, menu.column, menu.row, menu.pane_id.clone())
         };
-        let width = 18u16.min(screen.width);
+        let rows = self.menu_for(pane.as_deref());
+        let labels: Vec<&str> = rows.iter().map(|(label, _)| *label).collect();
+        let inner = labels
+            .iter()
+            .map(|label| label.len() + 1)
+            .max()
+            .unwrap_or(12) as u16;
+        let width = inner.saturating_add(2).clamp(18, screen.width);
         // Border, title row, one row per item, border. Shrink onto a short screen.
         let height = (labels.len() as u16 + 3).min(screen.height);
         let x = column.min(screen.x.saturating_add(screen.width).saturating_sub(width));
@@ -4218,7 +4756,7 @@ impl WorkbenchApp {
                 style,
             )));
             self.menu_hits.push((
-                menu_actions()[index],
+                rows[index].1,
                 Rect::new(x, y.saturating_add(2 + visible as u16), width, 1),
             ));
         }
@@ -4264,20 +4802,64 @@ impl WorkbenchApp {
         use ratatui::style::Style;
         self.tab_hits.clear();
         self.new_tab_hit = None;
+        self.tab_bar_area = Some(area);
         frame.render_widget(
             Paragraph::new("").style(Style::new().bg(palette.panel_bg)),
             area,
         );
         let mut x = area.x;
+        let zoomed = self.zoomed;
         if let Some(scene) = self.scenes.scenes.get(&self.scenes.selected) {
-            for (index, tab) in scene.tabs.iter().filter(|t| !t.hidden).enumerate() {
+            let visible: Vec<_> = scene.tabs.iter().filter(|tab| !tab.hidden).collect();
+            let active = visible
+                .iter()
+                .position(|tab| tab.id == scene.active)
+                .unwrap_or(0);
+            let tab_width = |index: usize, tab: &scenes::TabView, focused: bool| -> u16 {
+                let name = if tab.name.is_empty() || tab.name == "Terminal" {
+                    (index + 1).to_string()
+                } else {
+                    tab.name.clone()
+                };
+                let name = if focused && zoomed {
+                    format!("{name} Z")
+                } else {
+                    name
+                };
+                (name.chars().count() as u16 + 4).max(8)
+            };
+            // Keep the active tab on screen when the strip is wider than the bar.
+            let mut start = 0usize;
+            while start < active {
+                let mut used = 0u16;
+                let mut fits = false;
+                for (index, tab) in visible.iter().enumerate().skip(start) {
+                    let focused = tab.id == scene.active;
+                    let width = tab_width(index, tab, focused);
+                    let gap = u16::from(used > 0);
+                    if used.saturating_add(gap).saturating_add(width) > area.width.saturating_sub(4)
+                    {
+                        break;
+                    }
+                    used = used.saturating_add(gap).saturating_add(width);
+                    if index == active {
+                        fits = true;
+                        break;
+                    }
+                }
+                if fits {
+                    break;
+                }
+                start += 1;
+            }
+            for (index, tab) in visible.iter().enumerate().skip(start) {
                 let focused = tab.id == scene.active;
                 let name = if tab.name.is_empty() || tab.name == "Terminal" {
                     (index + 1).to_string()
                 } else {
                     tab.name.clone()
                 };
-                let name = if focused && self.zoomed {
+                let name = if focused && zoomed {
                     format!("{name} Z")
                 } else {
                     name
@@ -4673,18 +5255,33 @@ impl WorkbenchApp {
         // could focus that hidden list, so the goals never appeared.
         let regions = sidebar_bands(area);
         self.sidebar_hits.clear();
-        for (range, rect) in [
+        let mut scrolls = self.sidebar_scroll;
+        for (band, (range, rect)) in [
             (0..agent_start, regions[0]),
             (agent_start..task_start, regions[1]),
             (task_start..lines.len(), regions[2]),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             if rect.height == 0 || rect.width == 0 {
                 continue;
             }
-            let section = &lines[range];
+            let section = &lines[range.clone()];
             let height = rect.height as usize;
-            let selected_key = Some((self.focus, self.selected));
-            let offset = sidebar_reveal_offset(section, selected_key, height);
+            let selected_key = (self.focus, self.selected);
+            let anchor = section
+                .iter()
+                .position(|(_, key)| *key == Some(selected_key))
+                .map(|first| {
+                    let last = section
+                        .iter()
+                        .rposition(|(_, key)| *key == Some(selected_key))
+                        .unwrap_or(first);
+                    (first, last)
+                });
+            let offset = super::text::scroll_window(section.len(), scrolls[band], anchor, height);
+            scrolls[band] = offset;
             let mut visible = Vec::new();
             // The last column is the separator. A scrolling section keeps
             // one more column for the thumb, so a wide character cannot
@@ -4705,16 +5302,21 @@ impl WorkbenchApp {
                 }
             }
             frame.render_widget(Paragraph::new(visible), text_rect);
+            let track = Rect::new(text_rect.x + text_rect.width, rect.y, 1, rect.height);
             if overflow {
-                self.paint_scrollbar(
-                    frame,
-                    Rect::new(text_rect.x + text_rect.width, rect.y, 1, rect.height),
-                    offset,
-                    section.len(),
-                    height,
-                );
+                self.paint_scrollbar(frame, track, offset, section.len(), height);
             }
+            self.remember_scroll(ScrollRegion {
+                target: ScrollTarget::Sidebar(band),
+                rect,
+                track: Some(track),
+                offset,
+                total: section.len(),
+                viewport: height,
+                anchor,
+            });
         }
+        self.sidebar_scroll = scrolls;
         // herdr's sidebar separator: one dim vertical line on the right.
         let buffer = frame.buffer_mut();
         let x = area.x + area.width.saturating_sub(1);
@@ -4953,8 +5555,8 @@ impl WorkbenchApp {
 
     /// Draw the file browser overlay (V15-1): either the inventory list or
     /// the viewed file's material, always bounded to the frame.
-    fn draw_file_panel(&self, frame: &mut Frame) {
-        let Some(panel) = &self.file_panel else {
+    fn draw_file_panel(&mut self, frame: &mut Frame) {
+        let Some(panel) = self.file_panel.clone() else {
             return;
         };
         let area = centered(
@@ -5003,8 +5605,15 @@ impl WorkbenchApp {
                 let body = usize::from(area.height.saturating_sub(2));
                 let banner = usize::from(panel.truncated);
                 let slots = body.saturating_sub(banner);
-                let start =
-                    crate::tui::text::scroll_to_reveal(panel.rows.len(), panel.selected, slots);
+                let anchor =
+                    (panel.selected < panel.rows.len()).then_some((panel.selected, panel.selected));
+                let start = super::text::scroll_window(
+                    panel.rows.len(),
+                    self.file_list_scroll,
+                    anchor,
+                    slots,
+                );
+                self.file_list_scroll = start;
                 let mut items: Vec<ListItem> = Vec::new();
                 if panel.truncated {
                     items.push(ListItem::new(Line::from(Span::styled(
@@ -5033,6 +5642,23 @@ impl WorkbenchApp {
                     ),
                     area,
                 );
+                if slots > 0 {
+                    let body = Rect::new(
+                        area.x,
+                        area.y.saturating_add(1),
+                        area.width,
+                        area.height.saturating_sub(2),
+                    );
+                    self.remember_scroll(ScrollRegion {
+                        target: ScrollTarget::Files,
+                        rect: body,
+                        track: Some(popup_scroll_track(area, 0, area.height.saturating_sub(2))),
+                        offset: start,
+                        total: panel.rows.len(),
+                        viewport: slots,
+                        anchor,
+                    });
+                }
                 if panel.rows.len() > slots && slots > 0 {
                     self.paint_scrollbar(
                         frame,
@@ -5047,14 +5673,18 @@ impl WorkbenchApp {
     }
 
     /// Draw the handoff target picker (V15-3).
-    fn draw_handoff_picker(&self, frame: &mut Frame) {
-        let Some(picker) = &self.handoff_picker else {
+    fn draw_handoff_picker(&mut self, frame: &mut Frame) {
+        let Some(picker) = self.handoff_picker.clone() else {
             return;
         };
         let area = centered(frame.area(), 50, (picker.agents.len() as u16 + 2).max(5));
         frame.render_widget(Clear, area);
         let slots = usize::from(area.height.saturating_sub(2));
-        let start = crate::tui::text::scroll_to_reveal(picker.agents.len(), picker.selected, slots);
+        let anchor =
+            (picker.selected < picker.agents.len()).then_some((picker.selected, picker.selected));
+        let start =
+            super::text::scroll_window(picker.agents.len(), self.handoff_scroll, anchor, slots);
+        self.handoff_scroll = start;
         let items: Vec<ListItem> = picker
             .agents
             .iter()
@@ -5077,6 +5707,23 @@ impl WorkbenchApp {
             ),
             area,
         );
+        if slots > 0 {
+            let body = Rect::new(
+                area.x,
+                area.y.saturating_add(1),
+                area.width,
+                area.height.saturating_sub(2),
+            );
+            self.remember_scroll(ScrollRegion {
+                target: ScrollTarget::Handoff,
+                rect: body,
+                track: Some(popup_scroll_track(area, 0, area.height.saturating_sub(2))),
+                offset: start,
+                total: picker.agents.len(),
+                viewport: slots,
+                anchor,
+            });
+        }
         if picker.agents.len() > slots && slots > 0 {
             self.paint_scrollbar(
                 frame,
@@ -7523,6 +8170,719 @@ mod tests {
         }
     }
 
+    fn pointer(
+        kind: ratatui::crossterm::event::MouseEventKind,
+        column: u16,
+        row: u16,
+    ) -> ratatui::crossterm::event::MouseEvent {
+        ratatui::crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: ratatui::crossterm::event::KeyModifiers::empty(),
+        }
+    }
+
+    fn frame_row(frame: &str, row: usize) -> String {
+        frame.lines().nth(row).unwrap_or("").trim_end().to_string()
+    }
+
+    fn worktrees(count: usize) -> WorkbenchModel {
+        let mut model = sample();
+        model.attention.clear();
+        model.workspaces.clear();
+        model.worktrees = (0..count)
+            .map(|index| WorktreeRow {
+                worktree_id: format!("wt-{index:02}"),
+                project_id: "p1".into(),
+                path: format!("/wt/{index}"),
+                branch: format!("branch-{index:02}"),
+                dirty: Some(false),
+                task_id: None,
+                source: "created".into(),
+                pr_state: None,
+                ahead: None,
+                behind: None,
+            })
+            .collect();
+        model
+    }
+
+    #[test]
+    fn sidebar_thumb_and_wheel_scroll_without_moving_the_selection_off_screen() {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = WorkbenchApp::new();
+        app.set_model(worktrees(24));
+        app.attach_terminal("t1".into());
+        let before = render(&mut app, 120, 36);
+        let first = frame_row(&before, 1);
+        assert!(
+            before.contains('▕'),
+            "the sidebar draws a thumb when it overflows\n{before}"
+        );
+        let track = app
+            .scroll_regions
+            .iter()
+            .find(|region| matches!(region.target, ScrollTarget::Sidebar(0)))
+            .and_then(|region| region.track)
+            .expect("spaces scrollbar");
+        app.on_mouse(pointer(
+            MouseEventKind::Down(MouseButton::Left),
+            track.x,
+            track.y,
+        ));
+        app.on_mouse(pointer(
+            MouseEventKind::Drag(MouseButton::Left),
+            track.x,
+            track.bottom().saturating_sub(1),
+        ));
+        app.on_mouse(pointer(
+            MouseEventKind::Up(MouseButton::Left),
+            track.x,
+            track.bottom().saturating_sub(1),
+        ));
+        let dragged = render(&mut app, 120, 36);
+        let after_drag = frame_row(&dragged, 1);
+        assert_ne!(
+            after_drag, first,
+            "dragging the thumb changes the first sidebar row\nbefore: {first}\nafter: {after_drag}\n{dragged}"
+        );
+        assert!(
+            dragged.contains("branch-00"),
+            "the selected worktree stays in the window\n{dragged}"
+        );
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.focus(), Focus::Worktrees);
+
+        app.on_mouse(pointer(MouseEventKind::ScrollUp, 2, 4));
+        let wheeled = render(&mut app, 120, 36);
+        assert_ne!(
+            frame_row(&wheeled, 1),
+            after_drag,
+            "a wheel on the sidebar changes its first row\n{wheeled}"
+        );
+        assert!(
+            wheeled.contains("branch-00"),
+            "the selected row is still on screen\n{wheeled}"
+        );
+        let held = frame_row(&wheeled, 1);
+        let pane = app
+            .visible_geometry()
+            .iter()
+            .find(|(id, _)| id == "t1")
+            .map(|(_, rect)| *rect)
+            .expect("terminal pane");
+        app.on_mouse(pointer(
+            MouseEventKind::ScrollDown,
+            pane.x.saturating_add(2),
+            pane.y.saturating_add(1),
+        ));
+        let wheeled_pane = render(&mut app, 120, 36);
+        assert_eq!(
+            frame_row(&wheeled_pane, 1),
+            held,
+            "a wheel on terminal content leaves the sidebar where it was\n{wheeled_pane}"
+        );
+    }
+
+    #[test]
+    fn pane_scrollbar_drag_changes_scrollback_and_lists_follow_their_thumbs() {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.focus = Focus::Panes;
+        app.sidebar_collapsed = true;
+        app.set_snapshot(
+            "t1",
+            TerminalSnapshot {
+                screen: Some(crate::terminal::screen::ScreenView {
+                    lines: vec![vec![crate::terminal::screen::Run(
+                        "live row".into(),
+                        7,
+                        0,
+                        0,
+                        0,
+                    )]],
+                    cursor: (0, 0),
+                    cursor_visible: true,
+                    modes: crate::terminal::screen::InputModes::default(),
+                    scrollback_offset: 0,
+                    retained: 40,
+                }),
+                cols: 80,
+                rows: 12,
+                visible: vec!["live row".into()],
+                scrollback: vec!["older".into()],
+                scrollback_capped: false,
+                total_output_bytes: 20,
+                log_truncated: false,
+            },
+        );
+        let frame = render(&mut app, 80, 24);
+        assert!(
+            frame.contains('▕'),
+            "a pane with scrollback draws its own thumb\n{frame}"
+        );
+        let track = app
+            .scroll_regions
+            .iter()
+            .find(|region| matches!(region.target, ScrollTarget::Pane(_)))
+            .and_then(|region| region.track)
+            .expect("pane scrollbar");
+        let before = app.scroll_offset("t1");
+        app.on_mouse(pointer(
+            MouseEventKind::Down(MouseButton::Left),
+            track.x,
+            track.bottom().saturating_sub(1),
+        ));
+        app.on_mouse(pointer(
+            MouseEventKind::Drag(MouseButton::Left),
+            track.x,
+            track.y,
+        ));
+        assert_ne!(
+            app.scroll_offset("t1"),
+            before,
+            "dragging the pane thumb changes the scrollback position"
+        );
+
+        let mut model = sample();
+        for index in 0..30 {
+            model.terminals.push(TerminalRow {
+                terminal_id: format!("goto-{index:02}"),
+                worktree_id: Some("wt1".into()),
+                purpose: "shell".into(),
+                owner_label: "user_shell".into(),
+                live: Some(true),
+                agent_status: vec![],
+            });
+        }
+        let mut app = WorkbenchApp::new();
+        app.set_model(model);
+        let picked = app.model().terminals[12].terminal_id.clone();
+        app.goto = Some(GotoPicker {
+            query: String::new(),
+            searching: false,
+            cursor: 12,
+            kind: None,
+        });
+        let _ = render(&mut app, 80, 24);
+        let start = app.goto_scroll;
+        let track = app
+            .scroll_regions
+            .iter()
+            .find(|region| matches!(region.target, ScrollTarget::Goto))
+            .and_then(|region| region.track)
+            .expect("goto scrollbar");
+        app.on_mouse(pointer(
+            MouseEventKind::Down(MouseButton::Left),
+            track.x,
+            track.bottom().saturating_sub(1),
+        ));
+        app.on_mouse(pointer(
+            MouseEventKind::Drag(MouseButton::Left),
+            track.x,
+            track.bottom().saturating_sub(1),
+        ));
+        let frame = render(&mut app, 80, 24);
+        assert_ne!(app.goto_scroll, start, "the goto list moved\n{frame}");
+        assert!(
+            frame.contains(&picked),
+            "the selected goto row stays on screen\n{frame}"
+        );
+
+        let mut app = WorkbenchApp::new();
+        app.file_panel = Some(FilePanel {
+            worktree_id: "wt1".into(),
+            rows: (0..40)
+                .map(|index| (format!("file-{index:02}.rs"), "M".into()))
+                .collect(),
+            truncated: false,
+            total: 40,
+            selected: 20,
+            viewing: None,
+            full_path: None,
+            scroll: 0,
+        });
+        let _ = render(&mut app, 80, 24);
+        let start = app.file_list_scroll;
+        let track = app
+            .scroll_regions
+            .iter()
+            .find(|region| matches!(region.target, ScrollTarget::Files))
+            .and_then(|region| region.track)
+            .expect("file scrollbar");
+        app.on_mouse(pointer(
+            MouseEventKind::Down(MouseButton::Left),
+            track.x,
+            track.y,
+        ));
+        app.on_mouse(pointer(
+            MouseEventKind::Drag(MouseButton::Left),
+            track.x,
+            track.bottom().saturating_sub(1),
+        ));
+        let frame = render(&mut app, 80, 24);
+        assert_ne!(app.file_list_scroll, start, "the file list moved\n{frame}");
+        assert!(
+            frame.contains("file-20.rs"),
+            "the selected file stays on screen\n{frame}"
+        );
+
+        let mut app = WorkbenchApp::new();
+        app.handoff_picker = Some(HandoffPicker {
+            worktree_id: "wt1".into(),
+            agents: (0..20).map(|index| format!("agent-{index:02}")).collect(),
+            selected: 10,
+        });
+        let _ = render(&mut app, 80, 16);
+        let start = app.handoff_scroll;
+        let track = app
+            .scroll_regions
+            .iter()
+            .find(|region| matches!(region.target, ScrollTarget::Handoff))
+            .and_then(|region| region.track)
+            .expect("handoff scrollbar");
+        app.on_mouse(pointer(
+            MouseEventKind::Down(MouseButton::Left),
+            track.x,
+            track.y,
+        ));
+        app.on_mouse(pointer(
+            MouseEventKind::Drag(MouseButton::Left),
+            track.x,
+            track.bottom().saturating_sub(1),
+        ));
+        let frame = render(&mut app, 80, 16);
+        assert_ne!(app.handoff_scroll, start, "the handoff list moved\n{frame}");
+        assert!(
+            frame.contains("agent-10"),
+            "the selected agent stays on screen\n{frame}"
+        );
+    }
+
+    #[test]
+    fn wheel_on_the_tab_bar_changes_the_active_tab() {
+        use ratatui::crossterm::event::MouseEventKind;
+        let mut app = WorkbenchApp::new();
+        app.set_model(sample());
+        assert!(app.new_tab("alpha".into()));
+        assert!(app.new_tab("beta".into()));
+        let _ = render(&mut app, 120, 24);
+        let active = app
+            .scenes
+            .scenes
+            .get(&app.scenes.selected)
+            .map(|scene| scene.active.clone())
+            .expect("scene");
+        app.on_mouse(pointer(MouseEventKind::ScrollUp, 40, 1));
+        let previous = app
+            .scenes
+            .scenes
+            .get(&app.scenes.selected)
+            .map(|scene| scene.active.clone())
+            .expect("scene");
+        assert_ne!(previous, active, "wheel on the tab bar selects another tab");
+        app.on_mouse(pointer(MouseEventKind::ScrollDown, 80, 10));
+        let stayed = app
+            .scenes
+            .scenes
+            .get(&app.scenes.selected)
+            .map(|scene| scene.active.clone());
+        assert_eq!(stayed.as_deref(), Some(previous.as_str()));
+    }
+
+    #[test]
+    fn double_click_drag_grows_the_selection_by_words() {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.focus = Focus::Panes;
+        app.sidebar_collapsed = true;
+        app.set_snapshot("t1", snapshot_with(&["alpha beta gamma"]));
+        if let Some(scene) = app.scenes.scenes.get_mut(&app.scenes.selected) {
+            if let Some(tab) = scene.tabs.iter_mut().find(|tab| tab.id == scene.active) {
+                tab.name = "session".into();
+                tab.pane_names.insert("t1".into(), "shell".into());
+            }
+        }
+        let frame = render(&mut app, 80, 24);
+        let area = app
+            .visible_geometry()
+            .iter()
+            .find(|(id, _)| id == "t1")
+            .map(|(_, rect)| *rect)
+            .expect("pane");
+        let gamma = area
+            .x
+            .saturating_add(super::super::text::display_width("alpha beta ") as u16);
+        let down = |column| pointer(MouseEventKind::Down(MouseButton::Left), column, area.y);
+        app.on_mouse(down(area.x));
+        app.on_mouse(pointer(
+            MouseEventKind::Up(MouseButton::Left),
+            area.x,
+            area.y,
+        ));
+        app.on_mouse(down(area.x));
+        app.on_mouse(pointer(
+            MouseEventKind::Drag(MouseButton::Left),
+            gamma,
+            area.y,
+        ));
+        app.on_mouse(pointer(
+            MouseEventKind::Up(MouseButton::Left),
+            gamma,
+            area.y,
+        ));
+        assert_eq!(
+            app.last_copy(),
+            "alpha beta gamma",
+            "the drag reaches the word under the pointer\n{frame}"
+        );
+        assert!(app.pane_prompt.is_none());
+        let (tab_name, pane_names) = active_labels(&app);
+        assert_eq!(tab_name, "session");
+        assert_eq!(pane_names.get("t1").map(String::as_str), Some("shell"));
+    }
+
+    #[test]
+    fn copy_on_select_false_in_config_keeps_ctrl_c_for_the_selection() {
+        let ctrl_c = KeyEvent::new(
+            KeyCode::Char('c'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        );
+        let mut app = app_with_terminal_pane();
+        app.load_config_str("onboarding = false\ncopy_on_select = false\n", None);
+        assert!(!app.copy_on_select);
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.focus = Focus::Panes;
+        app.set_snapshot("t1", snapshot_with(&["abcdef"]));
+        app.pane_geometry = vec![("t1".into(), Rect::new(0, 10, 20, 5))];
+        app.enter_terminal_mode("t1");
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        app.on_mouse(pointer(MouseEventKind::Down(MouseButton::Left), 0, 10));
+        app.on_mouse(pointer(MouseEventKind::Drag(MouseButton::Left), 2, 10));
+        app.on_mouse(pointer(MouseEventKind::Up(MouseButton::Left), 2, 10));
+        assert!(app.last_copy().is_empty());
+        assert_eq!(app.on_key(ctrl_c), KeyOutcome::Handled);
+        assert_eq!(app.last_copy(), "abc");
+        assert!(app.retained_selection.is_none());
+        assert!(!app.quit_requested());
+        assert_eq!(app.on_key(ctrl_c), KeyOutcome::Forward(vec![0x03]));
+        assert!(!app.quit_requested());
+    }
+
+    #[test]
+    fn right_click_menu_can_hand_the_button_to_the_pane() {
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.focus = Focus::Panes;
+        app.enter_terminal_mode("t1");
+        app.sidebar_collapsed = true;
+        app.set_snapshot(
+            "t1",
+            snapshot_with_modes(crate::terminal::screen::InputModes {
+                mouse_mode: 3,
+                mouse_encoding: 2,
+                ..Default::default()
+            }),
+        );
+        let _ = render(&mut app, 80, 24);
+        let area = app.visible_geometry()[0].1;
+        let right = pointer(
+            MouseEventKind::Down(MouseButton::Right),
+            area.x.saturating_add(3),
+            area.y.saturating_add(2),
+        );
+        assert!(app.dispatch_mouse(right).is_none());
+        assert!(
+            app.context_menu.is_some(),
+            "right-click still opens the menu"
+        );
+        let _ = render(&mut app, 80, 24);
+        let hit = app
+            .menu_hits
+            .iter()
+            .find(|(action, _)| *action == MenuAction::RightClickToPane)
+            .map(|(_, rect)| *rect)
+            .expect("menu item");
+        app.on_mouse(pointer(
+            MouseEventKind::Down(MouseButton::Left),
+            hit.x.saturating_add(1),
+            hit.y,
+        ));
+        assert!(app.right_click_panes.contains("t1"));
+        assert!(app.context_menu.is_none());
+        let forwarded = app.dispatch_mouse(right).expect("right-click bytes");
+        assert_eq!(forwarded.0, "t1");
+        assert!(!forwarded.1.is_empty(), "{:?}", forwarded.1);
+        assert!(app.context_menu.is_none());
+
+        let mut shifted = right;
+        shifted.modifiers = KeyModifiers::SHIFT;
+        assert!(app.dispatch_mouse(shifted).is_none());
+        assert!(
+            app.context_menu.is_some(),
+            "shift+right-click still opens the menu"
+        );
+        let _ = render(&mut app, 80, 24);
+        let hit = app
+            .menu_hits
+            .iter()
+            .find(|(action, _)| *action == MenuAction::RightClickToPane)
+            .map(|(_, rect)| *rect)
+            .expect("toggle");
+        app.on_mouse(pointer(
+            MouseEventKind::Down(MouseButton::Left),
+            hit.x.saturating_add(1),
+            hit.y,
+        ));
+        assert!(!app.right_click_panes.contains("t1"));
+        assert!(app.dispatch_mouse(right).is_none());
+        assert!(app.context_menu.is_some());
+    }
+
+    #[test]
+    fn the_first_click_from_the_sidebar_only_focuses_a_mouse_pane() {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.focus = Focus::Worktrees;
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.set_snapshot(
+            "t1",
+            snapshot_with_modes(crate::terminal::screen::InputModes {
+                mouse_mode: 3,
+                mouse_encoding: 2,
+                ..Default::default()
+            }),
+        );
+        app.pane_geometry = vec![("t1".into(), Rect::new(2, 1, 40, 12))];
+        let down = pointer(MouseEventKind::Down(MouseButton::Left), 6, 4);
+        assert!(
+            app.dispatch_mouse(down).is_none(),
+            "the focusing click does not emit mouse bytes"
+        );
+        assert_eq!(app.focus(), Focus::Panes);
+        assert_eq!(app.terminal_mode(), Some("t1"));
+        app.on_mouse(pointer(MouseEventKind::Up(MouseButton::Left), 6, 4));
+        let (id, bytes) = app
+            .dispatch_mouse(down)
+            .expect("the next click is reported");
+        assert_eq!(id, "t1");
+        assert_eq!(bytes, b"\x1b[<0;5;4M");
+    }
+
+    #[test]
+    fn scrollbar_column_is_outside_the_terminal_grid() {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        use ratatui::layout::Position;
+        let mut app = app_with_terminal_pane();
+        app.set_model(sample());
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.focus = Focus::Panes;
+        app.enter_terminal_mode("t1");
+        let zs = "Z".repeat(80);
+        app.set_snapshot(
+            "t1",
+            TerminalSnapshot {
+                screen: Some(crate::terminal::screen::ScreenView {
+                    lines: vec![vec![crate::terminal::screen::Run(zs, 80, 0, 0, 0)]],
+                    cursor: (0, 0),
+                    cursor_visible: false,
+                    modes: crate::terminal::screen::InputModes {
+                        mouse_mode: 3,
+                        mouse_encoding: 2,
+                        ..Default::default()
+                    },
+                    scrollback_offset: 0,
+                    retained: 30,
+                }),
+                cols: 80,
+                rows: 24,
+                visible: vec!["Z".repeat(80)],
+                scrollback: vec![],
+                scrollback_capped: false,
+                total_output_bytes: 80,
+                log_truncated: false,
+            },
+        );
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let area = app
+            .visible_geometry()
+            .iter()
+            .find(|(id, _)| id == "t1")
+            .map(|(_, rect)| *rect)
+            .expect("geometry");
+        let glyph = |x, y| {
+            buffer
+                .cell(Position::new(x, y))
+                .map(|cell| cell.symbol().to_string())
+                .unwrap_or_default()
+        };
+        let gutter = area.x + area.width;
+        assert_eq!(area, Rect::new(26, 2, 53, 21), "{area:?}");
+        assert_eq!(glyph(gutter, area.y), "▕");
+        assert_eq!(glyph(gutter - 1, area.y), "Z");
+        assert_eq!(app.scroll_offset("t1"), 0);
+        let content = pointer(MouseEventKind::Down(MouseButton::Left), gutter - 1, area.y);
+        assert!(
+            app.dispatch_mouse(content).is_some(),
+            "a click on the last drawn character reaches the program"
+        );
+        let track_top = pointer(MouseEventKind::Down(MouseButton::Left), gutter, area.y);
+        assert!(
+            app.dispatch_mouse(track_top).is_none(),
+            "a click on the gutter does not reach the program"
+        );
+        let jumped = app.scroll_offset("t1");
+        assert!(
+            jumped > 0,
+            "clicking the empty track above the thumb jumps into scrollback"
+        );
+        app.on_mouse(pointer(
+            MouseEventKind::Drag(MouseButton::Left),
+            gutter,
+            area.y + area.height - 1,
+        ));
+        assert!(
+            app.scroll_offset("t1") < jumped,
+            "the drag follows the pointer instead of staying at the jump"
+        );
+    }
+
+    #[test]
+    fn prefix_o_click_focuses_the_mouse_pane_without_forwarding() {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = app_with_terminal_pane();
+        app.set_model(sample());
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.enter_terminal_mode("t1");
+        app.set_snapshot(
+            "t1",
+            snapshot_with_modes(crate::terminal::screen::InputModes {
+                mouse_mode: 3,
+                mouse_encoding: 2,
+                ..Default::default()
+            }),
+        );
+        let _ = render(&mut app, 80, 24);
+        let area = app.visible_geometry()[0].1;
+        app.on_key(KeyEvent::new(
+            KeyCode::Char('b'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        ));
+        assert_eq!(
+            app.on_key(KeyEvent::new(
+                KeyCode::Char('o'),
+                ratatui::crossterm::event::KeyModifiers::empty(),
+            )),
+            KeyOutcome::Handled
+        );
+        assert_eq!(app.focus(), Focus::Terminals);
+        assert_eq!(app.terminal_mode(), Some("t1"));
+        let down = pointer(
+            MouseEventKind::Down(MouseButton::Left),
+            area.x + 3,
+            area.y + 1,
+        );
+        assert!(
+            app.dispatch_mouse(down).is_none(),
+            "sidebar focus does not hand this click to the program"
+        );
+        assert_eq!(app.focus(), Focus::Panes);
+        assert_eq!(app.terminal_mode(), Some("t1"));
+        let drag = pointer(
+            MouseEventKind::Drag(MouseButton::Left),
+            area.x + 4,
+            area.y + 2,
+        );
+        assert!(
+            app.dispatch_mouse(drag).is_none(),
+            "the rest of the focusing gesture stays here"
+        );
+        app.on_mouse(pointer(
+            MouseEventKind::Up(MouseButton::Left),
+            area.x + 4,
+            area.y + 2,
+        ));
+        assert!(app.dispatch_mouse(down).is_some());
+    }
+
+    #[test]
+    fn reload_config_applies_copy_on_select() {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        let ctrl_c = KeyEvent::new(
+            KeyCode::Char('c'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        );
+        let prefix = KeyEvent::new(
+            KeyCode::Char('b'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        );
+        let reload = KeyEvent::new(
+            KeyCode::Char('R'),
+            ratatui::crossterm::event::KeyModifiers::SHIFT,
+        );
+        let path =
+            std::env::temp_dir().join(format!("viva-copy-on-select-{}.toml", std::process::id()));
+        std::fs::write(&path, "onboarding = false\ncopy_on_select = true\n").unwrap();
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.focus = Focus::Panes;
+        app.enter_terminal_mode("t1");
+        app.load_config_str(&std::fs::read_to_string(&path).unwrap(), Some(path.clone()));
+        app.pane_geometry = vec![("t1".into(), Rect::new(0, 10, 40, 5))];
+        let drag = |app: &mut WorkbenchApp, text: &str| {
+            app.set_snapshot("t1", snapshot_with(&[text]));
+            let end = text.chars().count() as u16 - 1;
+            app.on_mouse(pointer(MouseEventKind::Down(MouseButton::Left), 0, 10));
+            app.on_mouse(pointer(MouseEventKind::Drag(MouseButton::Left), end, 10));
+            app.on_mouse(pointer(MouseEventKind::Up(MouseButton::Left), end, 10));
+        };
+        drag(&mut app, "alpha beta gamma");
+        assert_eq!(app.last_copy(), "alpha beta gamma");
+        std::fs::write(&path, "onboarding = false\ncopy_on_select = false\n").unwrap();
+        app.on_key(prefix);
+        assert_eq!(app.on_key(reload), KeyOutcome::Handled);
+        assert!(!app.copy_on_select);
+        drag(&mut app, "one two three");
+        assert_eq!(
+            app.last_copy(),
+            "alpha beta gamma",
+            "a reload to false leaves the selection until Ctrl+C"
+        );
+        assert!(app.retained_selection.is_some());
+        assert_eq!(app.on_key(ctrl_c), KeyOutcome::Handled);
+        assert_eq!(app.last_copy(), "one two three");
+        assert!(!app.quit_requested());
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = app_with_terminal_pane();
+        app.grid = PaneNode::leaf(PaneContent::Terminal("t1".into()));
+        app.pane_focus = PaneContent::Terminal("t1".into());
+        app.focus = Focus::Panes;
+        app.enter_terminal_mode("t1");
+        app.load_config_str("onboarding = false\ncopy_on_select = false\n", None);
+        assert!(!app.copy_on_select);
+        app.pane_geometry = vec![("t1".into(), Rect::new(0, 10, 40, 5))];
+        app.on_key(prefix);
+        assert_eq!(app.on_key(reload), KeyOutcome::Handled);
+        assert!(app.copy_on_select);
+        drag(&mut app, "back to default");
+        assert_eq!(app.last_copy(), "back to default");
+    }
+
     #[test]
     fn pane_tree_renders_multiple_terminal_panes_side_by_side() {
         let mut app = WorkbenchApp::new();
@@ -9296,7 +10656,7 @@ mod v15_tui_fix_tests {
             .map(|x| screen[(x, rect.y)].symbol().to_string())
             .collect();
         assert!(row.to_lowercase().contains("split right"), "{row:?}");
-        assert_eq!(app.menu_hits.len(), menu_actions().len());
+        assert_eq!(app.menu_hits.len(), app.menu_for(None).len());
         // herdr: a left press on an item activates it.
         app.on_mouse(mouse_down(rect.x + 1, rect.y));
         assert_eq!(app.take_mouse_action(), Some(WorkbenchAction::SplitRight));
@@ -9418,6 +10778,7 @@ mod v15_tui_fix_tests {
             selected: 4,
             column: 0,
             row: 23,
+            pane_id: None,
         });
         let frame = super::tests::render(&mut app, 80, 24);
         assert!(frame.contains("zoom"), "{frame}");
@@ -9594,6 +10955,7 @@ mod v15_tui_fix_tests {
             selected: 0,
             column: 1,
             row: 2,
+            pane_id: None,
         });
         let hidden = super::tests::render(&mut app, 5, 24);
         assert!(!hidden.contains("split right"), "{hidden}");
