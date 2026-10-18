@@ -3829,6 +3829,10 @@ impl WorkbenchApp {
         self.last_divider_click = None;
         self.drag_select = None;
         self.drag_moved = false;
+        // A press on the thumb keeps the offset it grabbed. A press on the
+        // empty track jumps first; the drag must compare against that new
+        // offset, or a later move that lands on the old one is discarded.
+        let mut offset = region.offset;
         let grab = crate::tui::chrome::scrollbar_grab(
             region.offset,
             region.total,
@@ -3851,13 +3855,14 @@ impl WorkbenchApp {
                 }
             };
             self.write_scroll(&region.target, next, region.total, region.viewport);
+            offset = next;
             crate::tui::chrome::scrollbar_grab(next, region.total, region.viewport, track, row)
                 .unwrap_or(0)
         });
         self.drag = DragState::Scrollbar {
             target: region.target,
             track,
-            offset: region.offset,
+            offset,
             total: region.total,
             viewport: region.viewport,
             anchor: region.anchor,
@@ -8734,10 +8739,15 @@ mod tests {
             app.dispatch_mouse(content).is_some(),
             "a click on the last drawn character reaches the program"
         );
-        let thumb = pointer(MouseEventKind::Down(MouseButton::Left), gutter, area.y);
+        let track_top = pointer(MouseEventKind::Down(MouseButton::Left), gutter, area.y);
         assert!(
-            app.dispatch_mouse(thumb).is_none(),
+            app.dispatch_mouse(track_top).is_none(),
             "a click on the gutter does not reach the program"
+        );
+        let jumped = app.scroll_offset("t1");
+        assert!(
+            jumped > 0,
+            "clicking the empty track above the thumb jumps into scrollback"
         );
         app.on_mouse(pointer(
             MouseEventKind::Drag(MouseButton::Left),
@@ -8745,8 +8755,8 @@ mod tests {
             area.y + area.height - 1,
         ));
         assert!(
-            app.scroll_offset("t1") > 0,
-            "dragging the gutter still changes scrollback"
+            app.scroll_offset("t1") < jumped,
+            "the drag follows the pointer instead of staying at the jump"
         );
     }
 
