@@ -1,0 +1,97 @@
+{
+  "reviewed_head": "ed7abd59715f522afb65af0a4ae1eb4108a5671f",
+  "date_utc": "2026-10-28",
+  "role": "dev verification and fixes, NOT independent QA",
+  "issue": 190,
+  "pr": 192,
+  "source_tree_unchanged": "98b3f4ed3ae4c238f3267fb22c5920256571e308",
+  "findings": [
+    {
+      "number": 1,
+      "judgment": "Confirmed: Fira Code and missing libpng license text were omitted from notices; the UTF-8 regex did not expose the font's UTF-16BE name table.",
+      "evidence": "font-evidence.json was extracted from the committed ed7abd5 blob: 289624 bytes, version 6.002, Copyright 2014-2021 The Fira Code Project Authors, OFL 1.1 declaration.",
+      "fix": "Supply licenses/OFL-1.1.txt with the upstream Fira Code copyright/license, retain the font's own 2014-2021 attribution in THIRD_PARTY_NOTICES.md, supply licenses/libpng-LICENSE.txt, record both files and known provenance limitations. No original source/asset removed or changed.",
+      "license_sources": [
+        {
+          "file": "licenses/OFL-1.1.txt",
+          "url": "https://github.com/tonsky/FiraCode/blob/eee6db993696aba61ff4eef03698e2987d79910c/LICENSE",
+          "sha256": "1d41e10031ab125302780a05ec4c91d218e47db0c7e37cf315cce5e608cdc25c"
+        },
+        {
+          "file": "licenses/libpng-LICENSE.txt",
+          "url": "https://github.com/pnggroup/libpng/blob/0a158f3506502dfa23edfc42790dfaed82efba17/LICENSE",
+          "sha256": "dfe5a536b0e5a531f844fb9c101a3089aca60772a503893b8e15f9457e369960"
+        }
+      ],
+      "limitation": "libpng 1.6.38 release prebuilt differs from the imported 1.6.38.git header in version and copyright-year lines; exact imported prebuilt revision remains unresolved. Manifest separately says 1.6.43. License supplementation is not a full provenance/combined-product clearance."
+    },
+    {
+      "number": 2,
+      "judgment": "Confirmed: schema 1 read all blobs but only retained matched text, Zig manifests and top-level assets.",
+      "fix": "Schema 2 files list retains all 2945 committed blobs with path, SHA-256, kind and Git mode, including 48 binary files and 1 symlink. 2896 classify as text. Kind is only UTF-8/NUL/Git-mode evidence, not permission classification. 67 paths contain /testdata/; Fira Code is visible independently of regex matches."
+    },
+    {
+      "number": 3,
+      "judgment": "Confirmed: previous three pure-function tests missed core traversal and did not run in CI.",
+      "fix": "Add two real HEAD:upstream/herdr traversal tests: source tree and 2945/22/8 counts, unique complete records, hashes/kinds independently checked through git show for font, PNG, dotfile, text and symlink. Existing acceptance-tools CI job now runs unittest discovery without Cargo metadata, downloads or nested builds."
+    },
+    {
+      "number": 4,
+      "judgment": "Path exposure confirmed. The Cargo-field filter was never a log anonymizer, but its broadly worded comment was misleading.",
+      "fix": "Narrow the comment and explicitly disclose the raw logs' /Users/zuohaisu, task layout and .local/share/uv paths in validation.json and PR. Preserve original raw logs; do not silently rewrite historical evidence. This is an intentional disclosure, not a claim that all evidence is free of personal/local-path information."
+    },
+    {
+      "number": 5,
+      "judgment": "Partly agree: empty stdout is not standalone proof, but does not imply the check was skipped or failed. cargo fmt --check normally emits nothing on success; the original command/environment and shell-recorded exit_code 0 already existed in validation.json and /tmp/viva-190/herdr-fmt.exit.",
+      "fix": "Clarify the historical capture and add a real rerun transcript with Rust version, UTC start/end, command and exit_code=0. Capture both stdout and stderr; preserve the old empty log as history.",
+      "log": "logs/herdr-fmt-qa-transcript.log"
+    },
+    {
+      "number": 6,
+      "judgment": "Confirmed documentation ambiguity, not stale source evidence: viva_commit reports the running checkout's HEAD.",
+      "fix": "Explain same-HEAD byte identity versus cross-HEAD payload comparison in the tool, notices and validation. Source binding is source_tree. Current inventory was generated at ed7abd5 and will differ only in viva_commit when rerun after the fix commit, provided metadata and source tree stay the same."
+    }
+  ],
+  "checks": [
+    {
+      "command": "python3 -m unittest discover -s tooling/herdr-audit -v",
+      "pre_fix_implementation_commit": "ed7abd59715f522afb65af0a4ae1eb4108a5671f",
+      "pre_fix_exit_code": 1,
+      "pre_fix_result": "3 existing tests passed; 2 new traversal tests errored with KeyError: files, reproducing missing complete records.",
+      "pre_fix_log": "logs/inventory-qa-pre-fix.log",
+      "post_fix_exit_code": 0,
+      "post_fix_result": "5 passed, including real Git traversal/count/hash checks",
+      "post_fix_log": "logs/inventory-qa-post-fix.log"
+    },
+    {
+      "cwd": "upstream/herdr",
+      "command": "cargo metadata --locked --offline --format-version 1",
+      "exit_code": 0,
+      "result": "297 packages; used only as official metadata input, not a successful build or linked SBOM"
+    },
+    {
+      "command": "python3 tooling/herdr-audit/inventory.py /tmp/viva-192-qa/metadata.json",
+      "exit_code": 0,
+      "result": "Schema 2 generated; identical repeated output at the same HEAD and same metadata. Core tests independently verify committed blob hashes."
+    },
+    {
+      "cwd": "upstream/herdr",
+      "command": "cargo fmt --all -- --check",
+      "exit_code": 0,
+      "log": "logs/herdr-fmt-qa-transcript.log"
+    },
+    {
+      "command": "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=init.defaultBranch GIT_CONFIG_VALUE_0=master cargo test --workspace -- --test-threads=1",
+      "exit_code": 0,
+      "result": "610 passed, 0 failed, 1 existing ignored (not executed). No global Git configuration or tests changed.",
+      "log": "logs/viva-tests-qa.log",
+      "capture_note": "Only terminal empty line omitted for diff --check; original stdout and shell exit file retained at /tmp/viva-192-qa/viva-tests.log and viva-tests.exit."
+    }
+  ],
+  "boundaries": [
+    "No original imported source, assets, dependency versions, default Viva entry, runtime authority or user data changed.",
+    "No nested build, Rust suite or real binary/TUI rerun in this QA-fix slice; historical download failures remain historical evidence, not revalidated current connectivity claims.",
+    "Qualified legal scope review, remaining source/asset provenance, independent QA on the NEW head and human UI acceptance remain unresolved.",
+    "Old-head green CI and old-head QA evidence are not claimed as proof for the new head. No merge, release or issue closure authorized by this fix."
+  ]
+}

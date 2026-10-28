@@ -1,0 +1,20 @@
+info: syncing channel updates for 1.96.1-x86_64-apple-darwin
+info: latest update on 2026-06-30 for version 1.96.1 (31fca3adb 2026-06-26)
+info: recovering from a partially installed toolchain
+info: removing previous version of component rustc
+info: removing previous version of component cargo
+info: removing previous version of component rust-std
+info: removing previous version of component rust-docs
+info: removing previous version of component rustfmt
+info: removing previous version of component clippy
+info: downloading 6 components
+info: rolling back changes
+error: could not rename 'component' file from '/Users/zuohaisu/.rustup/tmp/zallt0f3lnfuva3l_dir/bk' to '/Users/zuohaisu/.rustup/toolchains/1.96.1-x86_64-apple-darwin/bin': Directory not empty (os error 66)
+error: could not rename 'component' file from '/Users/zuohaisu/.rustup/tmp/3cyfty1ob4a7tm45_dir/bk' to '/Users/zuohaisu/.rustup/toolchains/1.96.1-x86_64-apple-darwin/share': Directory not empty (os error 66)
+error: could not rename 'component' file from '/Users/zuohaisu/.rustup/tmp/u9icy0np8ameuw71_dir/bk' to '/Users/zuohaisu/.rustup/toolchains/1.96.1-x86_64-apple-darwin/share/doc': Directory not empty (os error 66)
+error: could not rename 'component' file from '/Users/zuohaisu/.rustup/tmp/2yrsp7ba08mzi5wr_dir/bk' to '/Users/zuohaisu/.rustup/toolchains/1.96.1-x86_64-apple-darwin/lib/rustlib/x86_64-apple-darwin': Directory not empty (os error 66)
+error: could not rename 'component' file from '/Users/zuohaisu/.rustup/tmp/6pcn_uayxc1g53zh_dir/bk' to '/Users/zuohaisu/.rustup/toolchains/1.96.1-x86_64-apple-darwin/share/doc/rust': Directory not empty (os error 66)
+error: could not rename 'component' file from '/Users/zuohaisu/.rustup/tmp/ixrxhjwxlt60odqo_dir/bk' to '/Users/zuohaisu/.rustup/toolchains/1.96.1-x86_64-apple-darwin/etc': Directory not empty (os error 66)
+error: could not rename 'component' file from '/Users/zuohaisu/.rustup/tmp/fwj4isk_o7x9qoxb_dir/bk' to '/Users/zuohaisu/.rustup/toolchains/1.96.1-x86_64-apple-darwin/share/man': Directory not empty (os error 66)
+error: could not rename 'component' file from '/Users/zuohaisu/.rustup/tmp/dnbrz52pfp6ufdbg_dir/bk' to '/Users/zuohaisu/.rustup/toolchains/1.96.1-x86_64-apple-darwin/share/man/man1': Directory not empty (os error 66)
+error: failed to install component: 'rustc-x86_64-apple-darwin', detected conflict: 'bin/rust-gdb'

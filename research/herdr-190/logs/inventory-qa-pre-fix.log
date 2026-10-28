@@ -1,0 +1,26 @@
+test_binary_and_dotfile_hashes_match_independent_git_show (test_inventory.CommittedTreeTests) ... ERROR
+test_fixed_source_tree_counts_and_complete_file_records (test_inventory.CommittedTreeTests) ... ERROR
+test_file_level_exceptions_are_discovered_not_relicensed (test_inventory.InventoryTests) ... ok
+test_metadata_keeps_unknown_license_and_omits_absolute_paths (test_inventory.InventoryTests) ... ok
+test_opaque_asset_is_hashed_without_claiming_permission (test_inventory.InventoryTests) ... ok
+
+======================================================================
+ERROR: test_binary_and_dotfile_hashes_match_independent_git_show (test_inventory.CommittedTreeTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/zuohaisu/orca/workspaces/viva/herdr/tooling/herdr-audit/test_inventory.py", line 63, in test_binary_and_dotfile_hashes_match_independent_git_show
+    records = {r["path"]: r for r in self.result["files"]}
+KeyError: 'files'
+
+======================================================================
+ERROR: test_fixed_source_tree_counts_and_complete_file_records (test_inventory.CommittedTreeTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/zuohaisu/orca/workspaces/viva/herdr/tooling/herdr-audit/test_inventory.py", line 57, in test_fixed_source_tree_counts_and_complete_file_records
+    self.assertEqual(len(result["files"]), 2945)
+KeyError: 'files'
+
+----------------------------------------------------------------------
+Ran 5 tests in 6.570s
+
+FAILED (errors=2)

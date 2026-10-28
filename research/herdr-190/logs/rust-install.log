@@ -1,0 +1,8 @@
+info: syncing channel updates for 1.96.1-x86_64-apple-darwin
+info: latest update on 2026-06-30 for version 1.96.1 (31fca3adb 2026-06-26)
+info: downloading 6 components
+
+  1.96.1-x86_64-apple-darwin installed - rustc 1.96.1 (31fca3adb 2026-06-26)
+
+info: checking for self-update (current version: 1.29.0)
+info: downloading self-update (new version: 1.29.2)

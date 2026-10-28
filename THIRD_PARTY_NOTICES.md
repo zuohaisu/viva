@@ -25,10 +25,10 @@ The snapshot includes these separately licensed vendored sources:
 | Component | Attribution / license | Retained source notice |
 | --- | --- | --- |
 | libghostty-vt | Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors; MIT | [`vendor/libghostty-vt/LICENSE`](upstream/herdr/vendor/libghostty-vt/LICENSE); source revision in [`vendor/libghostty-vt.vendor.json`](upstream/herdr/vendor/libghostty-vt.vendor.json) |
-| Ghostty bash/zsh shell integration (file-level exception to Ghostty's MIT) | **GPL-3.0-or-later**, derived in part from Kitty as stated in the original file headers | [`bash/ghostty.bash`](upstream/herdr/vendor/libghostty-vt/src/shell-integration/bash/ghostty.bash), [`zsh/ghostty-integration`](upstream/herdr/vendor/libghostty-vt/src/shell-integration/zsh/ghostty-integration); full license supplied at [`licenses/GPL-3.0-or-later.txt`](licenses/GPL-3.0-or-later.txt) |
+| Ghostty bash/zsh shell integration (file-level exception to Ghostty's MIT) | **GPL-3.0-or-later**, derived in part from Kitty as stated in the original file headers | [`bash/ghostty.bash`](upstream/herdr/vendor/libghostty-vt/src/shell-integration/bash/ghostty.bash), [`zsh/ghostty-integration`](upstream/herdr/vendor/libghostty-vt/src/shell-integration/zsh/ghostty-integration), [`zsh/.zshenv`](upstream/herdr/vendor/libghostty-vt/src/shell-integration/zsh/.zshenv); full license supplied at [`licenses/GPL-3.0-or-later.txt`](licenses/GPL-3.0-or-later.txt) |
 | portable-pty | Copyright (c) 2018 Wez Furlong; MIT | [`vendor/portable-pty/LICENSE.md`](upstream/herdr/vendor/portable-pty/LICENSE.md); local patch provenance in [`vendor/portable-pty.patches.md`](upstream/herdr/vendor/portable-pty.patches.md) |
 
-The two GPL-covered scripts above are conveyed as their complete, unmodified
+The three GPL-covered scripts above are conveyed as their complete, unmodified
 source, under GPL-3.0-or-later, with their original notices intact and the GPL
 text supplied alongside this source distribution. Neither Viva's MIT nor
 herdr's Apache-2.0 relicenses those scripts. GPLv3 §4 applies to verbatim source
@@ -43,6 +43,90 @@ that tree; this table does not relicense them. This PR imports source only:
 it does not redistribute a new binary or change npm release contents. Any later
 binary distribution must retain applicable third-party licenses and notices in
 the actual package, not just link to this repository.
+
+## #190 file-level follow-up (2026-10-28)
+
+The read-only inventory in [`research/herdr-190/inventory.json`](research/herdr-190/inventory.json)
+records a path, SHA-256, kind and Git mode for **every one of the 2,945 committed
+blobs** (including dotfiles, binary fixtures and fonts outside `assets/`) in its
+schema-2 `files` list. `kind` is a UTF-8/NUL heuristic (or Git symlink mode), not
+a rights determination. It also records 297 Cargo packages from official
+`cargo metadata --locked`, 22 Zig manifests and the eight **top-level** assets.
+Schema 1 at `ed7abd5` read every blob but only retained matched text files,
+Zig manifests and top-level assets; it omitted binary fixtures such as Fira Code.
+Reproduce with
+[`tooling/herdr-audit/inventory.py`](tooling/herdr-audit/inventory.py). Its
+`viva_commit` is the running checkout's HEAD and will differ on later commits;
+compare `source_tree` and the other payload fields for cross-commit reproduction.
+The byte-identical repeat claim applies only to the same recorded HEAD and
+Cargo metadata. Run regression checks with
+`python3 -m unittest discover -s tooling/herdr-audit -v`; CI's existing
+`acceptance-tools` job now runs them against the real committed source tree.
+Matches
+are discovery signals, not license classification; no match does not mean
+permission exists. Cargo metadata covers all platforms, not actual linked
+objects. No successful binary exists from this validation run.
+
+Further file-level exceptions and obligations identified in this pass:
+
+| Content | Evidence / source-distribution treatment | Binary/package follow-up |
+| --- | --- | --- |
+| Ghostty `src/shell-integration/zsh/.zshenv` | A **third** GPL-3.0-or-later script, previously omitted from this table; original full source/header retained; covered by the supplied GPL text | Check whether the actual artifact embeds/installs any of these scripts; do not infer aggregation or combined-work scope from a directory name |
+| Fira Code font in Ghostty `pkg/freetype/res/FiraCode-Regular.ttf` | Font `name` table: **Copyright 2014-2021 The Fira Code Project Authors (https://github.com/tonsky/FiraCode)**, version 6.002, explicitly **SIL Open Font License 1.1**. Full font-specific license/copyright supplied at [`licenses/OFL-1.1.txt`](licenses/OFL-1.1.txt); original font and embedded copyright untouched. Parsed metadata and SHA-256 are in [`font-evidence.json`](research/herdr-190/font-evidence.json) | This file is already redistributed in the source snapshot, independently of whether FreeType is linked. Retain font copyright and OFL text with every conveyed font copy; respect OFL sale/name/endorsement terms. Do not substitute FreeType's license or Ghostty MIT for OFL |
+| Ghostty `pkg/libpng/pnglibconf.h` | Header says libpng 1.6.38.git, retains Cosmin Truta and Glenn Randers-Pehrson copyright, and refers to a missing `png.h` license. Supply upstream 1.6.38's complete LICENSE at [`licenses/libpng-LICENSE.txt`](licenses/libpng-LICENSE.txt) (PNG Reference Library License v2 plus historical v1 text) | Manifest separately says 1.6.43. The release prebuilt header differs in its version and copyright-year lines; do not claim it is the exact imported revision. Preserve local copyright headers and verify the fixed downloaded dependency's LICENSE/NOTICE against B's real artifact |
+| Ghostty `pkg/libintl/libintl.h` | Header explicitly grants **LGPL-2.1-or-later**; full text now supplied at [`licenses/LGPL-2.1-or-later.txt`](licenses/LGPL-2.1-or-later.txt) | `pkg/libintl` describes gettext 0.24; do not assume this header means libintl is linked into the VT-only build. If combined/linked, assess the actual LGPL source/relinking obligations with qualified counsel |
+| Ghostty `src/input/keycodes.zig` | Header identifies Chromium's `dom_code_data.inc`; BSD text now supplied at [`licenses/Chromium-BSD-3-Clause.txt`](licenses/Chromium-BSD-3-Clause.txt). Referenced Chromium source bears Copyright 2013 The Chromium Authors; preserve that attribution alongside its license | Reproduce applicable copyright, conditions and disclaimer in package materials if included |
+| Ghostty `pkg/simdutf/vendor/simdutf.h` | Contains the full Facebook/Deepmind/NYU/NEC/IDIAP BSD notice (lines 966–1011), not covered merely by Ghostty MIT | Preserve that notice as well as simdutf's own license. Exact amalgamation provenance unresolved: Zig manifest says 5.2.8, embedded version constants say 9.0.0; do not treat manifest version alone as an SBOM |
+| Ghostty fontconfig override headers | Keith Packard permission/disclaimer retained in `fontconfig.h`, `fcint.h`, `fclang.h`; `fcconst.h` marks HPND; `fccase.h` separately cites Unicode terms | Retain copyright/permission in supporting documentation; verify the exact Unicode data notice/version, not just fontconfig's umbrella license |
+| Ghostty Highway overrides | `abort.cc` marks Apache-2.0 and BSD-3-Clause; `per_target.cc` marks Apache-2.0 | Fetch the fixed dependency and retain its applicable LICENSE/NOTICE and local notices; downloading the build manifest alone is not enough |
+| Ghostty stb image/resize, Zig compatibility, Wayland XML | Full notices remain in the stb headers, `src/lib/compat/README.md`, and `vicinae-hotkey-v1.xml` respectively | Copy applicable notices into actual package materials when included; dual-license choice must be recorded, not silently assumed |
+| Ghostty `src/terminal/res/rgb.txt` | `x11_color.zig` explicitly identifies X11 rgb data and its separate MIT/X11 license | Confirm original copyright/permission material for the embedded data; Ghostty's copyright alone is not the data attribution |
+
+New license text provenance (retrieved through GitHub's contents API):
+
+- Fira Code font-specific OFL text: tonsky/FiraCode commit `eee6db993696aba61ff4eef03698e2987d79910c` (tag 6.2), `LICENSE`, including its 2014 copyright. The font's own 2014–2021 copyright above is retained separately; font name-table metadata supplies its licensing declaration, not a claim that it matches the release binary byte-for-byte.
+- libpng text: pnggroup/libpng commit `0a158f3506502dfa23edfc42790dfaed82efba17` (v1.6.38), `LICENSE`. `scripts/pnglibconf.h.prebuilt` was compared: version and Cosmin Truta copyright-year lines differ from the imported header; all other lines match. Exact imported prebuilt revision remains unresolved, distinct from supplying the release's full license text.
+- LGPL text: SPDX license-list-data commit `f715b3660bb164c3d0b81cba9ce94e3c558c4048`, `text/LGPL-2.1-or-later.txt`.
+- Chromium BSD text: chromium/chromium commit `58d786a70944808688eb8571db6c00fa6566e307`, `LICENSE`; the referenced `ui/events/keycodes/dom/dom_code_data.inc` was also inspected at that commit. This establishes a notice source, not an exact historical revision of Ghostty's adapted table.
+
+### Actual distribution obligations for integration B
+
+B must create and inspect a license payload **inside each actual install/npm
+archive**, not only link to this file. At minimum, carry herdr Apache-2.0,
+Ghostty/portable-pty MIT notices, the applicable file-level notices above, and
+license/copyright texts for every selected Cargo and Zig dependency actually
+included. Keep this provenance manifest and prominently identify modified
+Apache-covered files. Cargo `OR` expressions allow a documented choice; `AND`
+Unicode terms must not be dropped. Current metadata includes Unicode-DFS-2016,
+Unicode-3.0, Zlib, WTFPL, BSD, and Apache LLVM-exception alternatives in addition
+to MIT/Apache. Platform-specific dependency closure and downloaded Zig sources
+still require verification. On Windows retain ConPTY LICENSE and NOTICE and
+verify the exact packaged runtime, not just the Rust crate metadata.
+
+If GPL/LGPL material is conveyed, include its applicable license and complete
+corresponding source/build/installation or relinking materials as required by
+the actual distribution mode. Source availability on GitHub alone is not a
+universal substitute. Scope/combination questions need qualified professional
+review. No release clearance is asserted here.
+
+### Assets: unresolved, not approved for redistribution
+
+Binary/font/testdata files outside `assets/` now have `files` records as well;
+that visibility does not establish their permissions. Fira Code's explicit OFL
+notice is addressed above, not silently treated as an MIT/Apache asset. Remaining
+fixture and embedded-data provenance still needs review.
+
+The eight **top-level** assets have hashes in the inventory: `logo.png`, `logo.svg`,
+`og-card.png`, `screenshot.png`, `sounds/done.mp3`, `sounds/request.mp3`, and
+`sponsors/terminal-trove.{png,svg}`. No separate source/author/permission record
+was found in the tracked asset tree. This is an evidence gap, not a legal
+finding that permission is absent. `src/sound.rs:27–28` embeds both MP3s with
+`include_bytes!`; disabling playback does **not** remove them from a binary.
+Artwork and sponsor marks must not become Viva branding. Obtain provenance and
+permission or explicitly omit/replace uncertain content before redistribution;
+that decision remains open. The original snapshot is retained for provenance,
+not silently edited or presented as cleared. Source publication itself remains
+subject to this unresolved review.
 
 ## Review status: incomplete — merge/release hold
 

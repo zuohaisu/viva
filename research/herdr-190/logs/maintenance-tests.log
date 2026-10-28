@@ -1,0 +1,133 @@
+........................................................................................usage: git diff [<options>] [<commit>] [--] [<path>...]
+   or: git diff [<options>] --cached [--merge-base] [<commit>] [--] [<path>...]
+   or: git diff [<options>] [--merge-base] <commit> [<commit>...] <commit> [--] [<path>...]
+   or: git diff [<options>] <commit>...<commit> [--] [<path>...]
+   or: git diff [<options>] <blob> <blob>
+   or: git diff [<options>] --no-index [--] <path> <path>
+
+common diff options:
+  -z            output diff-raw with lines terminated with NUL.
+  -p            output patch format.
+  -u            synonym for -p.
+  --patch-with-raw
+                output both a patch and the diff-raw format.
+  --stat        show diffstat instead of patch.
+  --numstat     show numeric diffstat instead of patch.
+  --patch-with-stat
+                output a patch and prepend its diffstat.
+  --name-only   show only names of changed files.
+  --name-status show names and status of changed files.
+  --full-index  show full object name on index lines.
+  --abbrev=<n>  abbreviate object names in diff-tree header and diff-raw.
+  -R            swap input file pairs.
+  -B            detect complete rewrites.
+  -M            detect renames.
+  -C            detect copies.
+  --find-copies-harder
+                try unchanged files as candidate for copy detection.
+  -l<n>         limit rename attempts up to <n> paths.
+  -O<file>      reorder diffs according to the <file>.
+  -S<string>    find filepair whose only one side contains the string.
+  --pickaxe-all
+                show all files diff when -S is used and hit is found.
+  -a  --text    treat all files as text.
+
+E........FFFFFF......................................................
+======================================================================
+ERROR: test_hotfix_isolated_from_master_and_metadata_sync_preserves_master_code (scripts.test_release.ReleaseTests.test_hotfix_isolated_from_master_and_metadata_sync_preserves_master_code)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/scripts/test_release.py", line 199, in test_hotfix_isolated_from_master_and_metadata_sync_preserves_master_code
+    patch = subprocess.check_output(["git", "diff", "--binary", "--default-prefix", hotfix, candidate])
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/zuohaisu/.local/share/uv/python/cpython-3.11.15-macos-x86_64-none/lib/python3.11/subprocess.py", line 466, in check_output
+    return run(*popenargs, stdout=PIPE, timeout=timeout, check=True,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/zuohaisu/.local/share/uv/python/cpython-3.11.15-macos-x86_64-none/lib/python3.11/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'diff', '--binary', '--default-prefix', '13807ba1ea6d5fc8fa2a475141eeacbf740a4490', '2975f53ed2fbdd960a2093630c12eaca2642c460']' returned non-zero exit status 129.
+
+======================================================================
+FAIL: test_android_is_rejected_before_replacing_existing_binary (scripts.test_unix_installer.UnixInstallerTests.test_android_is_rejected_before_replacing_existing_binary)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/scripts/test_unix_installer.py", line 165, in test_android_is_rejected_before_replacing_existing_binary
+    result = self._run_installer(
+             ^^^^^^^^^^^^^^^^^^^^
+  File "/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/scripts/test_unix_installer.py", line 129, in _run_installer
+    self._select_checksum_tool(tool)
+  File "/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/scripts/test_unix_installer.py", line 83, in _select_checksum_tool
+    self.fail("test host is missing sha256sum")
+AssertionError: test host is missing sha256sum
+
+======================================================================
+FAIL: test_checksum_mismatch_does_not_replace_existing_binary (scripts.test_unix_installer.UnixInstallerTests.test_checksum_mismatch_does_not_replace_existing_binary)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/scripts/test_unix_installer.py", line 189, in test_checksum_mismatch_does_not_replace_existing_binary
+    result = self._run_installer("0" * 64)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/scripts/test_unix_installer.py", line 129, in _run_installer
+    self._select_checksum_tool(tool)
+  File "/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/scripts/test_unix_installer.py", line 83, in _select_checksum_tool
+    self.fail("test host is missing sha256sum")
+AssertionError: test host is missing sha256sum
+
+======================================================================
+FAIL: test_missing_checksum_fails_without_replacing_existing_binary (scripts.test_unix_installer.UnixInstallerTests.test_missing_checksum_fails_without_replacing_existing_binary)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/scripts/test_unix_installer.py", line 200, in test_missing_checksum_fails_without_replacing_existing_binary
+    result = self._run_installer(None)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/scripts/test_unix_installer.py", line 129, in _run_installer
+    self._select_checksum_tool(tool)
+  File "/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/scripts/test_unix_installer.py", line 83, in _select_checksum_tool
+    self.fail("test host is missing sha256sum")
+AssertionError: test host is missing sha256sum
+
+======================================================================
+FAIL: test_missing_uname_operating_system_flag_keeps_linux_supported (scripts.test_unix_installer.UnixInstallerTests.test_missing_uname_operating_system_flag_keeps_linux_supported)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/scripts/test_unix_installer.py", line 176, in test_missing_uname_operating_system_flag_keeps_linux_supported
+    result = self._run_installer(
+             ^^^^^^^^^^^^^^^^^^^^
+  File "/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/scripts/test_unix_installer.py", line 129, in _run_installer
+    self._select_checksum_tool(tool)
+  File "/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/scripts/test_unix_installer.py", line 83, in _select_checksum_tool
+    self.fail("test host is missing sha256sum")
+AssertionError: test host is missing sha256sum
+
+======================================================================
+FAIL: test_valid_download_uses_each_supported_checksum_tool (scripts.test_unix_installer.UnixInstallerTests.test_valid_download_uses_each_supported_checksum_tool) (tool='sha256sum')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/scripts/test_unix_installer.py", line 155, in test_valid_download_uses_each_supported_checksum_tool
+    result = self._run_installer(self.expected_sha256.upper(), tool)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/scripts/test_unix_installer.py", line 129, in _run_installer
+    self._select_checksum_tool(tool)
+  File "/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/scripts/test_unix_installer.py", line 83, in _select_checksum_tool
+    self.fail("test host is missing sha256sum")
+AssertionError: test host is missing sha256sum
+
+======================================================================
+FAIL: test_valid_download_uses_each_supported_checksum_tool (scripts.test_unix_installer.UnixInstallerTests.test_valid_download_uses_each_supported_checksum_tool) (tool='shasum')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/scripts/test_unix_installer.py", line 155, in test_valid_download_uses_each_supported_checksum_tool
+    result = self._run_installer(self.expected_sha256.upper(), tool)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/scripts/test_unix_installer.py", line 129, in _run_installer
+    self._select_checksum_tool(tool)
+  File "/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/scripts/test_unix_installer.py", line 90, in _select_checksum_tool
+    self.fail("test host is missing sha256sum for the shasum fixture")
+AssertionError: test host is missing sha256sum for the shasum fixture
+
+----------------------------------------------------------------------
+Ran 156 tests in 28.046s
+
+FAILED (failures=6, errors=1)
+Windows SDK configured at /var/folders/3w/4k2pwwpx1ps8cv6k215x_bjw0000gp/T/tmpldbnu746/libc.txt. Run `just windows-lint` or `just check`.
+Windows SDK configured at /var/folders/3w/4k2pwwpx1ps8cv6k215x_bjw0000gp/T/tmpldbnu746/libc.txt. Run `just windows-lint` or `just check`.

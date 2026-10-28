@@ -1,0 +1,6 @@
+/usr/local/Homebrew/Library/Homebrew/startup.rb:8:in 'Kernel#require_relative': cannot load such file -- /usr/local/Homebrew/Library/Homebrew/startup/bootsnap (LoadError)
+	from /usr/local/Homebrew/Library/Homebrew/startup.rb:8:in '<top (required)>'
+	from /usr/local/Homebrew/Library/Homebrew/global.rb:4:in 'Kernel#require_relative'
+	from /usr/local/Homebrew/Library/Homebrew/global.rb:4:in '<top (required)>'
+	from /usr/local/Homebrew/Library/Homebrew/brew.rb:24:in 'Kernel#require_relative'
+	from /usr/local/Homebrew/Library/Homebrew/brew.rb:24:in '<main>'

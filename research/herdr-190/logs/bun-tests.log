@@ -1,0 +1,103 @@
+bun test v1.4.4 (38afee6c8)
+
+scripts/release-workflows.test.ts:
+(pass) official publishing workflow boundaries > publishing is tag-only while normal PR CI remains enabled [0.95ms]
+(pass) official publishing workflow boundaries > preview checks do not require a workstation Windows SDK [0.49ms]
+(pass) official publishing workflow boundaries > each publishing job rechecks both actors before using credentials [0.24ms]
+51 |       ["release-prepare", input, input],
+52 |       ["release-publish", input, input],
+53 |       ["release", input, input],
+54 |     ]) {
+55 |       const result = spawnSync("just", ["--dry-run", ...args], { encoding: "utf8" });
+56 |       expect(result.status).toBe(0);
+                                 ^
+error: expect(received).toBe(expected)
+
+Expected: 0
+Received: null
+
+      at <anonymous> (/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/scripts/release-workflows.test.ts:56:29)
+(fail) official publishing workflow boundaries > release arguments are not interpolated into executable shell text [4.02ms]
+(pass) official publishing workflow boundaries > admin gate permits admins and fails closed for other roles or API errors [562.67ms]
+
+scripts/docs/versions.test.ts:
+(pass) normalizeVersion > normalizes 0.7.5 [0.29ms]
+(pass) normalizeVersion > normalizes v0.7.5
+(pass) normalizeVersion > rejects non-release refs [0.13ms]
+(pass) sortVersionsNewestFirst > sorts semantic versions numerically [0.27ms]
+
+scripts/docs/preview.integration.test.ts:
+(pass) preview documentation snapshots > snapshots and validates the selected commit exactly [671.39ms]
+(pass) preview documentation snapshots > rejects snapshot drift [575.96ms]
+
+scripts/docs/versions.integration.test.ts:
+(pass) documentation release publishing > publishes immutable tagged snapshots and validates maintained corrections [2141.81ms]
+
+src/integration/assets/herdr-agent-state.test.ts:
+(pass) OpenCode maps the Windows socket marker path to a named pipe endpoint [11.26ms]
+(pass) Kilo maps the Windows socket marker path to a named pipe endpoint [2.07ms]
+(pass) OpenCode stays disabled without the Herdr socket environment [0.87ms]
+(pass) Pi maps the Windows socket marker path to a named pipe endpoint [4.33ms]
+(pass) Pi reload preserves working state when the agent is active [9.07ms]
+(pass) Oh My Pi maps the Windows socket marker path to a named pipe endpoint [4.84ms]
+(pass) Oh My Pi reload preserves working state when the agent is active [7.93ms]
+(pass) OMP ignores nested sessions launched inside another OMP shell [27.75ms]
+(pass) OMP accepts POSIX and Windows session paths [1.59ms]
+(pass) Pi reports a Windows session path [8.73ms]
+(pass) Pi reports idle only after the agent settles [46.79ms]
+(pass) Pi ignores RPC sessions even when UI APIs are available [27.32ms]
+(pass) Pi settlement preserves explicit blocked-state precedence [52.95ms]
+(pass) Pi reports the session replacement source [3.16ms]
+(pass) Pi waits for a replacement session report before publishing state [14.93ms]
+(pass) Oh My Pi retries working before a queued idle state [509.89ms]
+(pass) Oh My Pi keeps working when a turn ends with a scheduled continuation [73.92ms]
+(pass) Pi retries working state after an unanswered socket attempt [510.60ms]
+
+src/integration/assets/opencode/herdr-agent-state.test.ts:
+(pass) serializes lifecycle reports [1.00ms]
+(pass) suppresses redundant same-session updates [1.04ms]
+(pass) does not classify server activity in another root session as a selection [0.31ms]
+(pass) does not classify server-global root creation as a local selection [0.69ms]
+(pass) reports retry status as working [0.70ms]
+(pass) reports child prompts without replacing the root session [1.94ms]
+(pass) routes nested child prompts to their own root, not the last active root [0.97ms]
+(pass) only local run and Mini own server lifecycle, never shared servers or TUI workers [6.32ms]
+(pass) dual server entrypoint keeps V1 hooks and never reports from the V2 shared server [0.75ms]
+
+src/integration/assets/opencode/herdr-tui-session.test.ts:
+(pass) reports a root session when only the local route changes [111.57ms]
+(pass) retries an initial selection while Herdr detects the process [127.23ms]
+(pass) does not report root sessions not selected by this TUI [134.11ms]
+(pass) does not replace the root session with a selected child session [138.65ms]
+(pass) stops route polling when the TUI plugin is disposed [126.82ms]
+(pass) V1 hydrates active descendants and keeps working until the whole family settles [35.30ms]
+(pass) V1 retains sibling blockers and cancellation does not finish an active parent [72.70ms]
+(pass) V1 hydration rejects aborted tool requests even if their session is busy again [24.16ms]
+(pass) V1 validates pending tools instead of assuming an idle owner has no requests [24.01ms]
+(pass) V1 replays completion and replies over a late initial snapshot [24.80ms]
+(pass) V1 retains replies received between failed hydration and its retry [661.93ms]
+(pass) V1 deleted sessions cannot return through a late hydration snapshot [23.77ms]
+(pass) V1 ignores stale hydration across A/B/A route changes and disposal [36.25ms]
+(pass) V1 a directly attached child owns its descendants, not its parent or siblings [35.03ms]
+(pass) V1 a terminal tool event during hydration cannot revive a cancelled blocker [22.32ms]
+(pass) V1 unknown tool evidence remains blocked and retries failed message reads [662.74ms]
+(pass) V1 request validation matches the exact tool and deduplicates message reads [28.08ms]
+(pass) V1 reselecting an aborted request does not resurrect it or poll completed tools [689.00ms]
+(pass) V1 home and selected-session deletion settle authority and retry a dropped idle report [1350.65ms]
+(pass) V1 a delayed home settlement cannot overwrite the next selected session [35.80ms]
+(pass) V2 ignores events without data [25.49ms]
+(pass) V2 completes and interrupts without legacy idle events [70.82ms]
+(pass) V2 aggregates root and child blockers and ignores other roots and child completion [32.64ms]
+(pass) V2 discards queued reports after selection changes and stops on disposal [283.74ms]
+(pass) V2 reconciles late blocker hydration without reviving an already-replied request [214.54ms]
+(pass) V2 never writes a delayed connection after disposal or a session switch [49.47ms]
+(pass) V2 settles a connection that never completes [504.81ms]
+(pass) V2 resends the latest state after a failed delivery [2629.48ms]
+
+1 tests failed:
+(fail) official publishing workflow boundaries > release arguments are not interpolated into executable shell text [4.02ms]
+
+ 66 pass
+ 1 fail
+ 222 expect() calls
+Ran 67 tests across 7 files. [13.55s]
