@@ -1,0 +1,12 @@
+{
+  "repository": "https://github.com/herdrdev/herdr",
+  "source_fork": "https://github.com/zuohaisu/herdr",
+  "commit": "e35f3937b0efe40ec0dab675709c68e1d8e8c9e6",
+  "tree": "98b3f4ed3ae4c238f3267fb22c5920256571e308",
+  "package_version": "0.9.3",
+  "license": "Apache-2.0",
+  "tracked_files": 2945,
+  "import_method": "git archive of the clean owner-provided local checkout; complete unmodified tree",
+  "modifications": [],
+  "issue": "https://github.com/zuohaisu/viva/issues/187"
+}
