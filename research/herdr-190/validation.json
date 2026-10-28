@@ -1,0 +1,142 @@
+{
+  "issue": "https://github.com/zuohaisu/viva/issues/190",
+  "parent_issue": 187,
+  "date_utc": "2026-10-28",
+  "evidence_state": "PARTIAL_TECHNICAL_BLOCKED_NOT_CLEARED",
+  "historical_delivery_blocker": {
+    "command": "git commit -m 'chore: inventory herdr baseline licenses and validation blockers' -m 'Refs #190'",
+    "result": "exit 128: Author identity unknown; unable to auto-detect email address",
+    "resolution": "Owner explicitly supplied Haisu Zuo <zuohaisu@gmail.com> in this session. Configured repository-local Git identity only; no global configuration changed. Original failed attempt retained as history.",
+    "delivery_tracking": "Subsequent commit, PR and Wiki commit URLs are recorded on issue #190; build, licensing and acceptance blockers remain independent of Git identity."
+
+  },
+  "viva_baseline": "21b0fa15b0344321aeef0b9ffcda407088543149",
+  "herdr_source_commit": "e35f3937b0efe40ec0dab675709c68e1d8e8c9e6",
+  "herdr_source_tree": "98b3f4ed3ae4c238f3267fb22c5920256571e308",
+  "environment": {
+    "os": "macOS 13.7.8 (22H730), x86_64",
+    "git": "2.39.2 (Apple Git-143)",
+    "herdr_rust": "1.96.1 (31fca3adb 2026-06-26)",
+    "viva_rust": "1.95.0 (59807616e 2026-04-14)",
+    "zig": "0.16.0",
+    "zig_url": "https://ziglang.org/download/0.16.0/zig-x86_64-macos-0.16.0.tar.xz",
+    "zig_sha256_verified_against_official_index": "0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7",
+    "python": "3.11.15 (upstream maintenance); 3.9.6 (inventory)",
+    "bun": "1.4.4, installed only in /tmp/viva-190/tools",
+    "just": "1.59.0, cargo install --locked --root /tmp/viva-190/tools; Homebrew attempt failed on pre-existing missing startup/bootsnap module",
+    "local_only_tools_and_unabridged_bootstrap_logs": "/tmp/viva-190"
+  },
+  "log_storage_note": "Logs are intentional validation evidence, not build outputs. The committed viva-tests-serial.log omits only the final empty line to satisfy diff --check; untrimmed stdout remains in /tmp/viva-190. Other stored logs retain captured bytes.",
+  "checks": [
+    {
+      "cwd": "upstream/herdr",
+      "command": "cargo metadata --locked --format-version 1",
+      "exit_code": 0,
+      "result": "297 packages; all-platform metadata, not actual linked binary closure",
+      "derived_evidence": "inventory.json"
+    },
+    {
+      "command": "python3 -m unittest discover -s tooling/herdr-audit -v",
+      "exit_code": 0,
+      "result": "3 passed",
+      "log": "logs/inventory-tests.log"
+    },
+    {
+      "command": "python3 tooling/herdr-audit/inventory.py /tmp/viva-190/cargo-metadata.json",
+      "exit_code": 0,
+      "result": "2945 committed blobs scanned, 53 files with discovery signals, 22 Zig manifests, 8 assets; second run byte-identical",
+      "limitations": "Regex discovery cannot establish permission, exhaustive provenance, license compatibility or final artifact contents. Reads HEAD blobs, not uncommitted source changes."
+    },
+    {
+      "cwd": "upstream/herdr",
+      "command": "ZIG=/tmp/viva-190/zig-x86_64-macos-0.16.0/zig cargo build --locked",
+      "exit_code": 101,
+      "result": "Initial sequential retry blocked on uucode HTTP 400; after verified cache seeding, blocked on translate-c HttpConnectionClosing and themes/highway/zlib/pixels HTTP 400",
+      "logs": ["logs/build-retry.log", "logs/build-after-fetch.log"],
+      "cache_seed": {
+        "download_command": "curl -fL https://deps.files.ghostty.org/uucode-2826a37a4562284fdacd8fa029d49509cc9bffcd.tar.gz -o /tmp/viva-190/uucode.tar.gz",
+        "cwd": "upstream/herdr/vendor/libghostty-vt",
+        "command": "/tmp/viva-190/zig-x86_64-macos-0.16.0/zig fetch /tmp/viva-190/uucode.tar.gz",
+        "exit_code": 0,
+        "verified_zig_content_hash_matches_unchanged_manifest": "uucode-0.2.0-ZZjBPlK5VADj7fdoq7G8LIHzD5o6FSkcBXXrRWr4jnrA",
+        "log": "logs/uucode-fetch-in-project.log",
+        "note": "No dependency URL, hash, version or source was changed. A prior fetch outside a Zig project failed; it did not seed the cache."
+      },
+      "bootstrap_note": "First build overlapped rustup installation and failed component recovery. This is not the upstream build result; sequential retry used verified installed 1.96.1. Original bootstrap logs retained."
+    },
+    {
+      "cwd": "upstream/herdr",
+      "command": "ZIG=/tmp/viva-190/zig-x86_64-macos-0.16.0/zig cargo test --workspace --locked",
+      "exit_code": 101,
+      "result": "Build blocked by uucode HTTP 400 before any Rust test execution; no upstream Rust suite PASS",
+      "log": "logs/herdr-tests.log"
+    },
+    {
+      "cwd": "upstream/herdr",
+      "command": "cargo fmt --all -- --check",
+      "exit_code": 0,
+      "log": "logs/herdr-fmt.log"
+    },
+    {
+      "command": "cargo test --workspace",
+      "exit_code": 101,
+      "result": "377 passed, 3 failed, 1 ignored in lib; workspace stopped. Two screen inference timing failures under concurrent builds; one test assumes init.defaultBranch is not main. No product code changed to hide them.",
+      "log": "logs/viva-tests.log"
+    },
+    {
+      "command": "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=init.defaultBranch GIT_CONFIG_VALUE_0=master cargo test --workspace -- --test-threads=1",
+      "exit_code": 0,
+      "result": "610 passed, 0 failed, 1 existing ignored (not executed). Process-local Git config, no global change; serialized run after initial compilation load.",
+      "log": "logs/viva-tests-serial.log"
+    },
+    {
+      "cwd": "upstream/herdr",
+      "command": "python3.11 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_release scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross scripts.test_windows_input scripts.test_ui_hot_path_architecture",
+      "exit_code": 1,
+      "result": "156 tests attempted; FAILED with 6 failure reports (missing host sha256sum) and 1 error (Git 2.39.2 lacks diff --default-prefix). Subset rerun excluding installer module: 151 tests, still 1 Git-option error. No shim or modified tests used.",
+      "logs": ["logs/maintenance-tests.log", "logs/maintenance-subset.log"]
+    },
+    {
+      "cwd": "upstream/herdr",
+      "command": "/tmp/viva-190/tools/node_modules/.bin/bun test scripts/release-workflows.test.ts ./scripts/docs src/integration/assets/herdr-agent-state.test.ts src/integration/assets/opencode/herdr-agent-state.test.ts src/integration/assets/opencode/herdr-tui-session.test.ts",
+      "exit_code": 1,
+      "result": "66 passed, 1 failed because just was not installed at that time; retry evidence is recorded separately if available",
+      "log": "logs/bun-tests.log"
+    },
+    {
+      "cwd": "upstream/herdr",
+      "command": "PATH=/tmp/viva-190/tools/bin:$PATH /tmp/viva-190/tools/node_modules/.bin/bun test scripts/release-workflows.test.ts ./scripts/docs src/integration/assets/herdr-agent-state.test.ts src/integration/assets/opencode/herdr-agent-state.test.ts src/integration/assets/opencode/herdr-tui-session.test.ts",
+      "exit_code": 0,
+      "result": "67 passed, 0 failed after installing real just 1.59.0; original failure preserved",
+      "log": "logs/bun-tests-retry.log"
+    },
+    {
+      "cwd": "upstream/herdr",
+      "command": "PATH=/tmp/viva-190/tools/bin:/tmp/viva-190/tools/node_modules/.bin:$PATH ZIG=/tmp/viva-190/zig-x86_64-macos-0.16.0/zig just check",
+      "exit_code": 101,
+      "result": "fmt completed; lint clippy build failed on fixed Zig dependency downloads. Nextest, remaining maintenance/docs recipes and Windows lint did not execute through this command; standalone results above do not make just check a PASS.",
+      "log": "logs/just-check.log"
+    }
+  ],
+  "pending": [
+    "Resolve fixed Zig dependency downloads and rerun original build/Rust suite/broader just check",
+    "Real binary --version / --help: NOT RUN, no binary built",
+    "Real isolated TUI startup/input/split/mouse/scroll/resize/detach/attach: NOT RUN, no binary built; no original UI evidence captured",
+    "Windows platform checks and final package/license payload verification",
+    "All eight top-level asset provenance/permission decisions; both MP3s are embedded regardless of sound playback setting",
+    "Exact simdutf amalgamation revision and remaining embedded-data/third-party notice gaps",
+    "Qualified professional review of unresolved legal scope/combination questions",
+    "Independent QA on delivered PR head, human UI acceptance, owner merge decision and main CI"
+  ],
+  "safety": {
+    "source_tree_modified": false,
+    "default_viva_entry_changed": false,
+    "user_data_or_sessions_operated": false,
+    "updater_or_installer_run_against_user_install": false,
+    "version_changed": false,
+    "published_or_merged": false,
+    "worktrees_deleted": false,
+    "legal_clearance_claimed": false,
+    "historical_import_whitespace": "Original #188 inherited whitespace remains unchanged; current diff checks do not erase that evidence."
+  }
+}

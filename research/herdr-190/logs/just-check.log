@@ -1,0 +1,134 @@
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
+    Checking cfg-if v1.0.4
+    Checking bitflags v2.11.0
+    Checking foldhash v0.2.0
+    Checking allocator-api2 v0.2.21
+    Checking libc v0.2.183
+    Checking equivalent v1.0.2
+    Checking serde_core v1.0.228
+    Checking itoa v1.0.18
+    Checking log v0.4.29
+    Checking memchr v2.8.0
+    Checking either v1.15.0
+    Checking thiserror v2.0.18
+    Checking castaway v0.2.4
+   Compiling unicode-segmentation v1.13.1
+    Checking unicode-width v0.2.2
+    Checking simd-adler32 v0.3.9
+    Checking once_cell v1.21.4
+    Checking itertools v0.14.0
+    Checking hashbrown v0.16.1
+    Checking smallvec v1.15.1
+    Checking ryu v1.0.23
+    Checking static_assertions v1.1.0
+    Checking compact_str v0.9.0
+    Checking tracing-core v0.1.36
+   Compiling convert_case v0.10.0
+    Checking typenum v1.19.0
+    Checking strum v0.27.2
+    Checking scopeguard v1.2.0
+    Checking powerfmt v0.2.0
+    Checking pin-project-lite v0.2.17
+    Checking adler2 v2.0.1
+    Checking deranged v0.5.8
+    Checking lock_api v0.4.14
+    Checking miniz_oxide v0.8.9
+    Checking kasuari v0.4.12
+    Checking errno v0.3.14
+    Checking mio v1.1.1
+    Checking signal-hook-registry v1.4.8
+    Checking lru v0.16.3
+    Checking signal-hook v0.3.18
+    Checking parking_lot_core v0.9.12
+    Checking num_threads v0.1.7
+    Checking crc32fast v1.5.0
+   Compiling derive_more-impl v2.1.1
+    Checking aho-corasick v1.1.4
+    Checking time-core v0.1.8
+    Checking generic-array v0.14.7
+    Checking num-conv v0.2.1
+    Checking regex-syntax v0.8.10
+    Checking objc2-encode v4.1.0
+    Checking objc2 v0.6.4
+    Checking unicode-truncate v2.0.1
+    Checking ratatui-core v0.1.0
+    Checking derive_more v2.1.1
+    Checking signal-hook-mio v0.2.5
+    Checking tracing v0.1.44
+    Checking flate2 v1.1.9
+    Checking time v0.3.47
+    Checking parking_lot v0.12.5
+    Checking rustix v1.1.4
+    Checking zmij v1.0.21
+    Checking fdeflate v0.3.7
+    Checking serde v1.0.228
+    Checking line-clipping v0.3.5
+    Checking bitflags v1.3.2
+   Compiling ghostty-vt v0.0.0 (/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/crates/ghostty-vt)
+    Checking clap_lex v1.1.0
+    Checking anstyle v1.0.14
+    Checking png v0.17.16
+    Checking clap_builder v4.6.0
+    Checking block2 v0.6.2
+    Checking crossterm v0.29.0
+    Checking toml_datetime v0.6.11
+    Checking serde_spanned v0.6.9
+    Checking thiserror v1.0.69
+    Checking serde_json v1.0.149
+    Checking crypto-common v0.1.7
+    Checking block-buffer v0.10.4
+    Checking regex-automata v0.4.14
+    Checking indexmap v2.13.0
+    Checking ratatui-widgets v0.3.0
+    Checking lazy_static v1.5.0
+    Checking base64 v0.22.1
+    Checking winnow v0.7.15
+    Checking toml_write v0.1.2
+    Checking ratatui-crossterm v0.1.0
+    Checking sharded-slab v0.1.7
+    Checking ref-cast v1.0.25
+    Checking nix v0.31.2
+    Checking digest v0.10.7
+    Checking nix v0.28.0
+error: failed to run custom build command for `ghostty-vt v0.0.0 (/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/crates/ghostty-vt)`
+
+Caused by:
+  process didn't exit successfully: `/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/target/debug/build/ghostty-vt-e8f413af70d09c98/build-script-build` (exit status: 101)
+  --- stdout
+  cargo:rerun-if-changed=build.rs
+  cargo:rerun-if-changed=/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/crates/ghostty-vt/../../vendor/libghostty-vt.vendor.json
+  cargo:rerun-if-changed=/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/crates/ghostty-vt/../../vendor/libghostty-vt/build.zig
+  cargo:rerun-if-changed=/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/crates/ghostty-vt/../../vendor/libghostty-vt/build.zig.zon
+  cargo:rerun-if-changed=/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/crates/ghostty-vt/../../vendor/libghostty-vt/include
+  cargo:rerun-if-changed=/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/crates/ghostty-vt/../../vendor/libghostty-vt/pkg
+  cargo:rerun-if-changed=/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/crates/ghostty-vt/../../vendor/libghostty-vt/src
+  cargo:rerun-if-changed=/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/crates/ghostty-vt/../../vendor/libghostty-vt/VERSION
+  cargo:rerun-if-env-changed=LIBGHOSTTY_VT_OPTIMIZE
+  cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SIMD
+  cargo:rerun-if-env-changed=LIBGHOSTTY_VT_ZIG_SYSTEM_DIR
+  cargo:rerun-if-env-changed=ZIG
+  cargo:rerun-if-env-changed=LIBGHOSTTY_VT_WINDOWS_LIBC
+
+  --- stderr
+  /Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/vendor/libghostty-vt/build.zig.zon:14:20: error: invalid HTTP response: HttpConnectionClosing
+              .url = "https://codeberg.org/vancluever/translate-c/archive/4e879eb8aba615de112eabd1231ea6e01920cead.tar.gz",
+                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  /Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/vendor/libghostty-vt/build.zig.zon:128:20: error: bad HTTP response code: '400 Bad Request'
+              .url = "https://deps.files.ghostty.org/ghostty-themes-release-20260831-151010-752a9c0.tgz",
+                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  /Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/vendor/libghostty-vt/pkg/zlib/build.zig.zon:9:20: error: bad HTTP response code: '400 Bad Request'
+              .url = "https://deps.files.ghostty.org/zlib-1220fed0c74e1019b3ee29edae2051788b080cd96e90d56836eea857b0b966742efb.tar.gz",
+                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  /Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/vendor/libghostty-vt/pkg/highway/build.zig.zon:9:20: error: bad HTTP response code: '400 Bad Request'
+              .url = "https://deps.files.ghostty.org/highway-66486a10623fa0d72fe91260f96c892e41aceb06.tar.gz",
+                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  /Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/vendor/libghostty-vt/pkg/wuffs/build.zig.zon:21:20: error: bad HTTP response code: '400 Bad Request'
+              .url = "https://deps.files.ghostty.org/pixels-12207ff340169c7d40c570b4b6a97db614fe47e0d83b5801a932dcd44917424c8806.tar.gz",
+                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+  thread 'main' (13722800) panicked at crates/ghostty-vt/build.rs:111:5:
+  zig build for vendored libghostty-vt failed: exit status: 1. Building Herdr requires Zig 0.16.0; check `zig version` or set ZIG to the path of a Zig 0.16.0 binary, then retry
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+warning: build failed, waiting for other jobs to finish...
+error: recipe `lint` failed on line 36 with exit code 101

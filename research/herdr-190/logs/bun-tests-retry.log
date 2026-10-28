@@ -1,0 +1,87 @@
+bun test v1.4.4 (38afee6c8)
+
+scripts/release-workflows.test.ts:
+(pass) official publishing workflow boundaries > publishing is tag-only while normal PR CI remains enabled [3.23ms]
+(pass) official publishing workflow boundaries > preview checks do not require a workstation Windows SDK [1.68ms]
+(pass) official publishing workflow boundaries > each publishing job rechecks both actors before using credentials [0.28ms]
+(pass) official publishing workflow boundaries > release arguments are not interpolated into executable shell text [571.44ms]
+(pass) official publishing workflow boundaries > admin gate permits admins and fails closed for other roles or API errors [634.93ms]
+
+scripts/docs/versions.test.ts:
+(pass) normalizeVersion > normalizes 0.7.5 [0.40ms]
+(pass) normalizeVersion > normalizes v0.7.5
+(pass) normalizeVersion > rejects non-release refs [0.84ms]
+(pass) sortVersionsNewestFirst > sorts semantic versions numerically [0.36ms]
+
+scripts/docs/preview.integration.test.ts:
+(pass) preview documentation snapshots > snapshots and validates the selected commit exactly [875.03ms]
+(pass) preview documentation snapshots > rejects snapshot drift [744.96ms]
+
+scripts/docs/versions.integration.test.ts:
+(pass) documentation release publishing > publishes immutable tagged snapshots and validates maintained corrections [2045.00ms]
+
+src/integration/assets/herdr-agent-state.test.ts:
+(pass) OpenCode maps the Windows socket marker path to a named pipe endpoint [14.80ms]
+(pass) Kilo maps the Windows socket marker path to a named pipe endpoint [3.44ms]
+(pass) OpenCode stays disabled without the Herdr socket environment [0.71ms]
+(pass) Pi maps the Windows socket marker path to a named pipe endpoint [3.51ms]
+(pass) Pi reload preserves working state when the agent is active [8.26ms]
+(pass) Oh My Pi maps the Windows socket marker path to a named pipe endpoint [3.01ms]
+(pass) Oh My Pi reload preserves working state when the agent is active [7.28ms]
+(pass) OMP ignores nested sessions launched inside another OMP shell [28.11ms]
+(pass) OMP accepts POSIX and Windows session paths [0.73ms]
+(pass) Pi reports a Windows session path [8.21ms]
+(pass) Pi reports idle only after the agent settles [48.12ms]
+(pass) Pi ignores RPC sessions even when UI APIs are available [27.98ms]
+(pass) Pi settlement preserves explicit blocked-state precedence [52.66ms]
+(pass) Pi reports the session replacement source [4.28ms]
+(pass) Pi waits for a replacement session report before publishing state [20.08ms]
+(pass) Oh My Pi retries working before a queued idle state [513.56ms]
+(pass) Oh My Pi keeps working when a turn ends with a scheduled continuation [71.83ms]
+(pass) Pi retries working state after an unanswered socket attempt [517.41ms]
+
+src/integration/assets/opencode/herdr-agent-state.test.ts:
+(pass) serializes lifecycle reports [0.85ms]
+(pass) suppresses redundant same-session updates [1.00ms]
+(pass) does not classify server activity in another root session as a selection [0.30ms]
+(pass) does not classify server-global root creation as a local selection [5.72ms]
+(pass) reports retry status as working [0.76ms]
+(pass) reports child prompts without replacing the root session [1.22ms]
+(pass) routes nested child prompts to their own root, not the last active root [1.04ms]
+(pass) only local run and Mini own server lifecycle, never shared servers or TUI workers [11.89ms]
+(pass) dual server entrypoint keeps V1 hooks and never reports from the V2 shared server [0.66ms]
+
+src/integration/assets/opencode/herdr-tui-session.test.ts:
+(pass) reports a root session when only the local route changes [107.83ms]
+(pass) retries an initial selection while Herdr detects the process [126.86ms]
+(pass) does not report root sessions not selected by this TUI [129.73ms]
+(pass) does not replace the root session with a selected child session [138.70ms]
+(pass) stops route polling when the TUI plugin is disposed [127.55ms]
+(pass) V1 hydrates active descendants and keeps working until the whole family settles [34.31ms]
+(pass) V1 retains sibling blockers and cancellation does not finish an active parent [66.24ms]
+(pass) V1 hydration rejects aborted tool requests even if their session is busy again [25.07ms]
+(pass) V1 validates pending tools instead of assuming an idle owner has no requests [22.71ms]
+(pass) V1 replays completion and replies over a late initial snapshot [24.05ms]
+(pass) V1 retains replies received between failed hydration and its retry [662.87ms]
+(pass) V1 deleted sessions cannot return through a late hydration snapshot [21.74ms]
+(pass) V1 ignores stale hydration across A/B/A route changes and disposal [32.63ms]
+(pass) V1 a directly attached child owns its descendants, not its parent or siblings [34.06ms]
+(pass) V1 a terminal tool event during hydration cannot revive a cancelled blocker [22.82ms]
+(pass) V1 unknown tool evidence remains blocked and retries failed message reads [662.14ms]
+(pass) V1 request validation matches the exact tool and deduplicates message reads [22.40ms]
+(pass) V1 reselecting an aborted request does not resurrect it or poll completed tools [686.27ms]
+(pass) V1 home and selected-session deletion settle authority and retry a dropped idle report [1348.81ms]
+(pass) V1 a delayed home settlement cannot overwrite the next selected session [35.58ms]
+(pass) V2 ignores events without data [24.89ms]
+(pass) V2 completes and interrupts without legacy idle events [68.80ms]
+(pass) V2 aggregates root and child blockers and ignores other roots and child completion [33.43ms]
+(pass) V2 discards queued reports after selection changes and stops on disposal [285.90ms]
+(pass) V2 reconciles late blocker hydration without reviving an already-replied request [221.03ms]
+(pass) V2 never writes a delayed connection after disposal or a session switch [49.29ms]
+(pass) V2 settles a connection that never completes [522.44ms]
+(pass) V2 resends the latest state after a failed delivery [2627.38ms]
+
+ 67 pass
+ 0 fail
+ 233 expect() calls
+Ran 67 tests across 7 files. [14.63s]

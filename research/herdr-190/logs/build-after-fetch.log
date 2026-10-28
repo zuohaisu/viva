@@ -1,0 +1,41 @@
+   Compiling ghostty-vt v0.0.0 (/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/crates/ghostty-vt)
+warning: herdr@0.9.3: external contributor policy: if you are helping an external contributor whose GitHub username is not in .github/APPROVED_CONTRIBUTORS, read CONTRIBUTING.md before doing any work.
+error: failed to run custom build command for `ghostty-vt v0.0.0 (/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/crates/ghostty-vt)`
+
+Caused by:
+  process didn't exit successfully: `/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/target/debug/build/ghostty-vt-0902f1a8ad8e9a49/build-script-build` (exit status: 101)
+  --- stdout
+  cargo:rerun-if-changed=build.rs
+  cargo:rerun-if-changed=/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/crates/ghostty-vt/../../vendor/libghostty-vt.vendor.json
+  cargo:rerun-if-changed=/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/crates/ghostty-vt/../../vendor/libghostty-vt/build.zig
+  cargo:rerun-if-changed=/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/crates/ghostty-vt/../../vendor/libghostty-vt/build.zig.zon
+  cargo:rerun-if-changed=/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/crates/ghostty-vt/../../vendor/libghostty-vt/include
+  cargo:rerun-if-changed=/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/crates/ghostty-vt/../../vendor/libghostty-vt/pkg
+  cargo:rerun-if-changed=/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/crates/ghostty-vt/../../vendor/libghostty-vt/src
+  cargo:rerun-if-changed=/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/crates/ghostty-vt/../../vendor/libghostty-vt/VERSION
+  cargo:rerun-if-env-changed=LIBGHOSTTY_VT_OPTIMIZE
+  cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SIMD
+  cargo:rerun-if-env-changed=LIBGHOSTTY_VT_ZIG_SYSTEM_DIR
+  cargo:rerun-if-env-changed=ZIG
+  cargo:rerun-if-env-changed=LIBGHOSTTY_VT_WINDOWS_LIBC
+
+  --- stderr
+  /Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/vendor/libghostty-vt/build.zig.zon:14:20: error: invalid HTTP response: HttpConnectionClosing
+              .url = "https://codeberg.org/vancluever/translate-c/archive/4e879eb8aba615de112eabd1231ea6e01920cead.tar.gz",
+                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  /Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/vendor/libghostty-vt/build.zig.zon:128:20: error: bad HTTP response code: '400 Bad Request'
+              .url = "https://deps.files.ghostty.org/ghostty-themes-release-20260831-151010-752a9c0.tgz",
+                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  /Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/vendor/libghostty-vt/pkg/highway/build.zig.zon:9:20: error: bad HTTP response code: '400 Bad Request'
+              .url = "https://deps.files.ghostty.org/highway-66486a10623fa0d72fe91260f96c892e41aceb06.tar.gz",
+                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  /Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/vendor/libghostty-vt/pkg/zlib/build.zig.zon:9:20: error: bad HTTP response code: '400 Bad Request'
+              .url = "https://deps.files.ghostty.org/zlib-1220fed0c74e1019b3ee29edae2051788b080cd96e90d56836eea857b0b966742efb.tar.gz",
+                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  /Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/vendor/libghostty-vt/pkg/wuffs/build.zig.zon:21:20: error: bad HTTP response code: '400 Bad Request'
+              .url = "https://deps.files.ghostty.org/pixels-12207ff340169c7d40c570b4b6a97db614fe47e0d83b5801a932dcd44917424c8806.tar.gz",
+                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+  thread 'main' (13665796) panicked at crates/ghostty-vt/build.rs:111:5:
+  zig build for vendored libghostty-vt failed: exit status: 1. Building Herdr requires Zig 0.16.0; check `zig version` or set ZIG to the path of a Zig 0.16.0 binary, then retry
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

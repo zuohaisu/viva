@@ -1,0 +1,8 @@
+test_file_level_exceptions_are_discovered_not_relicensed (test_inventory.InventoryTests) ... ok
+test_metadata_keeps_unknown_license_and_omits_absolute_paths (test_inventory.InventoryTests) ... ok
+test_opaque_asset_is_hashed_without_claiming_permission (test_inventory.InventoryTests) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.005s
+
+OK
