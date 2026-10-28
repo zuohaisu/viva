@@ -69,3 +69,9 @@ sandbox/*
 # Rust build artifacts (workspace target dir)
 /target
 packaging/npm/dist/
+
+# Imported herdr build caches (keep the upstream source snapshot unchanged).
+# Python __pycache__ directories are already covered above.
+/upstream/herdr/target/
+/upstream/herdr/vendor/libghostty-vt/.zig-cache/
+/upstream/herdr/vendor/libghostty-vt/zig-pkg/
