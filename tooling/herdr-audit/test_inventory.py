@@ -1,5 +1,6 @@
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -52,12 +53,16 @@ class CommittedTreeTests(unittest.TestCase):
 
     def test_fixed_source_tree_counts_and_complete_file_records(self):
         result = self.result
-        self.assertEqual(result["source_tree"], "98b3f4ed3ae4c238f3267fb22c5920256571e308")
-        self.assertEqual(result["tracked_files_scanned"], 2945)
-        self.assertEqual(len(result["files"]), 2945)
-        self.assertEqual(len({r["path"] for r in result["files"]}), 2945)
-        self.assertEqual(len(result["zig_manifests"]), 22)
-        self.assertEqual(len(result["assets"]), 8)
+        # Intentional original-snapshot regression pin. A deliberate upstream/herdr
+        # update must review and synchronize the tree/count constants below.
+        hint = ("Snapshot mismatch: check for an inventory regression; for deliberate source updates, "
+                "review provenance and synchronize snapshot constants.")
+        self.assertEqual(result["source_tree"], "98b3f4ed3ae4c238f3267fb22c5920256571e308", hint)
+        self.assertEqual(result["tracked_files_scanned"], 2945, hint)
+        self.assertEqual(len(result["files"]), 2945, hint)
+        self.assertEqual(len({r["path"] for r in result["files"]}), 2945, hint)
+        self.assertEqual(len(result["zig_manifests"]), 22, hint)
+        self.assertEqual(len(result["assets"]), 8, hint)
 
     def test_binary_and_dotfile_hashes_match_independent_git_show(self):
         records = {r["path"]: r for r in self.result["files"]}
@@ -73,6 +78,14 @@ class CommittedTreeTests(unittest.TestCase):
                 blob = subprocess.check_output(["git", "show", "HEAD:" + full_path], cwd=audit.ROOT)
                 self.assertEqual(records[full_path]["sha256"], hashlib.sha256(blob).hexdigest())
                 self.assertEqual(records[full_path]["kind"], kind)
+
+    def test_font_evidence_distinguishes_viva_commit_from_source_tree(self):
+        evidence = json.loads((audit.ROOT / "research/herdr-190/font-evidence.json").read_text())
+        self.assertNotIn("source_commit", evidence, "Use explicit Viva run provenance, not ambiguous source_commit")
+        self.assertRegex(evidence["viva_commit"], r"^[0-9a-f]{40}$")
+        self.assertEqual(evidence["source_tree"], self.result["source_tree"])
+        records = {r["path"]: r for r in self.result["files"]}
+        self.assertEqual(evidence["sha256"], records[evidence["path"]]["sha256"])
 
 
 if __name__ == "__main__":
