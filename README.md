@@ -339,15 +339,18 @@ writes or migrates the historical `~/.ticket-autopilot/` state.
 
 ## Acknowledgements
 
-Viva is an original implementation, and its design deliberately references
-two proven tools:
+Viva reuses proven tools. The workbench replacement now starts directly from
+herdr source rather than reimplementing its behavior (tracking [#187](https://github.com/zuohaisu/viva/issues/187)).
 
 - **[herdr](https://github.com/herdrdev/herdr)** (Apache-2.0) — the mature
   terminal-multiplexer reference behind Viva's resident runtime and workbench
   chrome: a resident server that holds all terminal sessions with
   detach/attach, a workspace/tab/pane layout, mouse-first pane interaction,
-  and sidebar-based agent awareness. Viva implements these ideas natively
-  ("route A"): no herdr source code is copied or redistributed. The alignment
+  and sidebar-based agent awareness. The unmodified source baseline is retained
+  in [`upstream/herdr/`](upstream/herdr/) with its original licenses; build and
+  scope instructions are in [`upstream/README.md`](upstream/README.md). This
+  initial import does not yet replace the default Viva runtime or integrate
+  Viva's authority and member/task/execution model. The alignment
   analysis and decision records live in the Wiki
   ([Research-Herdr-Runtime-Parity](https://github.com/zuohaisu/viva/wiki/Research-Herdr-Runtime-Parity)
   and [ADR-0012](https://github.com/zuohaisu/viva/wiki/ADR-0012)).
@@ -356,12 +359,13 @@ two proven tools:
   across git worktrees. Also a design reference only; no source code is
   reused.
 
-Both projects are credited as design references. If any code or substantive
-material from either project is ever reused, the respective license and
-copyright notices will be preserved in full, as those licenses require.
+herdr source and its vendored dependencies retain their original license and
+copyright notices; see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+Orca remains a design reference only.
 
 ## License
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-MIT — see [LICENSE](LICENSE). Copyright (c) 2026 zuohaisu
+Viva-authored code: MIT — see [LICENSE](LICENSE). Copyright (c) 2026 zuohaisu.
+Third-party source retains its own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
