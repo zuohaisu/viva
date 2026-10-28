@@ -1,0 +1,9 @@
+{
+  "args": [
+    "server",
+    "stop"
+  ],
+  "returncode": 0,
+  "stdout": "",
+  "stderr": ""
+}

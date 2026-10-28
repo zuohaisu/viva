@@ -1,0 +1,10 @@
+{
+  "args": [
+    "pane",
+    "read",
+    "w1:p1"
+  ],
+  "returncode": 0,
+  "stdout": "sh-3.2$ printf '__H190_INPUT__\\n'\n__H190_INPUT__\nsh-3.2$\n",
+  "stderr": ""
+}

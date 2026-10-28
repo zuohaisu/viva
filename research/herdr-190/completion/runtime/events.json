@@ -1,0 +1,68 @@
+[
+  {
+    "time": 1793209492.497487,
+    "client": 0,
+    "label": "shell input via actual client PTY",
+    "hex": "7072696e746620275f5f483139305f494e5055545f5f5c6e270d"
+  },
+  {
+    "time": 1793209493.232487,
+    "client": 0,
+    "label": "UTF-8 terminal input",
+    "hex": "7072696e746620275f5f554e49434f44455fe4b8ade696875ff09f99825f5f5c6e270d"
+  },
+  {
+    "time": 1793209494.059293,
+    "client": 0,
+    "label": "vertical split via prefix+v",
+    "hex": "0276"
+  },
+  {
+    "time": 1793209494.795736,
+    "client": 0,
+    "label": "scrollback output",
+    "hex": "693d313b207768696c65205b202469202d6c6520313030205d3b20646f207072696e746620225f5f524f575f253033645f5f5c6e2220222469223b20693d242828692b3129293b20646f6e650d"
+  },
+  {
+    "time": 1793209495.622594,
+    "client": 0,
+    "label": "SGR click left pane",
+    "hex": "1b5b3c303b34303b354d1b5b3c303b34303b356d"
+  },
+  {
+    "time": 1793209496.343543,
+    "client": 0,
+    "label": "keyboard after mouse focus",
+    "hex": "7072696e746620275f5f4d4f5553455f4c4546545f5f5c6e270d"
+  },
+  {
+    "time": 1793209497.082488,
+    "client": 0,
+    "label": "SGR wheel up right pane",
+    "hex": "1b5b3c36343b39303b31354d1b5b3c36343b39303b31354d1b5b3c36343b39303b31354d1b5b3c36343b39303b31354d1b5b3c36343b39303b31354d1b5b3c36343b39303b31354d1b5b3c36343b39303b31354d1b5b3c36343b39303b31354d"
+  },
+  {
+    "time": 1793209499.33995,
+    "client": 0,
+    "label": "detach first client",
+    "hex": "0271"
+  },
+  {
+    "time": 1793209503.334332,
+    "client": 1,
+    "label": "input after attach",
+    "hex": "7072696e746620275f5f524541545441434845445f5f5c6e270d"
+  },
+  {
+    "time": 1793209504.173138,
+    "client": 1,
+    "label": "horizontal split via prefix+minus",
+    "hex": "022d"
+  },
+  {
+    "time": 1793209505.014658,
+    "client": 1,
+    "label": "detach second client",
+    "hex": "0271"
+  }
+]

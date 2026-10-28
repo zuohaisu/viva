@@ -1,0 +1,67 @@
+{
+  "command": "cargo nextest list --workspace --locked --message-format json",
+  "listed_tests": 3726,
+  "observed_run_passed": 3714,
+  "ignored_not_executed": [
+    {
+      "binary": "ghostty_vt",
+      "test": "png_forward_tests::native_png_render_scale_profile",
+      "state": "ignored_not_executed"
+    },
+    {
+      "binary": "herdr",
+      "test": "app::terminal_targets::tests::terminal_target_lookup_profile",
+      "state": "ignored_not_executed"
+    },
+    {
+      "binary": "herdr",
+      "test": "client::shell::tests::copy::navigator_render_scale_profile",
+      "state": "ignored_not_executed"
+    },
+    {
+      "binary": "herdr",
+      "test": "client::shell::tests::link_hover::ctrl_hover_render_scale_profile",
+      "state": "ignored_not_executed"
+    },
+    {
+      "binary": "herdr",
+      "test": "kitty_graphics::surface::tests::graphics_occlusion_render_scale_profile",
+      "state": "ignored_not_executed"
+    },
+    {
+      "binary": "herdr",
+      "test": "layout::tests::bsp_layout_profile",
+      "state": "ignored_not_executed"
+    },
+    {
+      "binary": "herdr",
+      "test": "pane::terminal::migration_tests::render_scale_profile_sparse_dirty_patches",
+      "state": "ignored_not_executed"
+    },
+    {
+      "binary": "herdr",
+      "test": "server::headless::tests::event_fairness::external_api_burst_profile",
+      "state": "ignored_not_executed"
+    },
+    {
+      "binary": "herdr",
+      "test": "server::headless::tests::native_graphics::native_file_render_scale_profile",
+      "state": "ignored_not_executed"
+    },
+    {
+      "binary": "herdr",
+      "test": "server::headless::tests::retained_graphics_tests::render_scale_profile_retained_graphics",
+      "state": "ignored_not_executed"
+    },
+    {
+      "binary": "herdr",
+      "test": "server::render_scale_benchmark::dirty_scroll_collection_profile",
+      "state": "ignored_not_executed"
+    },
+    {
+      "binary": "herdr",
+      "test": "server::render_scale_benchmark::render_scale_profile",
+      "state": "ignored_not_executed"
+    }
+  ]
+}

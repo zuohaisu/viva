@@ -65,7 +65,8 @@ Cargo metadata. Run regression checks with
 Matches
 are discovery signals, not license classification; no match does not mean
 permission exists. Cargo metadata covers all platforms, not actual linked
-objects. No successful binary exists from this validation run.
+objects. This describes the initial PR #192 run, which had no successful binary;
+the subsequent fixed-source runtime evidence is recorded below.
 
 Further file-level exceptions and obligations identified in this pass:
 
@@ -76,7 +77,7 @@ Further file-level exceptions and obligations identified in this pass:
 | Ghostty `pkg/libpng/pnglibconf.h` | Header says libpng 1.6.38.git, retains Cosmin Truta and Glenn Randers-Pehrson copyright, and refers to a missing `png.h` license. Supply upstream 1.6.38's complete LICENSE at [`licenses/libpng-LICENSE.txt`](licenses/libpng-LICENSE.txt) (PNG Reference Library License v2 plus historical v1 text) | Manifest separately says 1.6.43. The release prebuilt header differs in its version and copyright-year lines; do not claim it is the exact imported revision. Preserve local copyright headers and verify the fixed downloaded dependency's LICENSE/NOTICE against B's real artifact |
 | Ghostty `pkg/libintl/libintl.h` | Header explicitly grants **LGPL-2.1-or-later**; full text now supplied at [`licenses/LGPL-2.1-or-later.txt`](licenses/LGPL-2.1-or-later.txt) | `pkg/libintl` describes gettext 0.24; do not assume this header means libintl is linked into the VT-only build. If combined/linked, assess the actual LGPL source/relinking obligations with qualified counsel |
 | Ghostty `src/input/keycodes.zig` | Header identifies Chromium's `dom_code_data.inc`; BSD text now supplied at [`licenses/Chromium-BSD-3-Clause.txt`](licenses/Chromium-BSD-3-Clause.txt). Referenced Chromium source bears Copyright 2013 The Chromium Authors; preserve that attribution alongside its license | Reproduce applicable copyright, conditions and disclaimer in package materials if included |
-| Ghostty `pkg/simdutf/vendor/simdutf.h` | Contains the full Facebook/Deepmind/NYU/NEC/IDIAP BSD notice (lines 966–1011), not covered merely by Ghostty MIT | Preserve that notice as well as simdutf's own license. Exact amalgamation provenance unresolved: Zig manifest says 5.2.8, embedded version constants say 9.0.0; do not treat manifest version alone as an SBOM |
+| Ghostty `pkg/simdutf/vendor/simdutf.h` | Contains the full Facebook/Deepmind/NYU/NEC/IDIAP BSD notice (lines 966–1011), not covered merely by Ghostty MIT. Both h/cpp exactly match Ghostty update `e89cc0b`; the h file also matches fixed Ghostty base `44f2a44df` | Full simdutf MIT and embedded BSD texts now supplied under [`licenses/herdr-native/simdutf/`](licenses/herdr-native/simdutf/). Wrapper still says 5.2.8 and embedded version 9.0.0; official v9 release amalgamations differ beyond generation timestamps. Do not relabel this as an unmodified official release |
 | Ghostty fontconfig override headers | Keith Packard permission/disclaimer retained in `fontconfig.h`, `fcint.h`, `fclang.h`; `fcconst.h` marks HPND; `fccase.h` separately cites Unicode terms | Retain copyright/permission in supporting documentation; verify the exact Unicode data notice/version, not just fontconfig's umbrella license |
 | Ghostty Highway overrides | `abort.cc` marks Apache-2.0 and BSD-3-Clause; `per_target.cc` marks Apache-2.0 | Fetch the fixed dependency and retain its applicable LICENSE/NOTICE and local notices; downloading the build manifest alone is not enough |
 | Ghostty stb image/resize, Zig compatibility, Wayland XML | Full notices remain in the stb headers, `src/lib/compat/README.md`, and `vicinae-hotkey-v1.xml` respectively | Copy applicable notices into actual package materials when included; dual-license choice must be recorded, not silently assumed |
@@ -88,6 +89,60 @@ New license text provenance (retrieved through GitHub's contents API):
 - libpng text: pnggroup/libpng commit `0a158f3506502dfa23edfc42790dfaed82efba17` (v1.6.38), `LICENSE`. `scripts/pnglibconf.h.prebuilt` was compared: version and Cosmin Truta copyright-year lines differ from the imported header; all other lines match. Exact imported prebuilt revision remains unresolved, distinct from supplying the release's full license text.
 - LGPL text: SPDX license-list-data commit `f715b3660bb164c3d0b81cba9ce94e3c558c4048`, `text/LGPL-2.1-or-later.txt`.
 - Chromium BSD text: chromium/chromium commit `58d786a70944808688eb8571db6c00fa6566e307`, `LICENSE`; the referenced `ui/events/keycodes/dom/dom_code_data.inc` was also inspected at that commit. This establishes a notice source, not an exact historical revision of Ghostty's adapted table.
+
+### Fixed-source runtime and dependency follow-up (2026-10-28, after #192)
+
+The original tree now **builds and runs on Intel macOS 13.7.8**, with Rust 1.96.1
+and Zig 0.16.0, without changing any tracked upstream file or dependency pin.
+The original source commit was fetched into a separate bare object store; its
+tree matches `HEAD:upstream/herdr` exactly. Evidence, binary hash, commands,
+initial failures and remaining limits are in
+[`completion/baseline.json`](research/herdr-190/completion/baseline.json) and
+[`checks.json`](research/herdr-190/completion/checks.json). The binary itself is
+not committed or distributed. CLI version/help succeeded; 3,714 upstream Rust
+tests passed, with 12 ignored profiles **not executed**. A real isolated PTY
+smoke exercised input/Unicode, splits, mouse focus/scroll, resize and
+same-process detach/attach. Raw ANSI streams and supporting text projections
+are retained; these are not physical screenshots or human visual acceptance.
+
+The download failure was not solved by changing dependencies or evading
+Codeberg's IP block. Official Ghostty URLs were fetched with curl and verified
+by Zig; an independently accessible GitHub repository contained the exact
+translate-c commit and yielded the **same original content hash**. Its fixed
+aro dependency was likewise hash-verified. A different bundled translate-c
+candidate was rejected, not substituted. Build instructions remain in
+[`upstream/README.md`](upstream/README.md).
+
+- [`native-notices.json`](research/herdr-190/completion/native-notices.json)
+  indexes captured texts in [`licenses/herdr-native/`](licenses/herdr-native/):
+  Highway Apache/BSD, Wuffs MIT/Apache, zlib, CC0 pixel resources, translate-c
+  MIT, aro MIT/Unicode, uucode MIT and its supplemental Unicode/width notices,
+  plus simdutf MIT/BSD. Some are build-graph inputs rather than proven binary
+  contents. The themes archive lacks a root notice in the fetched cache;
+  inclusion in any future artifact requires review, not an MIT assumption.
+- uucode's Zig `.paths` omits supplemental license files referenced by its
+  LICENSE.md. These were recovered from the full fixed archive and verified
+  against the original GitHub commit's individual Git blob IDs before copying.
+- [`cargo-target-notices.json`](research/herdr-190/completion/cargo-target-notices.json)
+  records 155 normal/build packages for `x86_64-apple-darwin`, their declared
+  licenses and local notice-file hashes. Four Ratatui Cargo archives omitted
+  their workspace license; the full MIT notice was recovered from the exact
+  `.cargo_vcs_info.json` revision under `licenses/herdr-native/ratatui/`.
+- **Unresolved legal-scope evidence, not agent clearance:** objc2/block2/
+  objc2-encode/dispatch2 archives omit a local notice. Their exact upstream
+  workspace [`LICENSE.md`](licenses/herdr-native/objc2/LICENSE.md) declares
+  MIT/trio alternatives but explicitly questions distribution of Apple-SDK
+  derived works. This statement is retained verbatim at its fixed revision;
+  qualified professional review is needed for that scope, not a scanner's or
+  agent's assurance. It is not a finding that all such use is prohibited.
+
+`just check` completed its Unix lint/tests/maintenance/integration stages in
+an isolated HOME with reduced concurrency, then stopped at missing Windows SDK
+configuration. No SDK license was accepted or SDK downloaded. A default-thread
+attempt's SSH-test timeout is retained as FAIL; its remaining tests were not
+run. Separate Unix suite and docs runs do not turn the full check into PASS.
+Top-level media rights, remaining embedded data, actual final package notices,
+independent QA and human visual acceptance remain open; #191 is not activated.
 
 ### Actual distribution obligations for integration B
 
@@ -128,7 +183,11 @@ that decision remains open. The original snapshot is retained for provenance,
 not silently edited or presented as cleared. Source publication itself remains
 subject to this unresolved review.
 
-## Review status: incomplete — merge/release hold
+## Review status: incomplete — integration/release hold
+
+PR #192's partial notice/evidence delivery was merged; that was not completion
+of #190 or a distribution clearance. Current follow-up evidence supersedes the
+old network-blocked runtime state, not the unresolved licensing/acceptance gates.
 
 This initial notice inventory is **not** a complete compliance clearance. Source
 publication is itself redistribution; not shipping a binary does not waive
@@ -136,7 +195,7 @@ source-distribution obligations. The GPL file-level exception was identified
 and its license text added after the original import; the original import alone
 was not sufficient evidence of license completeness.
 
-Before merging this baseline, review the complete tracked-source license scope,
+Before treating #190 as complete or entering #191, review the complete tracked-source license scope,
 including embedded third-party code and assets. In particular, attribution and
 permission scope for bundled sounds, artwork, screenshots and sponsor marks
 have not been separately established by this audit. Their presence upstream is

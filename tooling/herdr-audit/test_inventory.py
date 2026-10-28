@@ -87,6 +87,25 @@ class CommittedTreeTests(unittest.TestCase):
         records = {r["path"]: r for r in self.result["files"]}
         self.assertEqual(evidence["sha256"], records[evidence["path"]]["sha256"])
 
+    def test_captured_native_notices_have_complete_hash_index(self):
+        folder = audit.ROOT / "research/herdr-190/completion"
+        native = json.loads((folder / "native-notices.json").read_text())
+        cargo = json.loads((folder / "cargo-target-notices.json").read_text())
+        notices = [n for p in native["packages"] for n in p["notices"]]
+        notices += [{"path": n["notice_path"], "sha256": n["sha256"]}
+                    for n in cargo["workspace_notice_fallbacks"]]
+        for notice in notices:
+            with self.subTest(path=notice["path"]):
+                path = Path(notice["path"])
+                self.assertFalse(path.is_absolute())
+                self.assertNotIn("..", path.parts)
+                self.assertEqual(hashlib.sha256((audit.ROOT / path).read_bytes()).hexdigest(),
+                                 notice["sha256"])
+        indexed = {n["path"] for n in notices if n["path"].startswith("licenses/herdr-native/")}
+        present = {str(p.relative_to(audit.ROOT))
+                   for p in (audit.ROOT / "licenses/herdr-native").rglob("*") if p.is_file()}
+        self.assertEqual(indexed, present, "Every copied notice must have provenance/hash evidence")
+
 
 if __name__ == "__main__":
     unittest.main()
