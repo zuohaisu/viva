@@ -27,6 +27,8 @@
     "local_only_tools_and_unabridged_bootstrap_logs": "/tmp/viva-190"
   },
   "log_storage_note": "Logs are intentional validation evidence, not build outputs. The committed viva-tests-serial.log omits only the final empty line to satisfy diff --check; untrimmed stdout remains in /tmp/viva-190. Other stored logs retain captured bytes.",
+  "raw_log_path_disclosure": "The historical raw logs intentionally retain local absolute paths, including /Users/zuohaisu, the task worktree layout and .local/share/uv Python paths (10 logs at ed7abd5). These reveal local username and layout; they are NOT path-anonymized. The Cargo inventory omits local manifest/cache paths, a narrower guarantee than a claim about all evidence. Original logs are preserved rather than silently rewritten. Common key/token scans are not a comprehensive privacy audit.",
+  "qa_followup": "qa-followup.json records verification and fixes for the independent review of ed7abd5. The checks below retain their original historical outcomes; inventory.json is now schema 2. Compare source_tree and payload fields, excluding viva_commit, when reproducing at another HEAD.",
   "checks": [
     {
       "cwd": "upstream/herdr",
@@ -44,7 +46,7 @@
     {
       "command": "python3 tooling/herdr-audit/inventory.py /tmp/viva-190/cargo-metadata.json",
       "exit_code": 0,
-      "result": "2945 committed blobs scanned, 53 files with discovery signals, 22 Zig manifests, 8 assets; second run byte-identical",
+      "result": "Historical schema-1 run at 21b0fa1: 2945 committed blobs read, 53 files with discovery signals, 22 Zig manifests, 8 top-level assets; repeat byte-identical at the SAME HEAD. It did not retain all binary file records; schema 2 fixes that omission.",
       "limitations": "Regex discovery cannot establish permission, exhaustive provenance, license compatibility or final artifact contents. Reads HEAD blobs, not uncommitted source changes."
     },
     {
@@ -75,7 +77,8 @@
       "cwd": "upstream/herdr",
       "command": "cargo fmt --all -- --check",
       "exit_code": 0,
-      "log": "logs/herdr-fmt.log"
+      "log": "logs/herdr-fmt.log",
+      "capture_note": "Historical successful fmt emitted no stdout/stderr; exit_code 0 was recorded from the shell exit-status file /tmp/viva-190/herdr-fmt.exit, not inferred from an empty log. See logs/herdr-fmt-qa-transcript.log for a fresh run with command, toolchain, UTC timestamps and captured status."
     },
     {
       "command": "cargo test --workspace",

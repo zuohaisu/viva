@@ -6,6 +6,10 @@ only the reproducibility gap in #190; humans must resolve provenance/scope.
 Run from Viva's root, with metadata from the nested workspace:
   (cd upstream/herdr && cargo metadata --locked --format-version 1) > /tmp/metadata.json
   python3 tooling/herdr-audit/inventory.py /tmp/metadata.json > /tmp/inventory.json
+Every committed blob gets a path/hash/kind record, including binary files outside
+assets/. kind is only a UTF-8/NUL heuristic, never a license classification.
+viva_commit is the running checkout's HEAD; it changes after any commit. Compare
+source_tree and payload fields when reproducing from a different Viva commit.
 No build, installer, updater, or user session is started.
 """
 
@@ -29,13 +33,18 @@ SIGNAL = re.compile(
 
 def inspect_file(path, content):
     """Return factual signals only; absence of a match says nothing about rights."""
-    text = content.decode("utf-8", errors="replace")
+    try:
+        text = content.decode("utf-8")
+        kind = "binary" if b"\0" in content else "text"
+    except UnicodeDecodeError:
+        text = content.decode("utf-8", errors="replace")
+        kind = "binary"
     signals = [
         {"line": i, "text": line.strip()}
         for i, line in enumerate(text.splitlines(), 1)
         if SIGNAL.search(line)
     ]
-    result = {"path": path, "sha256": hashlib.sha256(content).hexdigest()}
+    result = {"path": path, "sha256": hashlib.sha256(content).hexdigest(), "kind": kind}
     if signals:
         result["signals"] = signals
     return result
@@ -45,7 +54,8 @@ def cargo_inventory(metadata):
     result = []
     for package in metadata["packages"]:
         manifest = Path(package["manifest_path"])
-        # Never put local absolute paths, credentials, or the whole metadata in evidence.
+        # Export only selected Cargo fields, not local manifest/cache paths or full
+        # metadata. Historical raw command logs have a separate disclosure policy.
         result.append({
             "name": package["name"],
             "version": package["version"],
@@ -66,7 +76,7 @@ def inventory(metadata):
 
     # Read committed blobs, not cache directories or symlink targets.
     tree = git("ls-tree", "-rz", "HEAD:upstream/herdr")
-    signal_files, assets, zig_manifests = [], [], []
+    files, signal_files, assets, zig_manifests = [], [], [], []
     entries = tree.rstrip(b"\0").split(b"\0")
     oids = [entry.split(b"\t", 1)[0].split()[2] for entry in entries]
     # One Git process, not thousands of subprocesses for the full snapshot.
@@ -86,6 +96,10 @@ def inventory(metadata):
         content = blobs[end + 1:end + 1 + size]
         cursor = end + 2 + size
         fact = inspect_file(PREFIX + path, content)
+        if mode == "120000":
+            fact["kind"] = "symlink"
+        files.append({"path": fact["path"], "sha256": fact["sha256"],
+                      "kind": fact["kind"], "git_mode": mode})
         if fact.get("signals"):
             signal_files.append(fact)
         if path.startswith("assets/"):
@@ -93,11 +107,12 @@ def inventory(metadata):
         if path.endswith("build.zig.zon"):
             zig_manifests.append({**fact, "manifest": content.decode()})
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "warning": "Discovery evidence only. Not exhaustive legal review or proof of binary linkage.",
         "viva_commit": git("rev-parse", "HEAD").decode().strip(),
         "source_tree": git("rev-parse", "HEAD:upstream/herdr").decode().strip(),
         "tracked_files_scanned": len(entries),
+        "files": files,
         "cargo_scope": "cargo metadata --locked; all platforms, not a built-artifact SBOM",
         "cargo_packages": cargo_inventory(metadata),
         "source_signals": signal_files,

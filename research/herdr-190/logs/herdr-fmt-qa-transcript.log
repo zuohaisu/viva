@@ -1,0 +1,6 @@
+utc_start=2026-10-28T14:14:57Z
+cwd=upstream/herdr
+rustc 1.96.1 (31fca3adb 2026-06-26)
+$ cargo fmt --all -- --check
+exit_code=0
+utc_end=2026-10-28T14:15:03Z

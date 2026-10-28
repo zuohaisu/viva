@@ -1,5 +1,7 @@
+import hashlib
 import importlib.util
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
@@ -40,6 +42,37 @@ class InventoryTests(unittest.TestCase):
             self.assertIsNone(row["declared_license"])
             self.assertEqual(row["license_files_present"], ["LICENSE-MIT", "NOTICE.md"])
             self.assertNotIn(temp, str(row))
+
+
+class CommittedTreeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Exercise real Git traversal/batch framing without Cargo or network.
+        cls.result = audit.inventory({"packages": []})
+
+    def test_fixed_source_tree_counts_and_complete_file_records(self):
+        result = self.result
+        self.assertEqual(result["source_tree"], "98b3f4ed3ae4c238f3267fb22c5920256571e308")
+        self.assertEqual(result["tracked_files_scanned"], 2945)
+        self.assertEqual(len(result["files"]), 2945)
+        self.assertEqual(len({r["path"] for r in result["files"]}), 2945)
+        self.assertEqual(len(result["zig_manifests"]), 22)
+        self.assertEqual(len(result["assets"]), 8)
+
+    def test_binary_and_dotfile_hashes_match_independent_git_show(self):
+        records = {r["path"]: r for r in self.result["files"]}
+        for path, kind in [
+            ("vendor/libghostty-vt/pkg/freetype/res/FiraCode-Regular.ttf", "binary"),
+            ("vendor/libghostty-vt/src/terminal/kitty/testdata/dog.png", "binary"),
+            ("vendor/libghostty-vt/src/shell-integration/zsh/.zshenv", "text"),
+            ("Cargo.toml", "text"),
+            ("CLAUDE.md", "symlink"),
+        ]:
+            full_path = audit.PREFIX + path
+            with self.subTest(path=full_path):
+                blob = subprocess.check_output(["git", "show", "HEAD:" + full_path], cwd=audit.ROOT)
+                self.assertEqual(records[full_path]["sha256"], hashlib.sha256(blob).hexdigest())
+                self.assertEqual(records[full_path]["kind"], kind)
 
 
 if __name__ == "__main__":

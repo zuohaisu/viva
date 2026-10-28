@@ -1,0 +1,38 @@
+{
+  "source_commit": "ed7abd59715f522afb65af0a4ae1eb4108a5671f",
+  "path": "upstream/herdr/vendor/libghostty-vt/pkg/freetype/res/FiraCode-Regular.ttf",
+  "size": 289624,
+  "sha256": "5992ab9640e2df491b2f609467b1de60e8bc39b2c28db184342a0592d98f6117",
+  "sfnt_name_records": [
+    {
+      "name_id": 0,
+      "platform": 3,
+      "language": 1033,
+      "text": "Copyright 2014-2021 The Fira Code Project Authors (https://github.com/tonsky/FiraCode)"
+    },
+    {
+      "name_id": 1,
+      "platform": 3,
+      "language": 1033,
+      "text": "Fira Code"
+    },
+    {
+      "name_id": 5,
+      "platform": 3,
+      "language": 1033,
+      "text": "Version 6.002"
+    },
+    {
+      "name_id": 13,
+      "platform": 3,
+      "language": 1033,
+      "text": "This Font Software is licensed under the SIL Open Font License, Version 1.1. This license is available with a FAQ at: http://scripts.sil.org/OFL"
+    },
+    {
+      "name_id": 14,
+      "platform": 3,
+      "language": 1033,
+      "text": "http://scripts.sil.org/OFL"
+    }
+  ]
+}

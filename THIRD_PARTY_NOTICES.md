@@ -47,10 +47,22 @@ the actual package, not just link to this repository.
 ## #190 file-level follow-up (2026-10-28)
 
 The read-only inventory in [`research/herdr-190/inventory.json`](research/herdr-190/inventory.json)
-scans all 2,945 committed files (including dotfiles) and records 297 Cargo
-packages from official `cargo metadata --locked`, plus 22 Zig manifests and
-all eight top-level assets. Reproduce with
-[`tooling/herdr-audit/inventory.py`](tooling/herdr-audit/inventory.py). Matches
+records a path, SHA-256, kind and Git mode for **every one of the 2,945 committed
+blobs** (including dotfiles, binary fixtures and fonts outside `assets/`) in its
+schema-2 `files` list. `kind` is a UTF-8/NUL heuristic (or Git symlink mode), not
+a rights determination. It also records 297 Cargo packages from official
+`cargo metadata --locked`, 22 Zig manifests and the eight **top-level** assets.
+Schema 1 at `ed7abd5` read every blob but only retained matched text files,
+Zig manifests and top-level assets; it omitted binary fixtures such as Fira Code.
+Reproduce with
+[`tooling/herdr-audit/inventory.py`](tooling/herdr-audit/inventory.py). Its
+`viva_commit` is the running checkout's HEAD and will differ on later commits;
+compare `source_tree` and the other payload fields for cross-commit reproduction.
+The byte-identical repeat claim applies only to the same recorded HEAD and
+Cargo metadata. Run regression checks with
+`python3 -m unittest discover -s tooling/herdr-audit -v`; CI's existing
+`acceptance-tools` job now runs them against the real committed source tree.
+Matches
 are discovery signals, not license classification; no match does not mean
 permission exists. Cargo metadata covers all platforms, not actual linked
 objects. No successful binary exists from this validation run.
@@ -60,6 +72,8 @@ Further file-level exceptions and obligations identified in this pass:
 | Content | Evidence / source-distribution treatment | Binary/package follow-up |
 | --- | --- | --- |
 | Ghostty `src/shell-integration/zsh/.zshenv` | A **third** GPL-3.0-or-later script, previously omitted from this table; original full source/header retained; covered by the supplied GPL text | Check whether the actual artifact embeds/installs any of these scripts; do not infer aggregation or combined-work scope from a directory name |
+| Fira Code font in Ghostty `pkg/freetype/res/FiraCode-Regular.ttf` | Font `name` table: **Copyright 2014-2021 The Fira Code Project Authors (https://github.com/tonsky/FiraCode)**, version 6.002, explicitly **SIL Open Font License 1.1**. Full font-specific license/copyright supplied at [`licenses/OFL-1.1.txt`](licenses/OFL-1.1.txt); original font and embedded copyright untouched. Parsed metadata and SHA-256 are in [`font-evidence.json`](research/herdr-190/font-evidence.json) | This file is already redistributed in the source snapshot, independently of whether FreeType is linked. Retain font copyright and OFL text with every conveyed font copy; respect OFL sale/name/endorsement terms. Do not substitute FreeType's license or Ghostty MIT for OFL |
+| Ghostty `pkg/libpng/pnglibconf.h` | Header says libpng 1.6.38.git, retains Cosmin Truta and Glenn Randers-Pehrson copyright, and refers to a missing `png.h` license. Supply upstream 1.6.38's complete LICENSE at [`licenses/libpng-LICENSE.txt`](licenses/libpng-LICENSE.txt) (PNG Reference Library License v2 plus historical v1 text) | Manifest separately says 1.6.43. The release prebuilt header differs in its version and copyright-year lines; do not claim it is the exact imported revision. Preserve local copyright headers and verify the fixed downloaded dependency's LICENSE/NOTICE against B's real artifact |
 | Ghostty `pkg/libintl/libintl.h` | Header explicitly grants **LGPL-2.1-or-later**; full text now supplied at [`licenses/LGPL-2.1-or-later.txt`](licenses/LGPL-2.1-or-later.txt) | `pkg/libintl` describes gettext 0.24; do not assume this header means libintl is linked into the VT-only build. If combined/linked, assess the actual LGPL source/relinking obligations with qualified counsel |
 | Ghostty `src/input/keycodes.zig` | Header identifies Chromium's `dom_code_data.inc`; BSD text now supplied at [`licenses/Chromium-BSD-3-Clause.txt`](licenses/Chromium-BSD-3-Clause.txt). Referenced Chromium source bears Copyright 2013 The Chromium Authors; preserve that attribution alongside its license | Reproduce applicable copyright, conditions and disclaimer in package materials if included |
 | Ghostty `pkg/simdutf/vendor/simdutf.h` | Contains the full Facebook/Deepmind/NYU/NEC/IDIAP BSD notice (lines 966–1011), not covered merely by Ghostty MIT | Preserve that notice as well as simdutf's own license. Exact amalgamation provenance unresolved: Zig manifest says 5.2.8, embedded version constants say 9.0.0; do not treat manifest version alone as an SBOM |
@@ -70,6 +84,8 @@ Further file-level exceptions and obligations identified in this pass:
 
 New license text provenance (retrieved through GitHub's contents API):
 
+- Fira Code font-specific OFL text: tonsky/FiraCode commit `eee6db993696aba61ff4eef03698e2987d79910c` (tag 6.2), `LICENSE`, including its 2014 copyright. The font's own 2014–2021 copyright above is retained separately; font name-table metadata supplies its licensing declaration, not a claim that it matches the release binary byte-for-byte.
+- libpng text: pnggroup/libpng commit `0a158f3506502dfa23edfc42790dfaed82efba17` (v1.6.38), `LICENSE`. `scripts/pnglibconf.h.prebuilt` was compared: version and Cosmin Truta copyright-year lines differ from the imported header; all other lines match. Exact imported prebuilt revision remains unresolved, distinct from supplying the release's full license text.
 - LGPL text: SPDX license-list-data commit `f715b3660bb164c3d0b81cba9ce94e3c558c4048`, `text/LGPL-2.1-or-later.txt`.
 - Chromium BSD text: chromium/chromium commit `58d786a70944808688eb8571db6c00fa6566e307`, `LICENSE`; the referenced `ui/events/keycodes/dom/dom_code_data.inc` was also inspected at that commit. This establishes a notice source, not an exact historical revision of Ghostty's adapted table.
 
@@ -95,7 +111,12 @@ review. No release clearance is asserted here.
 
 ### Assets: unresolved, not approved for redistribution
 
-All eight assets have hashes in the inventory: `logo.png`, `logo.svg`,
+Binary/font/testdata files outside `assets/` now have `files` records as well;
+that visibility does not establish their permissions. Fira Code's explicit OFL
+notice is addressed above, not silently treated as an MIT/Apache asset. Remaining
+fixture and embedded-data provenance still needs review.
+
+The eight **top-level** assets have hashes in the inventory: `logo.png`, `logo.svg`,
 `og-card.png`, `screenshot.png`, `sounds/done.mp3`, `sounds/request.mp3`, and
 `sponsors/terminal-trove.{png,svg}`. No separate source/author/permission record
 was found in the tracked asset tree. This is an evidence gap, not a legal
