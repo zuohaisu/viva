@@ -1,0 +1,9 @@
+{
+  "args": [
+    "status",
+    "server"
+  ],
+  "returncode": 0,
+  "stdout": "status: not running\nsocket: /tmp/h190ui-h9_x6zp3/config/herdr-dev/sessions/qa190/herdr.sock\n",
+  "stderr": ""
+}

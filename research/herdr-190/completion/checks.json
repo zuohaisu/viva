@@ -2,6 +2,7 @@
   "note": "Exact UTF-8 command output stored as JSON strings to preserve terminal blank lines and whitespace without diff-check damage. Initial failed attempts are retained, not counted as success. Raw originals remain under /tmp/viva-190-completion. Absolute task/tool paths are not anonymized.",
   "index_scope": "Selected original-baseline validation attempts. Additional source/cache/CLI attestations are in baseline.json; file-writing PTY evidence is linked from its entry. This is not an inventory of every bootstrap/discovery command. QA follow-up reruns and their evidence are recorded separately below.",
   "qa_followup": "qa-followup.json",
+  "qa_followups": ["qa-followup.json", "qa-round2.json"],
   "checks": [
     {
       "log_name": "build-initial.log",
@@ -196,6 +197,7 @@
       "cwd": "Viva repository root",
       "exit_code": 0,
       "log_name": "audit-tests.log",
+      "capture_note": "Historical original-baseline run of 7 tests, not a live counter. The subsequent 8-test execution is in qa-followup.json; the current cleanup/scope repair execution is in qa-round2.json. CI run 40803203783 also executed this test step successfully on ca36ca84.",
       "log_sha256": "bf89b0ae6dc123c92f8c3cf2723c222f8ec97daa6cbbaa6510884ddb4fdbef25",
       "stdout_and_stderr": "test_binary_and_dotfile_hashes_match_independent_git_show (test_inventory.CommittedTreeTests.test_binary_and_dotfile_hashes_match_independent_git_show) ... ok\ntest_captured_native_notices_have_complete_hash_index (test_inventory.CommittedTreeTests.test_captured_native_notices_have_complete_hash_index) ... ok\ntest_fixed_source_tree_counts_and_complete_file_records (test_inventory.CommittedTreeTests.test_fixed_source_tree_counts_and_complete_file_records) ... ok\ntest_font_evidence_distinguishes_viva_commit_from_source_tree (test_inventory.CommittedTreeTests.test_font_evidence_distinguishes_viva_commit_from_source_tree) ... ok\ntest_file_level_exceptions_are_discovered_not_relicensed (test_inventory.InventoryTests.test_file_level_exceptions_are_discovered_not_relicensed) ... ok\ntest_metadata_keeps_unknown_license_and_omits_absolute_paths (test_inventory.InventoryTests.test_metadata_keeps_unknown_license_and_omits_absolute_paths) ... ok\ntest_opaque_asset_is_hashed_without_claiming_permission (test_inventory.InventoryTests.test_opaque_asset_is_hashed_without_claiming_permission) ... ok\n\n----------------------------------------------------------------------\nRan 7 tests in 9.982s\n\nOK\n",
       "scope": "7 tests; includes full 24-notice hash/provenance index coverage. Does not replace legal review or re-execute the raw runtime capture."
@@ -204,13 +206,24 @@
       "command": "git diff --cached --check",
       "cwd": "Viva repository root",
       "context": "Historical pre-6a98584 staged check, already recorded in baseline.json.diff_check; now included in this command index as well.",
+      "scope": "historical-staged",
       "exit_code": 2,
       "log_name": "diff-check.log",
       "log_sha256": "4a8f9306b7a5449788dbb56ce11473b1bc5352df360cf1c85a8cdb1bef698d94",
       "stdout_and_stderr": "licenses/herdr-native/pixels/LICENSE:117: new blank line at EOF.\n",
       "decision": "Preserve the copied upstream CC0 license byte-for-byte, including its final empty line. FAIL/warning remains disclosed, not suppressed or counted as PASS.",
-      "replay_command": "git diff --check origin/main...HEAD",
-      "replay_exit_code": 2
+      "comparison_note": "This staged-index command is not semantically equivalent to a branch-range comparison. The separate branch-range observation below happens to report the same warning for this branch."
+    },
+    {
+      "command": "git diff --check origin/main...HEAD",
+      "cwd": "Viva repository root",
+      "scope": "branch-range",
+      "recorded_range_end": "ca36ca84a16c9e5efacfa7272abb24a004201c57",
+      "exit_code": 2,
+      "log_name": "branch-range-diff-check.log",
+      "log_sha256": "4a8f9306b7a5449788dbb56ce11473b1bc5352df360cf1c85a8cdb1bef698d94",
+      "stdout_and_stderr": "licenses/herdr-native/pixels/LICENSE:117: new blank line at EOF.\n",
+      "comparison_note": "Independent branch-range check, not a replay of git diff --cached --check. Exact range tip is recorded; later follow-up-range checks are documented separately."
     }
   ]
 }

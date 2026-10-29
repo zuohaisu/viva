@@ -1,4 +1,6 @@
+from contextlib import redirect_stderr
 import gzip
+import io
 import hashlib
 import importlib.util
 import json
@@ -129,6 +131,72 @@ class CommittedTreeTests(unittest.TestCase):
         diff = next(c for c in entries if c["command"] == baseline["diff_check"]["command"])
         self.assertEqual(diff["exit_code"], baseline["diff_check"]["exit_code"])
         self.assertEqual(diff["stdout_and_stderr"], baseline["diff_check"]["output"])
+        self.assertEqual(diff["scope"], "historical-staged")
+        self.assertNotIn("replay_command", diff)
+        branch = next(c for c in entries if c["command"] == "git diff --check origin/main...HEAD")
+        self.assertEqual(branch["scope"], "branch-range")
+
+
+class CleanupTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        path = audit.ROOT / "research/herdr-190/completion/runtime_cleanup.py"
+        spec = importlib.util.spec_from_file_location("runtime_cleanup_helper", path)
+        cls.helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.helper)
+
+    def test_transient_status_failure_is_recorded_and_retried(self):
+        calls, report = [], {}
+        def cli(label, *args):
+            calls.append((label, args))
+            if args == ("server", "stop"):
+                return ""
+            if len(calls) == 2:
+                raise RuntimeError("temporary socket failure")
+            return "status: not running\nsocket: /task-owned.sock\n"
+        self.helper.stop_and_observe(cli, lambda _: None, report, clock=lambda: 0)
+        self.assertTrue(report["not_running"])
+        self.assertEqual(len(report["status_attempts"]), 2)
+        self.assertIn("temporary socket failure", report["status_attempts"][0]["error"])
+        self.assertNotEqual(calls[1][0], calls[2][0])
+
+    def test_status_failure_until_deadline_is_not_success(self):
+        report = {}
+        def cli(label, *args):
+            if args == ("server", "stop"):
+                return ""
+            raise RuntimeError("socket unavailable")
+        with self.assertRaises(TimeoutError):
+            self.helper.stop_and_observe(cli, lambda _: self.fail("no retry after deadline"),
+                                         report, timeout=0, clock=lambda: 0)
+        self.assertFalse(report["not_running"])
+        self.assertEqual(len(report["status_attempts"]), 1)
+
+    def test_cleanup_failure_does_not_mask_primary_error(self):
+        def cleanup():
+            raise RuntimeError("secondary cleanup error")
+        output = io.StringIO()
+        with self.assertRaisesRegex(ValueError, "original failure"):
+            with redirect_stderr(output), self.helper.preserving_primary_error(cleanup):
+                raise ValueError("original failure")
+        self.assertIn("secondary cleanup error", output.getvalue())
+
+    def test_closed_stderr_does_not_mask_primary_error(self):
+        class ClosedStderr:
+            def write(self, text):
+                raise OSError("stderr unavailable")
+        def cleanup():
+            raise RuntimeError("secondary cleanup error")
+        with self.assertRaisesRegex(ValueError, "original failure"):
+            with redirect_stderr(ClosedStderr()), self.helper.preserving_primary_error(cleanup):
+                raise ValueError("original failure")
+
+    def test_cleanup_failure_alone_still_fails_run(self):
+        def cleanup():
+            raise RuntimeError("cleanup failed")
+        with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
+            with self.helper.preserving_primary_error(cleanup):
+                pass
 
 
 if __name__ == "__main__":

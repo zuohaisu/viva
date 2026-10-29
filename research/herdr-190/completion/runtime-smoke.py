@@ -15,6 +15,7 @@ import termios
 import time
 
 import pyte
+from runtime_cleanup import preserving_primary_error, stop_and_observe
 
 args = argparse.ArgumentParser()
 args.add_argument('--binary', required=True)
@@ -113,7 +114,32 @@ def capture(label):
     (output/'events.json').write_text(json.dumps(events, indent=2)+'\n')
 
 checks = {}
-try:
+
+def cleanup():
+    # Only this invocation's unique sandbox/session; never a default/user server.
+    report = {}
+    try:
+        stop_and_observe(cli, pump, report)
+        # Alias the actual successful attempt; do not invent a second query.
+        (output/'server-status-after-stop.json').write_bytes(
+            (output/report['successful_status_evidence']).read_bytes())
+        capture('final')
+    finally:
+        for process, fd, *_ in clients:
+            try:
+                os.close(fd)
+            except OSError as error:
+                report.setdefault('close_errors', []).append(str(error))
+        (output/'cleanup.json').write_text(json.dumps(report, indent=2)+'\n')
+        (output/'result.json').write_text(json.dumps({'sandbox': str(root), 'binary': binary,
+            'checks': checks, 'human_visual_review': 'PENDING',
+            'server_status_evidence': 'server-status-after-stop.json' if report.get('not_running') else None,
+            'cleanup_evidence': 'cleanup.json',
+            'client_exits': [p.poll() for p, *_ in clients]}, indent=2)+'\n')
+        if report.get('close_errors'):
+            raise RuntimeError('Task client descriptor cleanup failed; see cleanup.json')
+
+with preserving_primary_error(cleanup):
     first = launch()
     panes = cli('startup', 'pane', 'list')['result']['panes']
     assert len(panes) == 1
@@ -169,23 +195,3 @@ try:
     capture('three-panes')
     send(second, b'\x02q', 'detach second client')
     assert clients[second][0].wait(timeout=5) == 0
-finally:
-    # Only this invocation's unique sandbox/session; no default/existing server.
-    cli('owned-server-stop', 'server', 'stop')
-    # A successful stop request alone is not a shutdown observation. Query only
-    # this invocation's named session until its status reports not running.
-    deadline = time.monotonic() + 5
-    while True:
-        status = cli('server-status-after-stop', 'status', 'server')
-        if isinstance(status, str) and 'status: not running' in status.splitlines():
-            break
-        if time.monotonic() >= deadline:
-            raise RuntimeError('Owned server did not report not running after stop')
-        pump(.1)
-    capture('final')
-    (output/'result.json').write_text(json.dumps({'sandbox': str(root), 'binary': binary,
-        'checks': checks, 'human_visual_review': 'PENDING',
-        'server_status_evidence': 'server-status-after-stop.json',
-        'client_exits': [p.poll() for p, *_ in clients]}, indent=2)+'\n')
-    for process, fd, *_ in clients:
-        os.close(fd)

@@ -1,0 +1,20 @@
+{
+  "sandbox": "/tmp/h190ui-h9_x6zp3",
+  "binary": "/Users/zuohaisu/orca/workspaces/viva/herdr/upstream/herdr/target/debug/herdr",
+  "checks": {
+    "startup_and_terminal_input": true,
+    "unicode_terminal_input": true,
+    "mouse_focus_routes_keyboard": true,
+    "mouse_scrollback": true,
+    "resize_reaches_layout": true,
+    "detach_attach_same_shell_and_terminals": true,
+    "vertical_and_horizontal_split": true
+  },
+  "human_visual_review": "PENDING",
+  "server_status_evidence": "server-status-after-stop.json",
+  "cleanup_evidence": "cleanup.json",
+  "client_exits": [
+    0,
+    0
+  ]
+}
