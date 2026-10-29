@@ -1,0 +1,11 @@
+{
+  "args": [
+    "pane",
+    "layout",
+    "--pane",
+    "w1:p1"
+  ],
+  "returncode": 0,
+  "stdout": "{\"id\":\"cli:pane:layout\",\"result\":{\"layout\":{\"area\":{\"height\":35,\"width\":94,\"x\":0,\"y\":0},\"focused_pane_id\":\"w1:p2\",\"panes\":[{\"focused\":false,\"pane_id\":\"w1:p1\",\"rect\":{\"height\":35,\"width\":47,\"x\":0,\"y\":0}},{\"focused\":true,\"pane_id\":\"w1:p2\",\"rect\":{\"height\":35,\"width\":47,\"x\":47,\"y\":0}}],\"splits\":[{\"direction\":\"right\",\"id\":\"split_0_root\",\"ratio\":0.5,\"rect\":{\"height\":35,\"width\":94,\"x\":0,\"y\":0}}],\"tab_id\":\"w1:t1\",\"workspace_id\":\"w1\",\"zoomed\":false},\"type\":\"pane_layout\"}}\n",
+  "stderr": ""
+}

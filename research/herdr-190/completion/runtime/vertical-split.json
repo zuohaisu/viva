@@ -1,0 +1,9 @@
+{
+  "args": [
+    "pane",
+    "list"
+  ],
+  "returncode": 0,
+  "stdout": "{\"id\":\"cli:pane:list\",\"result\":{\"panes\":[{\"agent_status\":\"unknown\",\"cwd\":\"/private/tmp/h190ui-zctrp092/work\",\"focused\":false,\"foreground_cwd\":\"/private/tmp/h190ui-zctrp092/work\",\"pane_id\":\"w1:p1\",\"revision\":0,\"scroll\":{\"max_offset_from_bottom\":0,\"offset_from_bottom\":0,\"viewport_rows\":33},\"tab_id\":\"w1:t1\",\"terminal_id\":\"term_65eea1ea7b3511\",\"workspace_id\":\"w1\"},{\"agent_status\":\"unknown\",\"cwd\":\"/private/tmp/h190ui-zctrp092/work\",\"focused\":true,\"foreground_cwd\":\"/private/tmp/h190ui-zctrp092/work\",\"pane_id\":\"w1:p2\",\"revision\":0,\"scroll\":{\"max_offset_from_bottom\":0,\"offset_from_bottom\":0,\"viewport_rows\":33},\"tab_id\":\"w1:t1\",\"terminal_id\":\"term_65eea1ee6e2222\",\"workspace_id\":\"w1\"}],\"type\":\"pane_list\"}}\n",
+  "stderr": ""
+}

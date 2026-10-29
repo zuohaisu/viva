@@ -1,0 +1,11 @@
+{
+  "args": [
+    "pane",
+    "process-info",
+    "--pane",
+    "w1:p2"
+  ],
+  "returncode": 0,
+  "stdout": "{\"id\":\"cli:pane:process_info\",\"result\":{\"process_info\":{\"foreground_process_group_id\":88847,\"foreground_processes\":[{\"argv\":[\"/bin/sh\"],\"argv0\":\"sh\",\"cmdline\":\"/bin/sh\",\"cwd\":\"/private/tmp/h190ui-zctrp092/work\",\"name\":\"bash\",\"pid\":88847}],\"pane_id\":\"w1:p2\",\"shell_pid\":88847},\"type\":\"pane_process_info\"}}\n",
+  "stderr": ""
+}

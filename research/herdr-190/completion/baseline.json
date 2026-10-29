@@ -1,0 +1,167 @@
+{
+  "viva_baseline": "48ce171f11a249de575df71d59d868caf1a1e1c4",
+  "herdr_source_commit": "e35f3937b0efe40ec0dab675709c68e1d8e8c9e6",
+  "source_tree": "98b3f4ed3ae4c238f3267fb22c5920256571e308",
+  "source_verification": "Fetched original fixed commit to a separate bare object store; FETCH_HEAD^{tree} equals HEAD:upstream/herdr. No original source file or pin changed.",
+  "binary": {
+    "path": "upstream/herdr/target/debug/herdr",
+    "sha256": "1618b899cbc0f618e796d81ae92ace7ecd11c65ba319b3e2674f0c2825ac4f22",
+    "version_output": "herdr 0.9.3\n",
+    "help_output": "herdr — terminal workspace manager for AI coding agents\n\nUsage: herdr [options]\n       herdr --session <name> [options]\n       herdr --machine <label-or-id> <command>\n       herdr --remote <ssh-target> [--session <name>]\n       herdr session attach <name>\n       herdr completion zsh\n       herdr update [--handoff]\n       herdr channel set <stable|preview>\n       herdr machine <subcommand> ...\n       herdr server stop\n       herdr server reload-config\n       herdr api <subcommand> ...\n       herdr completion <shell>\n       herdr config <subcommand> ...\n       herdr channel <subcommand> ...\n       herdr workspace <subcommand> ...\n       herdr worktree <subcommand> ...\n       herdr tab <subcommand> ...\n       herdr notification <subcommand> ...\n       herdr agent <subcommand> ...\n       herdr pane <subcommand> ...\n       herdr session <subcommand> ...\n       herdr integration <subcommand> ...\n\nCommon commands:\n  herdr                            Launch or attach to the persistent session\n  herdr status [server|client]     Show local client and running server status\n  herdr update                     Download and install the latest version\n  herdr completion zsh             Generate shell completions for zsh\n  herdr server stop                Stop the running server via the API socket\n  herdr channel set <stable|preview> Choose the stable or preview update channel\n  herdr server reload-config       Reload config.toml in the running server\n  herdr config reset-keys          Back up config.toml and remove custom keybindings\n  herdr channel <subcommand>       Manage the stable or preview update channel\n  herdr machine <subcommand>       Manage saved SSH machines\n  herdr api <subcommand>           Inspect socket API metadata and live runtime state\n  herdr workspace <subcommand>     Workspace helpers over the socket API\n  herdr worktree <subcommand>      Git worktree helpers over the socket API\n  herdr tab <subcommand>           Tab helpers over the socket API\n  herdr notification <subcommand>  Notification helpers over the socket API\n  herdr agent <subcommand>         Agent/terminal helpers over the socket API\n  herdr pane <subcommand>          Pane control helpers over the socket API\n  herdr session <subcommand>       Manage named persistent sessions\n  herdr integration <subcommand>   Manage built-in agent integrations\n\nAdvanced commands:\n  herdr server                     Run as headless server\n\nOptions:\n  --session <name>    Use or create a named persistent session\n  --machine <label-or-id>  Run an API command on a saved SSH machine\n  --remote <target>   Attach through SSH to a remote Herdr server\n  --remote-keybindings <local|server>\n                      Keybindings for --remote app attach (default: local)\n  --handoff           Opt into live handoff for update or remote attach\n  --default-config    Print default configuration and exit\n  --skill             Print the agent skill file and exit\n  --version, -V       Print version and exit\n  --help, -h          Show this help\n\nConfig: /tmp/h190cli/config/herdr-dev/config.toml\nLogs:   /tmp/h190cli/config/herdr-dev/herdr.log (plus herdr-client.log, herdr-server.log)\nEnv:    HERDR_CONFIG_PATH overrides config file path\nHome:   https://herdr.dev\n\nAre you an AI? Use these resources ONLY IF your task specifically asks you to:\n  Help a human understand or set up Herdr for the first time:\n    https://herdr.dev/agent-guide.md\n  Debug or investigate a problem with Herdr:\n    https://herdr.dev/llms.txt\n  Control Herdr panes, agents, or workspaces:\n    SKIP if a Herdr skill is already in your context. Otherwise run: herdr --skill\n",
+    "dynamic_libraries_otool": "upstream/herdr/target/debug/herdr:\n\t/System/Library/Frameworks/Carbon.framework/Versions/A/Carbon (compatibility version 2.0.0, current version 169.0.0)\n\t/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 1971.0.0)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1319.100.3)\n\t/usr/lib/libobjc.A.dylib (compatibility version 1.0.0, current version 228.0.0)\n\t/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation (compatibility version 300.0.0, current version 1971.0.0)\n\t/usr/lib/libiconv.2.dylib (compatibility version 7.0.0, current version 7.0.0)\n",
+    "distributed": false
+  },
+  "environment": {
+    "os": "Intel macOS 13.7.8 (22H730)",
+    "herdr_rust": "1.96.1",
+    "zig": "0.16.0",
+    "nextest": "0.9.150 (official universal archive SHA-256 82a759b4d218d38359424196ab244c470e8f7c7d149c814fbbeef4d67c3c301a verified)",
+    "git": "2.51.0 built from official git/git v2.51.0 in /tmp, no system Git change",
+    "sha256sum": "uutils coreutils 0.2.2 installed only in /tmp; genuine hashsum multicall binary, not a test shim",
+    "just": "1.59.0",
+    "bun": "1.4.4",
+    "python": "3.11.15",
+    "pty_renderer": "pyte 0.8.2 installed only under /tmp; supporting projection, not a physical terminal screenshot",
+    "zig_executable": "/tmp/viva-190/zig-x86_64-macos-0.16.0/zig",
+    "PATH_prefix": "/tmp/viva-190-completion/tools/bin:/tmp/viva-190/tools/bin:/tmp/viva-190/tools/node_modules/.bin",
+    "scope_note": "Git/sha256sum/just/nextest were installed in temporary paths for later checks, not retroactively used by earlier failed bootstrap commands; system Git and global config unchanged."
+  },
+  "cache_recovery": [
+    {
+      "url": "https://deps.files.ghostty.org/ghostty-themes-release-20260831-151010-752a9c0.tgz",
+      "archive": "ghostty-themes-release-20260831-151010-752a9c0.tgz",
+      "exit_code": 0,
+      "zig_fetch_exit": 0,
+      "zig_fetch_stdout": "N-V-__8AAEFmBABuDGOKxAI6VMg41b9euMZ-z7HS9EcUdaor",
+      "zig_fetch_stderr": ""
+    },
+    {
+      "url": "https://deps.files.ghostty.org/zlib-1220fed0c74e1019b3ee29edae2051788b080cd96e90d56836eea857b0b966742efb.tar.gz",
+      "archive": "zlib-1220fed0c74e1019b3ee29edae2051788b080cd96e90d56836eea857b0b966742efb.tar.gz",
+      "exit_code": 0,
+      "zig_fetch_exit": 0,
+      "zig_fetch_stdout": "N-V-__8AAB0eQwD-0MdOEBmz7intriBReIsIDNlukNVoNu6o",
+      "zig_fetch_stderr": ""
+    },
+    {
+      "url": "https://deps.files.ghostty.org/highway-66486a10623fa0d72fe91260f96c892e41aceb06.tar.gz",
+      "archive": "highway-66486a10623fa0d72fe91260f96c892e41aceb06.tar.gz",
+      "exit_code": 0,
+      "zig_fetch_exit": 0,
+      "zig_fetch_stdout": "N-V-__8AAGmZhABbsPJLfbqrh6JTHsXhY6qCaLAQyx25e0XE",
+      "zig_fetch_stderr": ""
+    },
+    {
+      "url": "https://deps.files.ghostty.org/pixels-12207ff340169c7d40c570b4b6a97db614fe47e0d83b5801a932dcd44917424c8806.tar.gz",
+      "archive": "pixels-12207ff340169c7d40c570b4b6a97db614fe47e0d83b5801a932dcd44917424c8806.tar.gz",
+      "exit_code": 0,
+      "zig_fetch_exit": 0,
+      "zig_fetch_stdout": "N-V-__8AADYiAAB_80AWnH1AxXC0tql9thT-R-DYO1gBqTLc",
+      "zig_fetch_stderr": ""
+    },
+    {
+      "component": "translate-c",
+      "fetched_from": "https://api.github.com/repos/moderatelyConfused/translate-c/tarball/4e879eb8aba615de112eabd1231ea6e01920cead",
+      "original_url_unchanged": "https://codeberg.org/vancluever/translate-c/archive/4e879eb8aba615de112eabd1231ea6e01920cead.tar.gz",
+      "expected_content_hash": "translate_c-0.0.0-Q_BUWhVNBwDOEcIqub4VFPJPB6D9dgwzUMHTX5KWr8Xr",
+      "actual_content_hash": "translate_c-0.0.0-Q_BUWhVNBwDOEcIqub4VFPJPB6D9dgwzUMHTX5KWr8Xr"
+    },
+    {
+      "component": "aro",
+      "fetched_from": "https://api.github.com/repos/vancluever/arocc/tarball/f97cdfc3779aec4b242299e2fc9a1c828c3547c6",
+      "original_url_unchanged": "https://github.com/vancluever/arocc/archive/f97cdfc3779aec4b242299e2fc9a1c828c3547c6.tar.gz",
+      "expected_content_hash": "aro-0.0.0-JSD1Qk6lNgDdcDV4Vh7Sfy-34m2TluIVOdPzMmj_0BjX",
+      "actual_content_hash": "aro-0.0.0-JSD1Qk6lNgDdcDV4Vh7Sfy-34m2TluIVOdPzMmj_0BjX"
+    }
+  ],
+  "blocked_origin": {
+    "original_git_exit": 128,
+    "message": "Your IP address has been blocked by Codeberg",
+    "raw_log_sha256": "9f6941e29bd6db82706026ed015d6c224215d4366401a6c7d78e881ca37e4251",
+    "privacy": "Egress IP omitted here; original raw response retained locally. No alternate IP, proxy rotation, credential change, or retry against the blocked origin was used.",
+    "independent_source": "Public GitHub repository contains the exact original commit. Content verified against the original Zig pin, not trusted on repository name alone."
+  },
+  "rejected_alternative": {
+    "source": "Zig bundled compiler/translate-c directory",
+    "content_hash": "N-V-__8AALsXBgDjVcacT9hwf9YbF1KSPrLaLivmBoMq5Tu6",
+    "used": false,
+    "reason": "Hash differs from original dependency pin; no source substitution allowed."
+  },
+  "simdutf": {
+    "local_h_and_cpp_exact_match": "ghostty-org/ghostty@e89cc0b34cd6a62d3a0f6e9b722a8306178dd901",
+    "fixed_ghostty_source_h_exact_match": "ghostty-org/ghostty@44f2a44df7e8c4a0c6df3f7d872ef3d7ead88e51",
+    "official_v9_release_comparison": [
+      {
+        "file": "simdutf.h",
+        "local_sha256": "d3501fc2143f0edc5c84e6bb013a7fdb8ccd95514f7fd0816669248e62676301",
+        "official_sha256": "171e12efccb8c2fa1540173eaddfbf35a3473780084bcb987f9f83d97a3e0d1d",
+        "byte_identical": false,
+        "same_after_first_line": false,
+        "diff_line_count": 4527,
+        "diff_preview": [
+          "--- \n",
+          "+++ \n",
+          "@@ -1,4 +1,4 @@\n",
+          "-/* auto-generated on 2026-04-21 21:46:47 -0400. Do not edit! */",
+          "+/* auto-generated on 2026-04-21 16:52:25 -0400. Do not edit! */",
+          " /* begin file include/simdutf.h */",
+          " #ifndef SIMDUTF_H",
+          " #define SIMDUTF_H",
+          "@@ -1307,13 +1307,27 @@\n",
+          " //      #   error(\"Please amalgamate simdutf with UTF-16 support\")",
+          " //      #endif",
+          " //"
+        ]
+      },
+      {
+        "file": "simdutf.cpp",
+        "local_sha256": "38dc5481dc4b7eef95cea8056b84d940419288100f317ecaff683bd89f163263",
+        "official_sha256": "7eec4caeed90990ed0eab76d9150641518bcef4f8917ff1530a3a91df6cc39c5",
+        "byte_identical": false,
+        "same_after_first_line": false,
+        "diff_line_count": 29183,
+        "diff_preview": [
+          "--- \n",
+          "+++ \n",
+          "@@ -1,8 +1,9 @@\n",
+          "-/* auto-generated on 2026-04-21 21:46:47 -0400. Do not edit! */",
+          "+/* auto-generated on 2026-04-21 16:52:25 -0400. Do not edit! */",
+          " /* begin file src/simdutf.cpp */",
+          " #include \"simdutf.h\"",
+          " ",
+          " /* begin file src/encoding_types.cpp */",
+          "+",
+          " namespace simdutf {",
+          " std::string_view to_string(encoding_type bom) {"
+        ]
+      }
+    ],
+    "interpretation": "Ghostty provenance is established; wrapper still says 5.2.8 and header says 9.0.0. Do not assert byte identity to the upstream release amalgamation."
+  },
+  "cleanup": {
+    "returncode": 0,
+    "stdout": "status: not running\nsocket: /tmp/h190ui-zctrp092/config/herdr-dev/sessions/qa190/herdr.sock\n",
+    "stderr": ""
+  },
+  "prototype_harness_corrections": [
+    "Pyte private report_device_status keyword compatibility (not a Herdr patch)",
+    "CLI pane read returns text, not JSON",
+    "pane process-info requires --pane, not a positional ID; confirmed against real --help"
+  ],
+  "remaining": [
+    "Top-level artwork/sounds/sponsor and other embedded-data provenance/permission disposition",
+    "objc2 fixed upstream LICENSE.md raises an Apple SDK derived-work licensing question: qualified review required, not an agent clearance",
+    "Themes fetched archive lacks root notice; not cleared if a future artifact includes it",
+    "Final package/runtime/compiler-rt and platform-specific notice payload verification belongs to B actual artifact",
+    "Windows SDK/MSVC checks unrun; SDK license not accepted or downloaded",
+    "Human visual review and independent QA of this delivery head"
+  ],
+  "status": "Original build, CLI, functional Rust tests and programmatic isolated TUI now have passing evidence; #190 is NOT fully closed or distribution-cleared.",
+  "cache_recovery_note": "The successful retry driver additionally verified the original Wuffs archive (checks.json hash_verified_fetches). uucode was already verified and seeded in the earlier #190 run; its raw archive was retained for supplemental notice recovery.",
+  "diff_check": {
+    "command": "git diff --cached --check",
+    "exit_code": 2,
+    "output": "licenses/herdr-native/pixels/LICENSE:117: new blank line at EOF.\n",
+    "decision": "Preserve the newly copied upstream CC0 license byte-for-byte, including its final empty line. This is a disclosed FAIL/warning, not a PASS or a disabled check. Original imported whitespace also remains untouched."
+  }
+}

@@ -1,0 +1,189 @@
+{
+  "scope": "Captured source/build-graph notices, NOT final artifact legal clearance or full SBOM",
+  "source_tree": "98b3f4ed3ae4c238f3267fb22c5920256571e308",
+  "target": "x86_64-apple-darwin",
+  "packages": [
+    {
+      "component": "highway",
+      "zig_content_hash": "N-V-__8AAGmZhABbsPJLfbqrh6JTHsXhY6qCaLAQyx25e0XE",
+      "role": "SIMD native headers",
+      "notices": [
+        {
+          "path": "licenses/herdr-native/highway/LICENSE",
+          "source": "verified Zig cache N-V-__8AAGmZhABbsPJLfbqrh6JTHsXhY6qCaLAQyx25e0XE/LICENSE",
+          "sha256": "43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1"
+        },
+        {
+          "path": "licenses/herdr-native/highway/LICENSE-BSD3",
+          "source": "verified Zig cache N-V-__8AAGmZhABbsPJLfbqrh6JTHsXhY6qCaLAQyx25e0XE/LICENSE-BSD3",
+          "sha256": "d25e82e26acd42ca3ccc9993622631163425b869b9e16284226d534cff6470f2"
+        }
+      ]
+    },
+    {
+      "component": "wuffs",
+      "zig_content_hash": "N-V-__8AAP5JWgCGP_AD0teWpa4krRvE9VPZzvviGdbmN4jI",
+      "role": "C image decoder compiled into native VT",
+      "notices": [
+        {
+          "path": "licenses/herdr-native/wuffs/LICENSE",
+          "source": "verified Zig cache N-V-__8AAP5JWgCGP_AD0teWpa4krRvE9VPZzvviGdbmN4jI/LICENSE",
+          "sha256": "f8ac2c75e7f629a87565c80d61ff9fe5aa15cdea0bda997d52a4dc13fdbd19cb"
+        },
+        {
+          "path": "licenses/herdr-native/wuffs/LICENSE-APACHE",
+          "source": "verified Zig cache N-V-__8AAP5JWgCGP_AD0teWpa4krRvE9VPZzvviGdbmN4jI/LICENSE-APACHE",
+          "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+        },
+        {
+          "path": "licenses/herdr-native/wuffs/LICENSE-MIT",
+          "source": "verified Zig cache N-V-__8AAP5JWgCGP_AD0teWpa4krRvE9VPZzvviGdbmN4jI/LICENSE-MIT",
+          "sha256": "bb811a4b485eac3caeb8bdc58bbafb355fbcb6116010a7ea9179e5c70b0bc878"
+        }
+      ]
+    },
+    {
+      "component": "zlib",
+      "zig_content_hash": "N-V-__8AAB0eQwD-0MdOEBmz7intriBReIsIDNlukNVoNu6o",
+      "role": "fetched build graph input; binary reachability not asserted",
+      "notices": [
+        {
+          "path": "licenses/herdr-native/zlib/LICENSE",
+          "source": "verified Zig cache N-V-__8AAB0eQwD-0MdOEBmz7intriBReIsIDNlukNVoNu6o/LICENSE",
+          "sha256": "845efc77857d485d91fb3e0b884aaa929368c717ae8186b66fe1ed2495753243"
+        }
+      ]
+    },
+    {
+      "component": "pixels",
+      "zig_content_hash": "N-V-__8AADYiAAB_80AWnH1AxXC0tql9thT-R-DYO1gBqTLc",
+      "role": "CC0 build graph image resources; binary reachability not asserted",
+      "notices": [
+        {
+          "path": "licenses/herdr-native/pixels/LICENSE",
+          "source": "verified Zig cache N-V-__8AADYiAAB_80AWnH1AxXC0tql9thT-R-DYO1gBqTLc/LICENSE",
+          "sha256": "6a1ee543e5282cd9061881edf462e6fdab181f328da71fc2c9a6950a80e94d01"
+        }
+      ]
+    },
+    {
+      "component": "translate-c",
+      "zig_content_hash": "translate_c-0.0.0-Q_BUWhVNBwDOEcIqub4VFPJPB6D9dgwzUMHTX5KWr8Xr",
+      "role": "build translator plus runtime-imported helpers",
+      "notices": [
+        {
+          "path": "licenses/herdr-native/translate-c/LICENSE",
+          "source": "verified Zig cache translate_c-0.0.0-Q_BUWhVNBwDOEcIqub4VFPJPB6D9dgwzUMHTX5KWr8Xr/LICENSE",
+          "sha256": "5c537d6853e005298a285d508cff9ac7192cea23576c840d485b2b586a7ff177"
+        }
+      ]
+    },
+    {
+      "component": "aro",
+      "zig_content_hash": "aro-0.0.0-JSD1Qk6lNgDdcDV4Vh7Sfy-34m2TluIVOdPzMmj_0BjX",
+      "role": "host compiler used by translate-c",
+      "notices": [
+        {
+          "path": "licenses/herdr-native/aro/LICENSE",
+          "source": "verified Zig cache aro-0.0.0-JSD1Qk6lNgDdcDV4Vh7Sfy-34m2TluIVOdPzMmj_0BjX/LICENSE",
+          "sha256": "0dd70fe17c4cffeba2c47f45af831acf5b83a063d2f561e4495740c162b663ac"
+        },
+        {
+          "path": "licenses/herdr-native/aro/LICENSE-UNICODE",
+          "source": "verified Zig cache aro-0.0.0-JSD1Qk6lNgDdcDV4Vh7Sfy-34m2TluIVOdPzMmj_0BjX/LICENSE-UNICODE",
+          "sha256": "361d7912957842f2ce61c774b14afba41ae91df84882982e6f7e749e01c07c91"
+        }
+      ]
+    },
+    {
+      "component": "uucode",
+      "zig_content_hash": "uucode-0.2.0-ZZjBPlK5VADj7fdoq7G8LIHzD5o6FSkcBXXrRWr4jnrA",
+      "role": "VT Unicode/grapheme code and generated tables",
+      "notices": [
+        {
+          "path": "licenses/herdr-native/uucode/LICENSE.md",
+          "source": "verified Zig cache uucode-0.2.0-ZZjBPlK5VADj7fdoq7G8LIHzD5o6FSkcBXXrRWr4jnrA/LICENSE.md",
+          "sha256": "312e901e142be2477b4ca859e9311f9e3f80d33372991759b7921c1893605f33"
+        },
+        {
+          "path": "licenses/herdr-native/uucode/licenses/LICENSE_Bjoern_Hoehrmann",
+          "source": "jacobsandlund/uucode@2826a37a4562284fdacd8fa029d49509cc9bffcd:licenses/LICENSE_Bjoern_Hoehrmann",
+          "sha256": "de219cece932aad5a817bf763393d8d149d378a15d2ad5320e3331eac07626dd",
+          "verified_git_blob": "40465d2d8cc6ad7928a6a1eeb048405cb2bca140"
+        },
+        {
+          "path": "licenses/herdr-native/uucode/licenses/LICENSE_unicode",
+          "source": "jacobsandlund/uucode@2826a37a4562284fdacd8fa029d49509cc9bffcd:licenses/LICENSE_unicode",
+          "sha256": "1eda5a3b026870c737b22e8bcd4954338612c790db688242e003f41a4fa95175",
+          "verified_git_blob": "de5a378198720a3b4ad23bb635cc0c3aae3bc853"
+        },
+        {
+          "path": "licenses/herdr-native/uucode/resources/wcwidth/LICENSE_go_runewidth.txt",
+          "source": "jacobsandlund/uucode@2826a37a4562284fdacd8fa029d49509cc9bffcd:resources/wcwidth/LICENSE_go_runewidth.txt",
+          "sha256": "3262c43bd97cfa4f1a5b422ed442e12e108532dff8959027cf34181fd5c75af9",
+          "verified_git_blob": "873bc7617284218ff0aa0fc581f13dc860424c40"
+        },
+        {
+          "path": "licenses/herdr-native/uucode/resources/wcwidth/LICENSE_unicode_width.txt",
+          "source": "jacobsandlund/uucode@2826a37a4562284fdacd8fa029d49509cc9bffcd:resources/wcwidth/LICENSE_unicode_width.txt",
+          "sha256": "ffcc2ba94b4bc45bdd3bcf060392a6a4f7a9a7d8e6c0c20564980b457414c14f",
+          "verified_git_blob": "491476e91bc9cf293b67b348ec23da63153ad70f"
+        },
+        {
+          "path": "licenses/herdr-native/uucode/resources/wcwidth/LICENSE_uniseg.txt",
+          "source": "jacobsandlund/uucode@2826a37a4562284fdacd8fa029d49509cc9bffcd:resources/wcwidth/LICENSE_uniseg.txt",
+          "sha256": "1d2052e47febb981b96cf55af26c75b18e95d2bba0eef402667767d77a31ce1c",
+          "verified_git_blob": "f6165e0627e68667705e0b21e7504d60beddcef2"
+        },
+        {
+          "path": "licenses/herdr-native/uucode/resources/wcwidth/LICENSE_utf8proc.md",
+          "source": "jacobsandlund/uucode@2826a37a4562284fdacd8fa029d49509cc9bffcd:resources/wcwidth/LICENSE_utf8proc.md",
+          "sha256": "99330706531f25ac1dd9f0af3949378dde0a8d7efe0df0a63c277bbdefa03bb2",
+          "verified_git_blob": "6cdd962c7845c89efb60ea092f5e411c677421ac"
+        },
+        {
+          "path": "licenses/herdr-native/uucode/resources/wcwidth/LICENSE_wcwidth.txt",
+          "source": "jacobsandlund/uucode@2826a37a4562284fdacd8fa029d49509cc9bffcd:resources/wcwidth/LICENSE_wcwidth.txt",
+          "sha256": "6fd572161e5f17245fb7aebb197f83b1b2b4cd0bf4e37501d0df2c5c1fad70df",
+          "verified_git_blob": "73109571013b12654bc6469ea435f4bbbf6a524f"
+        },
+        {
+          "path": "licenses/herdr-native/uucode/resources/wcwidth/LICENSE_zg.txt",
+          "source": "jacobsandlund/uucode@2826a37a4562284fdacd8fa029d49509cc9bffcd:resources/wcwidth/LICENSE_zg.txt",
+          "sha256": "9690cc89ee41d61fee939d5e17e3b3f03214cc0df766738664eef6efaee07079",
+          "verified_git_blob": "861e6bc8e997284a138af487e622dfa054ef685c"
+        },
+        {
+          "path": "licenses/herdr-native/uucode/resources/wcwidth/LICENSE_ziglyph.txt",
+          "source": "jacobsandlund/uucode@2826a37a4562284fdacd8fa029d49509cc9bffcd:resources/wcwidth/LICENSE_ziglyph.txt",
+          "sha256": "6d9534272d9d1a64993f772d3d234017af912cbf22894a49dc9678ec66d8fcdd",
+          "verified_git_blob": "dd9dc689e492b8500bf48881a24d40cf52b3fd34"
+        }
+      ]
+    },
+    {
+      "component": "themes",
+      "zig_content_hash": "N-V-__8AAEFmBABuDGOKxAI6VMg41b9euMZ-z7HS9EcUdaor",
+      "role": "fetched configuration graph resource, not established as binary content",
+      "notices": [],
+      "notice_status": "No root notice in fetched cache; not cleared for redistribution"
+    },
+    {
+      "component": "simdutf",
+      "role": "vendored SIMD header and C++ code",
+      "source": "ghostty-org/ghostty@44f2a44df7e8c4a0c6df3f7d872ef3d7ead88e51; exact h/cpp also at e89cc0b",
+      "notices": [
+        {
+          "path": "licenses/herdr-native/simdutf/LICENSE-MIT",
+          "source": "simdutf/simdutf@ca7acbcea967b5dcbab490066e99e3a6e6925539:LICENSE-MIT",
+          "sha256": "fc8dbc04e03ad4efc08a647ffe7f995b811a95bc04c0e85a56d5277c6593fa5f"
+        },
+        {
+          "path": "licenses/herdr-native/simdutf/BSD-isadetection.txt",
+          "source": "unmodified embedded BSD block in tracked pkg/simdutf/vendor/simdutf.h",
+          "sha256": "204bbed08ddeeecb362b4da36d3479a0167b7356a9d6024a24f9833affbe228a"
+        }
+      ]
+    }
+  ]
+}

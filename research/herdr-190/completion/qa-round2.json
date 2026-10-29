@@ -1,0 +1,107 @@
+{
+  "date_utc": "2026-10-29",
+  "reviewed_head": "ca36ca84a16c9e5efacfa7272abb24a004201c57",
+  "role": "Dev response and rerun, NOT independent QA",
+  "judgments": [
+    {
+      "finding": 1,
+      "judgment": "Not current: audit-tests.log is explicitly original 7-test history. qa-followup.json already retained the local 8-test output, and the current remote/CI also proved execution. Strengthen the historical label and latest-evidence navigation, do not replace past output."
+    },
+    {
+      "finding": 2,
+      "judgment": "Not current: both remote branch and PR head were ca36ca84 before this repair. CI run 40803203783 is success on that same SHA; its actual job log includes the new evidence-index test and Ran 8 tests. Likely report timing/snapshot difference, not grounds to claim all runtime independently reproduced."
+    },
+    {
+      "finding": 3,
+      "judgment": "Correct disclosed historical difference, not a defect: original runtime/ remains the original producer output. New runs are separate qa-rerun/ and qa-round2-rerun/; producer implementation hashes are recorded."
+    },
+    {
+      "finding": 4,
+      "judgment": "Confirmed and reproduced from the exact ca36ca84 finally AST with deterministic callbacks. It replaced ValueError with cleanup RuntimeError and aborted on the first transient status failure.",
+      "fix": "Reuse existing CLI through a pure cleanup helper: record unique per-attempt status evidence, bounded retries, timeout remains a failed run, and preserve the primary exception while reporting cleanup errors. Cleanup-only failure still fails. Best-effort stderr failure also cannot replace the primary error."
+    },
+    {
+      "finding": 5,
+      "judgment": "Confirmed: staged index and origin/main...HEAD have different scopes, even if they currently report the same warning.",
+      "fix": "Remove replay naming. Keep historical-staged and branch-range as independent indexed records with their own command, scope and observed endpoint. Do not claim command equivalence."
+    }
+  ],
+  "existing_remote_execution_evidence": {
+    "pr_head_verified_before_fix": "ca36ca84a16c9e5efacfa7272abb24a004201c57",
+    "ci_run": "https://github.com/zuohaisu/viva/actions/runs/40803203783",
+    "ci_head": "ca36ca84a16c9e5efacfa7272abb24a004201c57",
+    "ci_conclusion": "success",
+    "job": "acceptance-tools / 123215908097",
+    "actual_job_log_excerpt": [
+      "acceptance-tools\tUNKNOWN STEP\t2026-10-29T01:54:35.7744730Z test_completion_index_links_file_results_and_failed_diff_check (test_inventory.CommittedTreeTests.test_completion_index_links_file_results_and_failed_diff_check) ... ok",
+      "acceptance-tools\tUNKNOWN STEP\t2026-10-29T01:54:35.7774152Z Ran 8 tests in 4.569s"
+    ]
+  },
+  "validation": {
+    "pre_fix_cleanup_probe": {
+      "implementation_commit": "ca36ca84a16c9e5efacfa7272abb24a004201c57",
+      "method": "Execute the exact original finally AST with deterministic failing CLI callbacks, no real process or socket. Unit-level reproduction, not runtime evidence.",
+      "results": [
+        {
+          "case": "primary_failure",
+          "observed_type": "RuntimeError",
+          "observed_message": "cleanup failure",
+          "cli_calls": [
+            [
+              "owned-server-stop",
+              "server",
+              "stop"
+            ]
+          ]
+        },
+        {
+          "case": "transient_status_error",
+          "observed_type": "RuntimeError",
+          "observed_message": "transient status failure",
+          "cli_calls": [
+            [
+              "owned-server-stop",
+              "server",
+              "stop"
+            ],
+            [
+              "server-status-after-stop",
+              "status",
+              "server"
+            ]
+          ]
+        }
+      ]
+    },
+    "unit_command": "python3.11 -m unittest discover -s tooling/herdr-audit -v",
+    "unit_exit_code": 0,
+    "unit_result": "13 passed: 8 existing audit checks plus 5 deterministic cleanup tests. Callback tests are unit logic only, not substituted for real binary evidence.",
+    "unit_stdout_and_stderr": "test_cleanup_failure_alone_still_fails_run (test_inventory.CleanupTests.test_cleanup_failure_alone_still_fails_run) ... ok\ntest_cleanup_failure_does_not_mask_primary_error (test_inventory.CleanupTests.test_cleanup_failure_does_not_mask_primary_error) ... ok\ntest_closed_stderr_does_not_mask_primary_error (test_inventory.CleanupTests.test_closed_stderr_does_not_mask_primary_error) ... ok\ntest_status_failure_until_deadline_is_not_success (test_inventory.CleanupTests.test_status_failure_until_deadline_is_not_success) ... ok\ntest_transient_status_failure_is_recorded_and_retried (test_inventory.CleanupTests.test_transient_status_failure_is_recorded_and_retried) ... ok\ntest_binary_and_dotfile_hashes_match_independent_git_show (test_inventory.CommittedTreeTests.test_binary_and_dotfile_hashes_match_independent_git_show) ... ok\ntest_captured_native_notices_have_complete_hash_index (test_inventory.CommittedTreeTests.test_captured_native_notices_have_complete_hash_index) ... ok\ntest_completion_index_links_file_results_and_failed_diff_check (test_inventory.CommittedTreeTests.test_completion_index_links_file_results_and_failed_diff_check) ... ok\ntest_fixed_source_tree_counts_and_complete_file_records (test_inventory.CommittedTreeTests.test_fixed_source_tree_counts_and_complete_file_records) ... ok\ntest_font_evidence_distinguishes_viva_commit_from_source_tree (test_inventory.CommittedTreeTests.test_font_evidence_distinguishes_viva_commit_from_source_tree) ... ok\ntest_file_level_exceptions_are_discovered_not_relicensed (test_inventory.InventoryTests.test_file_level_exceptions_are_discovered_not_relicensed) ... ok\ntest_metadata_keeps_unknown_license_and_omits_absolute_paths (test_inventory.InventoryTests.test_metadata_keeps_unknown_license_and_omits_absolute_paths) ... ok\ntest_opaque_asset_is_hashed_without_claiming_permission (test_inventory.InventoryTests.test_opaque_asset_is_hashed_without_claiming_permission) ... ok\n\n----------------------------------------------------------------------\nRan 13 tests in 4.989s\n\nOK\n",
+    "real_runtime_command": "PYTHONPATH=/tmp/viva-190-completion/pyte python3.11 research/herdr-190/completion/runtime-smoke.py --binary upstream/herdr/target/debug/herdr --output /tmp/viva-193-qa-round2/runtime-final",
+    "real_runtime_exit_code": 0,
+    "real_runtime_result": "Seven real PTY scenarios passed; client exits 0,0; separate cleanup report/status attempt observes not running. This normal-path real binary run does not claim real transient socket errors were induced.",
+    "runtime_evidence": [
+      "qa-round2-rerun/result.json",
+      "qa-round2-rerun/cleanup.json",
+      "qa-round2-rerun/server-status-after-stop.json",
+      "qa-round2-rerun/server-status-after-stop-attempt-1.json"
+    ],
+    "implementation_sha256": {
+      "runtime-smoke.py": "acb63e7b19d610a2aaf121a06bfb0a3722584f14d8e39b87f905bad35dec6614",
+      "runtime_cleanup.py": "bc5ef9274061f930e1d88a8d9f02b7307629163d5ae424e01ee039cd0c9b35a2"
+    },
+    "binary_sha256_unchanged": "1618b899cbc0f618e796d81ae92ace7ecd11c65ba319b3e2674f0c2825ac4f22",
+    "full_branch_check": {
+      "command": "git diff --check origin/main...HEAD",
+      "exit_code": 2,
+      "stdout_and_stderr": "licenses/herdr-native/pixels/LICENSE:117: new blank line at EOF.\n",
+      "scope_note": "Full branch, not staged index. Existing raw CC0 terminal blank line remains; no warning suppression or license changes."
+    }
+  },
+  "limits": [
+    "No upstream source, dependency, package version, default Viva entry, user data/session or permissions changed. Only task-owned unique named test session stopped.",
+    "Original logs/results remain historical; new evidence is separately identified, not retroactively reassigned.",
+    "Did not locally rerun the full upstream nextest/maintenance or root Rust suite for this script/index repair; new-head required CI runs root checks separately.",
+    "Independent runtime reproduction, human visual review, Windows/ARM, media/legal and distribution obligations remain pending. No merge, publish, issue closure or #191 activation."
+  ]
+}

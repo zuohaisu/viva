@@ -1,3 +1,6 @@
+from contextlib import redirect_stderr
+import gzip
+import io
 import hashlib
 import importlib.util
 import json
@@ -86,6 +89,114 @@ class CommittedTreeTests(unittest.TestCase):
         self.assertEqual(evidence["source_tree"], self.result["source_tree"])
         records = {r["path"]: r for r in self.result["files"]}
         self.assertEqual(evidence["sha256"], records[evidence["path"]]["sha256"])
+
+    def test_captured_native_notices_have_complete_hash_index(self):
+        folder = audit.ROOT / "research/herdr-190/completion"
+        native = json.loads((folder / "native-notices.json").read_text())
+        cargo = json.loads((folder / "cargo-target-notices.json").read_text())
+        notices = [n for p in native["packages"] for n in p["notices"]]
+        notices += [{"path": n["notice_path"], "sha256": n["sha256"]}
+                    for n in cargo["workspace_notice_fallbacks"]]
+        for notice in notices:
+            with self.subTest(path=notice["path"]):
+                path = Path(notice["path"])
+                self.assertFalse(path.is_absolute())
+                self.assertNotIn("..", path.parts)
+                self.assertEqual(hashlib.sha256((audit.ROOT / path).read_bytes()).hexdigest(),
+                                 notice["sha256"])
+        indexed = {n["path"] for n in notices if n["path"].startswith("licenses/herdr-native/")}
+        present = {str(p.relative_to(audit.ROOT))
+                   for p in (audit.ROOT / "licenses/herdr-native").rglob("*") if p.is_file()}
+        self.assertEqual(indexed, present, "Every copied notice must have provenance/hash evidence")
+
+    def test_completion_index_links_file_results_and_failed_diff_check(self):
+        folder = audit.ROOT / "research/herdr-190/completion"
+        baseline = json.loads((folder / "baseline.json").read_text())
+        entries = json.loads((folder / "checks.json").read_text())["checks"]
+        runtime = next(c for c in entries if c["log_name"] == "runtime-smoke.log")
+        self.assertIn("runtime/result.json", runtime["evidence"])
+        self.assertIn("runtime/server-status-after-stop.json", runtime["evidence"])
+        for name in runtime["evidence"]:
+            with self.subTest(path=name):
+                self.assertFalse(Path(name).is_absolute())
+                self.assertNotIn("..", Path(name).parts)
+                self.assertTrue((folder / name).is_file())
+                if name.endswith(".gz"):
+                    self.assertTrue(gzip.decompress((folder / name).read_bytes()))
+        observed = json.loads((folder / "runtime/server-status-after-stop.json").read_text())
+        self.assertEqual(observed["args"], ["status", "server"])
+        for key in ("returncode", "stdout", "stderr"):
+            self.assertEqual(observed[key], baseline["cleanup"][key])
+        self.assertIn("status: not running", observed["stdout"].splitlines())
+        diff = next(c for c in entries if c["command"] == baseline["diff_check"]["command"])
+        self.assertEqual(diff["exit_code"], baseline["diff_check"]["exit_code"])
+        self.assertEqual(diff["stdout_and_stderr"], baseline["diff_check"]["output"])
+        self.assertEqual(diff["scope"], "historical-staged")
+        self.assertNotIn("replay_command", diff)
+        branch = next(c for c in entries if c["command"] == "git diff --check origin/main...HEAD")
+        self.assertEqual(branch["scope"], "branch-range")
+
+
+class CleanupTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        path = audit.ROOT / "research/herdr-190/completion/runtime_cleanup.py"
+        spec = importlib.util.spec_from_file_location("runtime_cleanup_helper", path)
+        cls.helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.helper)
+
+    def test_transient_status_failure_is_recorded_and_retried(self):
+        calls, report = [], {}
+        def cli(label, *args):
+            calls.append((label, args))
+            if args == ("server", "stop"):
+                return ""
+            if len(calls) == 2:
+                raise RuntimeError("temporary socket failure")
+            return "status: not running\nsocket: /task-owned.sock\n"
+        self.helper.stop_and_observe(cli, lambda _: None, report, clock=lambda: 0)
+        self.assertTrue(report["not_running"])
+        self.assertEqual(len(report["status_attempts"]), 2)
+        self.assertIn("temporary socket failure", report["status_attempts"][0]["error"])
+        self.assertNotEqual(calls[1][0], calls[2][0])
+
+    def test_status_failure_until_deadline_is_not_success(self):
+        report = {}
+        def cli(label, *args):
+            if args == ("server", "stop"):
+                return ""
+            raise RuntimeError("socket unavailable")
+        with self.assertRaises(TimeoutError):
+            self.helper.stop_and_observe(cli, lambda _: self.fail("no retry after deadline"),
+                                         report, timeout=0, clock=lambda: 0)
+        self.assertFalse(report["not_running"])
+        self.assertEqual(len(report["status_attempts"]), 1)
+
+    def test_cleanup_failure_does_not_mask_primary_error(self):
+        def cleanup():
+            raise RuntimeError("secondary cleanup error")
+        output = io.StringIO()
+        with self.assertRaisesRegex(ValueError, "original failure"):
+            with redirect_stderr(output), self.helper.preserving_primary_error(cleanup):
+                raise ValueError("original failure")
+        self.assertIn("secondary cleanup error", output.getvalue())
+
+    def test_closed_stderr_does_not_mask_primary_error(self):
+        class ClosedStderr:
+            def write(self, text):
+                raise OSError("stderr unavailable")
+        def cleanup():
+            raise RuntimeError("secondary cleanup error")
+        with self.assertRaisesRegex(ValueError, "original failure"):
+            with redirect_stderr(ClosedStderr()), self.helper.preserving_primary_error(cleanup):
+                raise ValueError("original failure")
+
+    def test_cleanup_failure_alone_still_fails_run(self):
+        def cleanup():
+            raise RuntimeError("cleanup failed")
+        with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
+            with self.helper.preserving_primary_error(cleanup):
+                pass
 
 
 if __name__ == "__main__":

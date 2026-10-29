@@ -1,0 +1,12 @@
+{
+  "args": [
+    "pane",
+    "read",
+    "w1:p2",
+    "--source",
+    "visible"
+  ],
+  "returncode": 0,
+  "stdout": "__ROW_045__\n__ROW_046__\n__ROW_047__\n__ROW_048__\n__ROW_049__\n__ROW_050__\n__ROW_051__\n__ROW_052__\n__ROW_053__\n__ROW_054__\n__ROW_055__\n__ROW_056__\n__ROW_057__\n__ROW_058__\n__ROW_059__\n__ROW_060__\n__ROW_061__\n__ROW_062__\n__ROW_063__\n__ROW_064__\n__ROW_065__\n__ROW_066__\n__ROW_067__\n__ROW_068__\n__ROW_069__\n__ROW_070__\n__ROW_071__\n__ROW_072__\n__ROW_073__\n__ROW_074__\n__ROW_075__\n__ROW_076__\n__ROW_077__\n",
+  "stderr": ""
+}

@@ -1,0 +1,7 @@
+{
+  "args": ["status", "server"],
+  "returncode": 0,
+  "stdout": "status: not running\nsocket: /tmp/h190ui-zctrp092/config/herdr-dev/sessions/qa190/herdr.sock\n",
+  "stderr": "",
+  "evidence_origin": "Original capture's post-stop status observation, already committed in baseline.json.cleanup at 6a985844b584fe1f130fbd1e552bf27a56890fe4 and retained locally in smoke-stop-status.json. This supplement exposes that existing observation in runtime/, not a new observation retroactively assigned to the original run."
+}

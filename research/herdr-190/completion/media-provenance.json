@@ -1,0 +1,139 @@
+{
+  "scope": "8 top-level media files; no user-data files read; no current or historical source assets deleted",
+  "assets": [
+    {
+      "path": "upstream/herdr/assets/og-card.png",
+      "sha256": "75e0422c47b290527f0d27d8d75839c0578fb63bc09c27901a641ed34b6d8b13",
+      "source_commit": "e35f3937b0efe40ec0dab675709c68e1d8e8c9e6",
+      "history_scope": "up to 5 most recent path commits at the fixed original source; not an authorship or permission certificate",
+      "history": [
+        {
+          "commit": "41a0269de8594a66f010db48b569567f2aa9c3f2",
+          "message": "add og card screenshot",
+          "author_login": "ogulcancelik",
+          "url": "https://github.com/zuohaisu/herdr/commit/41a0269de8594a66f010db48b569567f2aa9c3f2"
+        }
+      ],
+      "permission_state": "UNRESOLVED: no independent grant established by this history lookup",
+      "next_action": "Owner to supply origin/permission or decide explicit omission/replacement; qualified review for unresolved scope. History alone does not clear third-party media/trademark rights."
+    },
+    {
+      "path": "upstream/herdr/assets/screenshot.png",
+      "sha256": "fb762101ab5128fcf1faf70a1360c067e7f2d904c9590da191062f61e4688d27",
+      "source_commit": "e35f3937b0efe40ec0dab675709c68e1d8e8c9e6",
+      "history_scope": "up to 5 most recent path commits at the fixed original source; not an authorship or permission certificate",
+      "history": [
+        {
+          "commit": "72f36fb2d95f32d87b051e708a29837f09bdb58b",
+          "message": "docs: update readme screenshot, remove demo video",
+          "author_login": "ogulcancelik",
+          "url": "https://github.com/zuohaisu/herdr/commit/72f36fb2d95f32d87b051e708a29837f09bdb58b"
+        },
+        {
+          "commit": "a57b97285c3308fbdcc167ab3da9ae1dd78767b6",
+          "message": "initial release\n\nterminal workspace manager for AI coding agents.\nsingle rust binary, runs inside your existing terminal.\nworkspaces, tiled panes, intelligent agent state detection.\n\nhttps://herdr.dev",
+          "author_login": "ogulcancelik",
+          "url": "https://github.com/zuohaisu/herdr/commit/a57b97285c3308fbdcc167ab3da9ae1dd78767b6"
+        }
+      ],
+      "permission_state": "UNRESOLVED: no independent grant established by this history lookup",
+      "next_action": "Owner to supply origin/permission or decide explicit omission/replacement; qualified review for unresolved scope. History alone does not clear third-party media/trademark rights."
+    },
+    {
+      "path": "upstream/herdr/assets/logo.png",
+      "sha256": "56fc2db845c16eb521022549890fbe239659957caee1f4fc718a634d7a66cf0a",
+      "source_commit": "e35f3937b0efe40ec0dab675709c68e1d8e8c9e6",
+      "history_scope": "up to 5 most recent path commits at the fixed original source; not an authorship or permission certificate",
+      "history": [
+        {
+          "commit": "a57b97285c3308fbdcc167ab3da9ae1dd78767b6",
+          "message": "initial release\n\nterminal workspace manager for AI coding agents.\nsingle rust binary, runs inside your existing terminal.\nworkspaces, tiled panes, intelligent agent state detection.\n\nhttps://herdr.dev",
+          "author_login": "ogulcancelik",
+          "url": "https://github.com/zuohaisu/herdr/commit/a57b97285c3308fbdcc167ab3da9ae1dd78767b6"
+        }
+      ],
+      "permission_state": "UNRESOLVED: no independent grant established by this history lookup",
+      "next_action": "Owner to supply origin/permission or decide explicit omission/replacement; qualified review for unresolved scope. History alone does not clear third-party media/trademark rights."
+    },
+    {
+      "path": "upstream/herdr/assets/logo.svg",
+      "sha256": "f4a8400d515fcf50112a952a5b48f5fa6e6b02b4dcb0b483ca92be39f7d7f7a1",
+      "source_commit": "e35f3937b0efe40ec0dab675709c68e1d8e8c9e6",
+      "history_scope": "up to 5 most recent path commits at the fixed original source; not an authorship or permission certificate",
+      "history": [
+        {
+          "commit": "fb94fff98dbcd88d9332a182dea4040c5de84fff",
+          "message": "docs: finish website redesign",
+          "author_login": "ogulcancelik",
+          "url": "https://github.com/zuohaisu/herdr/commit/fb94fff98dbcd88d9332a182dea4040c5de84fff"
+        }
+      ],
+      "permission_state": "UNRESOLVED: no independent grant established by this history lookup",
+      "next_action": "Owner to supply origin/permission or decide explicit omission/replacement; qualified review for unresolved scope. History alone does not clear third-party media/trademark rights."
+    },
+    {
+      "path": "upstream/herdr/assets/sounds/done.mp3",
+      "sha256": "cb9c93492c808e33946edac2ab5915758267e65914bc4b794a5ca6dc6e655741",
+      "source_commit": "e35f3937b0efe40ec0dab675709c68e1d8e8c9e6",
+      "history_scope": "up to 5 most recent path commits at the fixed original source; not an authorship or permission certificate",
+      "history": [
+        {
+          "commit": "0403775fd2a9458417c5349d5441125ab9b2553c",
+          "message": "feat: sound notifications for agent state changes\n\nplay a chime when an agent finishes work and an alert when one needs\ninput. only triggers for background workspaces. configurable via\nsound = true/false under [ui] in config.",
+          "author_login": "ogulcancelik",
+          "url": "https://github.com/zuohaisu/herdr/commit/0403775fd2a9458417c5349d5441125ab9b2553c"
+        }
+      ],
+      "permission_state": "UNRESOLVED: no independent grant established by this history lookup",
+      "next_action": "Owner to supply origin/permission or decide explicit omission/replacement; qualified review for unresolved scope. History alone does not clear third-party media/trademark rights."
+    },
+    {
+      "path": "upstream/herdr/assets/sounds/request.mp3",
+      "sha256": "44c077ce28a0a48cec29da204beb627fd17140e5bde1f92dbaecf3d478bdda6f",
+      "source_commit": "e35f3937b0efe40ec0dab675709c68e1d8e8c9e6",
+      "history_scope": "up to 5 most recent path commits at the fixed original source; not an authorship or permission certificate",
+      "history": [
+        {
+          "commit": "0403775fd2a9458417c5349d5441125ab9b2553c",
+          "message": "feat: sound notifications for agent state changes\n\nplay a chime when an agent finishes work and an alert when one needs\ninput. only triggers for background workspaces. configurable via\nsound = true/false under [ui] in config.",
+          "author_login": "ogulcancelik",
+          "url": "https://github.com/zuohaisu/herdr/commit/0403775fd2a9458417c5349d5441125ab9b2553c"
+        }
+      ],
+      "permission_state": "UNRESOLVED: no independent grant established by this history lookup",
+      "next_action": "Owner to supply origin/permission or decide explicit omission/replacement; qualified review for unresolved scope. History alone does not clear third-party media/trademark rights."
+    },
+    {
+      "path": "upstream/herdr/assets/sponsors/terminal-trove.svg",
+      "sha256": "c9ede5ac7b4ed087de90aab7c31ceab3faacdb711684a21d85970c8d4c57cf34",
+      "source_commit": "e35f3937b0efe40ec0dab675709c68e1d8e8c9e6",
+      "history_scope": "up to 5 most recent path commits at the fixed original source; not an authorship or permission certificate",
+      "history": [
+        {
+          "commit": "e8174caeb7dd2fc68898644d7cb996c7140f428c",
+          "message": "docs: lean readme, add terminal trove gold sponsor",
+          "author_login": "ogulcancelik",
+          "url": "https://github.com/zuohaisu/herdr/commit/e8174caeb7dd2fc68898644d7cb996c7140f428c"
+        }
+      ],
+      "permission_state": "UNRESOLVED: no independent grant established by this history lookup",
+      "next_action": "Owner to supply origin/permission or decide explicit omission/replacement; qualified review for unresolved scope. History alone does not clear third-party media/trademark rights."
+    },
+    {
+      "path": "upstream/herdr/assets/sponsors/terminal-trove.png",
+      "sha256": "7cacfaf715fa9b71aa20c8a37203f0f24107818b08ac91651704f00cd6128b2f",
+      "source_commit": "e35f3937b0efe40ec0dab675709c68e1d8e8c9e6",
+      "history_scope": "up to 5 most recent path commits at the fixed original source; not an authorship or permission certificate",
+      "history": [
+        {
+          "commit": "e8174caeb7dd2fc68898644d7cb996c7140f428c",
+          "message": "docs: lean readme, add terminal trove gold sponsor",
+          "author_login": "ogulcancelik",
+          "url": "https://github.com/zuohaisu/herdr/commit/e8174caeb7dd2fc68898644d7cb996c7140f428c"
+        }
+      ],
+      "permission_state": "UNRESOLVED: no independent grant established by this history lookup",
+      "next_action": "Owner to supply origin/permission or decide explicit omission/replacement; qualified review for unresolved scope. History alone does not clear third-party media/trademark rights."
+    }
+  ]
+}

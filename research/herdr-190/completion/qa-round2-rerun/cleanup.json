@@ -1,0 +1,10 @@
+{
+  "not_running": true,
+  "status_attempts": [
+    {
+      "evidence": "server-status-after-stop-attempt-1.json",
+      "status": "status: not running\nsocket: /tmp/h190ui-h9_x6zp3/config/herdr-dev/sessions/qa190/herdr.sock\n"
+    }
+  ],
+  "successful_status_evidence": "server-status-after-stop-attempt-1.json"
+}
