@@ -175,10 +175,21 @@ The follow-up keeps the original upstream tree and earlier evidence unchanged.
   libcxx/libcxxabi/libunwind notices. This is a mixed-platform superset, not proof
   that every listed component is linked; do not infer whole-product MPL/GPL
   obligations or clearance merely from the superset.
-- Remaining embedded-data review explicitly includes Nerd Font outlines in
-  `font/glyf_rasterize_png_test.zig`, the Kitty-derived diacritic selection and
-  four binary Kitty fixtures. The sprite/PNG test generators are provenance
-  evidence, not independent authorship certificates. These are not silently
+- **Font-data exception:** the five base64 glyphs in
+  `font/glyf_rasterize_png_test.zig` match the pinned NF 3.4.0 JetBrainsMono font's
+  decoded outlines and canonical glyph bytes. The actual fontTools comparison
+  is reproducible with `tooling/herdr-audit/glyph_provenance.py`; fixed font
+  blob and results are in [`glyph-provenance.json`](research/herdr-190/license-closure/glyph-provenance.json).
+  Full JetBrains/Nerd Fonts/Powerline/Font Awesome/Devicon copyright and terms
+  are retained in [`glyph-notices.json`](research/herdr-190/license-closure/glyph-notices.json).
+  Font Awesome's font section specifies **OFL 1.1**, not its SVG/JS or code
+  licenses; do not call all five glyphs Apache/MIT or relicense font data as
+  enclosing program code. Preserve applicable OFL conditions and attributions.
+  No whole font or example-program logic is added/relicensed, no trademark
+  permission is inferred, and the original golden PNG was not rerendered.
+- Remaining embedded-data review includes the Kitty-derived diacritic selection
+  and four binary Kitty fixtures. The sprite/PNG test generators are provenance
+  evidence, not independent authorship certificates; these are not silently
   treated as first-party MIT or CC0. Top-level asset and Apple SDK scope remain
   unresolved. The source/artifact obligations and necessary decisions are in
   [`obligations.json`](research/herdr-190/license-closure/obligations.json).

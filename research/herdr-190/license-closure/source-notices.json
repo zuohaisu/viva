@@ -675,7 +675,7 @@
     "status": "Unresolved. Root upstream Apache-2.0 and fixed path history alone are not independent evidence of authorship/third-party permission. MP3s remain embedded; disabling playback is not exclusion. No original asset has been deleted or replaced.",
     "binary_fixture_scope": "Inventory includes 48 binaries. 36 sprite atlas goldens have a generator in src/font/sprite/Face.zig; glyf PNG has a dedicated test. Generator presence is not independent proof every golden was authored there. Four kitty binary fixtures do not match any CC0 pixels-cache file by SHA-256; no CC0 assumption is made.",
     "additional_embedded_content": [
-      "vendor/libghostty-vt/src/font/glyf_rasterize_png_test.zig: five base64 Nerd Font outlines and golden PNG",
+      "vendor/libghostty-vt/src/font/glyf_rasterize_png_test.zig: five glyph sources/terms now identified in glyph-provenance.json and glyph-notices.json; original golden was not rerendered",
       "vendor/libghostty-vt/src/terminal/kitty/graphics_unicode.zig: rowcolumn-diacritics.txt derived list"
     ],
     "kitty_diacritics_provenance": {
@@ -719,6 +719,6 @@
     ],
     "foot": "src/input/function_keys.zig explicitly identifies foot keymap.h. MIT text/copyright recovered from an independently public GitHub mirror; no Codeberg request or ban circumvention. This does not claim exact adapted-table revision equivalence.",
     "fonts": "Embedded Spleen/Terminus bitmap expectations in font/face/freetype.zig now have the fixed Ghostty base font copyright list plus BSD/OFL texts. No missing font binary is silently substituted into the original source.",
-    "remaining": "Nerd Font glyf payloads in font/glyf_rasterize_png_test.zig cite a separate example repository; its code license alone cannot establish all underlying glyph rights. Kitty graphics_unicode.zig cites a selected Unicode-6 diacritic dataset: data provenance identified, precise selection/license scope not automatically resolved."
+    "remaining": "Follow-up supersedes the initial unknown Nerd glyph source: all five match pinned JetBrainsMono Nerd Font 3.4.0 canonical bytes/coordinates; full base/patcher/Powerline/Font Awesome/Devicon notices are in glyph-notices.json. This is specific font-data provenance, not a license grant for the example program or whole product. Kitty graphics_unicode.zig still requires selected Unicode-6 dataset scope review."
   }
 }

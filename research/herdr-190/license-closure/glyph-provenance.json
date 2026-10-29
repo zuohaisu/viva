@@ -1,0 +1,65 @@
+{
+  "role": "Developer actual-font comparison, not independent QA or legal clearance",
+  "source": "upstream/herdr/vendor/libghostty-vt/src/font/glyf_rasterize_png_test.zig",
+  "source_sha256": "d4b7d9a337dd7d74fd858ad39ac33a46241367848ef95de75ac1698440d9e1f4",
+  "font_source": "ryanoasis/nerd-fonts@fa7b859994228a9c8759f99c55a8d31ee92a1b5e:patched-fonts/JetBrainsMono/Ligatures/Regular/JetBrainsMonoNerdFont-Regular.ttf",
+  "font_git_blob": "235a07aef9028e2953076efc9038f1b1182f8b2b",
+  "font_sha256": "0ec29a68b539ece7078fc714cebff0c0accb2f4948f8f7963d9f5e86633b12d9",
+  "fonttools_version": "4.68.0",
+  "font_version": [
+    "Version 2.304; ttfautohint (v1.8.4.7-5d5b);Nerd Fonts 3.4.0"
+  ],
+  "comparison_scope": "Equal decoded coordinates/endpoints/on-curve flags AND equal fontTools canonical glyph serialization. Not a claim of whole-font or original raw storage-byte identity; no hint removal or geometry normalization used.",
+  "glyphs": [
+    {
+      "codepoint": "0xe0a0",
+      "font_glyph": "pl-branch",
+      "original_payload_sha256": "5c34e413ef8219c81d9d779f50f331ed8e0ff31202168fb082718aed9e796fe5",
+      "canonical_glyph_sha256": "5c34e413ef8219c81d9d779f50f331ed8e0ff31202168fb082718aed9e796fe5",
+      "coordinate_count": 30,
+      "contour_count": 2,
+      "outline_equal": true,
+      "canonical_bytes_equal": true
+    },
+    {
+      "codepoint": "0xf07b",
+      "font_glyph": "fa-folder",
+      "original_payload_sha256": "ba8179e3510a8f68d430dc33d74d30d42589e12bb8161caa2ad7139cc7968126",
+      "canonical_glyph_sha256": "ba8179e3510a8f68d430dc33d74d30d42589e12bb8161caa2ad7139cc7968126",
+      "coordinate_count": 22,
+      "contour_count": 1,
+      "outline_equal": true,
+      "canonical_bytes_equal": true
+    },
+    {
+      "codepoint": "0xf015",
+      "font_glyph": "fa-house",
+      "original_payload_sha256": "74c4d793d0dcf35d753d6706f37d1b7cea21acb661b4df04f24767ae1e77b205",
+      "canonical_glyph_sha256": "74c4d793d0dcf35d753d6706f37d1b7cea21acb661b4df04f24767ae1e77b205",
+      "coordinate_count": 63,
+      "contour_count": 1,
+      "outline_equal": true,
+      "canonical_bytes_equal": true
+    },
+    {
+      "codepoint": "0xf004",
+      "font_glyph": "fa-heart",
+      "original_payload_sha256": "45d40b39fabe18902428720e22e165800a8c0aeb97c5afecc88c67d8f575e1dd",
+      "canonical_glyph_sha256": "45d40b39fabe18902428720e22e165800a8c0aeb97c5afecc88c67d8f575e1dd",
+      "coordinate_count": 26,
+      "contour_count": 1,
+      "outline_equal": true,
+      "canonical_bytes_equal": true
+    },
+    {
+      "codepoint": "0xe7a8",
+      "font_glyph": "dev-rust",
+      "original_payload_sha256": "fc4ab66175d3eafa6ec9e0b0abfacbdef916a1450df25f357f62ea5bfda6ee66",
+      "canonical_glyph_sha256": "fc4ab66175d3eafa6ec9e0b0abfacbdef916a1450df25f357f62ea5bfda6ee66",
+      "coordinate_count": 462,
+      "contour_count": 10,
+      "outline_equal": true,
+      "canonical_bytes_equal": true
+    }
+  ]
+}

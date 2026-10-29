@@ -1,0 +1,50 @@
+{
+  "base_commit": "f805a889e96bae321da47b9a56525e65247181f3",
+  "role": "Developer follow-up, NOT independent QA or blanket license/trademark clearance",
+  "scope": "Actual fixed-font SDK comparison plus selected discovery attempts and full notice capture; not a log of every search/API request. No font binary added to repo.",
+  "actual_font_command": "PYTHONPATH=/tmp/viva-190-license-closure/fonttools python3.11 tooling/herdr-audit/glyph_provenance.py /tmp/viva-190-license-closure/JetBrainsMono-NF34.ttf",
+  "actual_font_exit_code": 0,
+  "producer_sha256": "cffc732865b18c38eefd68259ea27fcf2fac738b48f2bbb93cd38daba8010c5c",
+  "actual_font_result": "Five corresponding glyphs have identical decoded coordinates/endpoints/on-curve flags AND identical canonical serialized glyph bytes. No scaling, geometry normalization or hint removal.",
+  "font_git_blob": "235a07aef9028e2953076efc9038f1b1182f8b2b",
+  "fonttools_version": "4.68.0",
+  "candidate_history": [
+    {
+      "candidate": "Original fixed Zig Symbols-only 3.4.0 archive",
+      "url": "https://deps.files.ghostty.org/NerdFontsSymbolsOnly-3.4.0.tar.gz",
+      "first_fetch": "zig fetch from repository root failed: no build.zig context. Not counted as hash verification.",
+      "verified_command": "(cd upstream/herdr/vendor/libghostty-vt && /tmp/viva-190/zig-x86_64-macos-0.16.0/zig fetch --global-cache-dir /tmp/viva-190-license-closure/zig-cache /tmp/viva-190-license-closure/NerdFontsSymbolsOnly-3.4.0.tar.gz)",
+      "verified_exit_code": 0,
+      "verified_content_hash": "N-V-__8AAMVLTABmYkLqhZPLXnMl-KyN38R8UVYqGrxqO26s",
+      "result": "Original pin matches, but both Symbols-only fonts do not contain the exact five stored glyph payloads; not substituted as source."
+    },
+    {
+      "candidate": "Ghostty fixed-base JetBrainsMono Nerd Font 3.2.1",
+      "git_blob": "a6031886f447733184d41e4c8cd406b0f56b26a7",
+      "result": "Not the exact stored five glyphs; not substituted."
+    },
+    {
+      "candidate": "Nerd Fonts v3.4.0 JetBrainsMono Nerd Font",
+      "git_blob": "235a07aef9028e2953076efc9038f1b1182f8b2b",
+      "result": "All five canonical glyphs and outlines match. Source example explicitly names this font family/codepoints; no permission for the example program logic is inferred."
+    }
+  ],
+  "unit_command": "python3.11 -m unittest discover -s tooling/herdr-audit -v",
+  "unit_exit_code": 0,
+  "unit_result": "21 passed. New glyph test checks source/data/notices and rejecting wrong font before optional SDK import. CI does not independently download/compare the real font; the actual-font command above did.",
+  "unit_stdout_and_stderr": "test_cleanup_failure_alone_still_fails_run (test_inventory.CleanupTests.test_cleanup_failure_alone_still_fails_run) ... ok\ntest_cleanup_failure_does_not_mask_primary_error (test_inventory.CleanupTests.test_cleanup_failure_does_not_mask_primary_error) ... ok\ntest_closed_stderr_does_not_mask_primary_error (test_inventory.CleanupTests.test_closed_stderr_does_not_mask_primary_error) ... ok\ntest_status_failure_until_deadline_is_not_success (test_inventory.CleanupTests.test_status_failure_until_deadline_is_not_success) ... ok\ntest_transient_status_failure_is_recorded_and_retried (test_inventory.CleanupTests.test_transient_status_failure_is_recorded_and_retried) ... ok\ntest_binary_and_dotfile_hashes_match_independent_git_show (test_inventory.CommittedTreeTests.test_binary_and_dotfile_hashes_match_independent_git_show) ... ok\ntest_captured_native_notices_have_complete_hash_index (test_inventory.CommittedTreeTests.test_captured_native_notices_have_complete_hash_index) ... ok\ntest_completion_index_links_file_results_and_failed_diff_check (test_inventory.CommittedTreeTests.test_completion_index_links_file_results_and_failed_diff_check) ... ok\ntest_fixed_source_tree_counts_and_complete_file_records (test_inventory.CommittedTreeTests.test_fixed_source_tree_counts_and_complete_file_records) ... ok\ntest_font_evidence_distinguishes_viva_commit_from_source_tree (test_inventory.CommittedTreeTests.test_font_evidence_distinguishes_viva_commit_from_source_tree) ... ok\ntest_file_level_exceptions_are_discovered_not_relicensed (test_inventory.InventoryTests.test_file_level_exceptions_are_discovered_not_relicensed) ... ok\ntest_metadata_keeps_unknown_license_and_omits_absolute_paths (test_inventory.InventoryTests.test_metadata_keeps_unknown_license_and_omits_absolute_paths) ... ok\ntest_opaque_asset_is_hashed_without_claiming_permission (test_inventory.InventoryTests.test_opaque_asset_is_hashed_without_claiming_permission) ... ok\ntest_changed_notice_is_rejected (test_notice_payload.NoticePayloadTests.test_changed_notice_is_rejected) ... ok\ntest_duplicates_are_deduplicated_without_selecting_license_alternative (test_notice_payload.NoticePayloadTests.test_duplicates_are_deduplicated_without_selecting_license_alternative) ... ok\ntest_missing_or_changed_package_is_rejected (test_notice_payload.NoticePayloadTests.test_missing_or_changed_package_is_rejected) ... ok\ntest_real_captured_payload_has_exact_text_for_all_selected_notices (test_notice_payload.NoticePayloadTests.test_real_captured_payload_has_exact_text_for_all_selected_notices) ... ok\ntest_glyph_packet_is_bound_to_source_and_full_notices (test_notice_payload.SourceNoticeTests.test_glyph_packet_is_bound_to_source_and_full_notices) ... ok\ntest_theme_tree_and_all_supplemental_text_hashes (test_notice_payload.SourceNoticeTests.test_theme_tree_and_all_supplemental_text_hashes) ... ok\ntest_unicode_generated_representation_matches_fixed_17_data (test_notice_payload.SourceNoticeTests.test_unicode_generated_representation_matches_fixed_17_data) ... ok\ntest_x11_original_notice_and_data_equivalence (test_notice_payload.SourceNoticeTests.test_x11_original_notice_and_data_equivalence) ... ok\n\n----------------------------------------------------------------------\nRan 21 tests in 5.359s\n\nOK\n",
+  "current_evidence_hashes": {
+    "research/herdr-190/license-closure/cargo-notice-payload.json": "400f5195324d99c5252572ad819dfab59780be2548912dd9c3aa0945897cf108",
+    "research/herdr-190/license-closure/glyph-notices.json": "8c7798fd12c1a0a794d0163fc8c7e97b48ce1fe33964ffabb8ad838fbb40effb",
+    "research/herdr-190/license-closure/glyph-provenance.json": "35eb49775866b12d2b5fa2a3107369c4c5c46579a0b61865b7664d677af3abc7",
+    "research/herdr-190/license-closure/obligations.json": "1382bd733d8eed67764f0299ad3a44ec69ea8b20448e8cdeeb5d75d49380206c",
+    "research/herdr-190/license-closure/runtime-notices.json": "d944c391dd6299db287287f5d89edde94a182eea628c5e3312ff79f6578abd89",
+    "research/herdr-190/license-closure/source-notices.json": "d11d00e3ccb51de6fec7880bc6b4ce81b38fb92119d0880424290f94eb848db8",
+    "research/herdr-190/license-closure/validation.json": "4d6cf252e73ff0b73dd2845870992004cfcf102d0837b5c3a36d092fa8219408"
+  },
+  "limits": [
+    "No upstream source, dependency, product version, default entry, user data/session, release or merge operation changed.",
+    "Original glyph PNG was not rerendered. This supplies specific provenance/declared terms, not universal ownership certificates.",
+    "Kitty binary/selection scope, eight top-level assets, creator-specific theme rights and Apple SDK scope remain as recorded; #190 open and #191 gated."
+  ]
+}

@@ -121,6 +121,33 @@ class SourceNoticeTests(unittest.TestCase):
         present = {str(p.relative_to(ROOT)) for p in (ROOT / 'licenses/herdr-data').rglob('*') if p.is_file()}
         self.assertEqual(indexed, present, 'Each copied supplemental notice needs provenance/hash')
 
+    def test_glyph_packet_is_bound_to_source_and_full_notices(self):
+        record = json.loads((self.folder / 'glyph-provenance.json').read_text())
+        source = (ROOT / record['source']).read_bytes()
+        self.assertEqual(hashlib.sha256(source).hexdigest(), record['source_sha256'])
+        import base64
+        payloads = re.findall(rb'^\s*"([A-Za-z0-9+/=]+)",', source, re.M)
+        self.assertEqual(len(payloads), 5)
+        self.assertEqual(len(record['glyphs']), 5)
+        for raw, item in zip(payloads, record['glyphs']):
+            self.assertEqual(hashlib.sha256(base64.b64decode(raw)).hexdigest(), item['original_payload_sha256'])
+            self.assertTrue(item['outline_equal'])
+            self.assertTrue(item['canonical_bytes_equal'])
+        packet = json.loads((self.folder / 'glyph-notices.json').read_text())
+        self.assertTrue(packet['not_blanket_mit'])
+        for item in packet['notices']:
+            data = item['text'].encode()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), item['sha256'])
+            self.assertEqual(self.git_blob(data), item['git_blob'])
+        spec = importlib.util.spec_from_file_location('glyph_audit', Path(__file__).with_name('glyph_provenance.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as d:
+            wrong = Path(d) / 'wrong.ttf'
+            wrong.write_bytes(b'not the real font')
+            with self.assertRaisesRegex(ValueError, 'Not the pinned font blob'):
+                module.inspect(wrong)  # rejected before any optional fontTools import
+
     def test_unicode_generated_representation_matches_fixed_17_data(self):
         record = self.evidence['fontconfig_casefold']
         raw = record['candidate_text']

@@ -18,9 +18,9 @@
       "required_action": "Carry specific data copyright/permission notices, not only Ghostty/fontconfig umbrella licenses. Version/data encoding comparisons do not claim exact historical generator or runtime equivalence."
     },
     {
-      "area": "Foot-derived key mappings and bitmap font tests",
-      "evidence": "source-notices.json.additional_source_notices; licenses/herdr-data/{foot,fonts}/",
-      "required_action": "Preserve MIT/BSD/OFL copyright and full terms if applicable material is conveyed. No unprovided source revision or missing font is silently substituted."
+      "area": "Foot-derived key mappings, bitmap font tests and five identified Nerd glyphs",
+      "evidence": "source-notices.json.additional_source_notices; licenses/herdr-data/{foot,fonts}/; glyph-provenance.json and glyph-notices.json",
+      "required_action": "Preserve MIT/BSD/OFL copyright and full terms for the particular font data; do not relabel it all MIT/Apache. Five glyph coordinates/canonical bytes match the pinned NF 3.4.0 JetBrainsMono font. Keep OFL font conditions, original copyright, and trademark/attribution boundaries; no original or missing font is silently substituted."
     },
     {
       "area": "Native C/Zig dependencies",
@@ -49,7 +49,7 @@
       "id": "embedded-source-data",
       "owner": "Development research; rights holder/professional for unresolved scope",
       "evidence": "source-notices.json.remaining_source_rights",
-      "needed": "Resolve four kitty binary fixtures, five Nerd Font glyf outlines/golden, and precise Kitty selected-diacritic terms. Sprite generator evidence is recorded but not independent proof of golden authorship. Do not silently assume MIT/CC0/GPL or whole-product relicensing."
+      "needed": "Resolve four kitty binary fixtures and precise Kitty selected-diacritic terms. Nerd glyph source/notice material is now identified and supplied; the original golden was not rerendered. Sprite generator evidence is recorded but not independent proof of golden authorship. Do not silently assume MIT/CC0/GPL or whole-product relicensing."
     },
     {
       "id": "apple-sdk-derived-work",
