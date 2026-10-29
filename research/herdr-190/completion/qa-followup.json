@@ -1,0 +1,52 @@
+{
+  "reviewed_head": "6a985844b584fe1f130fbd1e552bf27a56890fe4",
+  "role": "dev response and rerun, NOT independent QA",
+  "qa_execution_limit": "The supplied QA report could not execute shell commands (exit 137); its structural consistency review is not an independently reproduced runtime PASS. This follow-up does not erase that limitation.",
+  "judgments": [
+    {
+      "finding": 1,
+      "judgment": "Partial: runtime/ lacked the separate status record/cross-reference, but baseline.json.cleanup already contained the original real status-not-running observation. The conclusion that it was inferred only from stop return 0 is not accurate.",
+      "fix": "Expose the existing observation in runtime/server-status-after-stop.json with original context intact; future experiment runs now query status after stop and require not running. Historical result is not rewritten as if the new script produced it."
+    },
+    {
+      "finding": 2,
+      "judgment": "Confirmed: diff-check failure was in baseline.json.diff_check and PR but absent from checks.json.",
+      "fix": "Add the original exit 2/output/hash to the command index, plus a stable branch-range replay command. Preserve upstream CC0 bytes and disclose failure, do not turn it into PASS."
+    },
+    {
+      "finding": 3,
+      "judgment": "Confirmed: empty stdout is legitimate for a file-writing script but the index lacked links to its actual evidence.",
+      "fix": "Add capture note/producer commit and explicit paths to results, status, event/API captures, raw ANSI and projections. Keep the actual empty log and its empty-string SHA."
+    }
+  ],
+  "validation": {
+    "regression_command": "python3.11 -m unittest discover -s tooling/herdr-audit -v",
+    "pre_fix_implementation": "6a985844b584fe1f130fbd1e552bf27a56890fe4",
+    "pre_fix_exit_code": 1,
+    "pre_fix_result": "7 existing tests passed; new evidence-index regression errored because evidence links were absent.",
+    "pre_fix_stdout_and_stderr": "test_binary_and_dotfile_hashes_match_independent_git_show (test_inventory.CommittedTreeTests.test_binary_and_dotfile_hashes_match_independent_git_show) ... ok\ntest_captured_native_notices_have_complete_hash_index (test_inventory.CommittedTreeTests.test_captured_native_notices_have_complete_hash_index) ... ok\ntest_completion_index_links_file_results_and_failed_diff_check (test_inventory.CommittedTreeTests.test_completion_index_links_file_results_and_failed_diff_check) ... ERROR\ntest_fixed_source_tree_counts_and_complete_file_records (test_inventory.CommittedTreeTests.test_fixed_source_tree_counts_and_complete_file_records) ... ok\ntest_font_evidence_distinguishes_viva_commit_from_source_tree (test_inventory.CommittedTreeTests.test_font_evidence_distinguishes_viva_commit_from_source_tree) ... ok\ntest_file_level_exceptions_are_discovered_not_relicensed (test_inventory.InventoryTests.test_file_level_exceptions_are_discovered_not_relicensed) ... ok\ntest_metadata_keeps_unknown_license_and_omits_absolute_paths (test_inventory.InventoryTests.test_metadata_keeps_unknown_license_and_omits_absolute_paths) ... ok\ntest_opaque_asset_is_hashed_without_claiming_permission (test_inventory.InventoryTests.test_opaque_asset_is_hashed_without_claiming_permission) ... ok\n\n======================================================================\nERROR: test_completion_index_links_file_results_and_failed_diff_check (test_inventory.CommittedTreeTests.test_completion_index_links_file_results_and_failed_diff_check)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/zuohaisu/orca/workspaces/viva/herdr/tooling/herdr-audit/test_inventory.py\", line 114, in test_completion_index_links_file_results_and_failed_diff_check\n    self.assertIn(\"runtime/result.json\", runtime[\"evidence\"])\n                                         ~~~~~~~^^^^^^^^^^^^\nKeyError: 'evidence'\n\n----------------------------------------------------------------------\nRan 8 tests in 5.470s\n\nFAILED (errors=1)\n",
+    "post_fix_result": "8 passed, exit 0; new test checks evidence paths, gzip decompression, original cleanup observation and the indexed diff failure.",
+    "post_fix_stdout_and_stderr": "test_binary_and_dotfile_hashes_match_independent_git_show (test_inventory.CommittedTreeTests.test_binary_and_dotfile_hashes_match_independent_git_show) ... ok\ntest_captured_native_notices_have_complete_hash_index (test_inventory.CommittedTreeTests.test_captured_native_notices_have_complete_hash_index) ... ok\ntest_completion_index_links_file_results_and_failed_diff_check (test_inventory.CommittedTreeTests.test_completion_index_links_file_results_and_failed_diff_check) ... ok\ntest_fixed_source_tree_counts_and_complete_file_records (test_inventory.CommittedTreeTests.test_fixed_source_tree_counts_and_complete_file_records) ... ok\ntest_font_evidence_distinguishes_viva_commit_from_source_tree (test_inventory.CommittedTreeTests.test_font_evidence_distinguishes_viva_commit_from_source_tree) ... ok\ntest_file_level_exceptions_are_discovered_not_relicensed (test_inventory.InventoryTests.test_file_level_exceptions_are_discovered_not_relicensed) ... ok\ntest_metadata_keeps_unknown_license_and_omits_absolute_paths (test_inventory.InventoryTests.test_metadata_keeps_unknown_license_and_omits_absolute_paths) ... ok\ntest_opaque_asset_is_hashed_without_claiming_permission (test_inventory.InventoryTests.test_opaque_asset_is_hashed_without_claiming_permission) ... ok\n\n----------------------------------------------------------------------\nRan 8 tests in 4.997s\n\nOK\n",
+    "fresh_runtime_command": "PYTHONPATH=/tmp/viva-190-completion/pyte python3.11 research/herdr-190/completion/runtime-smoke.py --binary upstream/herdr/target/debug/herdr --output /tmp/viva-193-qa/runtime",
+    "fresh_runtime_exit_code": 0,
+    "fresh_runtime_script_sha256": "5aff91265de4184542bef99164293faa934dae97535a19f0e17bbea29a8f4aa4",
+    "fresh_runtime_evidence": [
+      "qa-rerun/result.json",
+      "qa-rerun/server-status-after-stop.json"
+    ],
+    "fresh_runtime_result": "Seven real PTY scenarios passed; both clients exited 0; actual post-stop status reports not running. This is a new, separately identified sandbox, not a rewrite of the original capture.",
+    "binary_sha256_verified_unchanged": "1618b899cbc0f618e796d81ae92ace7ecd11c65ba319b3e2674f0c2825ac4f22",
+    "full_branch_diff_check": {
+      "command": "git diff --check origin/main...HEAD",
+      "exit_code": 2,
+      "stdout_and_stderr": "licenses/herdr-native/pixels/LICENSE:117: new blank line at EOF.\n",
+      "note": "Exactly the retained original CC0 terminal empty-line warning. Follow-up changed-path diff is checked separately."
+    }
+  },
+  "unchanged_limits": [
+    "No upstream/herdr source, dependency, version, default entry, user data/session or worktree changed. Only task-created unique named test session operated/stopped.",
+    "Did not rerun full nextest/maintenance/root Cargo suites for this evidence-only repair; previous runs remain historical. Required CI runs root checks again on the new head.",
+    "Windows/ARM, media permission, legal scope, final distribution and human visual review remain pending; no #190 closure or #191 activation.",
+    "New-head independent QA/owner merge remain separate; no merge, publish or self-approval."
+  ]
+}

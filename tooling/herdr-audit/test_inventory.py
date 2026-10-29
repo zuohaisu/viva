@@ -1,3 +1,4 @@
+import gzip
 import hashlib
 import importlib.util
 import json
@@ -105,6 +106,29 @@ class CommittedTreeTests(unittest.TestCase):
         present = {str(p.relative_to(audit.ROOT))
                    for p in (audit.ROOT / "licenses/herdr-native").rglob("*") if p.is_file()}
         self.assertEqual(indexed, present, "Every copied notice must have provenance/hash evidence")
+
+    def test_completion_index_links_file_results_and_failed_diff_check(self):
+        folder = audit.ROOT / "research/herdr-190/completion"
+        baseline = json.loads((folder / "baseline.json").read_text())
+        entries = json.loads((folder / "checks.json").read_text())["checks"]
+        runtime = next(c for c in entries if c["log_name"] == "runtime-smoke.log")
+        self.assertIn("runtime/result.json", runtime["evidence"])
+        self.assertIn("runtime/server-status-after-stop.json", runtime["evidence"])
+        for name in runtime["evidence"]:
+            with self.subTest(path=name):
+                self.assertFalse(Path(name).is_absolute())
+                self.assertNotIn("..", Path(name).parts)
+                self.assertTrue((folder / name).is_file())
+                if name.endswith(".gz"):
+                    self.assertTrue(gzip.decompress((folder / name).read_bytes()))
+        observed = json.loads((folder / "runtime/server-status-after-stop.json").read_text())
+        self.assertEqual(observed["args"], ["status", "server"])
+        for key in ("returncode", "stdout", "stderr"):
+            self.assertEqual(observed[key], baseline["cleanup"][key])
+        self.assertIn("status: not running", observed["stdout"].splitlines())
+        diff = next(c for c in entries if c["command"] == baseline["diff_check"]["command"])
+        self.assertEqual(diff["exit_code"], baseline["diff_check"]["exit_code"])
+        self.assertEqual(diff["stdout_and_stderr"], baseline["diff_check"]["output"])
 
 
 if __name__ == "__main__":

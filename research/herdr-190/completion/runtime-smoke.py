@@ -172,10 +172,20 @@ try:
 finally:
     # Only this invocation's unique sandbox/session; no default/existing server.
     cli('owned-server-stop', 'server', 'stop')
-    pump(.5)
+    # A successful stop request alone is not a shutdown observation. Query only
+    # this invocation's named session until its status reports not running.
+    deadline = time.monotonic() + 5
+    while True:
+        status = cli('server-status-after-stop', 'status', 'server')
+        if isinstance(status, str) and 'status: not running' in status.splitlines():
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError('Owned server did not report not running after stop')
+        pump(.1)
     capture('final')
     (output/'result.json').write_text(json.dumps({'sandbox': str(root), 'binary': binary,
         'checks': checks, 'human_visual_review': 'PENDING',
+        'server_status_evidence': 'server-status-after-stop.json',
         'client_exits': [p.poll() for p, *_ in clients]}, indent=2)+'\n')
     for process, fd, *_ in clients:
         os.close(fd)
