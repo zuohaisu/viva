@@ -1,0 +1,37 @@
+{
+  "base_commit": "dce71a2cffba0bd2975ac5a97a1ec04a0c3d6ee3",
+  "source_tree_unchanged": "98b3f4ed3ae4c238f3267fb22c5920256571e308",
+  "role": "Developer execution evidence, NOT independent QA or legal review",
+  "previous_coverage": "Merged base audit suite had 13 tests; no full Cargo notice text exporter or dedicated X11/Unicode/theme/runtime follow-up checks. This is new coverage/material, not a manufactured failing runtime scenario.",
+  "commands": [
+    {
+      "command": "(cd upstream/herdr && cargo metadata --offline --locked --format-version 1)",
+      "exit_code": 0,
+      "scope": "Official metadata, no dependency/build/source change; private cache paths retained locally, not exported."
+    },
+    {
+      "command": "python3.11 tooling/herdr-audit/notice_payload.py /tmp/viva-190-license-closure/cargo-metadata.json",
+      "exit_code": 0,
+      "result": "155 selected packages / 111 unique full texts. Repeated actual CLI output was byte-identical (cmp exit 0).",
+      "producer_sha256": "a90a4180f43f88618f60276af2b0538913f4e9738b575a5544e863dd922099eb"
+    },
+    {
+      "command": "python3.11 -m unittest discover -s tooling/herdr-audit -v",
+      "exit_code": 0,
+      "result": "20 passed; no ignored/skipped cases in this audit suite",
+      "stdout_and_stderr": "test_cleanup_failure_alone_still_fails_run (test_inventory.CleanupTests.test_cleanup_failure_alone_still_fails_run) ... ok\ntest_cleanup_failure_does_not_mask_primary_error (test_inventory.CleanupTests.test_cleanup_failure_does_not_mask_primary_error) ... ok\ntest_closed_stderr_does_not_mask_primary_error (test_inventory.CleanupTests.test_closed_stderr_does_not_mask_primary_error) ... ok\ntest_status_failure_until_deadline_is_not_success (test_inventory.CleanupTests.test_status_failure_until_deadline_is_not_success) ... ok\ntest_transient_status_failure_is_recorded_and_retried (test_inventory.CleanupTests.test_transient_status_failure_is_recorded_and_retried) ... ok\ntest_binary_and_dotfile_hashes_match_independent_git_show (test_inventory.CommittedTreeTests.test_binary_and_dotfile_hashes_match_independent_git_show) ... ok\ntest_captured_native_notices_have_complete_hash_index (test_inventory.CommittedTreeTests.test_captured_native_notices_have_complete_hash_index) ... ok\ntest_completion_index_links_file_results_and_failed_diff_check (test_inventory.CommittedTreeTests.test_completion_index_links_file_results_and_failed_diff_check) ... ok\ntest_fixed_source_tree_counts_and_complete_file_records (test_inventory.CommittedTreeTests.test_fixed_source_tree_counts_and_complete_file_records) ... ok\ntest_font_evidence_distinguishes_viva_commit_from_source_tree (test_inventory.CommittedTreeTests.test_font_evidence_distinguishes_viva_commit_from_source_tree) ... ok\ntest_file_level_exceptions_are_discovered_not_relicensed (test_inventory.InventoryTests.test_file_level_exceptions_are_discovered_not_relicensed) ... ok\ntest_metadata_keeps_unknown_license_and_omits_absolute_paths (test_inventory.InventoryTests.test_metadata_keeps_unknown_license_and_omits_absolute_paths) ... ok\ntest_opaque_asset_is_hashed_without_claiming_permission (test_inventory.InventoryTests.test_opaque_asset_is_hashed_without_claiming_permission) ... ok\ntest_changed_notice_is_rejected (test_notice_payload.NoticePayloadTests.test_changed_notice_is_rejected) ... ok\ntest_duplicates_are_deduplicated_without_selecting_license_alternative (test_notice_payload.NoticePayloadTests.test_duplicates_are_deduplicated_without_selecting_license_alternative) ... ok\ntest_missing_or_changed_package_is_rejected (test_notice_payload.NoticePayloadTests.test_missing_or_changed_package_is_rejected) ... ok\ntest_real_captured_payload_has_exact_text_for_all_selected_notices (test_notice_payload.NoticePayloadTests.test_real_captured_payload_has_exact_text_for_all_selected_notices) ... ok\ntest_theme_tree_and_all_supplemental_text_hashes (test_notice_payload.SourceNoticeTests.test_theme_tree_and_all_supplemental_text_hashes) ... ok\ntest_unicode_generated_representation_matches_fixed_17_data (test_notice_payload.SourceNoticeTests.test_unicode_generated_representation_matches_fixed_17_data) ... ok\ntest_x11_original_notice_and_data_equivalence (test_notice_payload.SourceNoticeTests.test_x11_original_notice_and_data_equivalence) ... ok\n\n----------------------------------------------------------------------\nRan 20 tests in 7.521s\n\nOK\n"
+    }
+  ],
+  "new_data_hashes": {
+    "research/herdr-190/license-closure/cargo-notice-payload.json": "400f5195324d99c5252572ad819dfab59780be2548912dd9c3aa0945897cf108",
+    "research/herdr-190/license-closure/obligations.json": "e2e717b401c2c38ad2a89cae3317822311dfd27154145d5dba434eadbb043e5b",
+    "research/herdr-190/license-closure/runtime-notices.json": "d944c391dd6299db287287f5d89edde94a182eea628c5e3312ff79f6578abd89",
+    "research/herdr-190/license-closure/source-notices.json": "1cc185438b8044fcacff701ec84389385ed515fb503e18eaf8b2c780c633120c"
+  },
+  "checks_scope": "git diff --check for this follow-up; inherited CC0 EOF warning was already merged into base, not edited or hidden. Final staged/branch checks and CI are separately reported on the PR.",
+  "not_rerun": [
+    "Complete nested nextest / maintenance / Rust build and real PTY: unchanged runtime, no new claim replacing the retained baseline",
+    "Windows/ARM, 12 manual profiles and physical human UI: no new execution evidence"
+  ],
+  "legal_scope": "Source/asset/glyph/creator and Apple SDK questions stay explicitly unresolved in obligations.json; exported text is not blanket approval. No final binary/package built or released."
+}

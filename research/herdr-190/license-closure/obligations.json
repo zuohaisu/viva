@@ -1,0 +1,66 @@
+{
+  "scope": "Issue #190 source and distribution-obligation register. Technical material supplied is not legal approval. #191 must inspect actual packages; main baseline remains unchanged.",
+  "source_tree": "98b3f4ed3ae4c238f3267fb22c5920256571e308",
+  "supplied_materials": [
+    {
+      "area": "herdr/Ghostty/portable-pty and existing GPL/LGPL/file exceptions",
+      "evidence": "THIRD_PARTY_NOTICES.md; original source/license headers; licenses/GPL-3.0-or-later.txt; licenses/LGPL-2.1-or-later.txt",
+      "required_action": "Retain original licenses/copyrights. Complete source of verbatim conveyed scripts is present; actual combined/linked scope and required source/build/relinking material depend on B distribution mode."
+    },
+    {
+      "area": "155 selected Cargo normal/build packages",
+      "evidence": "cargo-notice-payload.json: 111 unique full notice texts, SHA-256 roundtrip verified",
+      "required_action": "Export selected applicable texts into each real package. Preserve declared OR/AND expressions and attribution. Licensing explanations are not permission substitutes, especially objc2."
+    },
+    {
+      "area": "X11 color data and fontconfig Unicode data",
+      "evidence": "source-notices.json; licenses/herdr-data/x11/COPYING; licenses/herdr-data/unicode/",
+      "required_action": "Carry specific data copyright/permission notices, not only Ghostty/fontconfig umbrella licenses. Version/data encoding comparisons do not claim exact historical generator or runtime equivalence."
+    },
+    {
+      "area": "Foot-derived key mappings and bitmap font tests",
+      "evidence": "source-notices.json.additional_source_notices; licenses/herdr-data/{foot,fonts}/",
+      "required_action": "Preserve MIT/BSD/OFL copyright and full terms if applicable material is conveyed. No unprovided source revision or missing font is silently substituted."
+    },
+    {
+      "area": "Native C/Zig dependencies",
+      "evidence": "../completion/native-notices.json and original 24 captured source/workspace notices",
+      "required_action": "Determine actual linkage/reachability and include applicable texts; fetched optional cache input is not proof of shipped content."
+    },
+    {
+      "area": "Rust/Zig language runtimes",
+      "evidence": "runtime-notices.json: original installed Rust library copyright/dependency terms and Zig/libcxx/libcxxabi/libunwind license texts",
+      "required_action": "Retain applicable language runtime/compiler-rt and Unicode/LLVM-exception materials. Mixed-platform superset does not prove every component is linked into this target."
+    },
+    {
+      "area": "607 fetched themes",
+      "evidence": "source-notices.json.themes: exact upstream tree/blob IDs, original collection MIT notice and CREDITS",
+      "required_action": "Collection license explicitly leaves individual theme copyrights/licenses to creators. Do not treat the archive as blanket MIT or bundle ignored caches. If B conveys any themes, verify creator terms or explicitly exclude that resource."
+    }
+  ],
+  "open_decisions": [
+    {
+      "id": "assets",
+      "owner": "Haisu / rights holder",
+      "evidence": "source-notices.json.remaining_source_rights.top_level_assets",
+      "needed": "Establish authorship/permission for eight top-level sounds/artwork/screenshots/sponsor marks, or explicitly approve a derived variant excluding/replacing uncertain content while retaining original provenance. Two MP3s are compiled in; playback-off is insufficient. No deletion/replacement is implemented by this PR."
+    },
+    {
+      "id": "embedded-source-data",
+      "owner": "Development research; rights holder/professional for unresolved scope",
+      "evidence": "source-notices.json.remaining_source_rights",
+      "needed": "Resolve four kitty binary fixtures, five Nerd Font glyf outlines/golden, and precise Kitty selected-diacritic terms. Sprite generator evidence is recorded but not independent proof of golden authorship. Do not silently assume MIT/CC0/GPL or whole-product relicensing."
+    },
+    {
+      "id": "apple-sdk-derived-work",
+      "owner": "Qualified professional / Haisu",
+      "evidence": "licenses/herdr-native/objc2/LICENSE.md, exact upstream statement; block2/objc2/objc2-encode/dispatch2 selected versions in Cargo inventory",
+      "needed": "Resolve upstream-declared Apple SDK derived-work distribution ambiguity and obtain applicable full permission materials; neither a scanner nor this agent can certify it."
+    }
+  ],
+  "acceptance_boundaries": [
+    "Owner reports PR #193 QA complete and performed merge dce71a2 on 2026-10-29; main CI succeeded. This does not infer physical human UI acceptance or any unprovided independent reproduction scope.",
+    "This follow-up itself still needs independent QA on its new head.",
+    "Windows/ARM and 12 ignored manual profiles have no new execution evidence. No updater, release, default entry switch, user data/session change or #191 activation."
+  ]
+}

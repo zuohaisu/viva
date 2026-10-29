@@ -78,10 +78,10 @@ Further file-level exceptions and obligations identified in this pass:
 | Ghostty `pkg/libintl/libintl.h` | Header explicitly grants **LGPL-2.1-or-later**; full text now supplied at [`licenses/LGPL-2.1-or-later.txt`](licenses/LGPL-2.1-or-later.txt) | `pkg/libintl` describes gettext 0.24; do not assume this header means libintl is linked into the VT-only build. If combined/linked, assess the actual LGPL source/relinking obligations with qualified counsel |
 | Ghostty `src/input/keycodes.zig` | Header identifies Chromium's `dom_code_data.inc`; BSD text now supplied at [`licenses/Chromium-BSD-3-Clause.txt`](licenses/Chromium-BSD-3-Clause.txt). Referenced Chromium source bears Copyright 2013 The Chromium Authors; preserve that attribution alongside its license | Reproduce applicable copyright, conditions and disclaimer in package materials if included |
 | Ghostty `pkg/simdutf/vendor/simdutf.h` | Contains the full Facebook/Deepmind/NYU/NEC/IDIAP BSD notice (lines 966–1011), not covered merely by Ghostty MIT. Both h/cpp exactly match Ghostty update `e89cc0b`; the h file also matches fixed Ghostty base `44f2a44df` | Full simdutf MIT and embedded BSD texts now supplied under [`licenses/herdr-native/simdutf/`](licenses/herdr-native/simdutf/). Wrapper still says 5.2.8 and embedded version 9.0.0; official v9 release amalgamations differ beyond generation timestamps. Do not relabel this as an unmodified official release |
-| Ghostty fontconfig override headers | Keith Packard permission/disclaimer retained in `fontconfig.h`, `fcint.h`, `fclang.h`; `fcconst.h` marks HPND; `fccase.h` separately cites Unicode terms | Retain copyright/permission in supporting documentation; verify the exact Unicode data notice/version, not just fontconfig's umbrella license |
+| Ghostty fontconfig override headers | Keith Packard permission/disclaimer retained in `fontconfig.h`, `fcint.h`, `fclang.h`; `fcconst.h` marks HPND; `fccase.h` separately cites Unicode terms | Retain copyright/permission in supporting documentation. The later data follow-up supplies Unicode copyright/V3 terms and verifies the generated representation against Unicode 17 data; exact historical generator and runtime arithmetic are not claimed |
 | Ghostty Highway overrides | `abort.cc` marks Apache-2.0 and BSD-3-Clause; `per_target.cc` marks Apache-2.0 | Fetch the fixed dependency and retain its applicable LICENSE/NOTICE and local notices; downloading the build manifest alone is not enough |
 | Ghostty stb image/resize, Zig compatibility, Wayland XML | Full notices remain in the stb headers, `src/lib/compat/README.md`, and `vicinae-hotkey-v1.xml` respectively | Copy applicable notices into actual package materials when included; dual-license choice must be recorded, not silently assumed |
-| Ghostty `src/terminal/res/rgb.txt` | `x11_color.zig` explicitly identifies X11 rgb data and its separate MIT/X11 license | Confirm original copyright/permission material for the embedded data; Ghostty's copyright alone is not the data attribution |
+| Ghostty `src/terminal/res/rgb.txt` | `x11_color.zig` explicitly identifies X11 rgb data and its separate MIT/X11 license | Original Open Group/Oracle copyright and permission material supplied at [`licenses/herdr-data/x11/COPYING`](licenses/herdr-data/x11/COPYING); all ordered RGB/name rows match the cited Xorg mirror after whitespace tokenization, not byte-for-byte |
 
 New license text provenance (retrieved through GitHub's contents API):
 
@@ -143,6 +143,50 @@ attempt's SSH-test timeout is retained as FAIL; its remaining tests were not
 run. Separate Unix suite and docs runs do not turn the full check into PASS.
 Top-level media rights, remaining embedded data, actual final package notices,
 independent QA and human visual acceptance remain open; #191 is not activated.
+
+### Additional notice material and remaining source scope (2026-10-29)
+
+PR #193 was merged by Haisu as `dce71a2`; this is not completion of #190.
+The follow-up keeps the original upstream tree and earlier evidence unchanged.
+
+- [`license-closure/cargo-notice-payload.json`](research/herdr-190/license-closure/cargo-notice-payload.json)
+  now carries the full UTF-8 texts for all captured notices/fallbacks of the
+  155-package target inventory: 111 unique texts, byte-preserving by SHA-256.
+  Reproduce with `python3 tooling/herdr-audit/notice_payload.py /tmp/metadata.json`
+  using official nested-workspace `cargo metadata --offline --locked --format-version 1`.
+  This exports material, not a license choice or clearance. The objc2 explanation
+  remains an explanation, not a complete permission substitute.
+- [`source-notices.json`](research/herdr-190/license-closure/source-notices.json)
+  supplies X11 Open Group/Oracle notices, current official Unicode V3 terms with
+  the original data copyright, and fixed Ghostty font copyright/BSD/OFL texts.
+  Fontconfig's 1,585 full/common case-fold mappings match Unicode 17's generated
+  signed-short representation. This is not a test of runtime arithmetic or proof
+  of the exact historical generator. The foot-derived key table now has the
+  credited project's full MIT notice from an independent public mirror; no
+  Codeberg access-control bypass or exact adapted-revision claim is involved.
+- Every one of 607 fetched theme files matches the fixed collection commit
+  `752a9c079396cc9939b86e893578ed81e80c140f`. The recovered MIT collection
+  notice **explicitly leaves each theme's license/copyright to its creator**.
+  Full collection notice/credits and Git blob/tree IDs are retained; no theme
+  payload was added. This does not clear all themes or permit bundling caches.
+- [`runtime-notices.json`](research/herdr-190/license-closure/runtime-notices.json)
+  retains the installed Rust 1.96.1 standard-library copyright/dependency
+  declaration and full supporting terms, plus Zig 0.16.0 and its bundled
+  libcxx/libcxxabi/libunwind notices. This is a mixed-platform superset, not proof
+  that every listed component is linked; do not infer whole-product MPL/GPL
+  obligations or clearance merely from the superset.
+- Remaining embedded-data review explicitly includes Nerd Font outlines in
+  `font/glyf_rasterize_png_test.zig`, the Kitty-derived diacritic selection and
+  four binary Kitty fixtures. The sprite/PNG test generators are provenance
+  evidence, not independent authorship certificates. These are not silently
+  treated as first-party MIT or CC0. Top-level asset and Apple SDK scope remain
+  unresolved. The source/artifact obligations and necessary decisions are in
+  [`obligations.json`](research/herdr-190/license-closure/obligations.json).
+
+All supplemental copied notices have a hash/provenance index and CI regression
+coverage. B must still place applicable full terms and attributions **inside
+actual archives**, rather than ship links/JSON alone or assume every fetched
+build resource is a shipped dependency.
 
 ### Actual distribution obligations for integration B
 
