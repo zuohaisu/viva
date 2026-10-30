@@ -190,7 +190,8 @@ The follow-up keeps the original upstream tree and earlier evidence unchanged.
 - Remaining embedded-data review includes the Kitty-derived diacritic selection
   and four binary Kitty fixtures. The sprite/PNG test generators are provenance
   evidence, not independent authorship certificates; these are not silently
-  treated as first-party MIT or CC0. Top-level asset and Apple SDK scope remain
+  treated as first-party MIT or CC0. Top-level asset and Apple SDK scope are
+  disposition-decided on the publisher's own basis (below) but remain legally
   unresolved. The source/artifact obligations and necessary decisions are in
   [`obligations.json`](research/herdr-190/license-closure/obligations.json).
 
@@ -231,11 +232,20 @@ changing the original upstream tree:
 
 The current closeout action register is
 [`closeout/closeout-register.json`](research/herdr-190/closeout/closeout-register.json).
-It distinguishes supplied technical evidence from **owner disposition,
-qualified review and human visual decisions**. A documented derived variant
-excluding/replacing uncertain media is an option, **not an implemented or
-silently approved change**. Original source, assets, history and past evidence
-remain intact; no historical publication clearance is inferred.
+On 2026-10-31 the repository owner chose to follow the upstream publisher's own
+distribution basis for the unresolved items: the eight assets, the four fixture
+files and the `ctrlc`/`dispatch2`/`block2`/`objc2` chain stay exactly as
+published, conveyed under the repository-level Apache-2.0 declaration and each
+crate's declared license, with no replacement, omission or source-export change.
+That upstream practice is one repository LICENSE with no per-asset statement and
+no Cargo notice bundle; this file remains stricter than that practice.
+
+This records a disposition decision, not a legal clearance. Authorship of the
+media is still not independently established, the upstream Apple-SDK statement
+remains unresolved, and a third party may dispute the publisher's rights in a
+sponsor mark, screenshot or sound file. The rejected derived-variant option
+(generated replacement media) was not implemented. Human visual review of the
+original UI comparison is still pending.
 
 ### Actual distribution obligations for integration B
 

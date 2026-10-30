@@ -68,26 +68,30 @@
   "external_decisions_required": [
     {
       "id": "media-disposition",
-      "state": "OWNER_DISPOSITION_PENDING",
-      "required_from": "Haisu / relevant rights holder",
-      "minimal_owner_response": "Choose an evidence/disposition policy below; an agent cannot manufacture ownership confirmations.",
-      "options": [
-        {
-          "id": "publisher-declaration-review",
-          "proposal": "Have the owner/qualified reviewer explicitly decide whether the original Apache/MIT publisher declarations are acceptable evidence for unchanged source, recording assumptions and excluding any ungranted trademark/endorsement use. This does not constitute permission the publisher does not own."
-        },
-        {
-          "id": "derived-safe-assets",
-          "proposal": "Explicitly authorize a separately documented derived variant: omit six non-runtime branding/sponsor/docs images from Viva distributions, replace both embedded MP3s with original generated sounds, replace opaque image fixtures with deterministic synthetic fixtures. Keep original e35f393/tree98b3f4e/history and license/provenance records. Do not silently modify original baseline or infer historical publication clearance.",
-          "implementation_status": "PROPOSED ONLY; no replacements/deletions or source-export changes implemented."
-        }
-      ]
+      "state": "OWNER_DECISION_RECORDED",
+      "decided_by": "Haisu (repository owner)",
+      "decided_at": "2026-10-31",
+      "decision": "publisher-declaration-review: follow the upstream herdr publisher's own distribution basis; keep all eight assets and four fixtures unchanged, with no replacement, omission or source-export change.",
+      "decision_basis": {
+        "upstream_practice": "herdr distributes one repository-level Apache-2.0 LICENSE with no per-asset statement and no Cargo notice bundle; its macOS/Linux install script fetches only the binary, and only the Windows installer carries ConPTY notices. Viva's notice payload is already stricter than that practice.",
+        "scope": "Unchanged source and media are conveyed under the publisher's repository-level declaration. This is the publisher's interpretation, not independent authorship verification, and it grants nothing the publisher does not own."
+      },
+      "assumptions": [
+        "Files stay byte-unchanged from the pinned upstream tree.",
+        "No trademark, sponsorship or endorsement use is claimed by Viva.",
+        "The existing notice payload and this record accompany any distribution."
+      ],
+      "residual_risk": "A third party could still dispute the publisher's rights in the sponsor mark, screenshot or sound files; that risk is accepted, not resolved.",
+      "rejected_option": "derived-safe-assets (omit/replace media with generated originals) was considered and not chosen; no replacement assets are created and no audio/image file is modified."
     },
     {
       "id": "apple-and-inherited-attribution",
-      "state": "QUALIFIED_REVIEW_PENDING",
-      "required_from": "Qualified professional, with Haisu responsible for obtaining/accepting the scope decision",
-      "minimal_owner_response": "Provide an attributable scope decision addressing the upstream Apple-SDK derived-work statement and adequacy of inherited/current notices for the selected versions; do not replace this with an agent PASS.",
+      "state": "OWNER_DECISION_RECORDED_UPSTREAM_BASIS",
+      "decided_by": "Haisu (repository owner)",
+      "decided_at": "2026-10-31",
+      "decision": "Follow the upstream herdr distribution basis: keep ctrlc 3.5.2 and its Apple-only dispatch2/block2/objc2 chain, relying on each crate's declared license and the upstream Apple-SDK derived-work statement; no dependency replacement and no agent-issued scope conclusion.",
+      "basis": "Upstream herdr distributes the same chain without additional handling; the selected packages declare MIT and Zlib OR Apache-2.0 OR MIT.",
+      "residual_risk": "The upstream statement is not a resolved legal conclusion. Adequacy of inherited contributor copyrights and any Apple SDK terms remain unverified and are not asserted as cleared.",
       "review_inputs": [
         "licenses/herdr-native/objc2/LICENSE.md",
         "notice-index.json and supplied original full texts",
@@ -102,7 +106,7 @@
       "minimal_owner_response": "Explicitly record acceptance or concrete failures of the original Herdr UI comparison. Prior QA/merge and programmatic PTY success do not supply this visual decision."
     }
   ],
-  "next_work_boundary": "Continue concrete implementation after an explicit media disposition is chosen; obtain required external scope/visual decisions. Do not repeatedly repackage pending questions as completed development, close #190, or unlock #191. Existing failed/skipped/ignored checks retain their states.",
+  "next_work_boundary": "Media and Apple-SDK scope are owner-decided on the upstream-declaration basis and must not be restated as legal clearance. Human visual review remains pending. Do not repeatedly repackage pending questions as completed development; close #190 only when its acceptance items are done and do not unlock #191 early. Existing failed/skipped/ignored checks retain their states.",
   "unchanged": [
     "Original upstream source/dependency/version",
     "Viva default entry and authority/grants",
