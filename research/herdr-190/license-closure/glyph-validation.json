@@ -1,5 +1,7 @@
 {
   "base_commit": "f805a889e96bae321da47b9a56525e65247181f3",
+  "base_commit_note": "Implementation base, NOT a claim that the new glyph tool/21-test run existed on clean f805a88. Original producer SHA-256 matches the tool committed in d12f807; original pre-commit execution is not retroactively labeled a clean-head run. Fresh clean-d12f807 reruns and later pinning verification are recorded separately in qa-followup.json.",
+  "followup_record": "qa-followup.json",
   "role": "Developer follow-up, NOT independent QA or blanket license/trademark clearance",
   "scope": "Actual fixed-font SDK comparison plus selected discovery attempts and full notice capture; not a log of every search/API request. No font binary added to repo.",
   "actual_font_command": "PYTHONPATH=/tmp/viva-190-license-closure/fonttools python3.11 tooling/herdr-audit/glyph_provenance.py /tmp/viva-190-license-closure/JetBrainsMono-NF34.ttf",

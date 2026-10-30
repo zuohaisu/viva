@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('notice_payload', Path(__file__).with_name('notice_payload.py'))
@@ -59,6 +60,11 @@ class NoticePayloadTests(unittest.TestCase):
         captured = json.loads((folder / 'completion/cargo-target-notices.json').read_text())
         result = json.loads((folder / 'license-closure/cargo-notice-payload.json').read_text())
         self.assertEqual(result['source_tree'], captured['source_tree'])
+        # These are advertised facts for this fixed capture, not live counters.
+        # An intentional inventory refresh must also update its public claims.
+        self.assertEqual(len(captured['packages']), 155)
+        self.assertEqual(len(result['packages']), 155)
+        self.assertEqual(len(result['notice_texts']), 111)
         texts = {t['sha256']: t['text'] for t in result['notice_texts']}
         self.assertEqual(len(texts), len(result['notice_texts']))
         for digest, text in texts.items():
@@ -147,6 +153,20 @@ class SourceNoticeTests(unittest.TestCase):
             wrong.write_bytes(b'not the real font')
             with self.assertRaisesRegex(ValueError, 'Not the pinned font blob'):
                 module.inspect(wrong)  # rejected before any optional fontTools import
+
+    def test_glyph_source_is_pinned_independently_of_head(self):
+        spec = importlib.util.spec_from_file_location('pinned_glyph', Path(__file__).with_name('glyph_provenance.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        record = json.loads((self.folder / 'glyph-provenance.json').read_text())
+        self.assertEqual(module.SOURCE_SHA256, record['source_sha256'])
+        source = module.load_source()  # real committed Git object, no font SDK
+        self.assertEqual(self.git_blob(source), module.SOURCE_BLOB)
+        self.assertEqual(hashlib.sha256(source).hexdigest(), record['source_sha256'])
+        with patch.object(module.subprocess, 'check_output', return_value=source+b'\n// drift\n') as read:
+            with self.assertRaisesRegex(ValueError, 'Source SHA-256 differs'):
+                module.load_source()
+        read.assert_called_once_with(['git', 'cat-file', 'blob', module.SOURCE_BLOB], cwd=ROOT)
 
     def test_unicode_generated_representation_matches_fixed_17_data(self):
         record = self.evidence['fontconfig_casefold']
