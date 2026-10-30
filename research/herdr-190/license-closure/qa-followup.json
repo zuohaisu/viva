@@ -1,0 +1,138 @@
+{
+  "reviewed_head": "d12f807e12402329f353ac1d812f1fe9b4615ca3",
+  "role": "Developer QA-response checks, not independent QA or permission/visual clearance",
+  "judgments": [
+    {
+      "finding": 1,
+      "judgment": "Valid coverage improvement, not a false delivered count. Actual counts independently recalculated locally: 155 packages and 111 unique texts.",
+      "fix": "Assert captured package count, payload package count and payload text count explicitly. Intentional refresh must update its published facts too."
+    },
+    {
+      "finding": 2,
+      "judgment": "Confirmed. A different source with the same five payloads could be accepted by the old tool and relabeled with a new hash.",
+      "fix": "Read immutable source Git blob 881c0ed98aee538b81cab366607d83506a9b963f and require the original recorded SHA-256. Never use current HEAD to choose source. Missing blob fails instead of retargeting; mismatched bytes fail before SDK use.",
+      "pre_fix_probe": {
+        "implementation_commit": "d12f807e12402329f353ac1d812f1fe9b4615ca3",
+        "scope": "Unit-level Git-read injection with real fixed-font SDK, no source or checkout mutation. Not a runtime failure.",
+        "changed_source_accepted": true,
+        "all_five_still_equal": true
+      }
+    },
+    {
+      "finding": 3,
+      "judgment": "Traceability ambiguity valid; inference that 21 tests/tool executed on clean f805a88 is not valid. base_commit denotes implementation base. That commit did not contain glyph_provenance.py; the old producer SHA equals its d12f807 contents. No claim the original run was on clean d12 is made.",
+      "fix": "Clarify the historical field without changing old output, and separately rerun on clean reviewed head d12f807 before making any edits."
+    }
+  ],
+  "clean_reviewed_head_rerun": {
+    "head": "d12f807e12402329f353ac1d812f1fe9b4615ca3",
+    "worktree_state": "clean before and after these executions; before any QA-fix edit",
+    "unit_command": "python3.11 -m unittest discover -s tooling/herdr-audit -v",
+    "unit_exit_code": 0,
+    "unit_stdout_and_stderr": "test_cleanup_failure_alone_still_fails_run (test_inventory.CleanupTests.test_cleanup_failure_alone_still_fails_run) ... ok\ntest_cleanup_failure_does_not_mask_primary_error (test_inventory.CleanupTests.test_cleanup_failure_does_not_mask_primary_error) ... ok\ntest_closed_stderr_does_not_mask_primary_error (test_inventory.CleanupTests.test_closed_stderr_does_not_mask_primary_error) ... ok\ntest_status_failure_until_deadline_is_not_success (test_inventory.CleanupTests.test_status_failure_until_deadline_is_not_success) ... ok\ntest_transient_status_failure_is_recorded_and_retried (test_inventory.CleanupTests.test_transient_status_failure_is_recorded_and_retried) ... ok\ntest_binary_and_dotfile_hashes_match_independent_git_show (test_inventory.CommittedTreeTests.test_binary_and_dotfile_hashes_match_independent_git_show) ... ok\ntest_captured_native_notices_have_complete_hash_index (test_inventory.CommittedTreeTests.test_captured_native_notices_have_complete_hash_index) ... ok\ntest_completion_index_links_file_results_and_failed_diff_check (test_inventory.CommittedTreeTests.test_completion_index_links_file_results_and_failed_diff_check) ... ok\ntest_fixed_source_tree_counts_and_complete_file_records (test_inventory.CommittedTreeTests.test_fixed_source_tree_counts_and_complete_file_records) ... ok\ntest_font_evidence_distinguishes_viva_commit_from_source_tree (test_inventory.CommittedTreeTests.test_font_evidence_distinguishes_viva_commit_from_source_tree) ... ok\ntest_file_level_exceptions_are_discovered_not_relicensed (test_inventory.InventoryTests.test_file_level_exceptions_are_discovered_not_relicensed) ... ok\ntest_metadata_keeps_unknown_license_and_omits_absolute_paths (test_inventory.InventoryTests.test_metadata_keeps_unknown_license_and_omits_absolute_paths) ... ok\ntest_opaque_asset_is_hashed_without_claiming_permission (test_inventory.InventoryTests.test_opaque_asset_is_hashed_without_claiming_permission) ... ok\ntest_changed_notice_is_rejected (test_notice_payload.NoticePayloadTests.test_changed_notice_is_rejected) ... ok\ntest_duplicates_are_deduplicated_without_selecting_license_alternative (test_notice_payload.NoticePayloadTests.test_duplicates_are_deduplicated_without_selecting_license_alternative) ... ok\ntest_missing_or_changed_package_is_rejected (test_notice_payload.NoticePayloadTests.test_missing_or_changed_package_is_rejected) ... ok\ntest_real_captured_payload_has_exact_text_for_all_selected_notices (test_notice_payload.NoticePayloadTests.test_real_captured_payload_has_exact_text_for_all_selected_notices) ... ok\ntest_glyph_packet_is_bound_to_source_and_full_notices (test_notice_payload.SourceNoticeTests.test_glyph_packet_is_bound_to_source_and_full_notices) ... ok\ntest_theme_tree_and_all_supplemental_text_hashes (test_notice_payload.SourceNoticeTests.test_theme_tree_and_all_supplemental_text_hashes) ... ok\ntest_unicode_generated_representation_matches_fixed_17_data (test_notice_payload.SourceNoticeTests.test_unicode_generated_representation_matches_fixed_17_data) ... ok\ntest_x11_original_notice_and_data_equivalence (test_notice_payload.SourceNoticeTests.test_x11_original_notice_and_data_equivalence) ... ok\n\n----------------------------------------------------------------------\nRan 21 tests in 11.928s\n\nOK\n",
+    "font_command": "PYTHONPATH=/tmp/viva-190-license-closure/fonttools python3.11 tooling/herdr-audit/glyph_provenance.py /tmp/viva-190-license-closure/JetBrainsMono-NF34.ttf",
+    "font_exit_code": 0,
+    "font_output": "Byte-identical to committed glyph-provenance.json (cmp exit 0); all five glyphs equal.",
+    "old_producer_hash_matches_d12": true,
+    "tool_exists_on_clean_f805": false
+  },
+  "pinning_regression": {
+    "command": "python3.11 -m unittest discover -s tooling/herdr-audit -v",
+    "before": "21 passed / 1 new error (missing source pin API on recorded d12 implementation); separate real-font/Git-read-injection probe demonstrates the actual drift acceptance. No main/source checkout modified.",
+    "before_exit_code": 1,
+    "before_stdout_and_stderr": "test_cleanup_failure_alone_still_fails_run (test_inventory.CleanupTests.test_cleanup_failure_alone_still_fails_run) ... ok\ntest_cleanup_failure_does_not_mask_primary_error (test_inventory.CleanupTests.test_cleanup_failure_does_not_mask_primary_error) ... ok\ntest_closed_stderr_does_not_mask_primary_error (test_inventory.CleanupTests.test_closed_stderr_does_not_mask_primary_error) ... ok\ntest_status_failure_until_deadline_is_not_success (test_inventory.CleanupTests.test_status_failure_until_deadline_is_not_success) ... ok\ntest_transient_status_failure_is_recorded_and_retried (test_inventory.CleanupTests.test_transient_status_failure_is_recorded_and_retried) ... ok\ntest_binary_and_dotfile_hashes_match_independent_git_show (test_inventory.CommittedTreeTests.test_binary_and_dotfile_hashes_match_independent_git_show) ... ok\ntest_captured_native_notices_have_complete_hash_index (test_inventory.CommittedTreeTests.test_captured_native_notices_have_complete_hash_index) ... ok\ntest_completion_index_links_file_results_and_failed_diff_check (test_inventory.CommittedTreeTests.test_completion_index_links_file_results_and_failed_diff_check) ... ok\ntest_fixed_source_tree_counts_and_complete_file_records (test_inventory.CommittedTreeTests.test_fixed_source_tree_counts_and_complete_file_records) ... ok\ntest_font_evidence_distinguishes_viva_commit_from_source_tree (test_inventory.CommittedTreeTests.test_font_evidence_distinguishes_viva_commit_from_source_tree) ... ok\ntest_file_level_exceptions_are_discovered_not_relicensed (test_inventory.InventoryTests.test_file_level_exceptions_are_discovered_not_relicensed) ... ok\ntest_metadata_keeps_unknown_license_and_omits_absolute_paths (test_inventory.InventoryTests.test_metadata_keeps_unknown_license_and_omits_absolute_paths) ... ok\ntest_opaque_asset_is_hashed_without_claiming_permission (test_inventory.InventoryTests.test_opaque_asset_is_hashed_without_claiming_permission) ... ok\ntest_changed_notice_is_rejected (test_notice_payload.NoticePayloadTests.test_changed_notice_is_rejected) ... ok\ntest_duplicates_are_deduplicated_without_selecting_license_alternative (test_notice_payload.NoticePayloadTests.test_duplicates_are_deduplicated_without_selecting_license_alternative) ... ok\ntest_missing_or_changed_package_is_rejected (test_notice_payload.NoticePayloadTests.test_missing_or_changed_package_is_rejected) ... ok\ntest_real_captured_payload_has_exact_text_for_all_selected_notices (test_notice_payload.NoticePayloadTests.test_real_captured_payload_has_exact_text_for_all_selected_notices) ... ok\ntest_glyph_packet_is_bound_to_source_and_full_notices (test_notice_payload.SourceNoticeTests.test_glyph_packet_is_bound_to_source_and_full_notices) ... ok\ntest_glyph_source_is_pinned_independently_of_head (test_notice_payload.SourceNoticeTests.test_glyph_source_is_pinned_independently_of_head) ... ERROR\ntest_theme_tree_and_all_supplemental_text_hashes (test_notice_payload.SourceNoticeTests.test_theme_tree_and_all_supplemental_text_hashes) ... ok\ntest_unicode_generated_representation_matches_fixed_17_data (test_notice_payload.SourceNoticeTests.test_unicode_generated_representation_matches_fixed_17_data) ... ok\ntest_x11_original_notice_and_data_equivalence (test_notice_payload.SourceNoticeTests.test_x11_original_notice_and_data_equivalence) ... ok\n\n======================================================================\nERROR: test_glyph_source_is_pinned_independently_of_head (test_notice_payload.SourceNoticeTests.test_glyph_source_is_pinned_independently_of_head)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/zuohaisu/orca/workspaces/viva/herdr/tooling/herdr-audit/test_notice_payload.py\", line 162, in test_glyph_source_is_pinned_independently_of_head\n    self.assertEqual(module.SOURCE_SHA256, record['source_sha256'])\n                     ^^^^^^^^^^^^^^^^^^^^\nAttributeError: module 'pinned_glyph' has no attribute 'SOURCE_SHA256'\n\n----------------------------------------------------------------------\nRan 22 tests in 14.936s\n\nFAILED (errors=1)\n",
+    "after_exit_code": 0,
+    "after_stdout_and_stderr": "test_cleanup_failure_alone_still_fails_run (test_inventory.CleanupTests.test_cleanup_failure_alone_still_fails_run) ... ok\ntest_cleanup_failure_does_not_mask_primary_error (test_inventory.CleanupTests.test_cleanup_failure_does_not_mask_primary_error) ... ok\ntest_closed_stderr_does_not_mask_primary_error (test_inventory.CleanupTests.test_closed_stderr_does_not_mask_primary_error) ... ok\ntest_status_failure_until_deadline_is_not_success (test_inventory.CleanupTests.test_status_failure_until_deadline_is_not_success) ... ok\ntest_transient_status_failure_is_recorded_and_retried (test_inventory.CleanupTests.test_transient_status_failure_is_recorded_and_retried) ... ok\ntest_binary_and_dotfile_hashes_match_independent_git_show (test_inventory.CommittedTreeTests.test_binary_and_dotfile_hashes_match_independent_git_show) ... ok\ntest_captured_native_notices_have_complete_hash_index (test_inventory.CommittedTreeTests.test_captured_native_notices_have_complete_hash_index) ... ok\ntest_completion_index_links_file_results_and_failed_diff_check (test_inventory.CommittedTreeTests.test_completion_index_links_file_results_and_failed_diff_check) ... ok\ntest_fixed_source_tree_counts_and_complete_file_records (test_inventory.CommittedTreeTests.test_fixed_source_tree_counts_and_complete_file_records) ... ok\ntest_font_evidence_distinguishes_viva_commit_from_source_tree (test_inventory.CommittedTreeTests.test_font_evidence_distinguishes_viva_commit_from_source_tree) ... ok\ntest_file_level_exceptions_are_discovered_not_relicensed (test_inventory.InventoryTests.test_file_level_exceptions_are_discovered_not_relicensed) ... ok\ntest_metadata_keeps_unknown_license_and_omits_absolute_paths (test_inventory.InventoryTests.test_metadata_keeps_unknown_license_and_omits_absolute_paths) ... ok\ntest_opaque_asset_is_hashed_without_claiming_permission (test_inventory.InventoryTests.test_opaque_asset_is_hashed_without_claiming_permission) ... ok\ntest_changed_notice_is_rejected (test_notice_payload.NoticePayloadTests.test_changed_notice_is_rejected) ... ok\ntest_duplicates_are_deduplicated_without_selecting_license_alternative (test_notice_payload.NoticePayloadTests.test_duplicates_are_deduplicated_without_selecting_license_alternative) ... ok\ntest_missing_or_changed_package_is_rejected (test_notice_payload.NoticePayloadTests.test_missing_or_changed_package_is_rejected) ... ok\ntest_real_captured_payload_has_exact_text_for_all_selected_notices (test_notice_payload.NoticePayloadTests.test_real_captured_payload_has_exact_text_for_all_selected_notices) ... ok\ntest_glyph_packet_is_bound_to_source_and_full_notices (test_notice_payload.SourceNoticeTests.test_glyph_packet_is_bound_to_source_and_full_notices) ... ok\ntest_glyph_source_is_pinned_independently_of_head (test_notice_payload.SourceNoticeTests.test_glyph_source_is_pinned_independently_of_head) ... ok\ntest_theme_tree_and_all_supplemental_text_hashes (test_notice_payload.SourceNoticeTests.test_theme_tree_and_all_supplemental_text_hashes) ... ok\ntest_unicode_generated_representation_matches_fixed_17_data (test_notice_payload.SourceNoticeTests.test_unicode_generated_representation_matches_fixed_17_data) ... ok\ntest_x11_original_notice_and_data_equivalence (test_notice_payload.SourceNoticeTests.test_x11_original_notice_and_data_equivalence) ... ok\n\n----------------------------------------------------------------------\nRan 22 tests in 12.558s\n\nOK\n",
+    "after_count": 22,
+    "execution_context": "Modified QA-fix working tree based on d12, not a clean-d12 run. Exact producer/test content hashes below; final committed-head reruns and CI links are reported on the issue/PR to avoid recursive self-referential commit metadata.",
+    "implementation_sha256": {
+      "tooling/herdr-audit/glyph_provenance.py": "23c57e9c60f002608ed8153c5fdeed8363df7db5d9daa7e0dae942c771420302",
+      "tooling/herdr-audit/test_notice_payload.py": "bec28c9739e46a1ded206625c0463a3f5eb558df2dfb2fad1742535a29e640ac"
+    }
+  },
+  "fixed_real_font_rerun": {
+    "command": "PYTHONPATH=/tmp/viva-190-license-closure/fonttools python3.11 tooling/herdr-audit/glyph_provenance.py /tmp/viva-190-license-closure/JetBrainsMono-NF34.ttf",
+    "exit_code": 0,
+    "output": {
+      "role": "Developer actual-font comparison, not independent QA or legal clearance",
+      "source": "upstream/herdr/vendor/libghostty-vt/src/font/glyf_rasterize_png_test.zig",
+      "source_git_blob": "881c0ed98aee538b81cab366607d83506a9b963f",
+      "source_sha256": "d4b7d9a337dd7d74fd858ad39ac33a46241367848ef95de75ac1698440d9e1f4",
+      "font_source": "ryanoasis/nerd-fonts@fa7b859994228a9c8759f99c55a8d31ee92a1b5e:patched-fonts/JetBrainsMono/Ligatures/Regular/JetBrainsMonoNerdFont-Regular.ttf",
+      "font_git_blob": "235a07aef9028e2953076efc9038f1b1182f8b2b",
+      "font_sha256": "0ec29a68b539ece7078fc714cebff0c0accb2f4948f8f7963d9f5e86633b12d9",
+      "fonttools_version": "4.68.0",
+      "font_version": [
+        "Version 2.304; ttfautohint (v1.8.4.7-5d5b);Nerd Fonts 3.4.0"
+      ],
+      "comparison_scope": "Equal decoded coordinates/endpoints/on-curve flags AND equal fontTools canonical glyph serialization. Not a claim of whole-font or original raw storage-byte identity; no hint removal or geometry normalization used.",
+      "glyphs": [
+        {
+          "codepoint": "0xe0a0",
+          "font_glyph": "pl-branch",
+          "original_payload_sha256": "5c34e413ef8219c81d9d779f50f331ed8e0ff31202168fb082718aed9e796fe5",
+          "canonical_glyph_sha256": "5c34e413ef8219c81d9d779f50f331ed8e0ff31202168fb082718aed9e796fe5",
+          "coordinate_count": 30,
+          "contour_count": 2,
+          "outline_equal": true,
+          "canonical_bytes_equal": true
+        },
+        {
+          "codepoint": "0xf07b",
+          "font_glyph": "fa-folder",
+          "original_payload_sha256": "ba8179e3510a8f68d430dc33d74d30d42589e12bb8161caa2ad7139cc7968126",
+          "canonical_glyph_sha256": "ba8179e3510a8f68d430dc33d74d30d42589e12bb8161caa2ad7139cc7968126",
+          "coordinate_count": 22,
+          "contour_count": 1,
+          "outline_equal": true,
+          "canonical_bytes_equal": true
+        },
+        {
+          "codepoint": "0xf015",
+          "font_glyph": "fa-house",
+          "original_payload_sha256": "74c4d793d0dcf35d753d6706f37d1b7cea21acb661b4df04f24767ae1e77b205",
+          "canonical_glyph_sha256": "74c4d793d0dcf35d753d6706f37d1b7cea21acb661b4df04f24767ae1e77b205",
+          "coordinate_count": 63,
+          "contour_count": 1,
+          "outline_equal": true,
+          "canonical_bytes_equal": true
+        },
+        {
+          "codepoint": "0xf004",
+          "font_glyph": "fa-heart",
+          "original_payload_sha256": "45d40b39fabe18902428720e22e165800a8c0aeb97c5afecc88c67d8f575e1dd",
+          "canonical_glyph_sha256": "45d40b39fabe18902428720e22e165800a8c0aeb97c5afecc88c67d8f575e1dd",
+          "coordinate_count": 26,
+          "contour_count": 1,
+          "outline_equal": true,
+          "canonical_bytes_equal": true
+        },
+        {
+          "codepoint": "0xe7a8",
+          "font_glyph": "dev-rust",
+          "original_payload_sha256": "fc4ab66175d3eafa6ec9e0b0abfacbdef916a1450df25f357f62ea5bfda6ee66",
+          "canonical_glyph_sha256": "fc4ab66175d3eafa6ec9e0b0abfacbdef916a1450df25f357f62ea5bfda6ee66",
+          "coordinate_count": 462,
+          "contour_count": 10,
+          "outline_equal": true,
+          "canonical_bytes_equal": true
+        }
+      ]
+    },
+    "comparison_to_original": "Same source_sha256/font identity/all five glyph records. New source_git_blob field makes the immutable input explicit; no old capture overwritten."
+  },
+  "cargo_revalidation": {
+    "metadata_command": "(cd upstream/herdr && cargo metadata --offline --locked --format-version 1)",
+    "metadata_exit_code": 0,
+    "export_command": "python3.11 tooling/herdr-audit/notice_payload.py /tmp/viva-194-qa/metadata.json",
+    "export_exit_code": 0,
+    "cmp_committed_payload_exit_code": 0,
+    "package_count": 155,
+    "unique_text_count": 111
+  },
+  "limits": [
+    "QA report shell/Grep exit 137 remains an independent-execution limitation; these dev runs do not change that conclusion.",
+    "No original upstream tree, license bytes, versions, default entry, permissions, user sessions or published packages changed.",
+    "Full nested/runtime/Windows/ARM/human visual checks not rerun for this audit-only repair. #190 legal/asset/Kitty/B obligations remain open; no merge, publish, closure, worktree deletion or #191 activation."
+  ]
+}
