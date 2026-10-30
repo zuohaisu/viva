@@ -1,0 +1,50 @@
+{
+  "scope": "Supplemental primary-source material, not full copyright adequacy or SDK legal clearance. Original 155/111 capture and original notices retained.",
+  "notices": [
+    {
+      "path": "licenses/herdr-supplemental/unicode6/LICENSE",
+      "git_blob": "d7e7973c2fd6f2586a8999a69dc21e39af26be0f",
+      "sha256": "fe5c62b543e287981db198f2acfa0ca732d12591a1024536dc8fd85dacd77104",
+      "source": "unicode-org/unicodetools@578f6c0516f5f268292ebda50b51848407a06478:LICENSE"
+    },
+    {
+      "path": "licenses/herdr-supplemental/unicode6/ReadMe.txt",
+      "git_blob": "89d5cb39ef3a1ee6ec04edda391d90102dbbe890",
+      "sha256": "f60b999a42a615bfff12bbe91749a7c01e94eba26d0fb17d37a159a836b85f54",
+      "source": "unicode-org/unicodetools@578f6c0516f5f268292ebda50b51848407a06478:unicodetools/data/ucd/6.0.0-Update/ReadMe.txt"
+    },
+    {
+      "path": "licenses/herdr-supplemental/objc2/LICENSE-MIT.txt",
+      "git_blob": "ce8c4c17fd88f6cf5f3720c08fa685434e3cbcbb",
+      "sha256": "f6a2e783669a0dd7a2c3b8a4f76db40ae49033e66e1bdc30f3aa25fe5577b070",
+      "source": "madsmtm/objc2@ee9a7ada2131f5944b8750428e265c15632f2a19:LICENSE-MIT.txt"
+    },
+    {
+      "path": "licenses/herdr-supplemental/objc2/LICENSE-APACHE.txt",
+      "git_blob": "367635181689ec6e1efadf43eaa48503acaf34a8",
+      "sha256": "0c9a5f6fe28e27015e12506ffe58c9e007cead169af9670ec15c1df0d14e4f2a",
+      "source": "madsmtm/objc2@ee9a7ada2131f5944b8750428e265c15632f2a19:LICENSE-APACHE.txt"
+    },
+    {
+      "path": "licenses/herdr-supplemental/objc2/LICENSE-ZLIB.txt",
+      "git_blob": "e53b4121d96c9c337cc7fee57c0177e4a63b1da0",
+      "sha256": "fced3e7fedc235fa83ed0108b0df74d86b435d06436356f46917a903cbadd80a",
+      "source": "madsmtm/objc2@ee9a7ada2131f5944b8750428e265c15632f2a19:LICENSE-ZLIB.txt"
+    },
+    {
+      "path": "licenses/herdr-supplemental/objc2/rust-objc-LICENSE.txt",
+      "sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5",
+      "git_blob": "e9ab3babc0d8602b83dccde8a462f8f3dc1e52ad",
+      "source": "SSheldon/rust-objc@c8696b0cd1932fdf1b5b22c03af86f32a934f42f:LICENSE.txt",
+      "scope": "Earlier objc upstream notice preserved as attribution material. Not a claim that every historical contributor or SDK-derived-work scope is settled."
+    }
+  ],
+  "data": {
+    "path": "research/herdr-190/closeout/UnicodeData-6.0.0.txt.gz",
+    "raw_git_blob": "8d7222b13789c43e5ed36ddf0d3eb7ebe8d72c7b",
+    "raw_sha256": "90b45b777346bef027556f9c6cb3ea5d7d745bd60d6762855c08d8a22d34f771",
+    "gzip_sha256": "3f75dff5c9010464894ac39d7813aab5e6e9366338cda5de8bdfcd16f2a6f9bb",
+    "source": "unicode-org/unicodetools@578f6c0516f5f268292ebda50b51848407a06478:unicodetools/data/ucd/6.0.0-Update/UnicodeData.txt",
+    "permission_context": "Current repository Unicode V3 grant retained, alongside historical Unicode 6 README copyright. No claim to reconstruct historical license wording or relicense an entire third-party program."
+  }
+}

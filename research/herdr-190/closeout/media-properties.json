@@ -1,0 +1,164 @@
+{
+  "scope": "Metadata/pixels, not authorship, copyrightability or permission classification. Empty tags do not nullify a repository license or prove absence of permission.",
+  "source_tree": "98b3f4ed3ae4c238f3267fb22c5920256571e308",
+  "pillow_version": "13.0.0",
+  "mutagen_version": "1.48.1",
+  "records": [
+    {
+      "path": "upstream/herdr/assets/logo.png",
+      "sha256": "56fc2db845c16eb521022549890fbe239659957caee1f4fc718a634d7a66cf0a",
+      "size": 120644,
+      "format": "PNG",
+      "dimensions": [
+        512,
+        512
+      ],
+      "metadata": {
+        "chromaticity": "(0.3127, 0.329, 0.64, 0.33, 0.3, 0.6, 0.15, 0.06)",
+        "date:create": "2026-03-27T14:46:04+00:00",
+        "date:modify": "2026-03-27T14:46:00+00:00",
+        "date:timestamp": "2026-03-27T17:50:39+00:00"
+      },
+      "decoded_rgba_sha256": "2cf18699af9c13b8817ce051690c42ec2f218ef4002758b7864038aa053e3e5f",
+      "unique_rgba_colors": 2130
+    },
+    {
+      "path": "upstream/herdr/assets/logo.svg",
+      "sha256": "f4a8400d515fcf50112a952a5b48f5fa6e6b02b4dcb0b483ca92be39f7d7f7a1",
+      "size": 2167,
+      "format": "SVG",
+      "contains_metadata_element": false
+    },
+    {
+      "path": "upstream/herdr/assets/og-card.png",
+      "sha256": "75e0422c47b290527f0d27d8d75839c0578fb63bc09c27901a641ed34b6d8b13",
+      "size": 371510,
+      "format": "PNG",
+      "dimensions": [
+        1200,
+        630
+      ],
+      "metadata": {
+        "chromaticity": "(0.3127, 0.329, 0.64, 0.33, 0.3, 0.6, 0.15, 0.06)",
+        "date:create": "2026-03-30T15:55:58+00:00",
+        "date:modify": "2026-03-30T15:55:58+00:00",
+        "date:timestamp": "2026-03-30T16:01:55+00:00"
+      },
+      "decoded_rgba_sha256": "23dd5c8318fe79db18d91c9f8e43d7a80683073b9771df71ffc2794b6f6e219a",
+      "unique_rgba_colors": 34659
+    },
+    {
+      "path": "upstream/herdr/assets/screenshot.png",
+      "sha256": "fb762101ab5128fcf1faf70a1360c067e7f2d904c9590da191062f61e4688d27",
+      "size": 611631,
+      "format": "PNG",
+      "dimensions": [
+        1920,
+        1080
+      ],
+      "metadata": {
+        "aspect": "(0, 1)",
+        "chromaticity": "(0.3127, 0.329, 0.64, 0.33, 0.3, 0.6, 0.15, 0.06)",
+        "gamma": "0.45455"
+      },
+      "decoded_rgba_sha256": "a407b55093f06892a72fd45ec0427e0cbae0fbfa7246e9419d5b3626e2733530",
+      "unique_rgba_colors": 30977
+    },
+    {
+      "path": "upstream/herdr/assets/sounds/done.mp3",
+      "sha256": "cb9c93492c808e33946edac2ab5915758267e65914bc4b794a5ca6dc6e655741",
+      "size": 34560,
+      "format": "MP3",
+      "length_seconds": 1.08,
+      "sample_rate": 48000,
+      "bitrate": 256000,
+      "tags": {}
+    },
+    {
+      "path": "upstream/herdr/assets/sounds/request.mp3",
+      "sha256": "44c077ce28a0a48cec29da204beb627fd17140e5bde1f92dbaecf3d478bdda6f",
+      "size": 46811,
+      "format": "MP3",
+      "length_seconds": 1.46284375,
+      "sample_rate": 44100,
+      "bitrate": 256000,
+      "tags": {}
+    },
+    {
+      "path": "upstream/herdr/assets/sponsors/terminal-trove.png",
+      "sha256": "7cacfaf715fa9b71aa20c8a37203f0f24107818b08ac91651704f00cd6128b2f",
+      "size": 8077,
+      "format": "PNG",
+      "dimensions": [
+        600,
+        158
+      ],
+      "metadata": {},
+      "decoded_rgba_sha256": "ceea9bc96aa0101ad32a0c9da34c3704c5a75d140a10a16227b3b84e469367e7",
+      "unique_rgba_colors": 253
+    },
+    {
+      "path": "upstream/herdr/assets/sponsors/terminal-trove.svg",
+      "sha256": "c9ede5ac7b4ed087de90aab7c31ceab3faacdb711684a21d85970c8d4c57cf34",
+      "size": 7395,
+      "format": "SVG",
+      "contains_metadata_element": false
+    },
+    {
+      "path": "upstream/herdr/vendor/libghostty-vt/src/terminal/kitty/testdata/dog.png",
+      "sha256": "42623061c9b9966eb94e8ff367092227b77d1c3f6d724459024397c9af0c987f",
+      "size": 237387,
+      "format": "PNG",
+      "dimensions": [
+        500,
+        306
+      ],
+      "metadata": {},
+      "decoded_rgba_sha256": "822f005518939a3c773e74f36870dba27922b9f07f17b2f490e99cda330b1116",
+      "unique_rgba_colors": 66885
+    },
+    {
+      "path": "upstream/herdr/vendor/libghostty-vt/src/terminal/kitty/testdata/image-png-none-50x76-2147483647-raw.data",
+      "sha256": "dedaf6740787df1c11e5d1c5d20352aa41d0c619e548a5156bd8a6bc131f880e",
+      "size": 86,
+      "format": "PNG",
+      "dimensions": [
+        50,
+        76
+      ],
+      "metadata": {},
+      "decoded_rgba_sha256": "fa7c6853bc6e6526df1efdb5af90ad170d23836c355847f969eee6f5da7cdf62",
+      "unique_rgba_colors": 1,
+      "uniform_rgba": [
+        43,
+        47,
+        55,
+        255
+      ]
+    },
+    {
+      "path": "upstream/herdr/vendor/libghostty-vt/src/terminal/kitty/testdata/image-rgb-none-20x15-2147483647-raw.data",
+      "sha256": "3422f5c19f5dcb11337383841b4354a18ba95ea5b0b9e7ca905ac4d397a33c0c",
+      "size": 900,
+      "format": "RGB",
+      "dimensions": [
+        20,
+        15
+      ],
+      "decoded_rgb_sha256": "3422f5c19f5dcb11337383841b4354a18ba95ea5b0b9e7ca905ac4d397a33c0c",
+      "unique_rgb_colors": 276
+    },
+    {
+      "path": "upstream/herdr/vendor/libghostty-vt/src/terminal/kitty/testdata/image-rgb-zlib_deflate-128x96-2147483647-raw.data",
+      "sha256": "6869744d4ff0c14f6cacd9b83d83d8e84dba6df8237233a01e0035b6a0b122aa",
+      "size": 30455,
+      "format": "RGB",
+      "dimensions": [
+        128,
+        96
+      ],
+      "decoded_rgb_sha256": "5846279b35a1f8d74f03984432998a15fc52e4e9d34cb5a8e237674c277b95ad",
+      "unique_rgb_colors": 5800
+    }
+  ]
+}

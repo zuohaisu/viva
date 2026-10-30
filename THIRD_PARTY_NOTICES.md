@@ -199,6 +199,44 @@ coverage. B must still place applicable full terms and attributions **inside
 actual archives**, rather than ship links/JSON alone or assume every fetched
 build resource is a shipped dependency.
 
+### Closeout reconstruction and explicit external decisions
+
+The next source review supplies additional, directly licensed material without
+changing the original upstream tree:
+
+- [`closeout/diacritics-reconstruction.json`](research/herdr-190/closeout/diacritics-reconstruction.json)
+  verifies all **297 ordered numeric values** against the official Unicode 6.0
+  dataset. The complete fixed input is retained losslessly as
+  `closeout/UnicodeData-6.0.0.txt.gz`, with its provider's Unicode V3 grant and
+  historical 1991–2010 copyright under
+  [`licenses/herdr-supplemental/unicode6/`](licenses/herdr-supplemental/unicode6/).
+  `tooling/herdr-audit/unicode_diacritics.py` reconstructs the sequence from
+  character properties and 19 normalization exclusions. This establishes a
+  direct data source; it is not a whole-file license/relicensing opinion.
+- [`licenses/herdr-supplemental/objc2/`](licenses/herdr-supplemental/objc2/)
+  preserves actual MIT/Apache/Zlib texts from maintainer-cited commit
+  `ee9a7ada2131f5944b8750428e265c15632f2a19`, plus the earlier rust-objc
+  Steven Sheldon notice. They supplement, not replace, the original licensing
+  explanation and 155/111 captured root-notice payload. The maintainer confirmed
+  old versions' declared licenses, but explicitly could not confirm sufficiency
+  of all contributor copyrights. Do not treat new 2026 copyright or supplying
+  full text as an Apple SDK clearance.
+- [`closeout/media-properties.json`](research/herdr-190/closeout/media-properties.json)
+  records actual Pillow/Mutagen properties of all eight assets and four binary
+  fixtures, bound to their original hashes. Two MP3s have no ID3 tags. One PNG
+  is exactly a uniform 50x76 RGBA image; three other fixtures contain raster
+  image data without independently verified original-photo attribution. Empty
+  tags do not invalidate repository-level Apache/MIT declarations, and visual
+  resemblance to a Commons photo is not verified identity or permission.
+
+The current closeout action register is
+[`closeout/closeout-register.json`](research/herdr-190/closeout/closeout-register.json).
+It distinguishes supplied technical evidence from **owner disposition,
+qualified review and human visual decisions**. A documented derived variant
+excluding/replacing uncertain media is an option, **not an implemented or
+silently approved change**. Original source, assets, history and past evidence
+remain intact; no historical publication clearance is inferred.
+
 ### Actual distribution obligations for integration B
 
 B must create and inspect a license payload **inside each actual install/npm
