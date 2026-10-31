@@ -1,0 +1,117 @@
+{
+  "captured_utc": "2026-10-30T09:46:38.788813+00:00",
+  "base_commit": "fc5b414bef7a44ffe772cd5cf177b93d4ec41674",
+  "source_tree": "98b3f4ed3ae4c238f3267fb22c5920256571e308",
+  "scope": "A closeout evidence/decision register, not legal approval or a license classifier. Decisions below are not silently authorized by a test or a merge.",
+  "technical_results": [
+    {
+      "area": "Kitty numeric diacritics",
+      "result": "All 297 ordered values independently reconstruct from pinned official Unicode 6.0 data using documented properties and 19 numeric exclusions. Full provider Unicode V3 and historical 1991-2010 copyright supplied. No Kitty code copied; not a whole-file license/relicensing opinion.",
+      "evidence": "diacritics-reconstruction.json; notice-index.json; UnicodeData-6.0.0.txt.gz"
+    },
+    {
+      "area": "Eight assets and four image fixtures",
+      "result": "Actual Pillow/Mutagen read of all 12 committed inputs, tied to original SHA-256; no playback. Two MP3s have empty ID3 tags. Tags/dates do not establish authorship and do not nullify a publisher license. One PNG is precisely a uniform 50x76 RGBA(43,47,55,255) image; that is a pixel fact, not a copyrightability ruling. Three remaining fixture images are photographic/raster data without independently established photo origin.",
+      "evidence": "media-properties.json; metadata_probe.py"
+    },
+    {
+      "area": "objc2 permission text",
+      "result": "Recover actual root MIT/Apache/Zlib texts at the maintainer-cited ee9a7ada commit, plus the earlier rust-objc Steven Sheldon notice. Preserve the earlier licensing explanation; do not treat new 2026 copyright as proof it covers every past contributor or Apple SDK rights.",
+      "selected_target_packages": [
+        {
+          "name": "block2",
+          "version": "0.6.2",
+          "declared_license": "MIT"
+        },
+        {
+          "name": "dispatch2",
+          "version": "0.3.1",
+          "declared_license": "Zlib OR Apache-2.0 OR MIT"
+        },
+        {
+          "name": "objc2",
+          "version": "0.6.4",
+          "declared_license": "MIT"
+        },
+        {
+          "name": "objc2-encode",
+          "version": "4.1.0",
+          "declared_license": "MIT"
+        }
+      ],
+      "evidence": "notice-index.json; licenses/herdr-supplemental/objc2/"
+    }
+  ],
+  "primary_clarifications": [
+    {
+      "author": "madsmtm",
+      "url": "https://github.com/madsmtm/objc2/issues/826#issuecomment-4084918376",
+      "quote": "I think I've fixed this in ee9a7ada2131f5944b8750428e265c15632f2a19, let me know if you need something else."
+    },
+    {
+      "author": "madsmtm",
+      "url": "https://github.com/madsmtm/objc2/issues/826#issuecomment-6103078978",
+      "quote": "The license of the old crate versions are as stated in the `license` field. Did that answer your question?"
+    },
+    {
+      "author": "madsmtm",
+      "url": "https://github.com/madsmtm/objc2/issues/826#issuecomment-6107377999",
+      "quote": "Dunno how copyright law works, so can't really answer that. Probably not though, there's other contributors than me.",
+      "context": "Answer to whether the new copyright notices are sufficient; this explicitly does not settle adequacy."
+    }
+  ],
+  "licensing_evidence_basis": {
+    "herdr_assets": "Publisher repository-level Apache-2.0 declaration exists. This audit has not independently established asset authorship or obtained asset-specific permission. It does NOT label those assets unlicensed merely because tags are empty.",
+    "ghostty_fixtures": "Publisher repository-level MIT declaration exists; one flat image is mathematically reproducible. No independent original-photo attribution has been established for the other three, and no unrelated Commons candidate license has been assigned.",
+    "search_boundary": "Image-source searches/visual candidates did not establish a verified identity. No third-party contact sheets/photos downloaded for private comparison are committed or labeled as matched sources. A herdr 0.9.3 crate-archive probe returned HTTP 403: no archive retrieved, no byte comparison or reason inferred, no bypass."
+  },
+  "external_decisions_required": [
+    {
+      "id": "media-disposition",
+      "state": "OWNER_DECISION_RECORDED",
+      "decided_by": "Haisu (repository owner)",
+      "decided_at": "2026-10-31",
+      "decision": "publisher-declaration-review: follow the upstream herdr publisher's own distribution basis; keep all eight assets and four fixtures unchanged, with no replacement, omission or source-export change.",
+      "decision_basis": {
+        "upstream_practice": "herdr distributes one repository-level Apache-2.0 LICENSE with no per-asset statement and no Cargo notice bundle; its macOS/Linux install script fetches only the binary, and only the Windows installer carries ConPTY notices. Viva's notice payload is already stricter than that practice.",
+        "scope": "Unchanged source and media are conveyed under the publisher's repository-level declaration. This is the publisher's interpretation, not independent authorship verification, and it grants nothing the publisher does not own."
+      },
+      "assumptions": [
+        "Files stay byte-unchanged from the pinned upstream tree.",
+        "No trademark, sponsorship or endorsement use is claimed by Viva.",
+        "The existing notice payload and this record accompany any distribution."
+      ],
+      "residual_risk": "A third party could still dispute the publisher's rights in the sponsor mark, screenshot or sound files; that risk is accepted, not resolved.",
+      "rejected_option": "derived-safe-assets (omit/replace media with generated originals) was considered and not chosen; no replacement assets are created and no audio/image file is modified."
+    },
+    {
+      "id": "apple-and-inherited-attribution",
+      "state": "OWNER_DECISION_RECORDED_UPSTREAM_BASIS",
+      "decided_by": "Haisu (repository owner)",
+      "decided_at": "2026-10-31",
+      "decision": "Follow the upstream herdr distribution basis: keep ctrlc 3.5.2 and its Apple-only dispatch2/block2/objc2 chain, relying on each crate's declared license and the upstream Apple-SDK derived-work statement; no dependency replacement and no agent-issued scope conclusion.",
+      "basis": "Upstream herdr distributes the same chain without additional handling; the selected packages declare MIT and Zlib OR Apache-2.0 OR MIT.",
+      "residual_risk": "The upstream statement is not a resolved legal conclusion. Adequacy of inherited contributor copyrights and any Apple SDK terms remain unverified and are not asserted as cleared.",
+      "review_inputs": [
+        "licenses/herdr-native/objc2/LICENSE.md",
+        "notice-index.json and supplied original full texts",
+        "selected_target_packages above",
+        "maintainer issue826 quotations above"
+      ]
+    },
+    {
+      "id": "human-ui",
+      "state": "HUMAN_VISUAL_REVIEW_PENDING",
+      "required_from": "Haisu",
+      "minimal_owner_response": "Explicitly record acceptance or concrete failures of the original Herdr UI comparison. Prior QA/merge and programmatic PTY success do not supply this visual decision."
+    }
+  ],
+  "next_work_boundary": "Media and Apple-SDK scope are owner-decided on the upstream-declaration basis and must not be restated as legal clearance. Human visual review remains pending. Do not repeatedly repackage pending questions as completed development; close #190 only when its acceptance items are done and do not unlock #191 early. Existing failed/skipped/ignored checks retain their states.",
+  "unchanged": [
+    "Original upstream source/dependency/version",
+    "Viva default entry and authority/grants",
+    "User data/existing sessions/updater",
+    "Worktree lifecycle; no new/removal",
+    "Release/merge/issue closure"
+  ]
+}

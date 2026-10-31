@@ -190,7 +190,8 @@ The follow-up keeps the original upstream tree and earlier evidence unchanged.
 - Remaining embedded-data review includes the Kitty-derived diacritic selection
   and four binary Kitty fixtures. The sprite/PNG test generators are provenance
   evidence, not independent authorship certificates; these are not silently
-  treated as first-party MIT or CC0. Top-level asset and Apple SDK scope remain
+  treated as first-party MIT or CC0. Top-level asset and Apple SDK scope are
+  disposition-decided on the publisher's own basis (below) but remain legally
   unresolved. The source/artifact obligations and necessary decisions are in
   [`obligations.json`](research/herdr-190/license-closure/obligations.json).
 
@@ -198,6 +199,53 @@ All supplemental copied notices have a hash/provenance index and CI regression
 coverage. B must still place applicable full terms and attributions **inside
 actual archives**, rather than ship links/JSON alone or assume every fetched
 build resource is a shipped dependency.
+
+### Closeout reconstruction and explicit external decisions
+
+The next source review supplies additional, directly licensed material without
+changing the original upstream tree:
+
+- [`closeout/diacritics-reconstruction.json`](research/herdr-190/closeout/diacritics-reconstruction.json)
+  verifies all **297 ordered numeric values** against the official Unicode 6.0
+  dataset. The complete fixed input is retained losslessly as
+  `closeout/UnicodeData-6.0.0.txt.gz`, with its provider's Unicode V3 grant and
+  historical 1991–2010 copyright under
+  [`licenses/herdr-supplemental/unicode6/`](licenses/herdr-supplemental/unicode6/).
+  `tooling/herdr-audit/unicode_diacritics.py` reconstructs the sequence from
+  character properties and 19 normalization exclusions. This establishes a
+  direct data source; it is not a whole-file license/relicensing opinion.
+- [`licenses/herdr-supplemental/objc2/`](licenses/herdr-supplemental/objc2/)
+  preserves actual MIT/Apache/Zlib texts from maintainer-cited commit
+  `ee9a7ada2131f5944b8750428e265c15632f2a19`, plus the earlier rust-objc
+  Steven Sheldon notice. They supplement, not replace, the original licensing
+  explanation and 155/111 captured root-notice payload. The maintainer confirmed
+  old versions' declared licenses, but explicitly could not confirm sufficiency
+  of all contributor copyrights. Do not treat new 2026 copyright or supplying
+  full text as an Apple SDK clearance.
+- [`closeout/media-properties.json`](research/herdr-190/closeout/media-properties.json)
+  records actual Pillow/Mutagen properties of all eight assets and four binary
+  fixtures, bound to their original hashes. Two MP3s have no ID3 tags. One PNG
+  is exactly a uniform 50x76 RGBA image; three other fixtures contain raster
+  image data without independently verified original-photo attribution. Empty
+  tags do not invalidate repository-level Apache/MIT declarations, and visual
+  resemblance to a Commons photo is not verified identity or permission.
+
+The current closeout action register is
+[`closeout/closeout-register.json`](research/herdr-190/closeout/closeout-register.json).
+On 2026-10-31 the repository owner chose to follow the upstream publisher's own
+distribution basis for the unresolved items: the eight assets, the four fixture
+files and the `ctrlc`/`dispatch2`/`block2`/`objc2` chain stay exactly as
+published, conveyed under the repository-level Apache-2.0 declaration and each
+crate's declared license, with no replacement, omission or source-export change.
+That upstream practice is one repository LICENSE with no per-asset statement and
+no Cargo notice bundle; this file remains stricter than that practice.
+
+This records a disposition decision, not a legal clearance. Authorship of the
+media is still not independently established, the upstream Apple-SDK statement
+remains unresolved, and a third party may dispute the publisher's rights in a
+sponsor mark, screenshot or sound file. The rejected derived-variant option
+(generated replacement media) was not implemented. Human visual review of the
+original UI comparison is still pending.
 
 ### Actual distribution obligations for integration B
 

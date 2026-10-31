@@ -1,0 +1,45 @@
+{
+  "captured_utc": "2026-10-30T09:52:18.434169+00:00",
+  "execution_base": "fc5b414bef7a44ffe772cd5cf177b93d4ec41674",
+  "execution_context": "Working-tree closeout additions, not a clean-base execution. Producer/test hashes identify exact contents; committed-head reruns/CI are reported on the issue/PR.",
+  "scope": "Developer evidence only, not independent QA or copyright/scope/visual approval",
+  "prior_coverage": "22 audit tests at merged #194. No independent official-Unicode6 reconstruction or twelve-media codec/pixel record in the old suite. New coverage does not manufacture a failing runtime on main.",
+  "commands": [
+    {
+      "command": "python3.11 tooling/herdr-audit/unicode_diacritics.py research/herdr-190/closeout/UnicodeData-6.0.0.txt.gz",
+      "exit_code": 0,
+      "result": "All 297 ordered values equal original source. Repeated output cmp exit 0."
+    },
+    {
+      "command": "PYTHONPATH=/tmp/viva-190-assets/tools python3.11 research/herdr-190/closeout/metadata_probe.py",
+      "exit_code": 0,
+      "result": "12 actual committed-media inputs; Pillow 13.0.0 / Mutagen 1.48.1; no playback. Repeated output cmp exit 0. CI verifies stored data/source/hash binding but does not run these external SDKs."
+    },
+    {
+      "command": "python3.11 -m unittest discover -s tooling/herdr-audit -v",
+      "exit_code": 0,
+      "result": "25 passed, no skipped audit tests",
+      "stdout_and_stderr": "test_media_capture_is_bound_to_original_twelve_inputs (test_closeout.CloseoutTests.test_media_capture_is_bound_to_original_twelve_inputs) ... ok\ntest_official_unicode6_reconstructs_all_297_original_values (test_closeout.CloseoutTests.test_official_unicode6_reconstructs_all_297_original_values) ... ok\ntest_supplemental_notices_have_exact_source_blob_and_text_hashes (test_closeout.CloseoutTests.test_supplemental_notices_have_exact_source_blob_and_text_hashes) ... ok\ntest_cleanup_failure_alone_still_fails_run (test_inventory.CleanupTests.test_cleanup_failure_alone_still_fails_run) ... ok\ntest_cleanup_failure_does_not_mask_primary_error (test_inventory.CleanupTests.test_cleanup_failure_does_not_mask_primary_error) ... ok\ntest_closed_stderr_does_not_mask_primary_error (test_inventory.CleanupTests.test_closed_stderr_does_not_mask_primary_error) ... ok\ntest_status_failure_until_deadline_is_not_success (test_inventory.CleanupTests.test_status_failure_until_deadline_is_not_success) ... ok\ntest_transient_status_failure_is_recorded_and_retried (test_inventory.CleanupTests.test_transient_status_failure_is_recorded_and_retried) ... ok\ntest_binary_and_dotfile_hashes_match_independent_git_show (test_inventory.CommittedTreeTests.test_binary_and_dotfile_hashes_match_independent_git_show) ... ok\ntest_captured_native_notices_have_complete_hash_index (test_inventory.CommittedTreeTests.test_captured_native_notices_have_complete_hash_index) ... ok\ntest_completion_index_links_file_results_and_failed_diff_check (test_inventory.CommittedTreeTests.test_completion_index_links_file_results_and_failed_diff_check) ... ok\ntest_fixed_source_tree_counts_and_complete_file_records (test_inventory.CommittedTreeTests.test_fixed_source_tree_counts_and_complete_file_records) ... ok\ntest_font_evidence_distinguishes_viva_commit_from_source_tree (test_inventory.CommittedTreeTests.test_font_evidence_distinguishes_viva_commit_from_source_tree) ... ok\ntest_file_level_exceptions_are_discovered_not_relicensed (test_inventory.InventoryTests.test_file_level_exceptions_are_discovered_not_relicensed) ... ok\ntest_metadata_keeps_unknown_license_and_omits_absolute_paths (test_inventory.InventoryTests.test_metadata_keeps_unknown_license_and_omits_absolute_paths) ... ok\ntest_opaque_asset_is_hashed_without_claiming_permission (test_inventory.InventoryTests.test_opaque_asset_is_hashed_without_claiming_permission) ... ok\ntest_changed_notice_is_rejected (test_notice_payload.NoticePayloadTests.test_changed_notice_is_rejected) ... ok\ntest_duplicates_are_deduplicated_without_selecting_license_alternative (test_notice_payload.NoticePayloadTests.test_duplicates_are_deduplicated_without_selecting_license_alternative) ... ok\ntest_missing_or_changed_package_is_rejected (test_notice_payload.NoticePayloadTests.test_missing_or_changed_package_is_rejected) ... ok\ntest_real_captured_payload_has_exact_text_for_all_selected_notices (test_notice_payload.NoticePayloadTests.test_real_captured_payload_has_exact_text_for_all_selected_notices) ... ok\ntest_glyph_packet_is_bound_to_source_and_full_notices (test_notice_payload.SourceNoticeTests.test_glyph_packet_is_bound_to_source_and_full_notices) ... ok\ntest_glyph_source_is_pinned_independently_of_head (test_notice_payload.SourceNoticeTests.test_glyph_source_is_pinned_independently_of_head) ... ok\ntest_theme_tree_and_all_supplemental_text_hashes (test_notice_payload.SourceNoticeTests.test_theme_tree_and_all_supplemental_text_hashes) ... ok\ntest_unicode_generated_representation_matches_fixed_17_data (test_notice_payload.SourceNoticeTests.test_unicode_generated_representation_matches_fixed_17_data) ... ok\ntest_x11_original_notice_and_data_equivalence (test_notice_payload.SourceNoticeTests.test_x11_original_notice_and_data_equivalence) ... ok\n\n----------------------------------------------------------------------\nRan 25 tests in 6.981s\n\nOK\n"
+    }
+  ],
+  "implementation_sha256": {
+    "tooling/herdr-audit/unicode_diacritics.py": "8a62bf012702292632423b8c8ac05f6c0c135cc12a50016c56b7d2f62a72e5f0",
+    "tooling/herdr-audit/test_closeout.py": "3a6ec43c5b45c3758e93feaa9d73da909e92fdec1a6506fa5cdf81ce28cfea2e",
+    "research/herdr-190/closeout/metadata_probe.py": "9c178075793473d76660411a57b210bc97bd9bfa085dd96b2cc10e4df7dc2196"
+  },
+  "evidence_sha256": {
+    "research/herdr-190/closeout/UnicodeData-6.0.0.txt.gz": "3f75dff5c9010464894ac39d7813aab5e6e9366338cda5de8bdfcd16f2a6f9bb",
+    "research/herdr-190/closeout/closeout-register.json": "7a2a54359a21f4c21aac15802c19e596d871dbe4ff1dbaa670fcd9ade9d50823",
+    "research/herdr-190/closeout/diacritics-reconstruction.json": "e67d93a40510156f81b3b8ff48b7dee4b17597e56ace823ab0d51701b08d1d69",
+    "research/herdr-190/closeout/media-properties.json": "1c96f1007c136ed042d34996c895cb0d927dea67b050817db200b00e8a0cd052",
+    "research/herdr-190/closeout/metadata_probe.py": "9c178075793473d76660411a57b210bc97bd9bfa085dd96b2cc10e4df7dc2196",
+    "research/herdr-190/closeout/notice-index.json": "7905db1e106d627ca494607248fdf46b694941976a75d004d0a52b0b11f3afa6"
+  },
+  "limits": [
+    "Original upstream tree, licenses, package/dependency versions, default entry, user assets/sessions and worktree lifecycle unchanged. No SDK agreement accepted or updater used.",
+    "No UI/runtime/Windows/ARM/manual-profile rerun claimed; root CI runs separately and does not cover nested Herdr.",
+    "No new unclear image or audio payload committed. Lossless compressed official Unicode data is intentional licensed raw research input, not an executable/build artifact.",
+    "Missing tags/default publisher license are not ownership certificates or evidence of no permission. No Commons candidate was verified or assigned as the photo source.",
+    "Owner disposition, qualified legal review and human visual decisions remain external inputs; no agent approval/merge/release/issue closure/#191 activation."
+  ]
+}
