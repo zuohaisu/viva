@@ -197,6 +197,9 @@ pub struct Shared {
     pub home: PathBuf,
     pub socket_path: PathBuf,
     pub host_id: String,
+    /// Executable bytes captured at host startup, not re-read after an
+    /// installer atomically replaces the file at the same path (#191).
+    pub binary_sha256: String,
     pub store: Mutex<Store>,
     pub terminals: TerminalRegistry,
     pub channels: Mutex<crate::foundation::envelope::ChannelRegistry>,
@@ -262,6 +265,7 @@ impl Host {
     /// is forced to private 0700 permissions first — the socket is the
     /// control plane, and its directory is part of its access control.
     pub fn open(home: &Path) -> Result<Self> {
+        let binary_sha256 = client::executable_sha256()?;
         crate::foundation::paths::ensure_private_dir(home)?;
         let socket_path = home.join(SOCKET_NAME);
         let host_id = format!("host-{}", uuid::Uuid::new_v4().simple());
@@ -312,6 +316,7 @@ impl Host {
             home: home.to_path_buf(),
             socket_path,
             host_id,
+            binary_sha256,
             store: Mutex::new(store),
             terminals: TerminalRegistry::new(),
             channels: Mutex::new(crate::foundation::envelope::ChannelRegistry::new()),
@@ -771,6 +776,8 @@ fn handle_request(shared: Arc<Shared>, request: &Request) -> Result<serde_json::
         RequestKind::Ping => Ok(serde_json::json!({
             "pid": std::process::id(),
             "host_id": shared.host_id,
+            "binary_sha256": shared.binary_sha256,
+            "runtime": "viva-rust-v1",
         })),
         RequestKind::Status => status(&shared),
         RequestKind::Dispatch {

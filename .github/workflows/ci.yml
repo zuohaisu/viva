@@ -60,6 +60,10 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          # The startup-upgrade probe builds the recorded pre-#191 binary;
+          # it must not replace that baseline with another current build.
+          fetch-depth: 0
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -74,6 +78,31 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Build the real viva binary
         run: cargo build -p viva
+      - name: Verify startup handoff with real old and current binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="$RUNNER_TEMP/viva-191-baseline"
+          mkdir -p "$BASE"
+          git archive 9935ebbd5f0b20fbf2d9e82bb798106929f94261 | tar -x -C "$BASE"
+          CARGO_TARGET_DIR="$BASE/target" cargo build --locked --manifest-path "$BASE/Cargo.toml" -p viva
+          python tooling/herdr-integration/startup_handoff.py \
+            --server-bin "$BASE/target/debug/viva" --candidate-bin target/debug/viva \
+            --expect handoff --clients 2 --output "$RUNNER_TEMP/startup-old-to-current.json"
+          python tooling/herdr-integration/startup_handoff.py \
+            --server-bin target/debug/viva --candidate-bin target/debug/viva \
+            --expect attach --output "$RUNNER_TEMP/startup-current-to-current.json"
+          python tooling/herdr-integration/startup_handoff.py \
+            --server-bin target/debug/viva --candidate-bin target/debug/viva \
+            --replace-server-on-disk "$BASE/target/debug/viva" \
+            --expect attach --output "$RUNNER_TEMP/startup-replaced-path.json"
+      - name: Retain startup handoff evidence (including failures)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: startup-handoff-evidence
+          path: ${{ runner.temp }}/startup-*.json
+          if-no-files-found: warn
       - name: Run acceptance tooling tests
         # -rs lists every skipped test with its reason in the log; the
         # expected skip count is 0.
