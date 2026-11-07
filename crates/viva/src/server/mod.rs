@@ -5416,6 +5416,24 @@ mod s3_handoff_tests {
         false
     }
 
+    fn wait_for_new_host(home: &Path, previous: &str) {
+        let deadline = Instant::now() + Duration::from_secs(45);
+        loop {
+            if let Ok(mut client) = Client::connect(home) {
+                if let Ok(ping) = client.call(RequestKind::Ping) {
+                    if ping["host_id"].as_str().is_some_and(|id| id != previous) {
+                        return;
+                    }
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no new host incarnation answered after handoff"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// The issue #45 acceptance path, end to end: a running terminal
     /// survives a server restart WITHOUT being stopped — same terminal id,
     /// its history intact, still accepting input — and the old host exits
@@ -5458,6 +5476,11 @@ mod s3_handoff_tests {
             .to_string();
         assert!(wait_for_output(&mut client, &terminal_id, "handoff-marker"));
 
+        // An alias may be republished without an observable pathname gap.
+        let previous = client.call(RequestKind::Ping).unwrap()["host_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         // Begin the restart: the response names the rendezvous socket.
         let response = client.call(RequestKind::ServerRestart).expect("restart");
         assert_eq!(
@@ -5474,17 +5497,7 @@ mod s3_handoff_tests {
         // The old host transfers, then exits gracefully WITHOUT stopping
         // the terminal. BOUNDED wait: a failed transfer leaves the host
         // serving by design - the test must fail fast, never hang.
-        {
-            let deadline = Instant::now() + Duration::from_secs(45);
-            while socket.exists() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            assert!(
-                !socket.exists(),
-                "the old host never released the control socket within 45s - \
-                 the handoff failed; see the live_handoff_failed recovery record"
-            );
-        }
+        wait_for_new_host(&home, &previous);
         server.join().expect("old host exits cleanly");
 
         // The resumed host answers on the same control socket.
@@ -5624,6 +5637,10 @@ mod s3_handoff_tests {
             std::thread::sleep(Duration::from_millis(50));
         }
 
+        let previous = client.call(RequestKind::Ping).unwrap()["host_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         // Restart during the quiet window — the transfer splits the SGR.
         let response = client.call(RequestKind::ServerRestart).expect("restart");
         assert_eq!(
@@ -5633,16 +5650,7 @@ mod s3_handoff_tests {
         drop(client);
         let resume_home = home.clone();
         let resume_thread = std::thread::spawn(move || resume_server(&resume_home));
-        {
-            let deadline = Instant::now() + Duration::from_secs(45);
-            while socket.exists() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            assert!(
-                !socket.exists(),
-                "the old host never released the control socket — the handoff failed"
-            );
-        }
+        wait_for_new_host(&home, &previous);
         server.join().expect("old host exits cleanly");
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut client2 = loop {

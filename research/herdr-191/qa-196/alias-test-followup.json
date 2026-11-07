@@ -1,0 +1,27 @@
+{
+  "pre_fix_head": "03a7b818a414d4b979d682188cd86a971d9722dd",
+  "ci": "https://github.com/zuohaisu/viva/actions/runs/42369819728",
+  "ci_result": "rust FAILED on two S3 pathname-gap assertions; acceptance-tools and pi-extension PASSED. Actual acceptance log executed all 10 scenario JSON results successfully.",
+  "evidence": "CI log records both receiver threads resumed at 11:50:58/59 before the two pathname assertions failed at 11:51:43/44; no missing receiver was inferred from a green step.",
+  "fix": "Only test contract changed: wait for a different nonempty host_id, then still join the retired host and assert same terminal/history/input and split ANSI colour. An alias can replace a socket pathname without an observable absent interval.",
+  "no_weakened_checks": "No skip, increased deadline, changed byte-colour expectation, or removed old-host join. In-process handoffs share a PID, so host_id rather than PID is required.",
+  "command": "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=init.defaultBranch GIT_CONFIG_VALUE_0=master cargo test --lib server::s3_handoff_tests -- --nocapture",
+  "local_result": {
+    "exit": 0,
+    "passed": 3,
+    "failed": 0,
+    "ignored": 0
+  },
+  "execution_source": "test-only worktree change on 03a7b81; current-head CI will be recorded separately",
+  "changed_file_sha256": "0d484f59204e1af7cd1cd4321832f5957f530df736f410761a3f54f80fcc89eb",
+  "logs": [
+    {
+      "file": "ci-rust-failed.log.gz",
+      "uncompressed_sha256": "2dadb8118c7fad08653680517b0c605debc66f9552b1132200c7b76e0da0242a"
+    },
+    {
+      "file": "alias-identity-tests.log.gz",
+      "uncompressed_sha256": "99e3e80814be6258c555a49915f4d7c61f610eabd94b0c9056b0b1ec7b9cc285"
+    }
+  ]
+}
