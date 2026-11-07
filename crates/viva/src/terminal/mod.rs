@@ -291,6 +291,25 @@ impl TerminalRegistry {
         Ok(())
     }
 
+    pub(crate) fn register_prepared(&self, entry: TerminalEntry, handle: TerminalHandle) {
+        self.sessions
+            .lock()
+            .expect("terminal registry")
+            .push((entry, Arc::new(handle)));
+    }
+
+    pub(crate) fn cancel_prepared(&self) {
+        for (_, handle) in self.sessions.lock().expect("terminal registry").iter() {
+            handle.cancel_prepared();
+        }
+    }
+
+    pub(crate) fn activate_prepared(&self) {
+        for (_, handle) in self.sessions.lock().expect("terminal registry").iter() {
+            handle.activate_prepared();
+        }
+    }
+
     /// Live count: sessions that have not recorded an exit.
     pub fn live_count(&self) -> usize {
         self.sessions

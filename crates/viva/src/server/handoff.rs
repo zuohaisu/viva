@@ -3,17 +3,16 @@
 //! A server upgrade transfers every live PTY master fd to the next server
 //! process: the old server binds `handoff.sock` and answers a
 //! `ServerRestart` request with its path; the resumed server connects,
-//! receives one manifest + one fd per terminal (SCM_RIGHTS), and acks.
-//!
-//! Non-destructive by construction: SCM_RIGHTS duplicates the open file
-//! description — the old server keeps its own reference until it exits
-//! after a full ack. Every failure path (new server never starts, partial
-//! transfer, ack timeout) therefore leaves the old server serving and the
-//! children untouched: exactly the type-1 fallback semantics, with zero
-//! interruption.
+//! receives one manifest + one fd per terminal (SCM_RIGHTS). Receipt is NOT
+//! an acknowledgement: the receiver first binds its own control endpoint,
+//! validates and installs ALL sessions with parked readers, then sends READY.
+//! The sender keeps its masters and can resume its readers until READY.
+//! Protocol 2 excludes old receivers that acknowledged receipt prematurely.
+//! The current receiver also accepts protocol 1 from historical senders;
+//! its READY stays compatible with their `ok: true` acknowledgement.
 
 use std::io::Write as _;
-use std::os::fd::RawFd;
+use std::os::fd::{FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
@@ -22,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::foundation::error::{Error, Result};
 
 /// Handoff wire version.
-pub const HANDOFF_PROTOCOL: u32 = 1;
+pub const HANDOFF_PROTOCOL: u32 = 2;
 /// Per-message timeout during the transfer.
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -89,22 +88,30 @@ pub fn send_entries(
     for fd in fds {
         send_one_fd(stream, *fd)?;
     }
-    // The ack is one line; read it newline-bounded (the receiver may keep
-    // the socket open). Read errors past a complete line are not failures.
-    let mut ack = String::new();
+    // A complete, bounded READY message, not a substring in an incomplete
+    // read. An old receipt-only ACK must never retire this sender.
+    let mut ack = Vec::new();
     let mut reader = std::io::BufReader::new(stream.try_clone()?);
-    let _ = std::io::BufRead::read_line(&mut reader, &mut ack);
-    if !ack.contains("\"ok\":true") && !ack.contains("\"ok\": true") {
-        return Err(Error::Validation(format!(
-            "handoff receiver did not ack: {}",
-            ack.trim()
-        )));
+    use std::io::{BufRead as _, Read as _};
+    reader.by_ref().take(4097).read_until(b'\n', &mut ack)?;
+    let ready: serde_json::Value = serde_json::from_slice(&ack)?;
+    if ack.len() > 4096
+        || !ack.ends_with(b"\n")
+        || ready["ok"] != true
+        || ready["prepared"] != true
+        || ready["protocol"] != HANDOFF_PROTOCOL
+        || ready["source_host_id"] != manifest.host_id
+    {
+        return Err(Error::Validation(
+            "handoff receiver did not confirm prepared adoption; old host stays active".into(),
+        ));
     }
     Ok(())
 }
 
-/// Read the manifest and the per-entry fds from the CONNECTED handoff
-/// stream, then ack. The receiver owns the received fds from that point on.
+/// Read the manifest and per-entry fds WITHOUT sending an ACK. Owned fds
+/// close on any later validation/preparation failure; the sender still owns
+/// its original masters and will resume them when the connection closes.
 ///
 /// Implementation note (the Linux CI hang, issue #45 QA round 1): the
 /// manifest and the fd messages MAY coalesce into one socket segment, and
@@ -113,7 +120,7 @@ pub fn send_entries(
 /// and a control buffer on EVERY call, collecting fds per segment and
 /// parsing the manifest from the byte stream - coalescing then cannot
 /// lose anything.
-pub fn receive_entries(stream: &UnixStream) -> Result<(HandoffManifest, Vec<RawFd>)> {
+pub fn receive_entries(stream: &UnixStream) -> Result<(HandoffManifest, Vec<OwnedFd>)> {
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     // SAFETY: every recvmsg below targets our own connected fd with valid
@@ -168,7 +175,7 @@ pub fn receive_entries(stream: &UnixStream) -> Result<(HandoffManifest, Vec<RawF
                     let line: Vec<u8> = data.drain(..=pos).collect();
                     match serde_json::from_slice::<HandoffManifest>(&line[..line.len() - 1]) {
                         Ok(parsed) => {
-                            if parsed.protocol != HANDOFF_PROTOCOL {
+                            if !matches!(parsed.protocol, 1 | HANDOFF_PROTOCOL) {
                                 break Err(Error::Validation(format!(
                                     "handoff protocol {} (expected {HANDOFF_PROTOCOL})",
                                     parsed.protocol
@@ -183,8 +190,22 @@ pub fn receive_entries(stream: &UnixStream) -> Result<(HandoffManifest, Vec<RawF
                 }
             }
             if let Some(parsed) = &manifest {
-                if received_fds.len() >= parsed.entries.len() {
-                    break Ok((parsed.clone(), std::mem::take(&mut received_fds)));
+                if received_fds.len() > parsed.entries.len() {
+                    break Err(Error::Validation("extra handoff descriptors".into()));
+                }
+                if received_fds.len() == parsed.entries.len() {
+                    let owned = std::mem::take(&mut received_fds)
+                        .into_iter()
+                        .map(|fd| OwnedFd::from_raw_fd(fd))
+                        .collect::<Vec<_>>();
+                    for fd in &owned {
+                        // SCM_RIGHTS does not preserve FD_CLOEXEC. Do not
+                        // leak a transferred master into a later worker exec.
+                        if libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
+                            return Err(std::io::Error::last_os_error().into());
+                        }
+                    }
+                    break Ok((parsed.clone(), owned));
                 }
             }
             if n == 0 {
@@ -200,11 +221,6 @@ pub fn receive_entries(stream: &UnixStream) -> Result<(HandoffManifest, Vec<RawF
             }
             return outcome;
         }
-        // Ack ONLY after every fd is in: the sender keeps its own fd
-        // references until it sees this line.
-        let mut writer = stream.try_clone()?;
-        let _ = writer.write_all(b"{\"ok\":true}\n");
-        let _ = writer.flush();
         outcome
     }
     #[cfg(not(unix))]
@@ -212,6 +228,23 @@ pub fn receive_entries(stream: &UnixStream) -> Result<(HandoffManifest, Vec<RawF
         let _ = stream;
         Err(Error::Validation("fd passing requires unix".into()))
     }
+}
+
+/// Called only after host binding and all session preparations succeed.
+/// `ok` preserves compatibility with protocol-1 senders; protocol-2 senders
+/// additionally require the prepared phase and the matching source host.
+pub fn acknowledge_prepared(stream: &UnixStream, manifest: &HandoffManifest) -> Result<()> {
+    let mut writer = stream.try_clone()?;
+    let mut text = serde_json::to_vec(&serde_json::json!({
+        "ok": true,
+        "prepared": true,
+        "protocol": HANDOFF_PROTOCOL,
+        "source_host_id": manifest.host_id,
+    }))?;
+    text.push(b'\n');
+    writer.write_all(&text)?;
+    writer.flush()?;
+    Ok(())
 }
 
 /// Send one fd over the stream via SCM_RIGHTS.
@@ -297,19 +330,56 @@ mod tests {
         });
         let (received_manifest, received_fds) = {
             let outcome = receive_entries(&server_side).expect("receive");
-            drop(server_side); // done receiving; the sender may see EOF past the ack
+            acknowledge_prepared(&server_side, &outcome.0).expect("ready");
+            drop(server_side);
             outcome
         };
         sender.join().expect("sender");
         assert_eq!(received_manifest, manifest);
         assert_eq!(received_fds.len(), 1);
         // The received fd is a live reference to the same file description.
-        let mut file: std::fs::File =
-            unsafe { std::os::fd::FromRawFd::from_raw_fd(received_fds[0]) };
+        let mut file = std::fs::File::from(received_fds.into_iter().next().unwrap());
         file.write_all(b"probe-write")
             .expect("write via received fd");
         drop(file);
         assert_eq!(std::fs::read(&path).expect("read"), b"probe-write");
+    }
+
+    #[test]
+    fn descriptor_receipt_does_not_acknowledge_the_sender() {
+        let (mut sender, receiver) = UnixStream::pair().unwrap();
+        let manifest = HandoffManifest {
+            protocol: HANDOFF_PROTOCOL,
+            host_id: "h".into(),
+            entries: vec![],
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            tx.send(send_entries(&mut sender, &manifest, &[]).is_ok())
+                .unwrap();
+        });
+        let (_manifest, fds) = receive_entries(&receiver).unwrap();
+        assert!(fds.is_empty());
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        drop(receiver); // rejected before READY: sender must not retire
+        assert!(!rx.recv_timeout(Duration::from_secs(2)).unwrap());
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn receipt_only_ack_is_not_a_prepared_ack() {
+        let (mut sender, receiver) = UnixStream::pair().unwrap();
+        let manifest = HandoffManifest {
+            protocol: HANDOFF_PROTOCOL,
+            host_id: "h".into(),
+            entries: vec![],
+        };
+        let worker = std::thread::spawn(move || send_entries(&mut sender, &manifest, &[]));
+        let _ = receive_entries(&receiver).unwrap();
+        let mut stream = receiver;
+        stream.write_all(b"{\"ok\":true}\n").unwrap();
+        drop(stream);
+        assert!(worker.join().unwrap().is_err());
     }
 
     /// A manifest from an OLDER sender (no `pending_hex`) still parses —

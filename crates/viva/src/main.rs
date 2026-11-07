@@ -126,7 +126,7 @@ fn require_interactive_terminal() -> Result<()> {
 fn cmd_workbench() -> Result<()> {
     require_interactive_terminal()?;
     let home = viva::foundation::paths::viva_home(None);
-    let client = viva::server::Client::ensure_server(&home)?;
+    let client = viva::server::Client::ensure_current_server(&home)?;
     eprintln!(
         "workbench: attached to the resident server — ctrl+b q detaches, \
          the server keeps running (`viva shutdown` stops it); home {}",

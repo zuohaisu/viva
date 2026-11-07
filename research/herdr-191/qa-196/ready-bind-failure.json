@@ -1,0 +1,16 @@
+{
+  "scope": "real receiver binary + wire sender fixture + real owned PTYs",
+  "binary_name": "viva",
+  "binary_sha256": "2d7c4981752b81025e183fc2d6a7e6cb3f4e74553003d4d2d8a1c85dd8dd9e56",
+  "fault": "bind-failure",
+  "checks": {
+    "no_ack_before_full_preparation": true,
+    "sender_sessions_still_interactive": true,
+    "candidate_rejected": true
+  },
+  "binary_execution": "private immutable copy",
+  "ack": null,
+  "cleanup_receiver_exit": 1,
+  "receiver_log": "server (pid 39720) resuming from live handoff \u2014 home /tmp/v196-aytp25a6\nviva: validation: both prepared endpoints are occupied; sender retains its sessions\n",
+  "passed": true
+}

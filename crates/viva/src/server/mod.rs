@@ -32,6 +32,7 @@ mod client;
 mod handoff;
 mod protocol;
 mod restore;
+mod resume;
 
 pub use client::{Client, restart_server, restart_server_with};
 pub use handoff::{HandoffEntry, HandoffManifest};
@@ -127,6 +128,10 @@ CREATE TABLE agent_native_sessions (
 
 /// Socket file name inside `VIVA_HOME`.
 pub const SOCKET_NAME: &str = "server.sock";
+/// Receiver binds this endpoint BEFORE acknowledging a transfer. It remains
+/// usable if publication of the conventional name fails after commit.
+pub const RESUME_SOCKET_NAME: &str = "resume.sock";
+pub const RESUME_NEXT_SOCKET_NAME: &str = "resume-next.sock";
 /// Rendezvous socket for a live handoff (created by the restarting host,
 /// connected by the resumed host) — also inside `VIVA_HOME`.
 pub const HANDOFF_SOCKET_NAME: &str = "handoff.sock";
@@ -192,11 +197,68 @@ pub fn migrations() -> &'static crate::foundation::store::FrozenMigrations {
     })
 }
 
+/// Connect to the normal endpoint, or to a committed receiver whose normal
+/// name could not be published. Both live inside the same private home and
+/// use the same peer authentication; no caller-supplied socket is followed.
+pub(crate) fn connect_local_socket(home: &Path) -> std::io::Result<UnixStream> {
+    match UnixStream::connect(home.join(SOCKET_NAME)) {
+        Ok(stream) => Ok(stream),
+        Err(primary) => {
+            for name in [RESUME_SOCKET_NAME, RESUME_NEXT_SOCKET_NAME] {
+                if let Ok(stream) = UnixStream::connect(home.join(name)) {
+                    return Ok(stream);
+                }
+            }
+            Err(primary)
+        }
+    }
+}
+
+fn socket_identity(path: &Path) -> std::io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    let meta = std::fs::symlink_metadata(path)?;
+    Ok((meta.dev(), meta.ino()))
+}
+
+fn remove_owned_socket(path: &Path, identity: (u64, u64)) {
+    if socket_identity(path).ok() == Some(identity) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+struct SocketClaim {
+    path: PathBuf,
+    identity: (u64, u64),
+    armed: bool,
+}
+
+impl SocketClaim {
+    fn new(path: &Path) -> Result<Self> {
+        Ok(Self {
+            path: path.to_owned(),
+            identity: socket_identity(path)?,
+            armed: true,
+        })
+    }
+}
+
+impl Drop for SocketClaim {
+    fn drop(&mut self) {
+        if self.armed {
+            remove_owned_socket(&self.path, self.identity);
+        }
+    }
+}
+
 /// Shared host state, handed to per-connection threads.
 pub struct Shared {
     pub home: PathBuf,
     pub socket_path: PathBuf,
+    socket_identity: (u64, u64),
     pub host_id: String,
+    /// Executable bytes captured at host startup, not re-read after an
+    /// installer atomically replaces the file at the same path (#191).
+    pub binary_sha256: String,
     pub store: Mutex<Store>,
     pub terminals: TerminalRegistry,
     pub channels: Mutex<crate::foundation::envelope::ChannelRegistry>,
@@ -204,8 +266,9 @@ pub struct Shared {
     /// Set once a live handoff completed: the serve loop exits WITHOUT
     /// stopping terminals (they now belong to the resumed server).
     pub transferred: AtomicBool,
-    /// The rendezvous listener for an in-progress handoff, if any.
-    handoff_listener: Mutex<Option<UnixListener>>,
+    /// Freeze new effects while a receiver prepares; restored on rejection.
+    handoff_in_progress: AtomicBool,
+    effects: std::sync::RwLock<()>,
     /// Agent status board (S4): controlled reports (authoritative) and
     /// screen/process observations (auxiliary), kept per source.
     pub agent_board: crate::agents::AgentStatusBoard,
@@ -262,8 +325,19 @@ impl Host {
     /// is forced to private 0700 permissions first — the socket is the
     /// control plane, and its directory is part of its access control.
     pub fn open(home: &Path) -> Result<Self> {
+        for name in [RESUME_SOCKET_NAME, RESUME_NEXT_SOCKET_NAME] {
+            if let Ok(Some(pid)) = Self::probe_socket(&home.join(name)) {
+                return Err(Error::Validation(format!(
+                    "a resumed host is already serving this home (pid {pid}); refusing a second owner"
+                )));
+            }
+        }
+        Self::open_at(home, home.join(SOCKET_NAME), false)
+    }
+
+    fn open_at(home: &Path, socket_path: PathBuf, preparing: bool) -> Result<Self> {
+        let binary_sha256 = client::executable_sha256()?;
         crate::foundation::paths::ensure_private_dir(home)?;
-        let socket_path = home.join(SOCKET_NAME);
         let host_id = format!("host-{}", uuid::Uuid::new_v4().simple());
 
         if socket_path.exists() {
@@ -282,16 +356,36 @@ impl Host {
                         socket_path.display()
                     )));
                 }
-                Err(_) => {
-                    // Connect refused: nobody is listening. A crashed host
-                    // left the socket behind; claim it, with a record.
+                Err(Error::Io(err))
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                    ) =>
+                {
                     std::fs::remove_file(&socket_path)?;
+                }
+                Err(err) => {
+                    return Err(Error::Validation(format!(
+                        "cannot verify socket {} ({err}); left untouched",
+                        socket_path.display()
+                    )));
                 }
             }
         }
 
-        let store = Store::open(&crate::foundation::paths::database_path(home), migrations())?;
-        let host_id = Self::reconcile(&store, &host_id)?;
+        let database = crate::foundation::paths::database_path(home);
+        let store = if preparing {
+            Store::attach_for_handoff(&database, migrations())?
+        } else {
+            Store::open(&database, migrations())?
+        };
+        // A live transfer is NOT a crash. In particular, never rewrite its
+        // running executions as orphaned/stopped during preparation.
+        let host_id = if preparing {
+            host_id
+        } else {
+            Self::reconcile(&store, &host_id)?
+        };
         let persisted_pause: bool = store
             .connection()
             .query_row(
@@ -301,23 +395,27 @@ impl Host {
             )
             .map(|value| value == "true")
             .unwrap_or(false);
+        let tree = load_workbench_tree(&store, home, &host_id);
+        let listener = UnixListener::bind(&socket_path)?;
+        let mut claim = SocketClaim::new(&socket_path)?;
+        listener.set_nonblocking(true)?;
         store.connection().execute(
             "INSERT INTO hosts(host_id, pid, started_at) VALUES (?1, ?2, ?3)",
             rusqlite::params![host_id, std::process::id() as i64, utc_now()],
         )?;
-        let tree = load_workbench_tree(&store, home, &host_id);
-
-        let listener = UnixListener::bind(&socket_path)?;
         let shared = Arc::new(Shared {
             home: home.to_path_buf(),
             socket_path,
+            socket_identity: claim.identity,
             host_id,
+            binary_sha256,
             store: Mutex::new(store),
             terminals: TerminalRegistry::new(),
             channels: Mutex::new(crate::foundation::envelope::ChannelRegistry::new()),
             stopping: AtomicBool::new(false),
             transferred: AtomicBool::new(false),
-            handoff_listener: Mutex::new(None),
+            handoff_in_progress: AtomicBool::new(false),
+            effects: std::sync::RwLock::new(()),
             agent_board: crate::agents::AgentStatusBoard::new(),
             agent_processes: Mutex::new(std::collections::HashMap::new()),
             paused: AtomicBool::new(persisted_pause),
@@ -334,6 +432,7 @@ impl Host {
             pane_errors: Mutex::new(std::collections::BTreeMap::new()),
             history_flushed_at: Mutex::new(None),
         });
+        claim.armed = false;
         Ok(Self { shared, listener })
     }
 
@@ -491,8 +590,12 @@ impl Host {
         let shared = self.shared;
         let listener = self.listener;
         let poller = Arc::clone(&shared);
-        std::thread::spawn(move || poll_machines(poller));
-        listener.set_nonblocking(true)?;
+        // Binding/nonblocking setup was validated by open_at, before READY.
+        // Optional background/connection threads must not panic the owner
+        // process after its predecessor has retired.
+        if let Err(err) = std::thread::Builder::new().spawn(move || poll_machines(poller)) {
+            eprintln!("machine poller unavailable; local sessions remain hosted: {err}");
+        }
         loop {
             if shared.stopping.load(Ordering::SeqCst) {
                 break;
@@ -516,14 +619,32 @@ impl Host {
                     // client read into EAGAIN and drop a perfectly valid
                     // request. The connection handler is synchronous and
                     // has its own IO timeouts, so restore blocking mode.
-                    stream.set_nonblocking(false)?;
+                    if let Err(err) = stream.set_nonblocking(false) {
+                        eprintln!("control connection setup failed; host remains active: {err}");
+                        continue;
+                    }
                     let shared = Arc::clone(&shared);
-                    std::thread::spawn(move || {
+                    if let Err(err) = std::thread::Builder::new().spawn(move || {
                         let _ = handle_connection(shared, stream);
-                    });
+                    }) {
+                        eprintln!(
+                            "control connection worker unavailable; sessions retained: {err}"
+                        );
+                    }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::Interrupted
+                        || matches!(
+                            e.raw_os_error(),
+                            Some(libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::ENOBUFS)
+                        ) =>
+                {
+                    // Resource pressure is not an instruction to stop every
+                    // adopted process. Leave the listener/sessions alive.
+                    std::thread::sleep(Duration::from_millis(100));
                 }
                 Err(e) => {
                     let err = Error::Io(e);
@@ -600,10 +721,10 @@ impl Host {
             &format!("{note} ({terminal_count} terminal(s) were hosted here)"),
         )?;
         drop(store);
-        let _ = std::fs::remove_file(&shared.socket_path);
-        if transferred {
-            let _ = std::fs::remove_file(shared.home.join(HANDOFF_SOCKET_NAME));
-        }
+        remove_owned_socket(&shared.socket_path, shared.socket_identity);
+        remove_owned_socket(&shared.home.join(SOCKET_NAME), shared.socket_identity);
+        // The transfer worker releases only its own rendezvous inode; a
+        // retiring host must not unlink a subsequent host's rendezvous.
         Ok(())
     }
 
@@ -767,10 +888,28 @@ fn handle_request(shared: Arc<Shared>, request: &Request) -> Result<serde_json::
     // The socket authorization gate (ADR 0012 decision 4, issue #43):
     // grant semantics extend to every request before any handler runs.
     authorize_socket_request(&shared, request)?;
+    // Restart takes the writer side to drain in-flight effects before its
+    // snapshot. Normal effects remain concurrent outside the handoff window.
+    let _effect = if !handoff_read_only(&request.kind)
+        && !matches!(request.kind, RequestKind::ServerRestart)
+    {
+        let guard = shared.effects.read().expect("effect fence");
+        if shared.handoff_in_progress.load(Ordering::SeqCst) {
+            return Err(Error::Validation(
+                "handoff in progress; retry the operation after reconnection".into(),
+            ));
+        }
+        Some(guard)
+    } else {
+        None
+    };
     match &request.kind {
         RequestKind::Ping => Ok(serde_json::json!({
             "pid": std::process::id(),
             "host_id": shared.host_id,
+            "binary_sha256": shared.binary_sha256,
+            "runtime": "viva-rust-v1",
+            "handoff_protocol": handoff::HANDOFF_PROTOCOL,
         })),
         RequestKind::Status => status(&shared),
         RequestKind::Dispatch {
@@ -884,7 +1023,16 @@ fn handle_request(shared: Arc<Shared>, request: &Request) -> Result<serde_json::
         }
         RequestKind::Pause => pause_server(&shared, true),
         RequestKind::Resume => pause_server(&shared, false),
-        RequestKind::ServerRestart => begin_server_restart(&shared),
+        RequestKind::ServerRestart => {
+            if request.handoff_protocol != Some(handoff::HANDOFF_PROTOCOL) {
+                return Err(Error::Validation(
+                    "handoff rejected: this receiver requires prepared-adoption protocol 2; \
+                     an older candidate cannot safely replace it. Existing sessions remain on this host. \
+                     Check PATH and use the installed candidate; `viva status` with the same VIVA_HOME shows the serving host".into(),
+                ));
+            }
+            begin_server_restart(&shared)
+        }
         RequestKind::WorktreeFiles { worktree_id } => worktree_files(&shared, worktree_id),
         RequestKind::WorktreeFileContent { worktree_id, path } => {
             worktree_file_content(&shared, worktree_id, path)
@@ -1000,6 +1148,7 @@ fn is_member_gated_kind(kind: &RequestKind) -> bool {
             | RequestKind::AgentPrompt { .. }
             | RequestKind::AgentWait { .. }
             | RequestKind::Shutdown { .. }
+            | RequestKind::ServerRestart
             | RequestKind::Pause
             | RequestKind::Resume
             | RequestKind::WorktreeCleanup { .. }
@@ -1079,13 +1228,14 @@ fn authorize_socket_request(shared: &Shared, request: &Request) -> Result<()> {
         }
     };
 
-    // Member-attributed mutations: the grant must name the socket control
-    // action (dispatch is further checked in its handler; shutdown is an
-    // owner action no member grant may carry).
-    if request.member.is_some() && is_member_gated_kind(&request.kind) {
+    // A presented grant is not an owner identity, even when the caller
+    // omits its member field. Restart, like shutdown, stays owner-only.
+    if (request.member.is_some() || request.grant.is_some()) && is_member_gated_kind(&request.kind)
+    {
         if matches!(
             request.kind,
             RequestKind::Shutdown { .. }
+                | RequestKind::ServerRestart
                 | RequestKind::Workspace { .. }
                 | RequestKind::WorkbenchLayout { .. }
                 | RequestKind::Pause
@@ -1097,7 +1247,7 @@ fn authorize_socket_request(shared: &Shared, request: &Request) -> Result<()> {
             return Err(audit_grant_denial(
                 shared,
                 request,
-                "workspace/layout, shutdown/pause/resume/auto-pull and recovery-plan changes are owner \
+                "workspace/layout, shutdown/restart/pause/resume/auto-pull and recovery-plan changes are owner \
                  actions; member grants cannot carry them",
             ));
         }
@@ -2526,28 +2676,27 @@ fn apply_close_policy(shared: &Shared, close_policy: Option<&str>) -> Result<()>
 /// which connects to the rendezvous socket. On any transfer failure the
 /// host keeps serving (nothing was given away: fd passing duplicates).
 fn begin_server_restart(shared: &Arc<Shared>) -> Result<serde_json::Value> {
-    let handoff_path = shared.home.join(HANDOFF_SOCKET_NAME);
-    {
-        let mut slot = shared.handoff_listener.lock().expect("handoff slot");
-        if slot.is_some() {
-            return Err(Error::Validation(
-                "a server restart is already in progress; connect to its handoff socket                  or wait for the timeout"
-                    .into(),
-            ));
-        }
-        let _ = std::fs::remove_file(&handoff_path);
-        let listener = UnixListener::bind(&handoff_path)?;
-        *slot = Some(listener);
+    let _fence = shared.effects.write().expect("effect fence");
+    if shared.handoff_in_progress.swap(true, Ordering::SeqCst) {
+        return Err(Error::Validation(
+            "a server restart is already in progress".into(),
+        ));
     }
-    let listener = shared
-        .handoff_listener
-        .lock()
-        .expect("handoff slot")
-        .take()
-        .expect("just stored");
-    let shared = Arc::clone(shared);
+    let attempt = HandoffAttempt {
+        was_paused: shared.paused.swap(true, Ordering::SeqCst),
+        shared: Arc::clone(shared),
+    };
+    let handoff_path = shared.home.join(HANDOFF_SOCKET_NAME);
+    let _ = std::fs::remove_file(&handoff_path);
+    let listener = UnixListener::bind(&handoff_path)?;
+    let rendezvous = SocketClaim::new(&handoff_path)?;
+    let worker_shared = Arc::clone(shared);
     let response_path = handoff_path.display().to_string();
-    std::thread::spawn(move || perform_handoff(shared, listener, handoff_path));
+    std::thread::Builder::new().spawn(move || {
+        let _attempt = attempt;
+        let _rendezvous = rendezvous;
+        perform_handoff(worker_shared, listener);
+    })?;
     Ok(serde_json::json!({
         "state": "handoff_ready",
         "handoff_socket": response_path,
@@ -2555,16 +2704,46 @@ fn begin_server_restart(shared: &Arc<Shared>) -> Result<serde_json::Value> {
     }))
 }
 
+fn handoff_read_only(kind: &RequestKind) -> bool {
+    matches!(
+        kind,
+        RequestKind::Ping
+            | RequestKind::Status
+            | RequestKind::TerminalList
+            | RequestKind::TerminalSnapshot { .. }
+            | RequestKind::TerminalViewport { .. }
+            | RequestKind::WorkbenchView
+            | RequestKind::TaskResults { .. }
+            | RequestKind::AgentWait { .. }
+    )
+}
+
+struct HandoffAttempt {
+    shared: Arc<Shared>,
+    was_paused: bool,
+}
+impl Drop for HandoffAttempt {
+    fn drop(&mut self) {
+        if !self.shared.transferred.load(Ordering::SeqCst) {
+            self.shared.paused.store(self.was_paused, Ordering::SeqCst);
+            self.shared
+                .handoff_in_progress
+                .store(false, Ordering::SeqCst);
+        }
+    }
+}
+
 /// The transfer itself. Collects every LIVE terminal (manifest + master fd
 /// duplicate), sends them to the resumed server, and on the ack marks this
 /// host `transferred` so its exit keeps every process running. Any failure
 /// cleans the rendezvous socket up and leaves the host fully serving.
-fn perform_handoff(shared: Arc<Shared>, listener: UnixListener, handoff_path: std::path::PathBuf) {
+fn perform_handoff(shared: Arc<Shared>, listener: UnixListener) {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
     // Pass 1 (readers still live): liveness + one master-fd duplicate per
     // terminal — nothing is read or frozen yet, so a failure here leaves
     // the host byte-for-byte as it was. `collected` stays alive for the
     // failure branch, which needs every id to put the readers back.
-    let collect = (|| -> Result<Vec<(crate::terminal::TerminalEntry, RawFd, std::sync::Arc<crate::terminal::TerminalHandle>)>> {
+    let collect = (|| -> Result<Vec<(crate::terminal::TerminalEntry, OwnedFd, std::sync::Arc<crate::terminal::TerminalHandle>)>> {
         let mut collected = Vec::new();
         for entry in shared.terminals.list() {
             let handle = match shared.terminals.handle(&entry.terminal_id).ok().flatten() {
@@ -2578,7 +2757,8 @@ fn perform_handoff(shared: Arc<Shared>, listener: UnixListener, handoff_path: st
             let Some(fd) = handle.master_fd_for_transfer()? else {
                 continue;
             };
-            collected.push((entry, fd, handle));
+            // SAFETY: master_fd_for_transfer returns a fresh owned duplicate.
+            collected.push((entry, unsafe { OwnedFd::from_raw_fd(fd) }, handle));
         }
         Ok(collected)
     })();
@@ -2595,7 +2775,6 @@ fn perform_handoff(shared: Arc<Shared>, listener: UnixListener, handoff_path: st
                      terminal — no process touched"
                 ),
             );
-            let _ = std::fs::remove_file(&handoff_path);
             return;
         }
     };
@@ -2634,7 +2813,7 @@ fn perform_handoff(shared: Arc<Shared>, listener: UnixListener, handoff_path: st
                 history: Vec::new(), // styled replay includes the full primary ring
             });
         }
-        let fds: Vec<RawFd> = collected.iter().map(|(_, fd, _)| *fd).collect();
+        let fds: Vec<RawFd> = collected.iter().map(|(_, fd, _)| fd.as_raw_fd()).collect();
 
         // Wait, bounded, for the resumed server to connect. On timeout the
         // dups are closed and nothing happened.
@@ -2651,12 +2830,6 @@ fn perform_handoff(shared: Arc<Shared>, listener: UnixListener, handoff_path: st
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     if Instant::now() >= deadline {
-                        for fd in &fds {
-                            #[cfg(unix)]
-                            unsafe {
-                                libc::close(*fd);
-                            }
-                        }
                         return Err(Error::Validation(
                             "no resumed server connected within the handoff timeout".into(),
                         ));
@@ -2676,15 +2849,7 @@ fn perform_handoff(shared: Arc<Shared>, listener: UnixListener, handoff_path: st
             },
             &fds,
         );
-        if let Err(err) = send_result {
-            for fd in &fds {
-                #[cfg(unix)]
-                unsafe {
-                    libc::close(*fd);
-                }
-            }
-            return Err(err);
-        }
+        send_result?;
         Ok(entries.len())
     })();
 
@@ -2696,9 +2861,8 @@ fn perform_handoff(shared: Arc<Shared>, listener: UnixListener, handoff_path: st
                 &shared.host_id,
                 "live_handoff_out",
                 &format!(
-                    "{count} live terminal(s) transferred to the resumed server; \
-                     dispatches arriving during the handoff window were not transferred \
-                     and are recorded by the next reconciliation"
+                    "{count} live terminal(s) transferred after receiver preparation; \
+                     the effect fence rejected new mutations during the snapshot"
                 ),
             );
             drop(store);
@@ -2740,7 +2904,6 @@ fn perform_handoff(shared: Arc<Shared>, listener: UnixListener, handoff_path: st
                      process touched"
                 ),
             );
-            let _ = std::fs::remove_file(&handoff_path);
         }
     }
 }
@@ -2750,115 +2913,7 @@ fn perform_handoff(shared: Arc<Shared>, listener: UnixListener, handoff_path: st
 /// terminal identity, wait for the old host to release the control socket,
 /// then claim and serve as usual.
 pub fn resume_server(home: &Path) -> Result<()> {
-    crate::foundation::paths::ensure_private_dir(home)?;
-    // An older server that still runs on the previous table names cannot hand
-    // its terminals to a binary that renames them. Refuse before touching the
-    // handoff socket: the old server times out waiting and keeps serving.
-    crate::foundation::legacy::refuse_live_handoff(&crate::foundation::paths::database_path(home))?;
-    let handoff_path = home.join(HANDOFF_SOCKET_NAME);
-    // The old host creates the rendezvous in its ServerRestart handler;
-    // poll for it (the CLI starts this process right after that response).
-    let deadline = Instant::now() + HANDOFF_TIMEOUT;
-    let stream = loop {
-        if handoff_path.exists() {
-            if let Ok(stream) = UnixStream::connect(&handoff_path) {
-                break stream;
-            }
-        }
-        if Instant::now() >= deadline {
-            return Err(Error::Validation(format!(
-                "no handoff socket appeared at {} within {HANDOFF_TIMEOUT:?}",
-                handoff_path.display()
-            )));
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    };
-    let (manifest, fds) = handoff::receive_entries(&stream)?;
-    drop(stream);
-
-    // Wait for the old host to release the control socket, then claim it.
-    // (The transferred fds stay open the whole time — the kernel buffers
-    // the children's output in the meantime.)
-    let server_sock = home.join(SOCKET_NAME);
-    let deadline = Instant::now() + HANDOFF_TIMEOUT;
-    while server_sock.exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    if server_sock.exists() {
-        for fd in fds {
-            #[cfg(unix)]
-            unsafe {
-                libc::close(fd);
-            }
-        }
-        return Err(Error::Validation(
-            "the old host never released the control socket; the handoff was abandoned              (the old host's recovery records name what happened)"
-                .into(),
-        ));
-    }
-    let host = Host::open(home)?;
-    // Adopt the transferred processes. Do not start replacement shells —
-    // that path is only for a server whose process had already exited.
-    {
-        let shared = host.shared();
-        let store = shared.store.lock().expect("store");
-        for (entry, fd) in manifest.entries.iter().zip(fds) {
-            let adopt = (|| -> Result<()> {
-                let terminal_id = TerminalId::from_str(&entry.terminal_id)?;
-                let owner = owner_from_label(&entry.owner)?;
-                let worktree = entry
-                    .worktree_id
-                    .as_deref()
-                    .map(WorktreeId::from_str)
-                    .transpose()?;
-                shared.terminals.adopt_with_screen(
-                    terminal_id,
-                    owner,
-                    worktree,
-                    entry.purpose.clone(),
-                    fd,
-                    entry.pid,
-                    entry.pid_start_marker.clone(),
-                    entry.cols,
-                    entry.rows,
-                    entry.history.clone(),
-                    None,
-                    &hex_decode(&entry.screen_hex)?,
-                    &hex_decode(&entry.pending_hex)?,
-                )
-            })();
-            if let Err(err) = adopt {
-                // One failed adoption is that terminal's type-1 fallback:
-                // its pid is unaccounted, nothing is signalled.
-                let _ = record_recovery(
-                    &store,
-                    &shared.host_id,
-                    "live_handoff_adopt_failed",
-                    &format!(
-                        "terminal `{}` could not be adopted ({err}); its pid {} is \
-                         unaccounted and was not signalled",
-                        entry.terminal_id, entry.pid
-                    ),
-                );
-            }
-        }
-        let _ = record_recovery(
-            &store,
-            &shared.host_id,
-            "live_handoff_in",
-            &format!(
-                "adopted {} transferred terminal(s) from host `{}`; the transfer \
-                 preserved their identity and history",
-                manifest.entries.len(),
-                manifest.host_id
-            ),
-        );
-    }
-    eprintln!(
-        "server: resumed with {} transferred terminal(s)",
-        manifest.entries.len()
-    );
-    host.serve()
+    resume::run(home)
 }
 
 /// Parse an owner label back into its typed value (the inverse of
@@ -3140,48 +3195,13 @@ fn dispatch(
     // real exit fact. The handle is registered on the shared state so the
     // graceful shutdown can join it: a detached watcher would die with the
     // process and the next host would record a false orphan recovery.
-    let watcher_shared = Arc::clone(shared);
-    let watcher_key = request_key.to_string();
-    let watcher_task = task_id.clone();
-    let watcher_execution = execution_id.clone();
-    let watcher_handle = std::sync::Arc::clone(&handle);
-    let watcher = std::thread::spawn(move || {
-        if let Ok(exit) = watcher_handle.wait() {
-            // A signal exit carries no exit code; the intent protocol's
-            // integer field records it as -1 rather than staying silent —
-            // a stopped process must always land in the ledger.
-            let code = exit.code.unwrap_or(-1);
-            let server_stopped = !matches!(exit.via, crate::terminal::ExitVia::ChildExit);
-            let store = watcher_shared.store.lock().expect("store");
-            let tasks = TaskRegistry::new(&store);
-            let _ = tasks.record_exit(&watcher_key, code);
-            {
-                // The exit-code ledger sorts non-zero into `failed`; an
-                // exit Viva caused (graceful stop / forced kill) is
-                // a stop, not a failure — correct the record and say why.
-                if server_stopped {
-                    let _ = store.connection().execute(
-                        "UPDATE executions SET status = 'stopped', updated_at = ?2
-                         WHERE execution_id = ?1 AND status = 'failed'",
-                        rusqlite::params![watcher_execution.as_str(), utc_now()],
-                    );
-                }
-                let _ = tasks.record_result(
-                    &watcher_task,
-                    Some(watcher_execution),
-                    crate::tasks::ResultSource::Process,
-                    "process_exit",
-                    format!("{watcher_key}:exit"),
-                    serde_json::json!({ "exit_code": code, "via": format!("{:?}", exit.via) }),
-                );
-            }
-        }
-    });
-    shared
-        .watchers
-        .lock()
-        .expect("watcher registry")
-        .push(watcher);
+    register_exit_watcher(
+        shared,
+        &handle,
+        request_key.to_owned(),
+        task_id.clone(),
+        execution_id.clone(),
+    )?;
 
     Ok(serde_json::json!({
         "replayed": false,
@@ -3191,6 +3211,51 @@ fn dispatch(
         "terminal_id": terminal_id.to_string(),
         "pid": pid,
     }))
+}
+
+fn register_exit_watcher(
+    shared: &Arc<Shared>,
+    handle: &Arc<crate::terminal::TerminalHandle>,
+    request_key: String,
+    task: TaskId,
+    execution: crate::foundation::ids::ExecutionId,
+) -> Result<()> {
+    let shared_copy = Arc::clone(shared);
+    let handle = Arc::clone(handle);
+    let watcher = std::thread::Builder::new().spawn(move || {
+        // A prepared receiver's watcher is parked by the same adoption gate
+        // as its reader; cancellation must not write any process outcome.
+        if let Ok(exit) = handle.wait() {
+            let code = exit.code.unwrap_or(-1);
+            let store = shared_copy.store.lock().expect("store");
+            let tasks = TaskRegistry::new(&store);
+            let _ = tasks.record_exit(&request_key, code);
+            if exit.code.is_none() || !matches!(exit.via, crate::terminal::ExitVia::ChildExit) {
+                let _ = store.connection().execute(
+                    "UPDATE executions SET status = 'stopped', updated_at = ?2
+                     WHERE execution_id = ?1 AND status = 'failed'",
+                    rusqlite::params![execution.as_str(), utc_now()],
+                );
+            }
+            let _ = tasks.record_result(
+                &task,
+                Some(execution),
+                crate::tasks::ResultSource::Process,
+                "process_exit",
+                format!("{request_key}:exit"),
+                serde_json::json!({
+                    "exit_code": exit.code, "stored_exit_sentinel": code,
+                    "exit_code_known": exit.code.is_some(), "via": format!("{:?}", exit.via)
+                }),
+            );
+        }
+    })?;
+    shared
+        .watchers
+        .lock()
+        .expect("watcher registry")
+        .push(watcher);
+    Ok(())
 }
 
 fn terminal_list(shared: &Shared) -> Result<serde_json::Value> {
@@ -3341,14 +3406,16 @@ pub fn send_request(home: &Path, request: Request) -> Result<Response> {
     if let Some(record) = crate::machines::invocation_target() {
         return crate::machines::send_via_bridge(&record, request);
     }
-    let socket_path = home.join(SOCKET_NAME);
-    if !socket_path.exists() {
+    if ![SOCKET_NAME, RESUME_SOCKET_NAME, RESUME_NEXT_SOCKET_NAME]
+        .iter()
+        .any(|name| home.join(name).exists())
+    {
         return Err(Error::Validation(format!(
             "no active server in {} (mutation rejected; start one with `viva start`)",
             home.display()
         )));
     }
-    let mut stream = UnixStream::connect(&socket_path)?;
+    let mut stream = connect_local_socket(home)?;
     round_trip(&mut stream, &request)
 }
 
@@ -3673,6 +3740,7 @@ fn auto_sync_all_inner(shared: &Shared, force: bool) -> Result<serde_json::Value
 /// delivered to a live terminal, or the plan is closed with a note when
 /// the terminal is gone. Nothing is ever executed blindly twice.
 fn sweep_recovery_plans(shared: &Shared) {
+    let _effect = shared.effects.read().expect("effect fence");
     // Pause gates the sweep too (V15-5 acceptance: "pause 下不触发、resume
     // 后按计划继续") — due plans stay `scheduled` and fire after resume.
     if shared.paused.load(Ordering::SeqCst) {
