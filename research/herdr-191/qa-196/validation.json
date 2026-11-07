@@ -1,0 +1,179 @@
+{
+  "reviewed_head": "4a7d8fb8e54c816c289935f42599e08c521ef025",
+  "execution_source": "task-owned working tree on reviewed_head before follow-up commit; CI on final head recorded separately",
+  "review_scope": "user-supplied independent QA used static raw source/API/CI step evidence; exit 137 prevented QA command reruns. These records are developer reruns, NOT a new independent QA verdict.",
+  "pre_fix_binary_sha256": "db65189c02c93651a6cfee3ce4450a1f91b839368b7163fe09b2567e0995c014",
+  "pre_fix_binary_identity_check": "exactly matches candidate_sha256 in the committed 4a7d8fb old-to-current.json",
+  "findings": {
+    "F1": {
+      "judgment": "correct/blocker",
+      "pre_fix": [
+        "pre-fix-adoption.json",
+        "pre-fix-claim.json"
+      ],
+      "fix": "prepare bound receiver endpoint, exact schema without migration/crash reconciliation, ALL parked terminal readers and execution watchers BEFORE READY; abort cancels resources without consuming sender output. Keep prepared endpoint after commit if normal alias publication fails. v2 sender requires complete matching prepared ACK; receiver accepts historical v1 senders.",
+      "post_fix": [
+        "ready-bad-second-owner.json",
+        "ready-bind-failure.json",
+        "ready-alias-obstructed.json",
+        "ready-sender-rollback.json",
+        "ready-upgrade.json",
+        "ready-9935.json"
+      ]
+    },
+    "F2": {
+      "judgment": "correct: hash is not ordering and previous matrix omitted the older candidate",
+      "fix": "compatibility admission, not invented ordering of identical package versions: current sender rejects a receipt-only v1 candidate; same-schema compatible generations can still hand over. No claim that every older SemVer/build is numerically rejected.",
+      "post_fix": [
+        "ready-older-refused.json",
+        "ready-sender-rollback.json"
+      ]
+    },
+    "F3": {
+      "judgment": "correct: historical absolute user paths were present but not disclosed",
+      "fix": "retain historical bytes/provenance and explicitly disclose paths in PR; scan JSON plus decompressed gzip. Future probe records basename and hash, executes private immutable copies.",
+      "post_fix": [
+        "historical-path-scan.json"
+      ]
+    },
+    "F4": {
+      "judgment": "behavior change correctly observed; automatic old-workbench fallback is NOT required by approved contract 3",
+      "fix": "wrap local startup errors with same-VIVA_HOME viva status/server.log/retry instructions; no automatic old-workbench bypass. Real rejected-upgrade probe checks original host/PID/terminal still interactive and verifies actionable instructions.",
+      "post_fix": [
+        "ready-old-preserved.json"
+      ]
+    }
+  },
+  "commands": [
+    {
+      "command": "cargo fmt --all -- --check",
+      "exit": 0
+    },
+    {
+      "command": "cargo build --locked -p viva",
+      "exit": 0
+    },
+    {
+      "command": "cargo clippy --all-targets -- -D warnings",
+      "exit": 0
+    },
+    {
+      "command": "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=init.defaultBranch GIT_CONFIG_VALUE_0=master cargo test --workspace -- --test-threads=2",
+      "exit": 0,
+      "totals": {
+        "passed": 618,
+        "failed": 0,
+        "ignored": 1
+      },
+      "log": "workspace-ready.log.gz"
+    },
+    {
+      "command": "cargo test --workspace",
+      "exit": 101,
+      "log": "workspace-default.log.gz",
+      "note": "initial iteration: missing post-commit live_handoff_in event (fixed), plus local Git main/master fixture failure; retained"
+    },
+    {
+      "command": "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=init.defaultBranch GIT_CONFIG_VALUE_0=master cargo test --workspace",
+      "exit": 101,
+      "log": "workspace-concurrent-final.log.gz",
+      "note": "parallel handoff_moves fixture could not spawn terminal (ENOENT); cause not established, not called PASS or attributed to unchanged base without proof"
+    },
+    {
+      "command": "python3.11 -m unittest discover -s tooling/herdr-audit",
+      "exit": 0,
+      "passed": 25,
+      "log": "audit.log.gz"
+    },
+    {
+      "command": "/tmp/viva-191-startup/test-tools/bin/python -m pytest -o addopts='' tests/acceptance -q -rs",
+      "exit": 0,
+      "passed": 24,
+      "log": "acceptance.log.gz"
+    },
+    {
+      "command": "git diff --check",
+      "exit": 0
+    }
+  ],
+  "log_storage": [
+    {
+      "file": "workspace-default.log.gz",
+      "uncompressed_sha256": "112cd09c2f23e6aaf51f239806cd1d78186bbfc8fa0b4fab727abbee5ede2161"
+    },
+    {
+      "file": "workspace-concurrent-final.log.gz",
+      "uncompressed_sha256": "0befffa9e1c203613ed82434261ce0281a0af3248b9d89dea2601c985a4613f8"
+    },
+    {
+      "file": "workspace-final.log.gz",
+      "uncompressed_sha256": "b93c483bba90be7ad45228312908a5225433b17632335ff9a4cef608a2fb9907"
+    },
+    {
+      "file": "audit.log.gz",
+      "uncompressed_sha256": "34927c7d610c675e22fbfd3f3530011a895872ce6f538512523b3d52702fc4fb"
+    },
+    {
+      "file": "acceptance.log.gz",
+      "uncompressed_sha256": "4da39fbbb4d05221272ecb2d37f4e58e53e966add36ef5504ebdced044121ce8"
+    },
+    {
+      "file": "workspace-sealed.log.gz",
+      "uncompressed_sha256": "5ea1433fab261bf6294c08e42d7f43ef996af614c07ee73baf6a3df6a4ca1b9c"
+    },
+    {
+      "file": "workspace-ready.log.gz",
+      "uncompressed_sha256": "2852bc637dc93b9f0ba392ebdebaa799083913479d8651663ad8bd47a7e9518d"
+    }
+  ],
+  "new_tests": [
+    "transport receipt alone must not ACK; receipt-only ACK rejected",
+    "two consecutive real-binary transfers preserve running execution/attribution, then stop records process exit without completing task",
+    "grant caller cannot restart owner host even with member omitted; both refusals audited"
+  ],
+  "probe_sha256": {
+    "tooling/herdr-integration/startup_handoff.py": "cab79348772e1d9191ec600c05c57d9be641a40fbc8a9963ae32c5e082b0f17c",
+    "tooling/herdr-integration/handoff_faults.py": "1f7b59abb623aa94ab6e53d252e87ae61932ad5ba320de1e8b484447517e0dcc"
+  },
+  "development_failures_not_promoted_to_pass": [
+    "First wire probe cleanup used killpg and received EPERM; changed fixture cleanup to exact Popen child PID (fixture shell has no descendants). No privilege escalation or user process involved.",
+    "First occupied-endpoint iteration waited for a heartbeat from deliberately unserved listeners and timed out; preparation now treats a successful connect as occupied without waiting or unlinking it.",
+    "A parallel cargo build replaced target/debug/viva during a probe, causing expected-vs-running hash mismatch. That failed run was not accepted; probes now execute and hash private immutable copies."
+  ],
+  "remaining_boundaries": [
+    "No Herdr native/cross-backend integration or MacBook Air install/visual acceptance is claimed; imported subtree, dependencies and package versions unchanged.",
+    "Legacy v1 sender compatibility was tested on fixed 9935ebb and 4a7d8fb; it does not retrofit v2 effect fencing or strict ACK parsing into arbitrary historical sender code.",
+    "Arbitrary sender/receiver OS crash or kill, including commit ambiguity, is outside this recoverable-error test matrix; no crash-atomic distributed transaction guarantee is claimed. The fix covers tested preparation/binding/adoption/alias and incompatible-receiver failures.",
+    "Adopted processes may have unobservable OS exit status; result payload uses null/exit_code_known=false and retains the legacy integer sentinel, never claims task completion.",
+    "Same-UID control identity is still not an OS sandbox or full #191 worker channel integration. Restart now explicitly refuses grant/member callers with audit, but full ingress authority remains #191 work.",
+    "Fixture TUI clients may be forcibly reaped; not UI/detach or human visual PASS. One ignored release-download test remains unrun. CI and new-head independent QA are pending at local record time."
+  ],
+  "final_acceptance_matrix": [
+    "ready-9935.json",
+    "ready-alias-obstructed.json",
+    "ready-bad-second-owner.json",
+    "ready-bind-failure.json",
+    "ready-old-preserved.json",
+    "ready-older-refused.json",
+    "ready-replaced.json",
+    "ready-same.json",
+    "ready-sender-rollback.json",
+    "ready-upgrade.json"
+  ],
+  "sealed_source_sha256": {
+    ".github/workflows/ci.yml": "31daed68d7de42a56702db95597c66d87c6d75a8275665b9ad25dc21d2419a47",
+    "crates/viva/src/server/resume.rs": "cc6fdfdcbce47cfb24ea3e225282eb7f0a0431ae33394710cd02a7630c6788d5",
+    "crates/viva/src/server/mod.rs": "e4e2dd749082f2ec7f7ecca2282c7f3eeb337dfc3750eb2b5ac6eb1c3d9ffe4d",
+    "crates/viva/src/server/handoff.rs": "06be50e29c445915d5c4f55f40621752d7de80fc343f0899a16c40205a908a84",
+    "crates/viva/src/server/protocol.rs": "008e50d72717e4a0d695f2ae0656405278e4b715c44d30c42fccc440933ddf5d",
+    "crates/viva/src/server/client.rs": "f8dc3ea56e6946a12375fabd8a93a5c20bd002281d4b0ce3764e5d0328686300",
+    "crates/viva/src/foundation/store.rs": "d6435887f74fcccbf8369b612962d0829b2227109b7dbba2bdf9ca25eb5a8f54",
+    "crates/viva/src/terminal/session.rs": "6cebf71632d0326e52ff8d38858abedb9f6c914d2dfe394d679cdb594285bad0",
+    "crates/viva/src/terminal/mod.rs": "18f575fbdebe127320ac75607fa4db95471c441e31f66cb32e8e5afbabe32862",
+    "crates/viva/tests/startup_handoff_safety.rs": "63495e830539b0b8456970ae075b1242a3fc9d0360c66cee0dcc124c73e96d30",
+    "tooling/herdr-integration/startup_handoff.py": "cab79348772e1d9191ec600c05c57d9be641a40fbc8a9963ae32c5e082b0f17c",
+    "tooling/herdr-integration/handoff_faults.py": "1f7b59abb623aa94ab6e53d252e87ae61932ad5ba320de1e8b484447517e0dcc"
+  },
+  "earlier_positive_probe_iterations": "retained under /tmp/viva-196-qa/uncommitted-iterations; not acceptance evidence",
+  "readiness_preflight": "After binding and preparing ALL sessions, a real Ping round-trip through the bound listener, peer check and normal Ping handler succeeds BEFORE READY. Optional thread/resource errors after commit do not terminate the session owner."
+}

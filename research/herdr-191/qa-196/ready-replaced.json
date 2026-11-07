@@ -1,0 +1,393 @@
+{
+  "scope": "existing Viva runtime startup; NOT Herdr cross-backend handoff",
+  "not_asserted": [
+    "old workbench interaction, detach or visual acceptance",
+    "Herdr backend adoption",
+    "member/worker authorization integration"
+  ],
+  "server_source_name": "viva",
+  "server_sha256": "2d7c4981752b81025e183fc2d6a7e6cb3f4e74553003d4d2d8a1c85dd8dd9e56",
+  "candidate_name": "viva",
+  "candidate_sha256": "2d7c4981752b81025e183fc2d6a7e6cb3f4e74553003d4d2d8a1c85dd8dd9e56",
+  "expected": "attach",
+  "clients": 1,
+  "checks": {
+    "all_client_startups_attached": true,
+    "expected_host_transition": true,
+    "candidate_host_identity": true,
+    "original_terminal_interactive": true,
+    "original_process_preserved": true,
+    "original_host_still_serving": true,
+    "owned_control_socket_stopped": true
+  },
+  "candidate_execution": "private immutable copy",
+  "before": {
+    "binary_sha256": "2d7c4981752b81025e183fc2d6a7e6cb3f4e74553003d4d2d8a1c85dd8dd9e56",
+    "handoff_protocol": 2,
+    "host_id": "host-6e44f22f9d134c92a6f8e1ff1b7df5b9",
+    "pid": 40284,
+    "runtime": "viva-rust-v1"
+  },
+  "terminal_before": {
+    "cols": 100,
+    "pid": 40318,
+    "rows": 30,
+    "terminal_id": "term-ed3bbace2ff44213bbfb1c67a5526398"
+  },
+  "replacement_sha256": "db65189c02c93651a6cfee3ce4450a1f91b839368b7163fe09b2567e0995c014",
+  "after": {
+    "binary_sha256": "2d7c4981752b81025e183fc2d6a7e6cb3f4e74553003d4d2d8a1c85dd8dd9e56",
+    "handoff_protocol": 2,
+    "host_id": "host-6e44f22f9d134c92a6f8e1ff1b7df5b9",
+    "pid": 40284,
+    "runtime": "viva-rust-v1"
+  },
+  "snapshot_after": {
+    "cols": 100,
+    "log_truncated": false,
+    "rows": 30,
+    "screen": {
+      "cursor": [
+        3,
+        0
+      ],
+      "cursor_visible": true,
+      "lines": [
+        [
+          [
+            "READY:40318                                                                                         ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "handoff-0cad40f7d9284f7e964eb8cbbf6eaa4e                                                            ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "PID:40318 ECHO:handoff-0cad40f7d9284f7e964eb8cbbf6eaa4e                                             ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            "                                                                                                    ",
+            100,
+            0,
+            0,
+            0
+          ]
+        ]
+      ],
+      "modes": {
+        "alternate": false,
+        "application_cursor": false,
+        "application_keypad": false,
+        "bracketed_paste": false,
+        "kitty_flags": 0,
+        "mouse_encoding": 0,
+        "mouse_mode": 0
+      },
+      "retained": 0,
+      "scrollback_offset": 0
+    },
+    "scrollback": [],
+    "scrollback_capped": false,
+    "total_output_bytes": 112,
+    "visible": [
+      "READY:40318",
+      "handoff-0cad40f7d9284f7e964eb8cbbf6eaa4e",
+      "PID:40318 ECHO:handoff-0cad40f7d9284f7e964eb8cbbf6eaa4e",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      ""
+    ]
+  },
+  "terminals_after": {
+    "terminals": [
+      {
+        "owner": "test_run",
+        "purpose": "issue-191-isolated-handoff-probe",
+        "terminal_id": "term-ed3bbace2ff44213bbfb1c67a5526398",
+        "worktree_id": null
+      }
+    ]
+  },
+  "client_exit_statuses": [
+    -9
+  ],
+  "cleanup": {
+    "shutting_down": true
+  },
+  "server_log": "server host-6e44f22f9d134c92a6f8e1ff1b7df5b9 active (pid 40284) \u2014 home /tmp/v191-85_j884_/state\n",
+  "passed": true
+}

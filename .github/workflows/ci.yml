@@ -96,6 +96,33 @@ jobs:
             --server-bin target/debug/viva --candidate-bin target/debug/viva \
             --replace-server-on-disk "$BASE/target/debug/viva" \
             --expect attach --output "$RUNNER_TEMP/startup-replaced-path.json"
+      - name: Verify prepared handoff failures and incompatible older receiver
+        shell: bash
+        run: |
+          set -euo pipefail
+          PREVIOUS="$RUNNER_TEMP/viva-196-previous"
+          mkdir -p "$PREVIOUS"
+          git archive 4a7d8fb8e54c816c289935f42599e08c521ef025 | tar -x -C "$PREVIOUS"
+          CARGO_TARGET_DIR="$PREVIOUS/target" cargo build --locked --manifest-path "$PREVIOUS/Cargo.toml" -p viva
+          python tooling/herdr-integration/startup_handoff.py \
+            --server-bin "$PREVIOUS/target/debug/viva" --candidate-bin target/debug/viva \
+            --expect handoff --output "$RUNNER_TEMP/startup-v1-to-prepared.json"
+          python tooling/herdr-integration/startup_handoff.py \
+            --server-bin target/debug/viva --candidate-bin "$PREVIOUS/target/debug/viva" \
+            --expect refused --output "$RUNNER_TEMP/startup-older-receiver-refused.json"
+          python tooling/herdr-integration/startup_handoff.py \
+            --server-bin "$PREVIOUS/target/debug/viva" --candidate-bin target/debug/viva \
+            --expect refused --occupy-prepared-endpoints \
+            --output "$RUNNER_TEMP/startup-failure-old-still-serving.json"
+          python tooling/herdr-integration/startup_handoff.py \
+            --server-bin target/debug/viva --candidate-bin target/debug/viva \
+            --inject-old-receiver "$PREVIOUS/target/debug/viva" \
+            --expect attach --output "$RUNNER_TEMP/startup-sender-rollback.json"
+          for fault in bad-second-owner bind-failure alias-obstructed; do
+            python tooling/herdr-integration/handoff_faults.py \
+              --binary target/debug/viva --fault "$fault" \
+              --output "$RUNNER_TEMP/startup-fault-$fault.json"
+          done
       - name: Retain startup handoff evidence (including failures)
         if: always()
         uses: actions/upload-artifact@v4

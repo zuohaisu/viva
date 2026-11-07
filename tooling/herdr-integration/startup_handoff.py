@@ -29,11 +29,12 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def call(home, kind):
+def call(home, kind, **extra):
     with socket.socket(socket.AF_UNIX) as stream:
         stream.settimeout(3)
         stream.connect(str(home / "server.sock"))
         payload = {"request_id": str(uuid.uuid4()), "version": 2, "kind": kind}
+        payload.update(extra)
         stream.sendall(json.dumps(payload).encode() + b"\n")
         with stream.makefile("rb") as reader:
             line = reader.readline()
@@ -63,6 +64,7 @@ def poll(probe, timeout=12):
 
 CLIENT_OUTPUT = {}
 CLIENT_ATTACHED = {}
+CLIENT_REFUSED = {}
 
 
 def start_client(binary, environment):
@@ -74,6 +76,7 @@ def start_client(binary, environment):
     os.set_blocking(master, False)
     CLIENT_OUTPUT[pid] = b""
     CLIENT_ATTACHED[pid] = False
+    CLIENT_REFUSED[pid] = False
     return pid, master
 
 
@@ -83,6 +86,8 @@ def drain(clients):
             try:
                 data = CLIENT_OUTPUT[pid] + os.read(master, 65536)
                 CLIENT_ATTACHED[pid] |= b"workbench: attached to the resident server" in data
+                CLIENT_REFUSED[pid] |= (b"prepared-adoption protocol 2" in data
+                                        or b"startup handoff did not complete" in data)
                 CLIENT_OUTPUT[pid] = data[-4096:]
             except OSError:
                 pass
@@ -93,7 +98,9 @@ def main():
     parser.add_argument("--server-bin", type=Path, required=True)
     parser.add_argument("--candidate-bin", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--expect", choices=("handoff", "attach"), required=True)
+    parser.add_argument("--expect", choices=("handoff", "attach", "refused"), required=True)
+    parser.add_argument("--occupy-prepared-endpoints", action="store_true")
+    parser.add_argument("--inject-old-receiver", type=Path)
     parser.add_argument("--clients", type=int, choices=(1, 2), default=1)
     parser.add_argument("--replace-server-on-disk", type=Path)
     args = parser.parse_args()
@@ -103,9 +110,9 @@ def main():
         "scope": "existing Viva runtime startup; NOT Herdr cross-backend handoff",
         "not_asserted": ["old workbench interaction, detach or visual acceptance",
                          "Herdr backend adoption", "member/worker authorization integration"],
-        "server_source": str(source),
+        "server_source_name": source.name,
         "server_sha256": digest(source),
-        "candidate": str(candidate),
+        "candidate_name": candidate.name,
         "candidate_sha256": digest(candidate),
         "expected": args.expect,
         "clients": args.clients,
@@ -113,6 +120,7 @@ def main():
     }
     clients = []
     server = None
+    blockers = []
     # /tmp keeps Darwin's Unix socket path below sockaddr_un's limit.
     with tempfile.TemporaryDirectory(prefix="v191-", dir="/tmp") as directory:
         root = Path(directory)
@@ -129,6 +137,13 @@ def main():
         )
         executable = root / "server-generation"
         shutil.copy2(source, executable)
+        candidate_copy = root / "candidate-generation"
+        shutil.copy2(candidate, candidate_copy)
+        # A concurrent cargo build may atomically replace target/debug/viva.
+        # Pin the bytes actually executed, not a digest of a mutable path.
+        evidence["server_sha256"] = digest(executable)
+        evidence["candidate_sha256"] = digest(candidate_copy)
+        evidence["candidate_execution"] = "private immutable copy"
         with (root / "server.log").open("wb") as log:
             try:
                 server = subprocess.Popen(
@@ -147,21 +162,40 @@ def main():
                 })
                 terminal_id = terminal["terminal_id"]
                 evidence["terminal_before"] = terminal
+                if args.inject_old_receiver:
+                    incompatible = root / "incompatible-receiver"
+                    shutil.copy2(args.inject_old_receiver.resolve(strict=True), incompatible)
+                    evidence["injected_receiver_sha256"] = digest(incompatible)
+                    call(home, {"type": "server_restart"}, handoff_protocol=2)
+                    rejected = subprocess.run([str(incompatible), "server", "--resume"],
+                        env=environment, cwd=home, stdin=subprocess.DEVNULL,
+                        capture_output=True, timeout=12)
+                    evidence["injected_receiver_exit"] = rejected.returncode
+                    evidence["injected_receiver_error"] = rejected.stderr.decode(errors="replace")
+                    evidence["checks"]["injected_old_receiver_rejected"] = rejected.returncode != 0
+                    poll(lambda: call(home, {"type": "status"})["paused"] is False)
                 if args.replace_server_on_disk:
                     replacement = root / "replacement"
                     shutil.copy2(args.replace_server_on_disk.resolve(strict=True), replacement)
                     os.replace(replacement, executable)
                     evidence["replacement_sha256"] = digest(executable)
+                if args.occupy_prepared_endpoints:
+                    for name in ("resume.sock", "resume-next.sock"):
+                        blocker = socket.socket(socket.AF_UNIX)
+                        blocker.bind(str(home / name))
+                        blocker.listen()
+                        blockers.append(blocker)
                 for _ in range(args.clients):
-                    clients.append(start_client(candidate, environment))
-                deadline = time.monotonic() + 15
+                    clients.append(start_client(candidate_copy, environment))
+                deadline = time.monotonic() + (60 if args.expect == "refused" else 15)
                 after = None
                 while time.monotonic() < deadline:
                     drain(clients)
                     try:
                         after = call(home, {"type": "ping"})
                         changed = after["pid"] != before["pid"]
-                        if changed == (args.expect == "handoff") and all(CLIENT_ATTACHED.values()):
+                        ready = all(CLIENT_REFUSED.values()) if args.expect == "refused" else all(CLIENT_ATTACHED.values())
+                        if changed == (args.expect == "handoff") and ready:
                             break
                     except (OSError, RuntimeError):
                         pass
@@ -169,12 +203,20 @@ def main():
                 if after is None:
                     raise RuntimeError("no healthy host after startup")
                 evidence["after"] = after
-                evidence["checks"]["all_client_startups_attached"] = all(CLIENT_ATTACHED.values())
+                if args.expect == "refused":
+                    evidence["checks"]["candidate_explicitly_refused"] = all(CLIENT_REFUSED.values())
+                    evidence["checks"]["no_old_workbench_fallback"] = not any(CLIENT_ATTACHED.values())
+                    evidence["candidate_diagnostics"] = [CLIENT_OUTPUT[pid].decode(errors="replace") for pid, _ in clients]
+                    if args.occupy_prepared_endpoints:
+                        evidence["checks"]["actionable_failure_instructions"] = all(
+                            b"viva status" in CLIENT_OUTPUT[pid] for pid, _ in clients)
+                else:
+                    evidence["checks"]["all_client_startups_attached"] = all(CLIENT_ATTACHED.values())
                 evidence["checks"]["expected_host_transition"] = (
                     (after["pid"] != before["pid"]) == (args.expect == "handoff")
                 )
                 evidence["checks"]["candidate_host_identity"] = (
-                    after.get("binary_sha256") == evidence["candidate_sha256"]
+                    after.get("binary_sha256") == evidence["server_sha256" if args.expect == "refused" else "candidate_sha256"]
                 )
                 # The same terminal must still accept input and return output.
                 marker = "handoff-" + uuid.uuid4().hex
@@ -241,6 +283,8 @@ def main():
                     except subprocess.TimeoutExpired:
                         server.terminate()
                         server.wait(timeout=5)
+                for blocker in blockers:
+                    blocker.close()
                 evidence["server_log"] = (root / "server.log").read_text(errors="replace")
                 resumed_log = home / "server.log"
                 if resumed_log.exists():

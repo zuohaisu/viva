@@ -49,13 +49,17 @@ impl Client {
             return crate::machines::connect_client(&record);
         }
         let socket_path = home.join(SOCKET_NAME);
-        if !socket_path.exists() {
+        if !socket_path.exists()
+            && ![super::RESUME_SOCKET_NAME, super::RESUME_NEXT_SOCKET_NAME]
+                .iter()
+                .any(|name| home.join(name).exists())
+        {
             return Err(Error::Validation(format!(
                 "no active server in {} (start one with `viva server`)",
                 home.display()
             )));
         }
-        let stream = UnixStream::connect(&socket_path)?;
+        let stream = super::connect_local_socket(home)?;
         let mut client = Self {
             stream,
             home: home.to_path_buf(),
@@ -107,7 +111,11 @@ impl Client {
             )));
         }
         let socket_path = home.join(SOCKET_NAME);
-        if socket_path.exists() {
+        if socket_path.exists()
+            || [super::RESUME_SOCKET_NAME, super::RESUME_NEXT_SOCKET_NAME]
+                .iter()
+                .any(|name| home.join(name).exists())
+        {
             match Client::connect(home) {
                 Ok(client) => return Ok(client),
                 // Nobody listens: a killed host left the socket behind.
@@ -157,13 +165,21 @@ impl Client {
             // Never launch this machine's binary on a remote peer implicitly.
             return Self::connect(home);
         }
+        Self::ensure_current_local_server(home).map_err(|err| {
+            Error::Validation(format!(
+                "startup handoff did not complete: {err}. No fallback to the old workbench \
+                 was attempted. With the same VIVA_HOME, run `viva status` to inspect the \
+                 serving host and check server.log before retrying the installed `viva`; \
+                 do not stop or rerun an active task to force an upgrade"
+            ))
+        })
+    }
+
+    fn ensure_current_local_server(home: &Path) -> Result<Self> {
         let _startup = StartupLock::acquire(home)?;
         let expected = executable_sha256()?;
         let mut client = Self::ensure_server(home)?;
         let before = client.call(RequestKind::Ping)?;
-        if before.get("binary_sha256").and_then(|v| v.as_str()) == Some(&expected) {
-            return Ok(client);
-        }
         if let Some(runtime) = before.get("runtime").and_then(|v| v.as_str()) {
             if runtime != "viva-rust-v1" {
                 return Err(Error::Validation(format!(
@@ -171,6 +187,9 @@ impl Client {
                      the existing host was not stopped"
                 )));
             }
+        }
+        if before.get("binary_sha256").and_then(|v| v.as_str()) == Some(&expected) {
+            return Ok(client);
         }
         drop(client);
         restart_server(home)?;

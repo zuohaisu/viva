@@ -1,0 +1,73 @@
+{
+  "scope": "historical packet, JSON and losslessly decompressed gzip; limited pattern scan, not a proof that all secrets are absent",
+  "files": [
+    {
+      "file": "acceptance-tools.log.gz",
+      "absolute_user_path_occurrences": 0,
+      "example_paths": [],
+      "credential_pattern_hits": 0
+    },
+    {
+      "file": "baseline-clippy.log.gz",
+      "absolute_user_path_occurrences": 0,
+      "example_paths": [],
+      "credential_pattern_hits": 0
+    },
+    {
+      "file": "baseline-git-test.log.gz",
+      "absolute_user_path_occurrences": 0,
+      "example_paths": [],
+      "credential_pattern_hits": 0
+    },
+    {
+      "file": "current-to-current.json",
+      "absolute_user_path_occurrences": 2,
+      "example_paths": [
+        "/Users/zuohaisu/orca/workspaces/viva/herdr/target/debug/viva"
+      ],
+      "credential_pattern_hits": 0
+    },
+    {
+      "file": "old-to-current.json",
+      "absolute_user_path_occurrences": 1,
+      "example_paths": [
+        "/Users/zuohaisu/orca/workspaces/viva/herdr/target/debug/viva"
+      ],
+      "credential_pattern_hits": 0
+    },
+    {
+      "file": "pre-fix.json",
+      "absolute_user_path_occurrences": 0,
+      "example_paths": [],
+      "credential_pattern_hits": 0
+    },
+    {
+      "file": "replaced-path.json",
+      "absolute_user_path_occurrences": 2,
+      "example_paths": [
+        "/Users/zuohaisu/orca/workspaces/viva/herdr/target/debug/viva"
+      ],
+      "credential_pattern_hits": 0
+    },
+    {
+      "file": "validation.json",
+      "absolute_user_path_occurrences": 0,
+      "example_paths": [],
+      "credential_pattern_hits": 0
+    },
+    {
+      "file": "workspace-controlled.log.gz",
+      "absolute_user_path_occurrences": 0,
+      "example_paths": [],
+      "credential_pattern_hits": 0
+    },
+    {
+      "file": "workspace-default.log.gz",
+      "absolute_user_path_occurrences": 1,
+      "example_paths": [
+        "/Users/zuohaisu/orca/workspaces/viva/herdr/crates/viva)"
+      ],
+      "credential_pattern_hits": 0
+    }
+  ]
+}

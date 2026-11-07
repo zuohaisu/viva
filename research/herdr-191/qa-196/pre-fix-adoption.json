@@ -1,0 +1,17 @@
+{
+  "scope": "real receiver binary + wire sender fixture + real owned PTYs",
+  "binary_name": "viva-4a7d8fb",
+  "binary_sha256": "db65189c02c93651a6cfee3ce4450a1f91b839368b7163fe09b2567e0995c014",
+  "fault": "bad-second-owner",
+  "checks": {
+    "no_ack_before_full_preparation": false,
+    "sender_sessions_still_interactive": true,
+    "candidate_rejected": false
+  },
+  "ack": {
+    "ok": true
+  },
+  "cleanup_receiver_exit": -9,
+  "receiver_log": "server (pid 67100) resuming from live handoff \u2014 home /tmp/v196-5oc48r0n\n",
+  "passed": false
+}

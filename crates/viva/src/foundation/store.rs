@@ -490,6 +490,36 @@ impl Store {
         Ok(store)
     }
 
+    /// Attach to a live host's existing schema WITHOUT applying migrations
+    /// or legacy renames. Preparation must not mutate tables underneath the
+    /// still-active sender, including when the receiver is an older build.
+    pub(crate) fn attach_for_handoff(path: &Path, migrations: &FrozenMigrations) -> Result<Store> {
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        let mut store = Store {
+            conn,
+            schema_versions: BTreeMap::new(),
+            legacy_migration: None,
+        };
+        let actual = store
+            .applied_migrations()?
+            .into_iter()
+            .map(|(domain, version, _, _)| (domain, version))
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = migrations
+            .all()
+            .map(|m| (m.domain.as_str().to_owned(), m.version))
+            .collect::<std::collections::BTreeSet<_>>();
+        if actual != expected {
+            return Err(Error::Migration(
+                "live handoff requires matching schema migrations; no migration was applied to the active host".into(),
+            ));
+        }
+        store.reload_schema_versions()?;
+        Ok(store)
+    }
+
     /// What the one-time rename of the old table/value names did while this
     /// store was being opened, if it ran.
     pub fn legacy_migration(&self) -> Option<&legacy::Migrated> {

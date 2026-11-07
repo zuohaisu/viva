@@ -37,7 +37,7 @@ use std::io::Read as _;
 use std::io::Write as _;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -61,6 +61,12 @@ const READ_CHUNK: usize = 8 * 1024;
 /// unfinished sequence longer than the bound is best-effort truncated
 /// (see [`super::screen::unfinished_tail_len`]).
 const TAIL_BOUND: usize = 64 * 1024;
+
+#[derive(Default)]
+struct AdoptionGate {
+    decision: Mutex<Option<bool>>,
+    wake: Condvar,
+}
 
 // ---------------------------------------------------------------------------
 // Spec and results
@@ -343,6 +349,7 @@ pub struct TerminalHandle {
     /// session's process.
     pub pid_start_marker: String,
     disk_log: Option<Arc<DiskLog>>,
+    adoption_gate: Option<Arc<AdoptionGate>>,
 }
 
 impl TerminalHandle {
@@ -409,8 +416,9 @@ impl TerminalHandle {
                 crate::foundation::ids::utc_now()
             ),
             disk_log,
+            adoption_gate: None,
         };
-        spawn_reader(&handle.shared, reader_fd, handle.disk_log.clone());
+        spawn_reader(&handle.shared, reader_fd, handle.disk_log.clone(), None)?;
 
         // The spawn event carries the ownership boundary: only a
         // member-execution terminal carries an execution id.
@@ -455,6 +463,36 @@ impl TerminalHandle {
         history: Vec<String>,
         disk_log: Option<Arc<DiskLog>>,
         screen: &[u8],
+        pending: &[u8],
+    ) -> Result<Self> {
+        let handle = Self::prepare_adoption(
+            master_fd,
+            pid,
+            pid_start_marker,
+            cols,
+            rows,
+            history,
+            disk_log,
+            screen,
+            pending,
+        )?;
+        handle.activate_prepared();
+        Ok(handle)
+    }
+
+    /// Own the descriptor, emulator, writer AND reader thread before READY.
+    /// The reader is parked, so aborting preparation cannot consume bytes
+    /// the previous host needs when it rolls back.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_adoption(
+        master_fd: std::os::fd::RawFd,
+        pid: u32,
+        pid_start_marker: String,
+        cols: u16,
+        rows: u16,
+        history: Vec<String>,
+        disk_log: Option<Arc<DiskLog>>,
+        screen: &[u8],
         // `pending`: the old session's trailing unfinished escape/UTF-8
         // bytes (see [`Self::pending_tail`]). Replayed into the fresh
         // parser BEFORE the reader starts, so a sequence split by the
@@ -462,15 +500,20 @@ impl TerminalHandle {
         // sequence, not text.
         pending: &[u8],
     ) -> Result<Self> {
-        if cols == 0 || rows == 0 {
+        // Ownership begins even on validation failure; no transferred fd
+        // leaks when one bad entry rejects an entire handoff.
+        let master = unsafe { OwnedMaster::from_received(master_fd) };
+        if cols == 0
+            || rows == 0
+            || cols > 512
+            || rows > 256
+            || u32::from(cols) * u32::from(rows) > 16384
+        {
             return Err(Error::Validation(
                 "terminal size must be 1..512 columns, 1..256 rows and at most 16384 cells".into(),
             ));
         }
-        // SAFETY: the received fd is a valid open master transferred to us;
-        // the sender keeps its own reference until the ack.
-        let master = unsafe { OwnedMaster::from_received(master_fd) };
-        let writer_fd = master.dup()?;
+        let writer = unsafe { std::fs::File::from_raw_fd(master.dup()?) };
         let reader_fd = master.dup()?;
 
         let mut parser = Parser::new_with_callbacks(
@@ -481,12 +524,13 @@ impl TerminalHandle {
         );
         parser.process(screen);
         parser.process(pending);
-        super::osc52::publish(parser.callbacks_mut().take_clipboard());
+        // Replayed control bytes must not affect the host clipboard while
+        // this is only a tentative adoption.
+        let _ = parser.callbacks_mut().take_clipboard();
         parser.callbacks_mut().bytes.clear();
         let shared = Arc::new(SessionShared {
             parser: Mutex::new(parser),
-            // SAFETY: fresh dup of the received master fd.
-            writer: Mutex::new(Box::new(unsafe { std::fs::File::from_raw_fd(writer_fd) })),
+            writer: Mutex::new(Box::new(writer)),
             core: Mutex::new(SessionCore {
                 state: SessionState::Running,
                 escalated: false,
@@ -504,23 +548,48 @@ impl TerminalHandle {
             reader_detached: AtomicBool::new(false),
             reader_gone: AtomicBool::new(false),
         });
+        let gate = Arc::new(AdoptionGate::default());
         let handle = Self {
             shared,
             master: Mutex::new(Some(master)),
             pid: Some(pid),
             pid_start_marker,
             disk_log,
+            adoption_gate: Some(gate.clone()),
         };
-        spawn_reader(&handle.shared, reader_fd, handle.disk_log.clone());
+        spawn_reader(
+            &handle.shared,
+            reader_fd,
+            handle.disk_log.clone(),
+            Some(gate),
+        )?;
+        Ok(handle)
+    }
 
+    pub(crate) fn cancel_prepared(&self) {
+        if let Some(gate) = &self.adoption_gate {
+            let mut decision = gate.decision.lock().expect("adoption gate");
+            if decision.is_none() {
+                *decision = Some(false);
+                gate.wake.notify_all();
+            }
+        }
+    }
+
+    pub(crate) fn activate_prepared(&self) {
+        if let Some(gate) = &self.adoption_gate {
+            *gate.decision.lock().expect("adoption gate") = Some(true);
+            gate.wake.notify_all();
+        }
+        let snapshot = self.snapshot().ok();
+        let (cols, rows) = snapshot.map(|s| (s.cols, s.rows)).unwrap_or((80, 24));
         // Nudge a repaint: a resize down and back sends SIGWINCH to the
         // child's foreground group, so full-screen programs (the agents'
         // TUIs) redraw their screens on the fresh emulator.
         if rows > 1 {
-            let _ = handle.resize(cols, rows - 1);
-            let _ = handle.resize(cols, rows);
+            let _ = self.resize(cols, rows - 1);
+            let _ = self.resize(cols, rows);
         }
-        Ok(handle)
     }
 
     /// A duplicate of the master fd for live-handoff transfer. The
@@ -722,6 +791,15 @@ impl TerminalHandle {
     /// sleep happens outside every lock, so a concurrent stop() can always
     /// acquire the core lock, signal the group, and escalate on time.
     pub fn wait(&self) -> Result<TerminalExit> {
+        if let Some(gate) = &self.adoption_gate {
+            let mut decision = gate.decision.lock().expect("adoption gate");
+            while decision.is_none() {
+                decision = gate.wake.wait(decision).expect("adoption gate");
+            }
+            if *decision != Some(true) {
+                return Err(Error::Validation("tentative adoption was cancelled".into()));
+            }
+        }
         loop {
             if let Some(exit) = self.try_wait()? {
                 return Ok(exit);
@@ -844,7 +922,7 @@ impl TerminalHandle {
         drop(master_guard);
         self.shared.reader_detached.store(false, Ordering::SeqCst);
         self.shared.reader_gone.store(false, Ordering::SeqCst);
-        spawn_reader(&self.shared, reader_fd, self.disk_log.clone());
+        spawn_reader(&self.shared, reader_fd, self.disk_log.clone(), None)?;
         Ok(())
     }
 
@@ -870,11 +948,21 @@ fn spawn_reader(
     shared: &Arc<SessionShared>,
     reader_fd: std::os::fd::RawFd,
     log: Option<Arc<DiskLog>>,
-) {
+    gate: Option<Arc<AdoptionGate>>,
+) -> Result<()> {
     // SAFETY: fresh dup of our own master fd, owned by this thread.
     let mut reader = unsafe { std::fs::File::from_raw_fd(reader_fd) };
     let shared = Arc::downgrade(shared);
-    std::thread::spawn(move || {
+    std::thread::Builder::new().spawn(move || {
+        if let Some(gate) = gate {
+            let mut decision = gate.decision.lock().expect("adoption gate");
+            while decision.is_none() {
+                decision = gate.wake.wait(decision).expect("adoption gate");
+            }
+            if *decision != Some(true) {
+                return;
+            }
+        }
         let mut buf = [0u8; READ_CHUNK];
         loop {
             // Poll with a tick instead of an unconditional blocking read:
@@ -978,7 +1066,8 @@ fn spawn_reader(
                 log.finish();
             }
         }
-    });
+    })?;
+    Ok(())
 }
 
 /// Zombie-aware liveness for an adopted session's pid (issue #45 QA F8).
@@ -1062,6 +1151,16 @@ fn reap_under_lock(core: &mut SessionCore) -> Result<Option<TerminalExit>> {
 
 impl Drop for TerminalHandle {
     fn drop(&mut self) {
+        if let Some(gate) = &self.adoption_gate {
+            let mut decision = gate.decision.lock().expect("adoption gate");
+            if decision.is_none() {
+                *decision = Some(false);
+                gate.wake.notify_all();
+            }
+            if *decision == Some(false) {
+                return;
+            }
+        }
         // Never kill on drop (stopping is an explicit Viva decision), but
         // reap in the background so an exited child does not linger as a
         // zombie. Polling reap: no lock is held across the sleep. If the
