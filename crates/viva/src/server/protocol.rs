@@ -54,6 +54,10 @@ pub struct Request {
     /// and audits anything else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member: Option<String>,
+    /// Receiver capability for ServerRestart. Absent in pre-prepared
+    /// clients: a current sender refuses them before freezing any session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_protocol: Option<u32>,
 }
 
 /// The request vocabulary. Read-only kinds are answerable from
@@ -268,8 +272,9 @@ pub enum RequestKind {
     /// Begin a live handoff (S3, issue #45): the host binds `handoff.sock`
     /// and answers with its path. The resumed server connects, receives
     /// every live PTY master fd + manifest, and takes over; the old host
-    /// exits only after a full ack. On any failure the old host keeps
-    /// serving — the type-1 fallback, with zero interruption.
+    /// exits only after prepared adoption is confirmed. A pre-READY failure
+    /// resumes the sender; after READY the receiver already owns a bound
+    /// endpoint and every terminal, even if the normal socket alias fails.
     ServerRestart,
     /// V15-1: the file inventory of one worktree (path + porcelain status).
     WorktreeFiles {
@@ -601,12 +606,15 @@ pub fn round_trip_within(
 
 /// Build a request with a fresh id and the current protocol version.
 pub fn new_request(kind: RequestKind) -> Request {
+    let handoff_protocol =
+        matches!(kind, RequestKind::ServerRestart).then_some(super::handoff::HANDOFF_PROTOCOL);
     Request {
         request_id: format!("req-{}", uuid::Uuid::new_v4().simple()),
         version: PROTOCOL_VERSION,
         kind,
         grant: None,
         member: None,
+        handoff_protocol,
     }
 }
 

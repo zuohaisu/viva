@@ -1,0 +1,17 @@
+{
+  "scope": "real receiver binary + wire sender fixture + real owned PTYs",
+  "binary_name": "viva-4a7d8fb",
+  "binary_sha256": "db65189c02c93651a6cfee3ce4450a1f91b839368b7163fe09b2567e0995c014",
+  "fault": "alias-obstructed",
+  "checks": {
+    "prepared_ack": false
+  },
+  "binary_execution": "private immutable copy",
+  "ack": {
+    "ok": true
+  },
+  "error": "TimeoutError: probe did not become ready",
+  "cleanup_receiver_exit": -9,
+  "receiver_log": "server (pid 1321) resuming from live handoff \u2014 home /tmp/v196-5vqbf87z\n",
+  "passed": false
+}

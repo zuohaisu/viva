@@ -1,0 +1,114 @@
+{
+  "scope": "#191 first implementation slice: existing Viva startup handoff, NOT Herdr cutover",
+  "base_commit": "9935ebbd5f0b20fbf2d9e82bb798106929f94261",
+  "execution_source": "uncommitted task-owned worktree on base; not a claim that base contains this implementation",
+  "toolchain": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "probe_sha256": "d45bc65a199947a186461dbff114b89b9bb3233d8dd995ae764ec7a332878d65",
+  "controlled_suite_totals": {
+    "passed": 614,
+    "failed": 0,
+    "ignored": 1
+  },
+  "commands": [
+    {
+      "command": "cargo build --locked -p viva",
+      "exit": 0
+    },
+    {
+      "command": "cargo fmt --all -- --check",
+      "exit": 0
+    },
+    {
+      "command": "cargo clippy --all-targets -- -D warnings",
+      "exit": 0,
+      "note": "initial baseline lint reproduced on independently archived base; equivalent loop rewrite, no lint suppressed"
+    },
+    {
+      "command": "cargo test --workspace",
+      "exit": 101,
+      "evidence": "workspace-default.log.gz",
+      "note": "screen-status observation timeout and Git default branch fixture failure retained; screen timeout cause not established"
+    },
+    {
+      "command": "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=init.defaultBranch GIT_CONFIG_VALUE_0=master cargo test --workspace -- --test-threads=2",
+      "exit": 0,
+      "evidence": "workspace-controlled.log.gz",
+      "note": "process-local Git setting and lower test concurrency; original failure not erased; ignored item not executed"
+    },
+    {
+      "command": "python3.11 -m unittest discover -s tooling/herdr-audit",
+      "exit": 0,
+      "passed": 25
+    },
+    {
+      "command": "/tmp/viva-191-startup/test-tools/bin/python -m pytest -o addopts='' tests/acceptance -q -rs",
+      "exit": 0,
+      "passed": 24,
+      "evidence": "acceptance-tools.log.gz",
+      "note": "initial python3.11 had no pytest; installed into task-only temporary venv"
+    },
+    {
+      "command": "git diff --check",
+      "exit": 0
+    }
+  ],
+  "pre_fix": {
+    "evidence": "pre-fix.json",
+    "exit": 1,
+    "expected": "old host remains, no executable identity or automatic handoff"
+  },
+  "real_binary_scenarios": [
+    {
+      "evidence": "old-to-current.json",
+      "exit": 0
+    },
+    {
+      "evidence": "current-to-current.json",
+      "exit": 0
+    },
+    {
+      "evidence": "replaced-path.json",
+      "exit": 0
+    }
+  ],
+  "limitations": [
+    "No Herdr source/native integration, cross-backend import, final package or MacBook Air install acceptance in this slice.",
+    "Existing handoff protocol and same-UID owner control path are reused, not a new authorization boundary. Full member/worker ingress checks remain #191 work.",
+    "The existing receiver acknowledges fd receipt before full host adoption; post-ack adoption/host-claim failure remains a safety gap to close before full #191 acceptance.",
+    "PTY clients are fixture-cleaned (including SIGKILL); client exit statuses are retained. No interaction/detach/visual acceptance is asserted.",
+    "Early probe development attempts timed out in client cleanup and hit EOF JSON decoding; final probe bounds cleanup, drains PTYs, handles EOF, and checks every client attachment. Those attempts are not PASS evidence.",
+    "A shared-target baseline test attempt was invalid as a baseline control (reused current test artifact); baseline-clippy.log and baseline-git-test.log are fresh independent-target executions.",
+    "One ignored Rust test is not executed. Pi npm suite is left to CI; no local Pi host check claimed.",
+    "CI additions have not run at the time of this local record."
+  ],
+  "raw_log_storage": {
+    "format": "lossless gzip; original bytes retained, not whitespace-trimmed",
+    "files": [
+      {
+        "path": "acceptance-tools.log.gz",
+        "uncompressed_sha256": "af81d3c94e331614a9ae57fdfc31caca53492c6894849dd066eb4352798c1afb"
+      },
+      {
+        "path": "baseline-git-test.log.gz",
+        "uncompressed_sha256": "7494a87a6247fff2ff776365f7408ed1847268c42a87f84bead9395cb07e28b4"
+      },
+      {
+        "path": "workspace-default.log.gz",
+        "uncompressed_sha256": "b145da4b8423e4efca5250cfbfc18909c36810ae83b5e1a1fb3658d03ecf3989"
+      },
+      {
+        "path": "baseline-clippy.log.gz",
+        "uncompressed_sha256": "f6774eb7e9bf6874a28297554080e3d5672df78c2ba84c63bdf3a624fa7b14c3"
+      },
+      {
+        "path": "workspace-controlled.log.gz",
+        "uncompressed_sha256": "b89738e6baff2e46783d2ca4b82dbb83888e1c28883e69aa1cbf662333f90e73"
+      }
+    ],
+    "initial_staged_diff_check": {
+      "exit": 2,
+      "diagnostic": "workspace-controlled.log:844: new blank line at EOF.",
+      "resolution": "store the untouched log as lossless gzip, retaining the original sha256"
+    }
+  }
+}

@@ -318,11 +318,13 @@ fn value_end(b: &[u8], start: usize) -> Option<usize> {
         }
         _ => {
             let mut i = start;
-            while i < b.len()
-                && !matches!(b[i], b',' | b'}' | b']')
-                && !b[i].is_ascii_whitespace()
-                && !(b[i] == b'/' && matches!(b.get(i + 1), Some(b'/' | b'*')))
-            {
+            while i < b.len() {
+                if matches!(b[i], b',' | b'}' | b']')
+                    || b[i].is_ascii_whitespace()
+                    || (b[i] == b'/' && matches!(b.get(i + 1), Some(b'/' | b'*')))
+                {
+                    break;
+                }
                 i += 1;
             }
             Some(i)

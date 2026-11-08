@@ -1,0 +1,29 @@
+{
+  "scope": "real receiver binary + wire sender fixture + real owned PTYs",
+  "binary_name": "viva",
+  "binary_sha256": "2d7c4981752b81025e183fc2d6a7e6cb3f4e74553003d4d2d8a1c85dd8dd9e56",
+  "fault": "alias-obstructed",
+  "checks": {
+    "prepared_ack": true,
+    "all_sessions_registered": true,
+    "sessions_work_after_sender_retirement": true,
+    "obstructing_path_not_removed": true
+  },
+  "binary_execution": "private immutable copy",
+  "ack": {
+    "ok": true,
+    "prepared": true,
+    "protocol": 2,
+    "source_host_id": "host-owned-wire-fixture"
+  },
+  "receiver": {
+    "binary_sha256": "2d7c4981752b81025e183fc2d6a7e6cb3f4e74553003d4d2d8a1c85dd8dd9e56",
+    "handoff_protocol": 2,
+    "host_id": "host-6c836aa056d2430eb1dce01ff46de850",
+    "pid": 39725,
+    "runtime": "viva-rust-v1"
+  },
+  "cleanup_receiver_exit": -9,
+  "receiver_log": "server (pid 39725) resuming from live handoff \u2014 home /tmp/v196-5a7gfkq6\nserver: resumed with 2 prepared terminal(s)\n",
+  "passed": true
+}
