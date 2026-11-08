@@ -13,3 +13,14 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 repository = "https://github.com/zuohaisu/viva"
+
+# Native debug binaries are large. Keep the existing RustCrypto fingerprint
+# implementation fast at boot too, not only in release. Unoptimized SHA-256
+# took ~8s for 115MB and broke the unchanged 5s real-CLI startup contract.
+[profile.dev.package.sha2]
+opt-level = 3
+
+# Keep native source/line debugging without full variable DWARF in every
+# developer CLI. This reduces cold-load/fingerprint work, not test deadlines.
+[profile.dev.package.herdr]
+debug = 1

@@ -186,6 +186,17 @@ jobs:
           mkdir -p "$RUNNER_TEMP/nextest-bin"
           tar -xzf "$RUNNER_TEMP/nextest.tar.gz" -C "$RUNNER_TEMP/nextest-bin"
           echo "$RUNNER_TEMP/nextest-bin" >> "$GITHUB_PATH"
+      - name: Install the genuine checksum CLI used by native maintenance tests
+        run: |
+          curl --fail --location --retry 2 https://github.com/uutils/coreutils/releases/download/0.2.2/coreutils-0.2.2-x86_64-apple-darwin.tar.gz -o "$RUNNER_TEMP/coreutils.tar.gz"
+          echo "d60533c66d5f9d8b4c5aaec3837a25ef8b82227c1ace780c2d97f94da1c8b229  $RUNNER_TEMP/coreutils.tar.gz" | shasum -a 256 -c -
+          tar -xzf "$RUNNER_TEMP/coreutils.tar.gz" -C "$RUNNER_TEMP"
+          ln -s "$RUNNER_TEMP/coreutils-0.2.2-x86_64-apple-darwin/coreutils" "$RUNNER_TEMP/nextest-bin/sha256sum"
+      - name: Test native maintenance tooling
+        working-directory: upstream/herdr
+        run: |
+          git --version
+          python -m unittest discover -s scripts -p 'test_*.py'
       - name: Test imported native workspace and frozen codecs in isolated processes
         # Reuse the upstream justfile's runner. A shared cargo-test process can
         # inherit signal handlers changed by another native test (SIGPIPE).

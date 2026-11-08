@@ -16,8 +16,9 @@ name = "viva"
 path = "src/main.rs"
 
 [features]
-# Development integration gate. Do not make this the default until #191's
-# authority, cross-backend transfer, install and visual acceptance are met.
+# Temporary development gate, not a permanent second product backend.
+# Default cutover waits for #191 authority and cross-backend evidence;
+# installation/visual acceptance still gates delivery of that cutover.
 herdr-runtime = ["dep:herdr"]
 
 [dependencies]
