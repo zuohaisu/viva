@@ -1,3 +1,5 @@
+// Modified for Viva #191: standalone capability fixtures omit the additive
+// native-domain JSON extension. Existing wire expectations remain unchanged.
 use std::collections::HashMap;
 
 use super::*;
@@ -721,6 +723,7 @@ fn success_response_round_trips() {
             version: "0.1.2".into(),
             protocol: 6,
             capabilities: Some(ServerCapabilities {
+                viva_domain_schema: None,
                 live_handoff: true,
                 detached_server_daemon: true,
                 endpoint_protocol_generation: Some(1),

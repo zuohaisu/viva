@@ -6,7 +6,7 @@ only the reproducibility gap in #190; humans must resolve provenance/scope.
 Run from Viva's root, with metadata from the nested workspace:
   (cd upstream/herdr && cargo metadata --locked --format-version 1) > /tmp/metadata.json
   python3 tooling/herdr-audit/inventory.py /tmp/metadata.json > /tmp/inventory.json
-Every committed blob gets a path/hash/kind record, including binary files outside
+Every ORIGINAL IMPORT blob gets a path/hash/kind record, including binary files outside
 assets/. kind is only a UTF-8/NUL heuristic, never a license classification.
 viva_commit is the running checkout's HEAD; it changes after any commit. Compare
 source_tree and payload fields when reproducing from a different Viva commit.
@@ -22,6 +22,9 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 PREFIX = "upstream/herdr/"
+# #191 derives code from the import. #190 evidence must remain pinned to the
+# unchanged source, NOT silently become a native Viva artifact SBOM.
+SOURCE_REF = "48ce171f11a249de575df71d59d868caf1a1e1c4"
 SIGNAL = re.compile(
     r"copyright|spdx-license|licensed? under|lesser general public|"
     r"permission (?:is hereby|to use)|redistribution and use|"
@@ -75,7 +78,7 @@ def inventory(metadata):
         return subprocess.check_output(["git", *args], cwd=ROOT, input=input_data)
 
     # Read committed blobs, not cache directories or symlink targets.
-    tree = git("ls-tree", "-rz", "HEAD:upstream/herdr")
+    tree = git("ls-tree", "-rz", f"{SOURCE_REF}:upstream/herdr")
     files, signal_files, assets, zig_manifests = [], [], [], []
     entries = tree.rstrip(b"\0").split(b"\0")
     oids = [entry.split(b"\t", 1)[0].split()[2] for entry in entries]
@@ -110,7 +113,8 @@ def inventory(metadata):
         "schema_version": 2,
         "warning": "Discovery evidence only. Not exhaustive legal review or proof of binary linkage.",
         "viva_commit": git("rev-parse", "HEAD").decode().strip(),
-        "source_tree": git("rev-parse", "HEAD:upstream/herdr").decode().strip(),
+        "source_ref": SOURCE_REF,
+        "source_tree": git("rev-parse", f"{SOURCE_REF}:upstream/herdr").decode().strip(),
         "tracked_files_scanned": len(entries),
         "files": files,
         "cargo_scope": "cargo metadata --locked; all platforms, not a built-artifact SBOM",

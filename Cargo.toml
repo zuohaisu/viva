@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
 members = ["crates/viva"]
+exclude = ["upstream/herdr"]
+
+# Dependency patches are not inherited from a path dependency's workspace.
+# Reuse the imported portability patch, without changing the original lockfile.
+[patch.crates-io]
+portable-pty = { path = "upstream/herdr/vendor/portable-pty" }
 
 [workspace.package]
 edition = "2024"

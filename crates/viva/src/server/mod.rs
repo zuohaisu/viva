@@ -128,6 +128,32 @@ CREATE TABLE agent_native_sessions (
 
 /// Socket file name inside `VIVA_HOME`.
 pub const SOCKET_NAME: &str = "server.sock";
+
+/// Development composition fence, not a cross-backend handoff implementation.
+/// Do not spawn a legacy PTY owner/renderer behind an active native preview.
+pub fn reject_native_preview_owner(home: &Path) -> Result<()> {
+    let socket = home.join("runtime/workbench/herdr.sock");
+    if std::os::unix::net::UnixStream::connect(socket).is_ok() {
+        // Refusal facts only: do not migrate/reconcile or log caller arguments.
+        let store = Store::attach_for_handoff(
+            &crate::foundation::paths::database_path(home),
+            migrations(),
+        )?;
+        crate::foundation::events::append(
+            &store,
+            crate::foundation::events::NewEvent {
+                domain: DOMAIN_HOST,
+                kind: "native_legacy_entry_refused".into(),
+                subject_type: "native_ingress".into(),
+                subject_id: uuid::Uuid::new_v4().to_string(),
+                origin: "legacy_entry:unbound".into(),
+                payload: serde_json::json!({"reason": "native_adapter_not_integrated"}),
+            },
+        )?;
+        return Err(Error::Validation("an isolated native development preview owns this home; legacy operations are not integrated and will not start a second host or fall back to the legacy workbench".into()));
+    }
+    Ok(())
+}
 /// Receiver binds this endpoint BEFORE acknowledging a transfer. It remains
 /// usable if publication of the conventional name fails after commit.
 pub const RESUME_SOCKET_NAME: &str = "resume.sock";
@@ -336,6 +362,7 @@ impl Host {
     }
 
     fn open_at(home: &Path, socket_path: PathBuf, preparing: bool) -> Result<Self> {
+        reject_native_preview_owner(home)?;
         let binary_sha256 = client::executable_sha256()?;
         crate::foundation::paths::ensure_private_dir(home)?;
         let host_id = format!("host-{}", uuid::Uuid::new_v4().simple());

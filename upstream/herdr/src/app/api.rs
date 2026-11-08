@@ -905,12 +905,33 @@ impl App {
         &mut self,
         request: crate::api::schema::Request,
     ) -> String {
+        // Viva modification: also fence client-shell/internal JSON ingress.
+        if let Err(err) = crate::embedding::admit(&request) {
+            return responses::encode_error(
+                request.id,
+                "authority_not_integrated",
+                err.to_string(),
+            );
+        }
         self.sync_pending_terminal_titles();
         use crate::api::schema::{
             ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
         };
 
         let response = match request.method {
+            Method::VivaSnapshot(_) => match crate::embedding::snapshot() {
+                Ok(snapshot) => SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::VivaSnapshot { snapshot },
+                },
+                Err(err) => {
+                    return responses::encode_error(
+                        request.id,
+                        "viva_domain_unavailable",
+                        err.to_string(),
+                    )
+                }
+            },
             Method::ServerStop(_) => {
                 self.state.should_quit = true;
                 SuccessResponse {

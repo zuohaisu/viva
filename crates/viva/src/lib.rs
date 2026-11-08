@@ -23,6 +23,8 @@ pub mod machines;
 pub mod maintenance;
 pub mod members;
 pub mod memory;
+#[cfg(feature = "herdr-runtime")]
+pub mod native_runtime;
 pub mod plugins;
 pub mod projects;
 pub mod redaction;

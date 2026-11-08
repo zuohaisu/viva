@@ -79,6 +79,16 @@ fn run(args: &[String]) -> Result<()> {
         Some("recovery") => cmd_recovery(args.get(1..).unwrap_or(&[])),
         Some("conversations") => cmd_conversations(args.get(1..).unwrap_or(&[])),
         Some("workbench") => cmd_workbench(),
+        Some("runtime") => {
+            #[cfg(feature = "herdr-runtime")]
+            {
+                viva::native_runtime::run(args.get(1..).unwrap_or(&[]))
+            }
+            #[cfg(not(feature = "herdr-runtime"))]
+            {
+                Err(Error::Validation("native runtime integration is not enabled in this build; #191 is still in progress".into()))
+            }
+        }
         Some("data") => cmd_data(args.get(1..).unwrap_or(&[])),
         Some("tools") => cmd_tools(args.get(1..).unwrap_or(&[])),
         Some("memory") => cmd_memory(args.get(1..).unwrap_or(&[])),
@@ -1331,6 +1341,9 @@ fn parse_domain(name: &str) -> Result<viva::foundation::store::Domain> {
 
 fn cmd_control(args: &[String]) -> Result<()> {
     let home = viva::foundation::paths::viva_home(None);
+    if viva::machines::invocation_target().is_none() {
+        viva::server::reject_native_preview_owner(&home)?;
+    }
     match args.first().map(String::as_str) {
         Some("server" | "start") => {
             let resume = args.get(1).map(String::as_str) == Some("--resume");

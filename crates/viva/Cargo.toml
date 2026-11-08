@@ -15,7 +15,13 @@ path = "src/lib.rs"
 name = "viva"
 path = "src/main.rs"
 
+[features]
+# Development integration gate. Do not make this the default until #191's
+# authority, cross-backend transfer, install and visual acceptance are met.
+herdr-runtime = ["dep:herdr"]
+
 [dependencies]
+herdr = { path = "../../upstream/herdr", optional = true }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

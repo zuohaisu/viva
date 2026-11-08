@@ -22,6 +22,17 @@ impl App {
         context: &PluginInvocationContext,
         event_json: Option<String>,
     ) -> Result<PluginCommandLogInfo, (&'static str, String)> {
+        // Viva modification: fence every plugin launch, including event hooks
+        // and local UI paths, before user-dir creation or process spawning.
+        if let Some(ctx) = crate::embedding::context() {
+            ctx.domain
+                .refused("plugin.command")
+                .map_err(|error| ("audit_unavailable", error.to_string()))?;
+            return Err((
+                "authority_not_integrated",
+                "native plugin execution is not integrated with Viva authority".into(),
+            ));
+        }
         let Some(program) = command.first().cloned() else {
             return Err((
                 "invalid_plugin_command",
@@ -181,6 +192,10 @@ impl App {
     }
 
     pub(crate) fn run_plugin_startup_hooks(&mut self) {
+        // Viva modification: startup plugins have no integrated grant channel.
+        if crate::embedding::enabled() {
+            return;
+        }
         let mut context = self.current_plugin_context("plugin.startup");
         context.invocation_source = Some("startup".to_string());
         let mut plugins = self

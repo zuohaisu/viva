@@ -21,6 +21,9 @@ pub struct ServerSshAgentRegisterParams {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ServerCapabilities {
+    // Viva modification: discoverable JSON extension; absent for standalone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viva_domain_schema: Option<u32>,
     pub live_handoff: bool,
     #[serde(default)]
     pub detached_server_daemon: bool,

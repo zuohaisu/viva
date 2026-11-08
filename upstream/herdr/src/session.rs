@@ -81,7 +81,9 @@ pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
 
     if let Some(session) = requested_session {
         apply_explicit_name(&session)?;
-    } else if std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR).is_some() {
+    } else if crate::embedding::enabled()
+        || std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR).is_some()
+    {
         EXPLICIT_SESSION_REQUESTED.store(false, Ordering::Relaxed);
     } else if let Ok(session) = std::env::var(SESSION_ENV_VAR) {
         if normalize_name(&session)?.is_none() {
@@ -96,6 +98,10 @@ pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
 }
 
 pub fn active_name() -> Option<String> {
+    // Viva modification: inherited HERDR_SESSION cannot select another host.
+    if crate::embedding::enabled() {
+        return None;
+    }
     std::env::var(SESSION_ENV_VAR)
         .ok()
         .filter(|name| name != DEFAULT_SESSION_NAME)
@@ -173,6 +179,9 @@ pub fn api_socket_path_for(name: Option<&str>) -> PathBuf {
 }
 
 pub fn active_api_socket_path() -> PathBuf {
+    if crate::embedding::enabled() {
+        return api_socket_path_for(None);
+    }
     if explicit_session_requested() {
         return api_socket_path_for(active_name().as_deref());
     }
