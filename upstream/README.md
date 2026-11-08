@@ -1,22 +1,27 @@
-# herdr source baseline
+# herdr baseline and derived runtime
 
-This is the starting source tree for Viva's source-based workbench replacement
-(issue [#187](https://github.com/zuohaisu/viva/issues/187)), not another reference
-implementation to translate. `herdr/` is an **unmodified, complete Git snapshot**
-of the owner's local herdr checkout. Its source, tests, build configuration,
-vendored dependencies, docs, and license notices are retained together so that
-its original behavior can be built and compared before Viva-specific changes.
+This is the source base for Viva's workbench replacement (#187 / #191), not a
+reference implementation to translate. The **original complete import** remains
+at commit `48ce171f11a249de575df71d59d868caf1a1e1c4`, tree `98b3f4e`.
+The current `herdr/` is now a derivative: its entry is a callable library with
+explicit embedding paths and a development-only Viva domain-read adapter.
+Original dependency locks, native sources, assets and frozen codecs remain
+unchanged. Attribution, tests and license notices are retained.
 Upstream docs are third-party source assets, not Viva's canonical knowledge base.
 The source commit and tree are recorded in `herdr-source.json`.
 
 ## Build and test the original baseline
 
+Use a new archive directory, not the derived checkout or another Git worktree:
+
 ```sh
-cd upstream/herdr
+scratch="$(mktemp -d /tmp/herdr-original.XXXXXX)" || exit 1
+git archive 48ce171f11a249de575df71d59d868caf1a1e1c4 upstream/herdr | tar -x -C "$scratch"
+cd "$scratch/upstream/herdr"
 rustup toolchain install
 # Install Zig 0.16.0; alternatively set ZIG to its executable.
 cargo build --locked
-cargo test --workspace --locked
+cargo nextest run --workspace --locked
 ./target/debug/herdr --version
 ./target/debug/herdr --help
 ```
@@ -26,10 +31,24 @@ and the Windows cross-compilation prerequisites described in its `AGENTS.md`).
 The direct Cargo commands above do not replace those maintenance, integration,
 documentation, or Windows checks.
 
-The nested Cargo workspace intentionally keeps its upstream lockfile, dependency
-patches, and Rust toolchain. Run Cargo **from that directory**, not via the root
-Viva workspace. Root `cargo test --workspace` and current Viva CI do not test
-this nested workspace. Neither workspace's package versions have been changed.
+The nested workspace retains its original lockfile, patches and Rust toolchain.
+Use its upstream nextest runner: a shared `cargo test` process can inherit signal
+handlers changed by another native test. Root default tests do not run these
+native tests. The new `native-runtime` CI job builds the explicit development
+feature, runs the native suite/maintenance, and exercises the real client.
+Neither package version changed. The root composition has its own combined lock
+graph; the original #190 notices are not a final derived-artifact SBOM.
+
+For the isolated development composition (not an installed/default runtime):
+
+```sh
+# Use the toolchain pinned by upstream/herdr/rust-toolchain.toml.
+cargo +1.96.1 build -p viva --features herdr-runtime
+python3 tooling/herdr-integration/native_runtime.py --viva target/debug/viva --output /tmp/native-runtime.json
+```
+
+The probe creates private HOME/VIVA_HOME and an immutable binary copy. See
+`research/herdr-191/native/` and the Wiki for exact commands, tools and limits.
 
 ## Reproduce the #190 fixed-source build after download failures
 
@@ -85,10 +104,12 @@ API; run it only against the original binary in its new isolated HOME/session.
 
 ## Compare the import with its source
 
-After the import is committed, this command must print the `tree` recorded in
-`herdr-source.json` (all imported bytes, executable bits and symlinks):
+The fixed import, not the derived current HEAD, must match `herdr-source.json`
+(including executable bits and symlinks):
 
 ```sh
+git rev-parse 48ce171f11a249de575df71d59d868caf1a1e1c4:upstream/herdr
+# The following is now a DIFFERENT, derived tree:
 git rev-parse HEAD:upstream/herdr
 ```
 
@@ -99,18 +120,18 @@ available as the comparison baseline; document each Viva-specific change.
 
 ## Safety and scope
 
-This first slice does **not** replace the installed `viva` entry or migrate any
-user data. The binary still identifies as herdr and has herdr's upstream paths,
-update channels, socket API, hooks, and worktree actions. It does **not** enforce
+The standalone baseline has Herdr's original identity, paths, update channels,
+socket API, hooks and worktree actions. The development embedding overrides its
+paths, blocks self-update/plugins and refuses unintegrated automated operations.
+It does **not** replace the installed/default `viva` entry or migrate user data. It does **not** enforce
 Viva's live grants or write Viva Resident/Task/Execution attribution. Do not use
 it as a Viva-authorized worker host, attach it to an existing herdr server, run
 its updater/installers, or operate existing worktrees as part of baseline tests.
 Any interactive test must use a disposable, explicitly isolated session and
 configuration, with the exact scope recorded on #187.
 
-No scripts, hooks or workflows from the nested snapshot are installed or
-activated in Viva. In particular, its nested `.github/workflows` do not run as
-Viva workflows. Before replacing the default Viva runtime, validate authority,
+No upstream installer/hooks are installed into user tools by this integration.
+Its nested `.github/workflows` do not run as Viva workflows. Before replacing the default Viva runtime, validate authority,
 source attribution, redaction, data preservation and real TUI interactions.
 Passing upstream tests alone is not evidence that Viva integration is complete.
 

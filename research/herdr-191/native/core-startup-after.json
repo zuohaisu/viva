@@ -1,0 +1,8 @@
+{
+  "scenario": "legacy control startup of native-linked development binary; not cross-backend handoff",
+  "binary_sha256": "ac92787deff2a1746b7838446dec421e4775334ea36dfecfb70e97ae5dad34ab",
+  "binary_bytes": 112638640,
+  "seconds_to_socket": 3.6478994309999995,
+  "socket_ready": true,
+  "exit_code": null
+}
