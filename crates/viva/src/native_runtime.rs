@@ -78,7 +78,11 @@ impl herdr::embedding::DomainServices for DomainBridge {
             }))
         })
     }
-    fn refused(&self, method: &'static str) -> io::Result<()> {
+    fn refused(
+        &self,
+        method: &'static str,
+        peer: Option<herdr::embedding::TransportPeer>,
+    ) -> io::Result<()> {
         self.with_store(|store| {
             events::append(store, NewEvent {
                 domain: crate::server::DOMAIN_HOST,
@@ -90,7 +94,7 @@ impl herdr::embedding::DomainServices for DomainBridge {
                     "plugin.command" => "native_plugin:unbound",
                     _ => "native_api:unbound",
                 }.into(),
-                payload: serde_json::json!({"method": method, "actor": "unbound", "reason": "authority_not_integrated"}),
+                payload: serde_json::json!({"method": method, "actor": "unbound", "reason": "authority_not_integrated", "transport_peer": peer.map(|peer| serde_json::json!({"pid": peer.pid, "uid": peer.uid}))}),
             })?;
             Ok(())
         })

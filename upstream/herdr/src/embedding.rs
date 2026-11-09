@@ -12,7 +12,16 @@ use std::{
 pub trait DomainServices: Send + Sync {
     fn server_started(&self) -> io::Result<()>;
     fn snapshot(&self) -> io::Result<serde_json::Value>;
-    fn refused(&self, method: &'static str) -> io::Result<()>;
+    fn refused(&self, method: &'static str, peer: Option<TransportPeer>) -> io::Result<()>;
+}
+
+/// OS-reported transport facts, NOT a member identity or owner credential.
+/// PID reuse/inherited descriptors require lifecycle validation before authority.
+/// Deliberately not Deserialize: request JSON cannot construct this value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransportPeer {
+    pub pid: Option<u32>,
+    pub uid: Option<u32>,
 }
 
 pub struct Context {
@@ -35,7 +44,7 @@ pub fn enabled() -> bool {
 /// A second call in one process is rejected rather than changing live authority.
 pub fn run(context: Context) -> io::Result<()> {
     if let Err(error) = validate_arguments(&context.arguments) {
-        context.domain.refused("native_cli.unsupported")?;
+        context.domain.refused("native_cli.unsupported", None)?;
         return Err(error);
     }
     std::fs::create_dir_all(&context.directory)?;
@@ -125,7 +134,26 @@ pub(crate) fn constrain_config(config: &mut crate::config::Config) {
     }
 }
 
+pub(crate) fn admit_from_socket(
+    request: &crate::api::schema::Request,
+    stream: &crate::ipc::LocalStream,
+) -> io::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    // Captured from the accepted connection, never a request/pane/env claim.
+    let peer = crate::ipc::transport_peer(stream).ok();
+    admit_with_peer(request, peer)
+}
+
 pub(crate) fn admit(request: &crate::api::schema::Request) -> io::Result<()> {
+    admit_with_peer(request, None)
+}
+
+fn admit_with_peer(
+    request: &crate::api::schema::Request,
+    peer: Option<TransportPeer>,
+) -> io::Result<()> {
     let Some(ctx) = context() else {
         return Ok(());
     };
@@ -143,7 +171,7 @@ pub(crate) fn admit(request: &crate::api::schema::Request) -> io::Result<()> {
     // Never accept caller/member/grant claims from pane metadata or JSON params.
     // Unknown automated ingress is unbound, NOT the owner. Log only the schema's
     // fixed method name, never untrusted request IDs, tokens or command arguments.
-    ctx.domain.refused(method)?;
+    ctx.domain.refused(method, peer)?;
     Err(io::Error::new(
         io::ErrorKind::PermissionDenied,
         "native automation ingress is not yet bound to Viva authority; operation refused",

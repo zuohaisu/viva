@@ -32,7 +32,8 @@ fn call(home: &Path, method: &str, params: Value) -> Value {
     writeln!(
         socket,
         "{}",
-        json!({"id":"fixture-secret-do-not-persist", "method":method, "params":params})
+        json!({"id":"fixture-secret-do-not-persist", "method":method, "params":params,
+            "transport_peer":{"pid":1,"uid":0}, "peer_pid":1, "peer_uid":0, "claimed_role":"user"})
     )
     .unwrap();
     let mut line = String::new();
@@ -166,6 +167,22 @@ fn actual_native_server_reads_canonical_facts_and_audits_unbound_refusals() {
     assert!(audit.contains("workspace.create"), "{audit}");
     assert!(!audit.contains("fixture-secret-do-not-persist"));
     assert!(!audit.contains("forged"));
+    let peer: String = store.connection().query_row(
+        "SELECT payload FROM events WHERE kind='native_automation_refused' AND json_extract(payload, '$.method')='server.stop' ORDER BY seq DESC LIMIT 1", [], |row| row.get(0)).unwrap();
+    let peer: Value = serde_json::from_str(&peer).unwrap();
+    assert_eq!(
+        peer["actor"], "unbound",
+        "same UID/PID must not imply owner"
+    );
+    assert_eq!(
+        peer["transport_peer"]["pid"].as_u64(),
+        Some(u64::from(std::process::id()))
+    );
+    // SAFETY: geteuid is an argument-free OS query.
+    assert_eq!(
+        peer["transport_peer"]["uid"].as_u64(),
+        Some(u64::from(unsafe { libc::geteuid() }))
+    );
     assert_eq!(
         TaskRegistry::new(&store).list_tasks(0, 100).unwrap(),
         vec![task]

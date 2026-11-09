@@ -347,7 +347,7 @@ fn handle_connection_with_stop(
 
     // Viva modification: fence before early-return mutators such as stop and
     // live_handoff, not only in App's queued request dispatcher.
-    if let Err(err) = crate::embedding::admit(&request) {
+    if let Err(err) = crate::embedding::admit_from_socket(&request, &stream) {
         return write_text_line_allow_disconnect(
             &mut stream,
             &error_response_json(request.id, "authority_not_integrated", err.to_string()),

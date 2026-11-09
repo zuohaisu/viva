@@ -26,7 +26,7 @@ impl App {
         // and local UI paths, before user-dir creation or process spawning.
         if let Some(ctx) = crate::embedding::context() {
             ctx.domain
-                .refused("plugin.command")
+                .refused("plugin.command", None)
                 .map_err(|error| ("audit_unavailable", error.to_string()))?;
             return Err((
                 "authority_not_integrated",
