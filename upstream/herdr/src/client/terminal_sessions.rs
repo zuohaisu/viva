@@ -81,6 +81,8 @@ fn connect_terminal_session_stream(
     crate::logging::startup("client");
     info!(path = %socket_path.display(), target = %target, cols, rows, "{log_message}");
 
+    // Viva modification: terminal-session clients need the same host capability.
+    crate::embedding::authenticate_local_client()?;
     let mut stream = match crate::ipc::connect_local_stream(&socket_path) {
         Ok(stream) => stream,
         Err(err) => {

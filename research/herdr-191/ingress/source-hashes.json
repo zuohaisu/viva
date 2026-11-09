@@ -1,0 +1,10 @@
+{
+  "crates/viva/src/authority/mod.rs": "25361076a1dc8cb2b36c38d4548c208b6ba4d9ab83e424f799e7bafdcc4c6906",
+  "crates/viva/src/native_runtime.rs": "fa45e7a4bf30567cebfb72e33d9408419297c0d5ec51d311ebcfdc6f1f303a3a",
+  "crates/viva/tests/native_runtime_bridge.rs": "c75bb32f6adfb4eab1b0d2f6b844c742e1f7d5d3e1f404fb43923dd45d178266",
+  "crates/viva/tests/native_worker_binding.rs": "0758a67308d1aedc5a4e58aa6a6ceec3b4eb6e33a58e5e1017ad7bb73aa5b903",
+  "upstream/herdr/src/api/server.rs": "610c95cc2e3d586191d335b9666dfcd02ae298e4b0f1d9889f5092b661546d21",
+  "upstream/herdr/src/app/api/plugins/runtime.rs": "75d450d7936aba08c8c156e20fd747990dca9338eed07c0353c48b1bc756f13a",
+  "upstream/herdr/src/embedding.rs": "ad6c6453177b5b3eb57a3f65dd703b0cb57ce6476dd0725dc2e5e84c61f91739",
+  "upstream/herdr/src/ipc.rs": "223d3e100a31f085188214b33964507578213abcd2add3bfd8f499deb1dfaa38"
+}

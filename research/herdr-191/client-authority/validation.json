@@ -1,0 +1,342 @@
+{
+  "schema": 1,
+  "issue": 191,
+  "code_commit": "e25cee6348bf9f19bf18ec563fc028c785635af7",
+  "derived_herdr_tree": "e5f4bcfd43f278bc434922d2966d58624a09f992",
+  "existing_capability_and_gap": "Core ChannelRegistry/CallerIdentity, UUID credentials, canonical events/executions/worker credentials and native accepted-socket OS facts already exist. Native raw frontend admission lacked a host-issued capability/process binding. Add only owner-frontend bootstrap glue; no new daemon, PTY, role model, state schema, scheduler or crypto platform.",
+  "implementation": [
+    "Publish a separate random bearer credential (NOT a channel ID) as a recognized private 0600 file only after both native endpoints bind. File schema/host namespace, account ownership, regular-file and symlink checks; atomic normal-operation replacement. No crash-atomic handoff claim.",
+    "Native frontend authenticates over actual JSON API before raw connect/reconnect. Core issues the User-capability channel; JSON role/PID/UID cannot override socket facts. Compare the sender self-lifetime claim with OS-derived lifetime, never accept it as identity by itself.",
+    "Native raw hello and every forwarded frame revalidate the host-issued binding, UID, channel and current OS process lifetime. Record admission (safe channel ID/host ID/PID/UID/lifetime) BEFORE installing a usable binding; failed audit leaves no authorized raw client. Credentials are not logged and typed request Debug is redacted.",
+    "Readiness retry is bounded to 5s, only before effects. Reload a visible rotated private-file credential, never retry an unchanged bad proof as authorization.",
+    "Temporary owner-only prototype refuses pending/running canonical executions OR active worker credentials, before seeding a shell and again at admission/effects. This preserves existing records without reconciliation. Replace this guard with real supervised member/agent process/session/descriptor binding BEFORE enabling native member dispatch; it is NOT approved normal upgrade behavior."
+  ],
+  "pre_fix": {
+    "source_commit": "2e10b50640ee9e0b25e8a8244f889daf918301f0",
+    "build": "git archive of recorded commit, same feature/toolchain/profile, retained build log; not claimed to be the original CI artifact",
+    "binary_sha256": "3a11bfcfa4a85fa0abdb3550325a229aebe58e159fbb743f09529e5d13f6e66a",
+    "packet": "client-auth-pre-fix-final.json",
+    "result": "Expected failure: unbound same-UID raw socket was NOT closed before hello. Native PTY/detach/retained-state reattach still executed. Authentication method was absent (invalid_request), NOT evidence a forged credential was accepted. A raw receive timeout is explicitly NOT counted as refusal."
+  },
+  "checks": [
+    {
+      "command": "cargo +1.96.1 test --workspace --locked --features herdr-runtime",
+      "log": "client-auth-final-workspace.log.gz",
+      "result": "631 passed / 1 ignored; command-local private HOME/VIVA_HOME/XDG, explicit existing CARGO_HOME/RUSTUP_HOME, null Git global/system config, sequential mutable target"
+    },
+    {
+      "command": "cargo +1.96.1 test -p viva --locked --features herdr-runtime --lib native_runtime::",
+      "result": "4 Core channel/credential/lifetime/audit/file/active-credential guard fixtures passed; NOT Native member-process evidence"
+    },
+    {
+      "command": "cargo +1.96.1 test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test m1_terminal",
+      "result": "2 actual native bridge tests + 4 inherited real PTY tests passed. Real same-UID unbound socket EOF/reset (not timeout), forged proof refusal, private file, canonical facts, pending execution refusal without reconciliation; no native member spawn claim"
+    },
+    {
+      "command": "python3 tooling/herdr-integration/native_runtime.py --viva target/debug/viva --output client-auth-v4-post-fix.json",
+      "result": "PASS real immutable binary: unbound raw refused, bad capability untrusted_client, actual native PTY/ANSI/detach0/same host/retained-state reattach, 2 distinct canonically admitted frontend PIDs, private fixture exited",
+      "binary_sha256": "ef061fd50f620aecdc7a9c6157b587e74f426d831e4d7efd04df32cd66a04393"
+    },
+    {
+      "command": "cargo +1.96.1 nextest run --locked --workspace --no-fail-fast (nested original runner, private HOME/VIVA_HOME/XDG)",
+      "log": "client-auth-controlled-nextest.log.gz",
+      "result": "3717 passed / 12 skipped; no skipped profile counted PASS"
+    },
+    {
+      "command": "cargo +1.96.1 clippy -p viva --features herdr-runtime --all-targets -- -D warnings; nested cargo +1.96.1 clippy --all-targets -- -D warnings",
+      "result": "PASS after fixing needless return, no lint suppression"
+    },
+    {
+      "command": "HERDR_UPDATE_API_SCHEMA=1 cargo +1.96.1 test --locked generated_protocol_schema_artifact_is_current",
+      "result": "Official additive JSON schema generated, frozen native codecs unchanged; separate nextest debug-redaction test executed"
+    },
+    {
+      "command": "python -m unittest discover -s tooling/herdr-audit -q; nested python -m unittest discover -s scripts -q",
+      "result": "26 + 156 passed, genuine Git2.51/uutils sha256sum0.2.2; no fake hash executable"
+    },
+    {
+      "command": "cargo fmt --all -- --check; git diff --check; Python AST/CI YAML parse",
+      "result": "PASS; explicit native CI owner fixture command uses YAML block scalar"
+    },
+    {
+      "scope": "default workspace",
+      "result": "Not rerun locally this native-only slice; unchanged compiled default path had 625/1 ignored on published 2e10b50. Current-head CI required, not inherited as PASS."
+    }
+  ],
+  "preserved_failures": [
+    "Initial compile-time command timed out before test completion (not PASS).",
+    "Bridge test tried crate-private Store::attach_for_handoff; fixed by reading through the original already-open fixture Store, no public visibility widening.",
+    "Imported source Clippy flagged a new needless return; fixed code, did not relax lint.",
+    "Inline YAML scalar containing native_runtime:: was invalid; changed to block scalar, parsed final YAML.",
+    "First native full nextest:3716 passed/1 failed/12 skipped; targeted reruns also hit 2s fake-SSH-start wait. Exact unchanged test compiled against retained ORIGINAL e35f393 binary SHA1618b899... reproduced same timeout. Original private-home comparisons passed; a derived private-home targeted run still failed, so no definitive HOME/SSH/load/cold-cache cause is claimed. Final same unmodified full private-home run executed3717 passed/12 skipped. No deadlines/assertions/skips were changed; all transcripts retained."
+  ],
+  "limits": [
+    "User-capability possession/process admission does NOT prove physical Haisu intent or the current writer of an inherited/transferred FD. Same UID is NOT an OS sandbox; a same-UID program can access same-account files. The zero-known-active-work guard is a development restriction, NOT complete member/AgentCli source classification.",
+    "Lifetime mismatch/stale key/audit failure are Core fixtures, not forced real OS PID recycling or FD-transfer acceptance. Readiness/rotation micro-race has not been deterministically fault-injected; normal real startup/reattach is verified.",
+    "No actual Native MemberExecution channel issuance, canonical Native LaunchSpec/pane/process spawn-confirm-exit, live grant/redaction across all ingress, two-member/two-task executions, pause/targeted stop, cross-backend takeover or default switch.",
+    "Independent QA, Windows SDK/MSVC/Linux runtime/ARM/manual skipped profiles, device/Tailscale installation, human visual and final packaging/SBOM remain pending. Owner alone merges/releases; no versions/pins/releases changed."
+  ],
+  "logs_disclosure": "Lossless logs and frame tails retain absolute build/private fixture paths. No owner credential files or binaries are included. Limited credential-shape scan is NOT universal secret clearance. Private runtime fixtures only; upstream initial inherited-environment failure is retained separately from the final private-home run.",
+  "logs": {
+    "client-auth-audit.log.gz": {
+      "raw_sha256": "2ccc59355880dd9dab66908fa6369f22b49e6a11e4cba5142e5e123cd6ecc5f1",
+      "raw_bytes": 98,
+      "exit": "0"
+    },
+    "client-auth-baseline-build.log.gz": {
+      "raw_sha256": "238bb55c5f37c5be9d5a9fa7df3bcf41899b100323c381dc23fe99292cb8d930",
+      "raw_bytes": 1267,
+      "exit": "0"
+    },
+    "client-auth-baseline-driver.log.gz": {
+      "raw_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_bytes": 0,
+      "exit": "not recorded; see validation scope"
+    },
+    "client-auth-bridge-final.log.gz": {
+      "raw_sha256": "89e0d9f4cb3d35dccf6ffa3d277cdfda9b938b717f5036c6033ac5a63b26f9c9",
+      "raw_bytes": 1650,
+      "exit": "101"
+    },
+    "client-auth-bridge.log.gz": {
+      "raw_sha256": "e3a699a410fa82f73973c14839010c9185bf49332670550061777c731e7c9683",
+      "raw_bytes": 1336,
+      "exit": "not recorded; see validation scope"
+    },
+    "client-auth-build-final.log.gz": {
+      "raw_sha256": "4a6ce310196c09b3baf9abd5740c075e90a8aa3852a9dce2796cc056608a75ed",
+      "raw_bytes": 1037,
+      "exit": "0"
+    },
+    "client-auth-check.log.gz": {
+      "raw_sha256": "ebceac43d10577e1476a08c8e5512bcab9fd967eb4f615dedbc0097d939af411",
+      "raw_bytes": 1037,
+      "exit": "not recorded; see validation scope"
+    },
+    "client-auth-clippy.log.gz": {
+      "raw_sha256": "c5f5bdcc3c8d3ae0bd6b6df37024c0e0c75ec711054267c26201d9509ff89eb4",
+      "raw_bytes": 1146,
+      "exit": "0"
+    },
+    "client-auth-controlled-driver.log.gz": {
+      "raw_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_bytes": 0,
+      "exit": "not recorded; see validation scope"
+    },
+    "client-auth-controlled-nextest.log.gz": {
+      "raw_sha256": "fcc7944cd20c49409892fd6c3b1742cd0dd2f6506cce746652d8076cb3b13e33",
+      "raw_bytes": 449457,
+      "exit": "0"
+    },
+    "client-auth-controlled-ssh.log.gz": {
+      "raw_sha256": "e03c0cd587177d750ee7784500028c9832cb7755743c32498c311c2ab05dd4c5",
+      "raw_bytes": 1405,
+      "exit": "100"
+    },
+    "client-auth-driver.log.gz": {
+      "raw_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_bytes": 0,
+      "exit": "not recorded; see validation scope"
+    },
+    "client-auth-final-diff.log.gz": {
+      "raw_sha256": "4bf9de03c3d56f5d12888127bee0767d3166d190dc7041c77bfde99b83040adf",
+      "raw_bytes": 14618,
+      "exit": "not recorded; see validation scope"
+    },
+    "client-auth-final-driver.log.gz": {
+      "raw_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_bytes": 0,
+      "exit": "not recorded; see validation scope"
+    },
+    "client-auth-final-workspace-driver.log.gz": {
+      "raw_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_bytes": 0,
+      "exit": "not recorded; see validation scope"
+    },
+    "client-auth-final-workspace.log.gz": {
+      "raw_sha256": "fe812f48939b830d23189311eb4983e7d24741d968a8388218cf48751897e9c3",
+      "raw_bytes": 58100,
+      "exit": "0"
+    },
+    "client-auth-maintenance.log.gz": {
+      "raw_sha256": "42dc792b4c5a77e06d74577547ff326a73e0d46ae95b584dc5fe509d6c5b5b07",
+      "raw_bytes": 492,
+      "exit": "0"
+    },
+    "client-auth-original-ssh-build.log.gz": {
+      "raw_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_bytes": 0,
+      "exit": "not recorded; see validation scope"
+    },
+    "client-auth-original-ssh-inherited.log.gz": {
+      "raw_sha256": "1f6fc1fdf8d1eb353aaa3816037f81fca33cbf352f4e7a095a75f4efd93419ad",
+      "raw_bytes": 180,
+      "exit": "0"
+    },
+    "client-auth-original-ssh-isolated.log.gz": {
+      "raw_sha256": "f549a325519b84c2a1d81abbeee927487d0c9a1b892c94f2a989430fdb067df9",
+      "raw_bytes": 180,
+      "exit": "0"
+    },
+    "client-auth-original-ssh.log.gz": {
+      "raw_sha256": "2eb8421008e4fee3570c922ba05bcaeabd2663eb33270322b23efaa9d1b6e17c",
+      "raw_bytes": 512,
+      "exit": "101"
+    },
+    "client-auth-owner-unit.log.gz": {
+      "raw_sha256": "8f0957ef52837956214eb199aa16daa1aeac074c22c6e1ce9ac97b481aa8782e",
+      "raw_bytes": 1571,
+      "exit": "0"
+    },
+    "client-auth-pre-fix-final.log.gz": {
+      "raw_sha256": "97aff5e7024b1c0675d7ec6d9dce490447ab8a653e9fd4a1343f63857a7839c4",
+      "raw_bytes": 3856,
+      "exit": "not recorded; see validation scope"
+    },
+    "client-auth-pre-fix.log.gz": {
+      "raw_sha256": "b7153295f66c13159b24579e3cb23e2871abfdc1f871afa4b29dbe08c0a778ee",
+      "raw_bytes": 3784,
+      "exit": "not recorded; see validation scope"
+    },
+    "client-auth-python-driver.log.gz": {
+      "raw_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_bytes": 0,
+      "exit": "not recorded; see validation scope"
+    },
+    "client-auth-schema.log.gz": {
+      "raw_sha256": "19e8f0c943da0ef55d189b64069cdab8fc1b7b9306a36ad7e90f41a47cd58f90",
+      "raw_bytes": 3979,
+      "exit": "0"
+    },
+    "client-auth-tests.log.gz": {
+      "raw_sha256": "88d51e9b4b44936eacefb1dbf60a104324a63f1f83f81f6d15ec6d06d59af606",
+      "raw_bytes": 1073,
+      "exit": "not recorded; see validation scope"
+    },
+    "client-auth-ui-verified.log.gz": {
+      "raw_sha256": "0baf57d4c1b7af983ab5dc1b43b7bac7c2e2d1cb520cb29cb2feee66942bf3eb",
+      "raw_bytes": 759,
+      "exit": "0"
+    },
+    "client-auth-ui.log.gz": {
+      "raw_sha256": "ae2fd703e9bb7849a491336dc2787fb34f05ecebb2df7e9a0600d48c7eabb89a",
+      "raw_bytes": 591,
+      "exit": "not recorded; see validation scope"
+    },
+    "client-auth-v2-build.log.gz": {
+      "raw_sha256": "654a7b4c705a2de80fae36c0421507ff0521c3481745ef9a1b0c8289141f0525",
+      "raw_bytes": 951,
+      "exit": "0"
+    },
+    "client-auth-v2-clippy.log.gz": {
+      "raw_sha256": "8b2ed9beb486d537a240860b230b8fb39ba0229be783f0106b031683699a4209",
+      "raw_bytes": 1037,
+      "exit": "0"
+    },
+    "client-auth-v2-driver.log.gz": {
+      "raw_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_bytes": 0,
+      "exit": "not recorded; see validation scope"
+    },
+    "client-auth-v2-herdr-clippy.log.gz": {
+      "raw_sha256": "98ad673eedcb564101034c7fa6fa459368e423a26f2e0a95e426db9db6312e84",
+      "raw_bytes": 2323,
+      "exit": "101"
+    },
+    "client-auth-v2-schema.log.gz": {
+      "raw_sha256": "62c946d84bce89ab9e6b3cb8a3ddcc5c25f35aa1d70bdf434f0d5748e150c042",
+      "raw_bytes": 3979,
+      "exit": "0"
+    },
+    "client-auth-v2-ui.log.gz": {
+      "raw_sha256": "3d1e7dc0328e2316baf1fea8bb045ed116cc9ed24a779d5e2f38a9a4588857be",
+      "raw_bytes": 759,
+      "exit": "0"
+    },
+    "client-auth-v2-workspace.log.gz": {
+      "raw_sha256": "bda6dc5cfae6e9f19b9d4c183fca4ab3ad401bcf4fe1e7e5a46688feffe8ff8f",
+      "raw_bytes": 58185,
+      "exit": "0"
+    },
+    "client-auth-v3-driver.log.gz": {
+      "raw_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_bytes": 0,
+      "exit": "not recorded; see validation scope"
+    },
+    "client-auth-v3-herdr-clippy.log.gz": {
+      "raw_sha256": "d51c3cb76c350c229766be1886454c7496dc03faf522804f4dd315582ec2d304",
+      "raw_bytes": 360,
+      "exit": "0"
+    },
+    "client-auth-v3-nextest.log.gz": {
+      "raw_sha256": "1cf1f43b969628fb0f28a25e4b8c7306e524977561cfc022afbaa3de751f31a0",
+      "raw_bytes": 450263,
+      "exit": "100"
+    },
+    "client-auth-v4-bridge-pty.log.gz": {
+      "raw_sha256": "2d521e2f6e2aa236060dbc5a4baf22105c4f2d872203f9b021b072f52a3971bd",
+      "raw_bytes": 1835,
+      "exit": "0"
+    },
+    "client-auth-v4-build.log.gz": {
+      "raw_sha256": "5ead4e19c468aced65b20ac2b8797c9cd5153bf230517c6cf01b75249c47a55e",
+      "raw_bytes": 868,
+      "exit": "0"
+    },
+    "client-auth-v4-clippy.log.gz": {
+      "raw_sha256": "07b13b7e32f8cc3791417e950a3de5210ec88f9ef041f7298fa7fed8fdd03f16",
+      "raw_bytes": 1037,
+      "exit": "0"
+    },
+    "client-auth-v4-driver.log.gz": {
+      "raw_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_bytes": 0,
+      "exit": "not recorded; see validation scope"
+    },
+    "client-auth-v4-herdr-clippy.log.gz": {
+      "raw_sha256": "14db557ea6d320dc24bbf399859b941beb48ff9b1c2e5a4ec36a0606908f4ac8",
+      "raw_bytes": 360,
+      "exit": "0"
+    },
+    "client-auth-v4-ssh.log.gz": {
+      "raw_sha256": "41b8966928e328b1a390a0b69f9702d55bfad9b6d982967946e57e21de63ba3c",
+      "raw_bytes": 1492,
+      "exit": "100"
+    },
+    "client-auth-v4-ui.log.gz": {
+      "raw_sha256": "a46108faebd4e4fe7501087e6ebf4368f4e37432c7bbff085536eb8a0e5aeccc",
+      "raw_bytes": 759,
+      "exit": "0"
+    },
+    "client-auth-v4-unit.log.gz": {
+      "raw_sha256": "6c2189fc604ddb1fd7d042a3d875d58263ba8b914df214fc2a323ee0c3e18a00",
+      "raw_bytes": 1691,
+      "exit": "0"
+    },
+    "client-auth-workspace.log.gz": {
+      "raw_sha256": "4c7202140dc3813768ac3b5a48316e3833110b8f18353da315509fffa2656a5e",
+      "raw_bytes": 58099,
+      "exit": "0"
+    },
+    "client-auth-yaml-final.log.gz": {
+      "raw_sha256": "a502892d4ff4cbeabc7e27a42d4fd845d955388024e2a580fe0bff4d9071e4f5",
+      "raw_bytes": 45,
+      "exit": "not recorded; see validation scope"
+    },
+    "client-auth-yaml-initial.log.gz": {
+      "raw_sha256": "4429078f30d3624d97ac0fea80cde759ac2d9bfe1c1ac5c79554f7d2fb4453fd",
+      "raw_bytes": 4205,
+      "exit": "not recorded; see validation scope"
+    }
+  },
+  "packets": {
+    "client-auth-post-fix-final.json": "cdb3358f35602f4167f216b258e01b098344e947604fe1c5aebc6e0a7e5ec1c0",
+    "client-auth-pre-fix-final.json": "76fc0eb63d4624356cc4124c8cd2ad22331c6beeaefa7f97cad01f59546c3ee1",
+    "client-auth-pre-fix.json": "5717917b57324041b0007defb07bc6003c6b684fb4c2a320015c3a6aaae0af18",
+    "client-auth-ssh-derived-diagnostic.json": "f07d04a2b4dcbec317b2cd31a2b85ba02093c24c30c33d0b0eac97deba520f35",
+    "client-auth-ssh-original-diagnostic.json": "d32fc31f5f1516e8a567d6d0117ccc34fc91ad1495dfdabafcf6effb7b782b5c",
+    "client-auth-ui.json": "8d22f0d89d4fcb0d7ff8571240cabc5cccef42c71e3ae3735afe1559697aa10d",
+    "client-auth-v2-post-fix.json": "aef224457b06e128e295cc9520cc42b5b52b6d5f9e99c05b22588e16ab347b20",
+    "client-auth-v4-post-fix.json": "07aa7351b720e5922e7c68949482cc4f8907e85abd3e7d422b24c0eb74ed6e7a"
+  }
+}

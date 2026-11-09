@@ -541,6 +541,74 @@ impl<'a> AuthorityEngine<'a> {
         Ok(outcome)
     }
 
+    /// Resolve a worker through a HOST-ISSUED channel and canonical execution,
+    /// then check its live grant. No payload member/role/UID is a principal and
+    /// an omitted identity never becomes User. This does not issue channels or
+    /// replace transport/process-lifecycle binding; native ingress must supply
+    /// a validated connection binding and call this immediately before effects.
+    pub fn check_bound_worker_action(
+        &self,
+        channels: &crate::foundation::envelope::ChannelRegistry,
+        caller: &crate::foundation::envelope::CallerIdentity,
+        credential_id: &str,
+        grant: Option<GrantId>,
+        action: &str,
+        task: Option<&TaskId>,
+    ) -> Result<Result<MemberId, DenialReason>> {
+        use crate::foundation::{
+            envelope::CallerRole,
+            records::{ExecutionStatus, get_execution},
+        };
+        let bound = (|| -> Result<Option<MemberId>> {
+            let Ok(CallerRole::MemberExecution(execution_id)) = channels.validate(caller) else {
+                return Ok(None);
+            };
+            let credential: Option<(String, Option<String>, String, String)> = self.store.connection()
+                .query_row("SELECT channel_id, execution_id, member_id, status FROM worker_credentials WHERE credential_id=?1",
+                    [credential_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).optional()?;
+            let Some((channel, credential_execution, member, status)) = credential else {
+                return Ok(None);
+            };
+            if status != "active"
+                || channel != caller.channel_id.as_str()
+                || credential_execution.as_deref() != Some(execution_id.as_str())
+            {
+                return Ok(None);
+            }
+            let Some(execution) = get_execution(self.store, &execution_id)? else {
+                return Ok(None);
+            };
+            if execution.status != ExecutionStatus::Running
+                || execution.attribution.member_id.as_str() != member
+            {
+                return Ok(None);
+            }
+            Ok(Some(execution.attribution.member_id))
+        })()?;
+        let Some(member) = bound else {
+            // Fixed marker, NOT an untrusted bearer secret/claimed role in audit.
+            self.record_denial(
+                &Actor::Worker {
+                    credential_id: "unbound-channel".into(),
+                },
+                action,
+                &DenialReason::UntrustedWorker,
+            )?;
+            return Ok(Err(DenialReason::UntrustedWorker));
+        };
+        match self.check(
+            &Actor::Member {
+                member: member.clone(),
+                grant,
+            },
+            action,
+            task,
+        )? {
+            Ok(()) => Ok(Ok(member)),
+            Err(reason) => Ok(Err(reason)),
+        }
+    }
+
     /// Revoke a worker credential (host-side, when the worker is gone).
     pub fn revoke_worker_credential(&self, credential_id: &str) -> Result<()> {
         let n = self.store.connection().execute(

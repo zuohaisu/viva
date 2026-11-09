@@ -1,0 +1,10 @@
+{
+  "scope": "limited credential patterns over JSON/decompressed gzip, not universal clearance",
+  "patterns": [
+    "ghp_[A-Za-z0-9]{30,}",
+    "github_pat_[A-Za-z0-9_]{30,}",
+    "sk-[A-Za-z0-9]{24,}",
+    "-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"
+  ],
+  "hits": []
+}

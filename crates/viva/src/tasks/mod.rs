@@ -14,6 +14,9 @@
 //! - Attribution is captured once at creation; switching Viva's current
 //!   member/workspace never rewrites historical ownership.
 
+mod preparation;
+pub use preparation::DispatchRequest;
+
 use std::str::FromStr as _;
 
 use rusqlite::OptionalExtension;

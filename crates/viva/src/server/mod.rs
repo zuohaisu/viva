@@ -50,13 +50,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::authority::{Actor, AuthorityEngine};
+use crate::authority::AuthorityEngine;
 use crate::foundation::error::{Error, Result};
 use crate::foundation::ids::{GrantId, MemberId, TaskId, TerminalId, WorktreeId, utc_now};
-use crate::foundation::records::{AttributionSnapshot, LaunchSpec, RequestOrigin, TerminalOwner};
+use crate::foundation::records::{LaunchSpec, RequestOrigin, TerminalOwner};
 use crate::foundation::store::{Domain, MigrationRegistry, Store};
 use crate::members::MemberRegistry;
-use crate::tasks::{ExecutionStart, TaskRegistry, TaskStatus};
+use crate::tasks::{ExecutionStart, TaskRegistry};
 use crate::terminal::{StopPolicy, TerminalRegistry};
 
 /// The `host` migration domain: host registry, recovery records and
@@ -128,6 +128,32 @@ CREATE TABLE agent_native_sessions (
 
 /// Socket file name inside `VIVA_HOME`.
 pub const SOCKET_NAME: &str = "server.sock";
+
+/// Development composition fence, not a cross-backend handoff implementation.
+/// Do not spawn a legacy PTY owner/renderer behind an active native preview.
+pub fn reject_native_preview_owner(home: &Path) -> Result<()> {
+    let socket = home.join("runtime/workbench/herdr.sock");
+    if std::os::unix::net::UnixStream::connect(socket).is_ok() {
+        // Refusal facts only: do not migrate/reconcile or log caller arguments.
+        let store = Store::attach_for_handoff(
+            &crate::foundation::paths::database_path(home),
+            migrations(),
+        )?;
+        crate::foundation::events::append(
+            &store,
+            crate::foundation::events::NewEvent {
+                domain: DOMAIN_HOST,
+                kind: "native_legacy_entry_refused".into(),
+                subject_type: "native_ingress".into(),
+                subject_id: uuid::Uuid::new_v4().to_string(),
+                origin: "legacy_entry:unbound".into(),
+                payload: serde_json::json!({"reason": "native_adapter_not_integrated"}),
+            },
+        )?;
+        return Err(Error::Validation("an isolated native development preview owns this home; legacy operations are not integrated and will not start a second host or fall back to the legacy workbench".into()));
+    }
+    Ok(())
+}
 /// Receiver binds this endpoint BEFORE acknowledging a transfer. It remains
 /// usable if publication of the conventional name fails after commit.
 pub const RESUME_SOCKET_NAME: &str = "resume.sock";
@@ -336,6 +362,7 @@ impl Host {
     }
 
     fn open_at(home: &Path, socket_path: PathBuf, preparing: bool) -> Result<Self> {
+        reject_native_preview_owner(home)?;
         let binary_sha256 = client::executable_sha256()?;
         crate::foundation::paths::ensure_private_dir(home)?;
         let host_id = format!("host-{}", uuid::Uuid::new_v4().simple());
@@ -3018,122 +3045,22 @@ fn dispatch(
     let grant_id = GrantId::from_str(grant_id)?;
 
     let store = shared.store.lock().expect("store");
-    let members = MemberRegistry::new(&store);
-    let _member = members.require(&member_id)?;
-    let binding = members.binding(&member_id)?.ok_or_else(|| {
-        Error::Validation(format!(
-            "member `{member_id}` has no model/tool binding; dispatch needs one"
-        ))
-    })?;
-
-    // The grant must BELONG to the dispatching member: a member's grant
-    // never serves another member's dispatch, even for the same task.
-    // Checked before the authority verdict so the actionable message wins
-    // (the engine enforces the same rule for every other path).
-    let authority = AuthorityEngine::new(&store);
-    let grant = authority.require_grant(&grant_id)?;
-    if grant.principal_member_id.as_ref() != Some(&member_id) {
-        return Err(Error::Validation(format!(
-            "dispatch denied: grant `{grant_id}` was not issued to member `{member_id}` \
-             (principal: {:?}) — grants are not transferable between members",
-            grant
-                .principal_member_id
-                .as_ref()
-                .map(|m| m.to_string())
-                .unwrap_or_else(|| "<none>".into())
-        )));
-    }
-
-    // Authorization: the grant must be live, in scope for this task, and
-    // carry a dispatch action in an ACT_* mode. Revocation races are
-    // denied here, at the moment of effect — not at request time. `check`
-    // layers two results: storage failures and the authorization verdict
-    // itself; both must be honored.
-    match authority.check(
-        &Actor::Member {
-            member: member_id.clone(),
-            grant: Some(grant_id.clone()),
-        },
-        "dispatch_delegated",
-        Some(&task_id),
-    ) {
-        Ok(Ok(())) => {}
-        Ok(Err(denial)) => {
-            return Err(Error::Validation(format!("dispatch denied: {denial}")));
-        }
-        Err(err) => return Err(err),
-    }
-
     let tasks = TaskRegistry::new(&store);
-    let task = tasks.require_task(&task_id)?;
-    if matches!(task.status, TaskStatus::Done | TaskStatus::Cancelled) {
-        return Err(Error::Validation(format!(
-            "task `{}` is {}; a finished task is never executed again",
-            task.task_id,
-            task.status.as_str()
-        )));
-    }
-
-    if !cwd.is_absolute() {
-        return Err(Error::Validation(format!(
-            "dispatch cwd must be absolute: {}",
-            cwd.display()
-        )));
-    }
-
-    // A named worktree must be a real Viva record, not a free-form
-    // string: the attribution should never point at a worktree
-    // Viva does not know.
-    if let Some(worktree) = worktree_id {
-        let known: i64 = store.connection().query_row(
-            "SELECT COUNT(*) FROM task_worktrees
-             WHERE worktree_id = ?1 AND released_at IS NULL",
-            [worktree],
-            |row| row.get(0),
-        )?;
-        if known == 0 {
-            return Err(Error::NotFound {
-                entity: "worktree",
-                id: worktree.to_string(),
-            });
-        }
-    }
-
-    let mut attribution = AttributionSnapshot::capture(
-        member_id.clone(),
-        binding.role.clone(),
-        binding.model_binding.clone(),
-        binding.tools.join(","),
-    );
-    if let Some(workspace) = task.workspace_id.clone() {
-        attribution = attribution.in_workspace(workspace);
-    }
-    if let Some(project) = task.project_id.clone() {
-        attribution = attribution.in_project(project);
-    }
-
-    let start = tasks.begin_execution(&task_id, &attribution, request_key)?;
+    // Shared canonical preparation is backend-neutral. The existing ingress
+    // gate and effect/pause fences remain outside it; Native must establish
+    // genuine host-bound identity before using this same Core operation.
+    let start = tasks.prepare_member_dispatch(crate::tasks::DispatchRequest {
+        task_id: &task_id,
+        member_id: &member_id,
+        grant_id: &grant_id,
+        request_key,
+        cwd,
+        worktree_id,
+    })?;
     let intent = match start {
         ExecutionStart::Replayed(intent) => {
-            // Idempotency by request key — but ONLY within the same
-            // task AND the same member. The same key on a different task
-            // or from a different member is a client bug: silently
-            // returning the other caller's execution would make it look
-            // started when it never ran.
-            if intent.task_id != task_id {
-                return Err(Error::Validation(format!(
-                    "request key `{request_key}` already belongs to task `{}`; \
-                     keys are replayed per task — use a different key for task `{task_id}`",
-                    intent.task_id
-                )));
-            }
-            if intent.member_id != member_id {
-                return Err(Error::Validation(format!(
-                    "request key `{request_key}` was already used by member `{}`; \
-                     keys are replayed per (task, member) — use a different key",
-                    intent.member_id
-                )));
-            }
+            // Core preparation already verified the replay's task/member;
+            // report its original facts without launching another process.
             return Ok(serde_json::json!({
                 "replayed": true,
                 "request_key": intent.request_key,
@@ -3148,6 +3075,12 @@ fn dispatch(
         .execution_id
         .clone()
         .expect("a created intent carries its execution");
+    let attribution = crate::foundation::records::get_execution(&store, &execution_id)?
+        .ok_or_else(|| Error::NotFound {
+            entity: "execution",
+            id: execution_id.to_string(),
+        })?
+        .attribution;
 
     // Spawn the real terminal. If this fails, the intent is honestly
     // unresolved — an uncertain start is never reported as a success.
@@ -3183,7 +3116,7 @@ fn dispatch(
     .for_execution(execution_id.clone())
     .on_terminal(terminal_id.clone())
     .with_member(member_id.clone())
-    .with_bindings(binding.model_binding.clone(), binding.tools.join(","));
+    .with_bindings(attribution.model_binding, attribution.tool_binding);
     if let Some(worktree) = worktree_id {
         spec = spec.in_worktree(WorktreeId::from_str(worktree)?);
     }

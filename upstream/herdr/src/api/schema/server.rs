@@ -3,6 +3,20 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct PingParams {}
 
+// Viva modification: explicit host capability, never a caller-role assertion.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct VivaClientAuthenticateParams {
+    pub credential: String,
+    /// Compared with the OS fact, never accepted as identity on its own.
+    #[serde(default)]
+    pub process_lifetime: Option<String>,
+}
+impl std::fmt::Debug for VivaClientAuthenticateParams {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VivaClientAuthenticateParams { credential: [REDACTED] }")
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ServerLiveHandoffParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -21,6 +35,9 @@ pub struct ServerSshAgentRegisterParams {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ServerCapabilities {
+    // Viva modification: discoverable JSON extension; absent for standalone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viva_domain_schema: Option<u32>,
     pub live_handoff: bool,
     #[serde(default)]
     pub detached_server_daemon: bool,

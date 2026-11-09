@@ -1,0 +1,8 @@
+{
+  "binary_sha256": "b8fed3b17f281ebc91c726961917798bb305b5cdf4427d472dfdc12601eb9890",
+  "fake_ssh_started": true,
+  "exit": 1,
+  "stdout": "",
+  "stderr": "fixture ssh was invoked\nerror: remote platform detection failed: fixture ssh was invoked\n",
+  "scope": "isolated HOME/VIVA_HOME; fake SSH only, no live network host; diagnosis not acceptance"
+}

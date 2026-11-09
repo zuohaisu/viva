@@ -21,6 +21,10 @@ const SOCKET_PERMISSION_MODE: u32 = 0o600;
 /// 3. Otherwise, honor `HERDR_CLIENT_SOCKET_PATH` (legacy/testing fallback).
 /// 4. Otherwise, use the active session data directory.
 pub fn client_socket_path() -> PathBuf {
+    // Viva modification: no inherited standalone override can escape the home.
+    if crate::embedding::enabled() {
+        return crate::session::client_socket_path_for(None);
+    }
     if crate::session::explicit_session_requested() {
         return crate::session::client_socket_path_for(crate::session::active_name().as_deref());
     }

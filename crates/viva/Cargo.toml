@@ -15,7 +15,14 @@ path = "src/lib.rs"
 name = "viva"
 path = "src/main.rs"
 
+[features]
+# Temporary development gate, not a permanent second product backend.
+# Default cutover waits for #191 authority and cross-backend evidence;
+# installation/visual acceptance still gates delivery of that cutover.
+herdr-runtime = ["dep:herdr"]
+
 [dependencies]
+herdr = { path = "../../upstream/herdr", optional = true }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

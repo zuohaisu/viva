@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "binary": "viva",
+  "human_visual": "HUMAN_VISUAL_REVIEW_PENDING",
+  "cross_backend_inheritance": "not_tested",
+  "passed": true,
+  "binary_sha256": "6b6a247d4333f9cb864887a276104a66fb1af7f7f64a18e8c9d8b95deae4161a",
+  "immutable_private_binary": true,
+  "native_autospawn": true,
+  "canonical_domain_endpoint": true,
+  "native_pty_output": true,
+  "ansi_bytes": 15475,
+  "detach_exit_code": 0,
+  "same_host_after_detach": true,
+  "reattach_retains_shell_state": true,
+  "server_fixture_exited": true,
+  "server_fixture_cleanup": "exact private PID/start/argv verified; not a lifecycle acceptance claim"
+}

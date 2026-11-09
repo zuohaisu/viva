@@ -418,7 +418,9 @@ mod tests {
         ServerRuntimeStatus::Running {
             version: version.map(str::to_owned),
             protocol: Some(crate::protocol::PROTOCOL_VERSION),
+            // Viva modification: standalone JSON fixtures omit the extension.
             capabilities: Some(crate::api::schema::ServerCapabilities {
+                viva_domain_schema: None,
                 live_handoff: true,
                 detached_server_daemon: true,
                 endpoint_protocol_generation: endpoint_generation,

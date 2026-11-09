@@ -67,6 +67,16 @@ class CommittedTreeTests(unittest.TestCase):
         self.assertEqual(len(result["zig_manifests"]), 22, hint)
         self.assertEqual(len(result["assets"]), 8, hint)
 
+    def test_derived_runtime_keeps_original_pins_assets_native_codecs_and_native_sources(self):
+        # #191 may derive Rust composition glue; it may not silently replace
+        # the original dependency graph, assets, native source or frozen codecs.
+        paths = ["vendor", "assets", "crates/ghostty-vt", "Cargo.lock", "Cargo.toml",
+                 "rust-toolchain.toml", "src/protocol"]
+        diff = subprocess.check_output(
+            ["git", "diff", "--name-only", audit.SOURCE_REF, "--"] +
+            [audit.PREFIX + path for path in paths], cwd=audit.ROOT, text=True)
+        self.assertEqual(diff, "", "Derived source changed an original pinned surface: " + diff)
+
     def test_binary_and_dotfile_hashes_match_independent_git_show(self):
         records = {r["path"]: r for r in self.result["files"]}
         for path, kind in [
@@ -78,7 +88,7 @@ class CommittedTreeTests(unittest.TestCase):
         ]:
             full_path = audit.PREFIX + path
             with self.subTest(path=full_path):
-                blob = subprocess.check_output(["git", "show", "HEAD:" + full_path], cwd=audit.ROOT)
+                blob = subprocess.check_output(["git", "show", audit.SOURCE_REF + ":" + full_path], cwd=audit.ROOT)
                 self.assertEqual(records[full_path]["sha256"], hashlib.sha256(blob).hexdigest())
                 self.assertEqual(records[full_path]["kind"], kind)
 

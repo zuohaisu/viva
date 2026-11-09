@@ -1,0 +1,6 @@
+{
+  "crates/viva/src/server/mod.rs": "310566421cbe19cd5d1b34183802ef85802680dfb7eb496ea87adc730a66d23e",
+  "crates/viva/src/tasks/mod.rs": "4ba721d903a3e44eb30a2ac77301f1d3e36a0711061cbeee6d901d6adf7f274c",
+  "crates/viva/src/tasks/preparation.rs": "467bb22d36345934e67f692126339a7075623f914bb75c71ae173696f08c5fe8",
+  "crates/viva/tests/dispatch_preparation.rs": "e897e265c3b262041caa4f7c28d6bb3c3cb99ffc48c14b634786d450261c7f44"
+}

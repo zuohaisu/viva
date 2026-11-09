@@ -223,7 +223,8 @@ pub fn spawn_server_daemon() -> io::Result<u32> {
 }
 
 fn build_server_daemon_command(exe: PathBuf) -> Command {
-    let mut command = Command::new(&exe);
+    // Viva modification: re-exec `viva runtime server`, never `viva server`.
+    let mut command = crate::embedding::child_command(&exe);
     command
         .arg("server")
         // Redirect stdio to /dev/null

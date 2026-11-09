@@ -5,10 +5,59 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
 #[cfg(unix)]
-use interprocess::local_socket::traits::Stream as _;
+use interprocess::local_socket::traits::{Stream as _, StreamCommon as _};
 
 pub(crate) type LocalListener = interprocess::local_socket::Listener;
 pub(crate) type LocalStream = interprocess::local_socket::Stream;
+
+// Viva modification: reuse Interprocess's OS credentials. Its pinned Darwin
+// implementation provides UID but no PID; LOCAL_PEERPID fills only that gap.
+// These identify the connection peer, not a principal/current descriptor writer.
+pub(crate) fn transport_peer(stream: &LocalStream) -> io::Result<crate::embedding::TransportPeer> {
+    #[cfg(unix)]
+    {
+        let credentials = stream.peer_creds()?;
+        let pid = credentials
+            .pid()
+            .and_then(|pid| u32::try_from(pid).ok())
+            .filter(|pid| *pid != 0);
+        #[cfg(target_os = "macos")]
+        let pid = {
+            use std::os::fd::AsRawFd;
+            let LocalStream::UdSocket(socket) = stream;
+            let mut peer_pid: libc::pid_t = 0;
+            let mut length = std::mem::size_of_val(&peer_pid) as libc::socklen_t;
+            // SAFETY: live borrowed socket, correctly sized initialized pid_t
+            // output. Failure/zero remains unknown; it never grants authority.
+            let result = unsafe {
+                libc::getsockopt(
+                    socket.inner().as_raw_fd(),
+                    libc::SOL_LOCAL,
+                    libc::LOCAL_PEERPID,
+                    (&mut peer_pid as *mut libc::pid_t).cast(),
+                    &mut length,
+                )
+            };
+            if result == 0 && length as usize == std::mem::size_of_val(&peer_pid) {
+                u32::try_from(peer_pid).ok().filter(|pid| *pid != 0).or(pid)
+            } else {
+                pid
+            }
+        };
+        Ok(crate::embedding::TransportPeer {
+            pid,
+            uid: credentials.euid(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = stream;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "native peer identity is not integrated on this platform",
+        ))
+    }
+}
 
 pub(crate) enum LocalStreamRead {
     Data,
@@ -346,6 +395,32 @@ mod tests {
     use interprocess::local_socket::traits::Listener as _;
     #[cfg(windows)]
     use std::path::PathBuf;
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn transport_peer_reports_actual_connection_process_not_a_role() {
+        use std::os::unix::net::{UnixListener, UnixStream};
+        let path = std::path::Path::new("/tmp").join(format!(
+            "vp-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = UnixListener::bind(&path).unwrap();
+        let client = UnixStream::connect(&path).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let server = LocalStream::UdSocket(server.into());
+        let peer = transport_peer(&server).unwrap();
+        assert_eq!(peer.pid, Some(std::process::id()));
+        // SAFETY: geteuid has no arguments or mutable memory effects.
+        assert_eq!(peer.uid, Some(unsafe { libc::geteuid() }));
+        drop(client);
+        drop(server);
+        drop(listener);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn stale_socket_connect_errors_keep_unix_would_block_strict() {

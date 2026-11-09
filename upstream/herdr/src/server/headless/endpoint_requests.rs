@@ -35,6 +35,17 @@ impl HeadlessServer {
             self.send_to_client(client_id, message);
             return false;
         }
+        // Viva modification: no fast-path endpoint mutation bypasses admission.
+        if let Err(err) = crate::embedding::admit(&request) {
+            let message = crate::server::client_commands::error_message(
+                boot_id,
+                request_id,
+                "authority_not_integrated",
+                err.to_string(),
+            );
+            self.send_to_client(client_id, message);
+            return false;
+        }
         let surface_active = client.shell_surface_active;
         if let api::schema::Method::ClientShellSurfaceSet(params) = &request.method {
             let Some((changed, projection_revision)) =

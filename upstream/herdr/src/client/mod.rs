@@ -224,6 +224,8 @@ fn run_client_with_mode(
     };
     let federated = endpoint_catalog.has_enabled_ssh();
 
+    // Viva modification: authenticate the OS-bound frontend before raw attach.
+    crate::embedding::authenticate_local_client()?;
     let initial_stream = match crate::ipc::connect_local_stream(&socket_path) {
         Ok(stream) => Some(stream),
         Err(error) if federated => {

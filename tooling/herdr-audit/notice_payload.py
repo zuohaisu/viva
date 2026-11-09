@@ -77,9 +77,10 @@ def build_payload(metadata, captured, root=ROOT):
 
 
 if __name__ == '__main__':
+    from inventory import SOURCE_REF  # Original #190 import, not the #191 derivative.
     metadata = json.loads(Path(sys.argv[1]).read_text())
     captured = json.loads(INVENTORY.read_text())
-    tree = subprocess.check_output(['git', 'rev-parse', 'HEAD:upstream/herdr'], cwd=ROOT, text=True).strip()
+    tree = subprocess.check_output(['git', 'rev-parse', f'{SOURCE_REF}:upstream/herdr'], cwd=ROOT, text=True).strip()
     if tree != captured['source_tree']:
-        raise ValueError('Source snapshot changed; refresh the captured inventory first')
+        raise ValueError('Original import differs from captured evidence; do not treat derivative metadata as the #190 baseline')
     print(json.dumps(build_payload(metadata, captured), indent=2, ensure_ascii=False))

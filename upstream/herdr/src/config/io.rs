@@ -28,6 +28,10 @@ pub fn app_dir_name() -> &'static str {
 }
 
 pub fn config_dir() -> PathBuf {
+    // Viva modification: embedding never inherits standalone Herdr locations.
+    if let Some(ctx) = crate::embedding::context() {
+        return ctx.directory.clone();
+    }
     if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
         return PathBuf::from(dir).join(app_dir_name());
     }
@@ -35,6 +39,9 @@ pub fn config_dir() -> PathBuf {
 }
 
 pub fn state_dir() -> PathBuf {
+    if let Some(ctx) = crate::embedding::context() {
+        return ctx.directory.join("state");
+    }
     if let Ok(dir) = std::env::var("XDG_STATE_HOME") {
         return PathBuf::from(dir).join(app_dir_name());
     }
@@ -129,6 +136,12 @@ pub(super) fn read_optional_config(path: &Path) -> std::io::Result<Option<String
 
 impl Config {
     pub fn load() -> LoadedConfig {
+        let mut loaded = Self::load_unembedded();
+        crate::embedding::constrain_config(&mut loaded.config);
+        loaded
+    }
+
+    fn load_unembedded() -> LoadedConfig {
         let path = config_path();
         let content = match read_optional_config(&path) {
             Ok(Some(content)) => content,
@@ -193,6 +206,9 @@ pub(super) fn resolve_config_relative_path(path: &Path) -> PathBuf {
 }
 
 pub fn config_path() -> PathBuf {
+    if crate::embedding::enabled() {
+        return config_dir().join("config.toml");
+    }
     if let Ok(path) = std::env::var(CONFIG_PATH_ENV_VAR) {
         return PathBuf::from(path);
     }
@@ -243,6 +259,12 @@ pub fn config_diagnostic_summary(diagnostics: &[String]) -> Option<String> {
 }
 
 pub fn load_live_config() -> Result<LoadedConfig, Vec<String>> {
+    let mut loaded = load_live_config_unembedded()?;
+    crate::embedding::constrain_config(&mut loaded.config);
+    Ok(loaded)
+}
+
+fn load_live_config_unembedded() -> Result<LoadedConfig, Vec<String>> {
     let path = config_path();
     let content = match read_optional_config(&path) {
         Ok(Some(content)) => content,

@@ -648,6 +648,14 @@ pub fn foreground_group_leader_job(process_group_id: u32) -> Option<ForegroundJo
     })
 }
 
+// Viva modification: kernel start ticks distinguish a reused PID.
+pub(crate) fn process_lifetime_marker(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = stat.get(stat.rfind(')')? + 2..)?;
+    let ticks: u64 = rest.split_whitespace().nth(19)?.parse().ok()?;
+    Some(format!("linux:{pid}:{ticks}"))
+}
+
 pub fn foreground_process_group_id(child_pid: u32) -> Option<u32> {
     // /proc/<pid>/stat format: "pid (comm) state ppid pgrp session tty_nr tpgid ..."
     // The (comm) field can contain spaces and parens, so we find the last ')' first.

@@ -135,6 +135,87 @@ jobs:
         # expected skip count is 0.
         run: python -m pytest tests/acceptance -q -rs
 
+  # #191 development gate: the default Linux jobs do NOT compile the nested
+  # native runtime. Keep actual source composition and PTY evidence separate
+  # from same-backend handoff, install and human visual acceptance.
+  native-runtime:
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    env:
+      # Match the isolated native baseline, not runner/user Git defaults.
+      GIT_CONFIG_GLOBAL: /dev/null
+      GIT_CONFIG_NOSYSTEM: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Use the imported native Rust toolchain
+        run: |
+          python - <<'PY'
+          import os, pathlib, subprocess, tomllib
+          channel = tomllib.loads(pathlib.Path('upstream/herdr/rust-toolchain.toml').read_text())['toolchain']['channel']
+          subprocess.run(['rustup', 'toolchain', 'install', channel, '--component', 'clippy,rustfmt'], check=True)
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write(f'RUSTUP_TOOLCHAIN={channel}\n')
+          PY
+      - name: Install the original hash-pinned Zig 0.16.0
+        run: |
+          curl --fail --location --retry 2 https://ziglang.org/download/0.16.0/zig-x86_64-macos-0.16.0.tar.xz -o "$RUNNER_TEMP/zig.tar.xz"
+          echo "0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7  $RUNNER_TEMP/zig.tar.xz" | shasum -a 256 -c -
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP"
+          echo "ZIG=$RUNNER_TEMP/zig-x86_64-macos-0.16.0/zig" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: native-runtime
+          workspaces: |
+            . -> target
+            upstream/herdr -> target
+      - name: Native feature clippy
+        run: cargo clippy -p viva --features herdr-runtime --all-targets -- -D warnings
+      - name: Imported native source clippy
+        run: cargo clippy --manifest-path upstream/herdr/Cargo.toml --all-targets -- -D warnings
+      - name: Test native client capability and lifetime admission
+        run: |
+          cargo test -p viva --locked --features herdr-runtime --lib native_runtime:: -- --nocapture
+      - name: Test actual source-linked domain bridge and inherited PTY contract
+        run: cargo test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test m1_terminal -- --nocapture
+      - name: Install the original hash-pinned isolated test runner
+        run: |
+          curl --fail --location --retry 2 https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-universal-apple-darwin.tar.gz -o "$RUNNER_TEMP/nextest.tar.gz"
+          echo "82a759b4d218d38359424196ab244c470e8f7c7d149c814fbbeef4d67c3c301a  $RUNNER_TEMP/nextest.tar.gz" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/nextest-bin"
+          tar -xzf "$RUNNER_TEMP/nextest.tar.gz" -C "$RUNNER_TEMP/nextest-bin"
+          echo "$RUNNER_TEMP/nextest-bin" >> "$GITHUB_PATH"
+      - name: Install the genuine checksum CLI used by native maintenance tests
+        run: |
+          curl --fail --location --retry 2 https://github.com/uutils/coreutils/releases/download/0.2.2/coreutils-0.2.2-x86_64-apple-darwin.tar.gz -o "$RUNNER_TEMP/coreutils.tar.gz"
+          echo "d60533c66d5f9d8b4c5aaec3837a25ef8b82227c1ace780c2d97f94da1c8b229  $RUNNER_TEMP/coreutils.tar.gz" | shasum -a 256 -c -
+          tar -xzf "$RUNNER_TEMP/coreutils.tar.gz" -C "$RUNNER_TEMP"
+          ln -s "$RUNNER_TEMP/coreutils-0.2.2-x86_64-apple-darwin/coreutils" "$RUNNER_TEMP/nextest-bin/sha256sum"
+      - name: Test native maintenance tooling
+        working-directory: upstream/herdr
+        run: |
+          git --version
+          python -m unittest discover -s scripts -p 'test_*.py'
+      - name: Test imported native workspace and frozen codecs in isolated processes
+        # Reuse the upstream justfile's runner. A shared cargo-test process can
+        # inherit signal handlers changed by another native test (SIGPIPE).
+        run: cargo nextest run --manifest-path upstream/herdr/Cargo.toml --workspace --locked --test-threads 2 --no-fail-fast --status-level fail --final-status-level fail
+      - name: Build actual source-linked client
+        run: cargo build -p viva --locked --features herdr-runtime
+      - name: Verify native autospawn, PTY, detach and live reattach
+        run: python tooling/herdr-integration/native_runtime.py --viva target/debug/viva --output "$RUNNER_TEMP/native-runtime.json"
+      - name: Retain native evidence including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-runtime-evidence
+          path: ${{ runner.temp }}/native-runtime.json
+          if-no-files-found: warn
+
   pi-extension:
     runs-on: ubuntu-latest
     steps:

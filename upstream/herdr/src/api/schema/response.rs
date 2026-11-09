@@ -277,6 +277,10 @@ pub enum ResponseResult {
         active: bool,
         projection_revision: u64,
     },
+    // Viva modification: actual domain facts supplied by the composition root.
+    VivaSnapshot {
+        snapshot: serde_json::Value,
+    },
     Ok {},
 }
 

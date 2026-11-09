@@ -1,3 +1,5 @@
+// Modified for Viva #191: standalone capability fixtures omit the additive
+// native-domain JSON extension. Existing wire expectations remain unchanged.
 use std::collections::HashMap;
 
 use super::*;
@@ -6,6 +8,19 @@ fn protocol_schema_entry<T: schemars::JsonSchema>(name: &str) -> serde_json::Val
     let mut schema = serde_json::to_value(schemars::schema_for!(T)).unwrap();
     rewrite_schema_refs(&mut schema, name);
     schema
+}
+
+#[test]
+fn viva_client_authentication_debug_redacts_capability() {
+    let request = Request {
+        id: "fixture".into(),
+        method: Method::VivaClientAuthenticate(VivaClientAuthenticateParams {
+            credential: "fixture-secret-never-debug".into(),
+            process_lifetime: Some("fixture-lifetime".into()),
+        }),
+    };
+    assert!(format!("{request:?}").contains("[REDACTED]"));
+    assert!(!format!("{request:?}").contains("fixture-secret-never-debug"));
 }
 
 fn rewrite_schema_refs(value: &mut serde_json::Value, schema_name: &str) {
@@ -721,6 +736,7 @@ fn success_response_round_trips() {
             version: "0.1.2".into(),
             protocol: 6,
             capabilities: Some(ServerCapabilities {
+                viva_domain_schema: None,
                 live_handoff: true,
                 detached_server_daemon: true,
                 endpoint_protocol_generation: Some(1),

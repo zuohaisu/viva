@@ -68,7 +68,8 @@ pub(crate) fn start_server_with_stop_control(
 
 fn default_capabilities() -> Option<ServerCapabilities> {
     Some(ServerCapabilities {
-        live_handoff: crate::platform::capabilities().live_handoff,
+        viva_domain_schema: crate::embedding::enabled().then_some(1),
+        live_handoff: crate::platform::capabilities().live_handoff && !crate::embedding::enabled(),
         detached_server_daemon: crate::platform::current_process_is_detached_server_daemon(),
         endpoint_protocol_generation: Some(crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION),
         surface_interest: true,
@@ -107,7 +108,7 @@ fn start_server_inner(
         capabilities.ssh_agent_registration = {
             #[cfg(unix)]
             {
-                ssh_agents.is_some()
+                ssh_agents.is_some() && !crate::embedding::enabled()
             }
             #[cfg(not(unix))]
             {
@@ -344,12 +345,47 @@ fn handle_connection_with_stop(
         }
     };
 
+    // Viva modification: fence before early-return mutators such as stop and
+    // live_handoff, not only in App's queued request dispatcher.
+    if let Err(err) = crate::embedding::admit_from_socket(&request, &stream) {
+        return write_text_line_allow_disconnect(
+            &mut stream,
+            &error_response_json(request.id, "authority_not_integrated", err.to_string()),
+        );
+    }
     let request_id = request.id.clone();
     let method = api_method_name(&request.method);
     let changes_ui = request_changes_ui(&request);
     crate::logging::api_request_started(&request_id, method, changes_ui);
 
     match request.method {
+        Method::VivaClientAuthenticate(params) => {
+            match crate::embedding::authenticate_client(
+                &params.credential,
+                params.process_lifetime.as_deref(),
+                &stream,
+            ) {
+                Ok(()) => write_json_line_allow_disconnect(
+                    &mut stream,
+                    &SuccessResponse {
+                        id: request_id,
+                        result: ResponseResult::Ok {},
+                    },
+                ),
+                Err(error) => write_text_line_allow_disconnect(
+                    &mut stream,
+                    &error_response_json(
+                        request_id,
+                        if error.kind() == io::ErrorKind::WouldBlock {
+                            "client_not_ready"
+                        } else {
+                            "untrusted_client"
+                        },
+                        error.to_string(),
+                    ),
+                ),
+            }
+        }
         #[cfg(unix)]
         Method::ServerSshAgentRegister(params) => {
             let lease = ssh_agents
@@ -565,6 +601,8 @@ fn handle_request(
 pub(crate) fn api_method_name(method: &Method) -> &'static str {
     match method {
         Method::Ping(_) => "ping",
+        Method::VivaSnapshot(_) => "viva.snapshot",
+        Method::VivaClientAuthenticate(_) => "viva.client.authenticate",
         Method::ServerStop(_) => "server.stop",
         Method::ServerLiveHandoff(_) => "server.live_handoff",
         Method::ServerReloadConfig(_) => "server.reload_config",
@@ -1435,6 +1473,7 @@ mod tests {
             },
             &tx,
             Some(ServerCapabilities {
+                viva_domain_schema: None,
                 live_handoff: true,
                 detached_server_daemon: true,
                 endpoint_protocol_generation: Some(
