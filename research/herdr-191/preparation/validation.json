@@ -1,0 +1,84 @@
+{
+  "schema": 1,
+  "issue": 191,
+  "code_commit": "90c6ad9edab12ad2dfba166b00404ec9917de3be",
+  "base_commit": "b6a62ce0a503e6f8a2a5457a0572e00864064fd0",
+  "scope": "Backend-neutral canonical dispatch preparation, consumed by existing real dispatch. Native member dispatch is STILL not wired.",
+  "existing_capability_and_gap": "Reuse existing Core private server::dispatch grant/principal/task/location/attribution/launch-intent checks in TaskRegistry so Native can call them without constructing a legacy Host or second PTY owner. No new scheduler, PTY, authority platform or persistent object/schema.",
+  "behavior": "prepare_member_dispatch preserves check ordering, strict target-member principal, live grant, finished-task/cwd/known-worktree checks, immutable attribution and per-task/member request-key replay checks. It authenticates NO caller and is NOT a cached grant lease or launch confirmation. Ingress must bind identity/pause and call at effect time. Existing Host keeps its effect/pause fences and backend spawn/confirm/exit; LaunchSpec keeps the same captured configuration: the refactored caller reads that canonical Execution, not a fresh mutable member-binding query. The old local binding already represented that snapshot; this preserves it, not a claim that old code had a config-reread bug.",
+  "checks": [
+    {
+      "command": "cargo test --test dispatch_preparation --test v07_server",
+      "result": "3 backend-neutral preparation fixtures + 11 existing real-dispatch tests passed. Preparation fixtures are not native spawn/PID evidence."
+    },
+    {
+      "command": "GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 cargo test --workspace --locked",
+      "result": "625 passed / 1 ignored"
+    },
+    {
+      "command": "GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 cargo +1.96.1 test --workspace --locked --features herdr-runtime",
+      "result": "626 passed / 1 ignored; sequential after default build, no mixed-feature mutable binary overlap"
+    },
+    {
+      "command": "cargo clippy --all-targets -- -D warnings; cargo +1.96.1 clippy -p viva --features herdr-runtime --all-targets -- -D warnings; cargo fmt --all -- --check; git diff --check",
+      "result": "PASS"
+    },
+    {
+      "command": "python3 tooling/herdr-integration/native_runtime.py --viva target/debug/viva --output preparation-native-ui.json",
+      "result": "PASS actual immutable source-linked native binary autospawn/PTY/detach/retained shell state reattach; not human UI"
+    },
+    {
+      "scope": "native workspace source",
+      "result": "UNCHANGED from b6a62ce; its exact-head CI 42550898728 passed 3716 native tests / 12 skipped, maintenance 156 and actual peer bridge; do not count skipped or call that CI evidence for the new PR head"
+    }
+  ],
+  "negative_fixtures": "No intents for invalid location/unknown worktree/finished task; no replay across task/member even under another valid grant; config change does not rewrite captured attribution; revocation blocks re-preparation including a replay.",
+  "failure": "Initial extraction left a reference to old local binding and unused imports. Fixed by reading model/tool bindings from canonical captured Execution; compile error log retained, not relabeled pass.",
+  "pending": [
+    "Native channel issuance + live process/descriptor binding",
+    "Native real member spawn/confirm/LaunchSpec/pane binding/exit and two-member runs",
+    "all ingress authority/redaction/lifecycle",
+    "cross-backend automatic inheritance",
+    "default replacement/packaging/install/device/human visual",
+    "new-head independent QA/CI"
+  ],
+  "disclosure": "Raw compiler/test logs include checkout/temporary paths; task-owned fixtures only; no user sessions/data, product versions, source pins, native codecs, merge or release changed.",
+  "logs": {
+    "preparation-check.log.gz": {
+      "raw_sha256": "6da9ce18a6a5c27bd0176fae962742c582111e06d8c27f2784acdab7626f3522",
+      "raw_bytes": 1277
+    },
+    "preparation-tests.log.gz": {
+      "raw_sha256": "6dfc2298688913c208aec868fdc8bfdc38050397409d586f01d1298d1f90766a",
+      "raw_bytes": 1548
+    },
+    "preparation-clippy.log.gz": {
+      "raw_sha256": "0ad2884e17047e3e4a0f42cbe8bb304de6c665d12c232a33da8793e30d17e8b3",
+      "raw_bytes": 155
+    },
+    "preparation-workspace.log.gz": {
+      "raw_sha256": "fe1726cde981fe71edecd8cf695c33950ed9fa385549a401553873effbc74b20",
+      "raw_bytes": 56669
+    },
+    "preparation-clippy-final.log.gz": {
+      "raw_sha256": "e23c7dc24a180573b5f9283b3a83770d8e911a90ab4ec16eeefe4210d768c276",
+      "raw_bytes": 155
+    },
+    "preparation-native-workspace.log.gz": {
+      "raw_sha256": "a328c369f7eda4221911de8ecc2d0ea589862fe5b01f7a725574e3c792d8a4d2",
+      "raw_bytes": 57548
+    },
+    "preparation-native-clippy.log.gz": {
+      "raw_sha256": "49302f5c94a500e19c38b38d388b16a67c1dfed7829885e03def72097f0cbb21",
+      "raw_bytes": 951
+    },
+    "preparation-native-build.log.gz": {
+      "raw_sha256": "31cb5b9f99346ad2f8512f47d218cd39dae403db1faf23d87ecf0c8ba22989f1",
+      "raw_bytes": 868
+    },
+    "preparation-native-ui.log.gz": {
+      "raw_sha256": "0ef0ef2de1ad40c6650b2a873fadf70aec8f53714493edaa151334e1fa1b4268",
+      "raw_bytes": 591
+    }
+  }
+}
