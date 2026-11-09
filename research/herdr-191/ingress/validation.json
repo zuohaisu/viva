@@ -1,0 +1,118 @@
+{
+  "schema": 1,
+  "issue": 191,
+  "code_commit": "f2d4e015dc87cfeb46faccdb9ae58ccc952b73c1",
+  "base_commit": "4ee6ec200d932703fa94c6d74d2caa0a3207890e",
+  "derived_tree": "eac7456035b94ab59085a81521bd4e34d4ffe0f9",
+  "scope": "OS connection-peer facts + Core worker-channel action resolver. NOT complete native member ingress/dispatch.",
+  "existing_capabilities": "Interprocess peer_creds for UID/PID; Darwin lacks PID there, so a narrow LOCAL_PEERPID call fills that gap without dependency/pin changes. Core ChannelRegistry, worker_credentials, canonical Execution and AuthorityEngine reused.",
+  "facts_not_authority": "Connection PID/UID do not establish a member, current descriptor writer or owner. PID reuse/inherited/transferred descriptors need process lifecycle binding. Unknown/failed lookup remains unknown. No same-UID -> User promotion.",
+  "real_native_test": "Actual native binary refuses forged member/grant/peer_pid/peer_uid/transport_peer/claimed_role JSON. Canonical refusal actor stays unbound; recorded PID equals the real client test process, UID equals OS geteuid, NOT payload or server process.",
+  "core_resolver": "check_bound_worker_action validates host-issued channel role, active credential exact channel/execution/member, canonical Execution Running, then the live grant immediately before an effect. No payload member parameter or owner fallback. Bad-binding audits use a fixed marker, not untrusted bearer strings.",
+  "authority_test_scope": "Four canonical DB/channel fixtures, NOT real native member processes. Covers positive member action, missing/revoked/expired grant, protected action, forged User/unknown/revoked channel, valid non-worker roles, cross-channel credential, wrong principal/task, revoked credential, stopped execution and credential/member mismatch.",
+  "checks": [
+    {
+      "command": "GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 cargo +1.96.1 test --workspace --locked --features herdr-runtime",
+      "result": "623 passed / 1 ignored, serial rerun; ignored not executed"
+    },
+    {
+      "command": "cargo test --test native_worker_binding",
+      "result": "4 passed, canonical authority fixtures only"
+    },
+    {
+      "command": "cargo +1.96.1 test --manifest-path upstream/herdr/Cargo.toml --locked --lib transport_peer_reports_actual_connection_process_not_a_role",
+      "result": "1 passed plus 73 filtered ghostty tests, not full-suite evidence"
+    },
+    {
+      "command": "cargo +1.96.1 nextest run --manifest-path upstream/herdr/Cargo.toml --workspace --locked --test-threads 2 --no-fail-fast --status-level fail --final-status-level fail",
+      "result": "3716 passed / 12 skipped; skipped not executed"
+    },
+    {
+      "command": "cargo clippy --all-targets -- -D warnings; cargo +1.96.1 clippy -p viva --features herdr-runtime --all-targets -- -D warnings; cargo +1.96.1 clippy --manifest-path upstream/herdr/Cargo.toml --all-targets -- -D warnings",
+      "result": "PASS"
+    },
+    {
+      "command": "python3 tooling/herdr-integration/native_runtime.py --viva target/debug/viva --output ingress-native-ui.json",
+      "result": "PASS actual immutable native binary, autospawn/PTY/exit-0 detach/live shell-state reattach; not human visual"
+    },
+    {
+      "command": "cargo fmt --all -- --check; git diff --check",
+      "result": "PASS"
+    }
+  ],
+  "failures_preserved": [
+    "Initial compile missed StreamCommon trait import; fixed, no dependency version change.",
+    "First full native-feature run overlapped a default-feature cargo test using the SAME target directory; Cargo replaced target/debug/viva with a feature-disabled binary while native tests ran. Native bridge correctly failed with explicit feature-disabled error. Not a peer-authority failure; preserved log, stopped mixed-feature overlap and serial same-feature full rerun passed. No timeout/skip/assertion weakening."
+  ],
+  "pending": [
+    "Native channel issuance and live process/descriptor lifecycle binding",
+    "Wire the Core resolver into native effects; current positive grant checks are fixtures, not actual native dispatch",
+    "Canonical intent/spawn/LaunchSpec/pane binding/exit and two-member/two-task real runs",
+    "Raw client input/attach, all persistence redaction, stop/pause",
+    "Cross-backend automatic inheritance, default cutover, artifact/install/device/human acceptance",
+    "Independent QA on new head"
+  ],
+  "disclosure": "Lossless compiler/test logs contain absolute local checkout/temporary paths. Only task-owned fixtures. No versions, source pins, frozen codecs, release or user sessions/data changed.",
+  "logs": {
+    "peer-bridge.log.gz": {
+      "raw_sha256": "ba26a6601887b6787fbf5e300b8a60f94ed3a479fe0ba6865768f8b6c8b384ac",
+      "raw_bytes": 1789
+    },
+    "peer-ipc.log.gz": {
+      "raw_sha256": "2efe18124ae2bffb8ce0a4acf1910e90533ef8786e64c84b093ab2db28b68452",
+      "raw_bytes": 1164
+    },
+    "peer-bridge-retry.log.gz": {
+      "raw_sha256": "c96a8c8c07d0fe40234e3e30c246623b190f52f04ed5306683e25a4386e85629",
+      "raw_bytes": 1336
+    },
+    "peer-ipc-retry.log.gz": {
+      "raw_sha256": "20e432c6a33b051883b94236cdb4a9c1ed6641c9bbf04f246263e35f8934b6bd",
+      "raw_bytes": 863
+    },
+    "worker-binding.log.gz": {
+      "raw_sha256": "240132f9ffd5c23c33997fdf448f7ea7be6328ae2d4c3d726b4200b44449f869",
+      "raw_bytes": 735
+    },
+    "worker-binding-final.log.gz": {
+      "raw_sha256": "be6360dba262cde41ec44505f7dee7f926271994c1649642d0c078b46810df24",
+      "raw_bytes": 708
+    },
+    "peer-default-clippy.log.gz": {
+      "raw_sha256": "a6a5edecb6d7d9fdf8642254f03f2478ed638f13a74aa12684fafbb062e3bb0e",
+      "raw_bytes": 181
+    },
+    "ingress-workspace.log.gz": {
+      "raw_sha256": "48a2466bcd14e2a01c62620e7cc60a0ac93a4d4eba83ac91f19a4f3a11ea94b1",
+      "raw_bytes": 44826
+    },
+    "ingress-workspace-serial.log.gz": {
+      "raw_sha256": "edc95f1a85d19901d7290985f2129bf39a97700644ab2d70e39ce5d42f3b53dc",
+      "raw_bytes": 57076
+    },
+    "ingress-clippy.log.gz": {
+      "raw_sha256": "37e119b3858dfb5e052b19bf2f36be1f3e7e5944b48201c02c12428b334cca5d",
+      "raw_bytes": 1037
+    },
+    "ingress-clippy-serial.log.gz": {
+      "raw_sha256": "47c151551dd59d61010e339fa7255a2256e80e45f5c4cfe96d49a63ccb4a272b",
+      "raw_bytes": 868
+    },
+    "ingress-source-clippy.log.gz": {
+      "raw_sha256": "2b4d67dbc07ce9f0cfbc730d710560880c6c31471a1b6d17d3dd106882d31794",
+      "raw_bytes": 360
+    },
+    "ingress-nextest.log.gz": {
+      "raw_sha256": "634f5bd6196a513c36f1572cbb4da0575b86f616cf56acc43eca0dff008080c6",
+      "raw_bytes": 801
+    },
+    "ingress-build.log.gz": {
+      "raw_sha256": "8ca7145b25accfc4f8c9f76a7c54e1b2379617647776820617ce008807454bee",
+      "raw_bytes": 868
+    },
+    "ingress-native-ui.log.gz": {
+      "raw_sha256": "169fc26c6a1e133768e6b9cf8c291349a327242993708a286d59f6122c334ddd",
+      "raw_bytes": 591
+    }
+  }
+}
