@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "binary": "viva-pre-client-auth-2e10b50",
+  "human_visual": "HUMAN_VISUAL_REVIEW_PENDING",
+  "cross_backend_inheritance": "not_tested",
+  "passed": false,
+  "binary_sha256": "3a11bfcfa4a85fa0abdb3550325a229aebe58e159fbb743f09529e5d13f6e66a",
+  "immutable_private_binary": true,
+  "native_autospawn": true,
+  "canonical_domain_endpoint": true,
+  "invalid_capability_refused": false,
+  "unbound_raw_client_refused": false,
+  "native_pty_output": true,
+  "ansi_bytes": 15475,
+  "detach_exit_code": 0,
+  "same_host_after_detach": true,
+  "reattach_retains_shell_state": true,
+  "error": "forged capability was not explicitly refused",
+  "frame_tail": "                     \u001b[22;27H                                                                                              \u001b[23;1H                         \u001b[23;27H                                                                                              \u001b[24;1H                         \u001b[24;27H                                                                                              \u001b[25;1H                         \u001b[25;27H                                                                                              \u001b[26;1H                         \u001b[26;27H                                                                                              \u001b[27;1H                         \u001b[27;27H                                                                                              \u001b[28;1H                         \u001b[28;27H                                                                                              \u001b[29;1H                         \u001b[29;27H                                                                                              \u001b[30;1H                         \u001b[30;27H                                                                                              \u001b[31;1H                         \u001b[31;27H                                                                                              \u001b[32;1H                        \u001b[32;27H                                                                                              \u001b[0m\u001b[5;35H\u001b[?25h\u001b[?2026l\u001b[5;35H\u001b[?25h\u001b[?2026h\u001b[?25l\u001b]8;;\u001b\\\u001b[5;35H\u001b[0;39;49mprintf\u001b[5;42H'\\126\\111\\126\\101_\\116\\101\\124\\111\\126\\105_\\122\\105\\101\\124\\124\\101\\103\\110_%s\u001b[6;27H\\n'\u001b[6;31H\"$VN_STATE\"\u001b[0m\u001b[8;35H\u001b[?25h\u001b[?2026l\u001b[8;35H\u001b[?25h\u001b[?2026h\u001b[?25l\u001b]8;;\u001b\\\u001b[7;27H\u001b[0;39;49mVIVA_NATIVE_REATTACH_restored\u001b[8;27Hsh-3.2$\u001b[0m\u001b[8;35H\u001b[?25h\u001b[?2026l\u001b[8;35H\u001b[?25h\u001b[<1u\u001b[>31u\u001b[?2026h\u001b[?25l\u001b]8;;\u001b\\\u001b[32;27H\u001b[0;1;38;2;24;24;37;48;2;137;180;250m PREFIX \u001b[0;38;2;108;112;134;48;2;24;24;37m \u001b[0;1;38;2;137;180;250;48;2;24;24;37mesc\u001b[0;38;2;108;112;134;48;2;24;24;37m cancel  \u001b[0;1;38;2;137;180;250;48;2;24;24;37mctrl+b\u001b[0;38;2;108;112;134;48;2;24;24;37m send prefix  \u001b[0;1;38;2;137;180;250;48;2;24;24;37mw\u001b[0;38;2;108;112;134;48;2;24;24;37m workspace nav  \u001b[0;1;38;2;137;180;250;48;2;24;24;37m?\u001b[0;38;2;108;112;134;48;2;24;24;37m keybinds                          \u001b[0m\u001b[8;35H\u001b[?25h\u001b[?2026l\u001b[8;35H\u001b[?25h\u001b[<1u\u001b[?7h\u001b[?1004l\u001b[?2004l\u001b[?1006l\u001b[?1016l\u001b[?1015l\u001b[?1005l\u001b[?1003l\u001b[?1002l\u001b[?1000l\u001b[?9l\u001b[?1006l\u001b[?1015l\u001b[?1003l\u001b[?1002l\u001b[?1000l\u001b[?1049l\u001b[?2031l\u001b[?25h\u001b[0 q",
+  "server_fixture_exited": true,
+  "server_fixture_cleanup": "exact private PID/start/argv verified; not a lifecycle acceptance claim"
+}

@@ -1,0 +1,22 @@
+{
+  ".github/workflows/ci.yml": "d9b3634551ae0f625f4cc7ee8a6748bcd43a2c25663d6ceb614da7d70aaa6678",
+  "crates/viva/src/native_runtime.rs": "0edc4303fd9ff18b0024cbc438ab4b28c4151a696654acfcbcac32598f997d62",
+  "crates/viva/src/native_runtime/client_authority.rs": "de46fc6fcc65de4d725109ff4f7f97d20c914f2e758de9ab3fac61f36bdd5bd5",
+  "crates/viva/src/native_runtime/client_authority/tests.rs": "ac7bd579f902e2669080e01d2210815ca7919480a2ab6b9d1e9608aec3b0bbe3",
+  "crates/viva/tests/native_runtime_bridge.rs": "e2d6f002ab925378a7837359c688d2fd5888fdf968820d6ba68da8a9a0b13f8a",
+  "tooling/herdr-integration/native_runtime.py": "5a83c83d280e4875d2d34477550c31f27e69e75f7af3cf225e7819da29862959",
+  "upstream/herdr/docs/next/api/herdr-api.schema.json": "d562b82576a3eab78ffbbf18d20c06444f540a66c5c9f1fecc8744f180d68e90",
+  "upstream/herdr/src/api/schema.rs": "84a95301051c4be149b54b845d7e00d224955491d77dcda09ac2d0358dd3ebcf",
+  "upstream/herdr/src/api/schema/server.rs": "4d8b2021adf0358202066029530a46b003a6e856c192b0d7726c298634cdf833",
+  "upstream/herdr/src/api/schema/tests.rs": "dced56d56c97cbc19738095bd3c7ef985c697152c87ef0b8b95e7c93f230a6ee",
+  "upstream/herdr/src/api/server.rs": "645a949398d9ba26513ee4416a6af9035aa8f52403de0b375f887a2546a4777d",
+  "upstream/herdr/src/app/api.rs": "8c818d2fe289f324b4bcaa75df6cd8a4a9cc4587df13148f012b849a0a3da647",
+  "upstream/herdr/src/client/endpoint/supervisor.rs": "a89925ff9028a4ee74781ef31b1f15d69a555b39814066dc90d231dad4ce40d0",
+  "upstream/herdr/src/client/mod.rs": "2f10137e71c38211b931770d83950105f4b598fab420e02f48231f7599c37c45",
+  "upstream/herdr/src/client/terminal_sessions.rs": "06a6a5d51d0a754e8232dbb4f99ad95bf47e98f57cb2b24fb26ddedc233d8823",
+  "upstream/herdr/src/embedding.rs": "9e8d8898bb250bd51d09a5852c58303606afe201cb232b43ce313619cbbc29ba",
+  "upstream/herdr/src/platform/linux.rs": "315727b5b21138bb77836de1cdc0de3b378e882bf2987f85d7b15c2cced45a3f",
+  "upstream/herdr/src/platform/macos.rs": "a156792e390ee101940a04bbfee6a661ad7f24e48ba4c47e2ac257370a3cad90",
+  "upstream/herdr/src/server/client_transport.rs": "24179e7e839b76434a690bf67e22dfc2972f311d392cc0180a39616eeda092b4",
+  "upstream/herdr/src/server/headless/bootstrap.rs": "2b2ef553e1642dc86522ca43a351d519aa915f6f463639d26f2cd80928599ddc"
+}
