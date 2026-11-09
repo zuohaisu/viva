@@ -177,6 +177,9 @@ jobs:
         run: cargo clippy -p viva --features herdr-runtime --all-targets -- -D warnings
       - name: Imported native source clippy
         run: cargo clippy --manifest-path upstream/herdr/Cargo.toml --all-targets -- -D warnings
+      - name: Test native client capability and lifetime admission
+        run: |
+          cargo test -p viva --locked --features herdr-runtime --lib native_runtime:: -- --nocapture
       - name: Test actual source-linked domain bridge and inherited PTY contract
         run: cargo test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test m1_terminal -- --nocapture
       - name: Install the original hash-pinned isolated test runner

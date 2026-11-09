@@ -677,6 +677,9 @@ pub(crate) fn handle_client_handshake(
         return Ok(());
     }
 
+    // Viva modification: reject unbound raw clients before decoding a hello.
+    crate::embedding::validate_client(&stream)?;
+
     // Reset to blocking mode — the accept loop sets nonblocking but
     // the handshake thread needs blocking I/O for read_message/write_message.
     stream.set_nonblocking(false)?;
@@ -1014,6 +1017,11 @@ fn client_read_loop_with_endpoint_controls(
         );
         #[cfg(windows)]
         let message = protocol::read_message(&mut stream, MAX_GRAPHICS_FRAME_SIZE);
+        // Revalidate the registered process lifetime before forwarding effects.
+        if let Err(error) = crate::embedding::validate_client(&stream) {
+            let _ = server_event_tx.blocking_send(ServerEvent::ClientDisconnected { client_id });
+            return Err(error);
+        }
         let msg: ClientMessage = match message {
             Ok(msg) => msg,
             Err(protocol::FramingError::UnexpectedEof) => {

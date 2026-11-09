@@ -86,6 +86,8 @@ pub fn run_server() -> io::Result<()> {
             client_socket = %client_socket_path().display(),
             "herdr server started"
         );
+        // Viva modification: publish capabilities only after BOTH endpoints bind.
+        crate::embedding::server_ready()?;
         print_ready_message(&api::socket_path(), &client_socket_path());
         server.app.run_plugin_startup_hooks();
 

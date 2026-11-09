@@ -11,6 +11,15 @@ use std::{
 /// No dispatch/stop capability is exposed until ingress authority is integrated.
 pub trait DomainServices: Send + Sync {
     fn server_started(&self) -> io::Result<()>;
+    fn server_ready(&self) -> io::Result<()>;
+    fn client_credential(&self) -> io::Result<String>;
+    fn authenticate_client(
+        &self,
+        credential: &str,
+        expected_lifetime: Option<&str>,
+        peer: TransportPeer,
+    ) -> io::Result<()>;
+    fn validate_client(&self, peer: TransportPeer) -> io::Result<()>;
     fn snapshot(&self) -> io::Result<serde_json::Value>;
     fn refused(&self, method: &'static str, peer: Option<TransportPeer>) -> io::Result<()>;
 }
@@ -22,6 +31,131 @@ pub trait DomainServices: Send + Sync {
 pub struct TransportPeer {
     pub pid: Option<u32>,
     pub uid: Option<u32>,
+}
+
+/// Revalidate this at admission: a PID/UID alone is not a live process binding.
+pub fn peer_lifetime_marker(peer: TransportPeer) -> io::Result<String> {
+    let pid = peer.pid.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "connection PID unavailable",
+        )
+    })?;
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        crate::platform::process_lifetime_marker(pid).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "connection process lifetime unavailable",
+            )
+        })
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = pid;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "native process binding unavailable",
+        ))
+    }
+}
+
+pub(crate) fn server_ready() -> io::Result<()> {
+    if let Some(ctx) = context() {
+        ctx.domain.server_ready()?;
+    }
+    Ok(())
+}
+
+pub(crate) fn authenticate_client(
+    credential: &str,
+    expected_lifetime: Option<&str>,
+    stream: &crate::ipc::LocalStream,
+) -> io::Result<()> {
+    let ctx = context().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Viva embedding unavailable",
+        )
+    })?;
+    ctx.domain.authenticate_client(
+        credential,
+        expected_lifetime,
+        crate::ipc::transport_peer(stream)?,
+    )
+}
+
+pub(crate) fn validate_client(stream: &crate::ipc::LocalStream) -> io::Result<()> {
+    if let Some(ctx) = context() {
+        ctx.domain
+            .validate_client(crate::ipc::transport_peer(stream)?)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn authenticate_local_client() -> io::Result<()> {
+    let Some(ctx) = context() else {
+        return Ok(());
+    };
+    // The client socket can appear just before the ready capability is published.
+    // Retry only readiness or a visible private-file credential rotation,
+    // never an unchanged bad credential and never an execution effect.
+    use crate::api::client::{parse_response_value, ApiClient, ApiClientError};
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let credential = match ctx.domain.client_credential() {
+            Ok(value) => value,
+            Err(error) if error.kind() == io::ErrorKind::NotFound && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let request = crate::api::schema::Request {
+            id: "viva.client-authenticate".into(),
+            method: crate::api::schema::Method::VivaClientAuthenticate(
+                crate::api::schema::VivaClientAuthenticateParams {
+                    credential: credential.clone(),
+                    process_lifetime: Some(peer_lifetime_marker(TransportPeer {
+                        pid: Some(std::process::id()),
+                        uid: None,
+                    })?),
+                },
+            ),
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "native client authentication readiness timed out",
+            ));
+        }
+        match ApiClient::local()
+            .request_value_with_timeout(&request, remaining)
+            .and_then(parse_response_value)
+        {
+            Ok(_) => return Ok(()),
+            Err(ApiClientError::ErrorResponse(error))
+                if error.error.code == "client_not_ready" && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            Err(ApiClientError::ErrorResponse(error))
+                if error.error.code == "untrusted_client"
+                    && Instant::now() < deadline
+                    && ctx
+                        .domain
+                        .client_credential()
+                        .is_ok_and(|latest| latest != credential) =>
+            {
+                // A stale file can be read just before the ready host atomically
+                // replaces it. Reload the changed proof; do not retry a bad key.
+                continue;
+            }
+            Err(error) => return Err(io::Error::other(error)),
+        }
+    }
 }
 
 pub struct Context {
@@ -162,6 +296,7 @@ fn admit_with_peer(
         method,
         "ping"
             | "viva.snapshot"
+            | "viva.client.authenticate"
             | "client_shell.surface.set"
             | "client.window_title.set"
             | "client.window_title.clear"

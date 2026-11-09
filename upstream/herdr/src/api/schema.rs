@@ -50,6 +50,8 @@ pub enum Method {
     // Viva modification: additive JSON API; not a named bincode core change.
     #[serde(rename = "viva.snapshot")]
     VivaSnapshot(EmptyParams),
+    #[serde(rename = "viva.client.authenticate")]
+    VivaClientAuthenticate(VivaClientAuthenticateParams),
     #[serde(rename = "server.stop")]
     ServerStop(EmptyParams),
     #[serde(rename = "server.live_handoff")]

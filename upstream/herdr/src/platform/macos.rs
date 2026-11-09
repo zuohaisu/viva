@@ -912,6 +912,16 @@ fn run_clipboard_command(command: &ClipboardCommand, bytes: &[u8]) -> bool {
     child.wait().map(|status| status.success()).unwrap_or(false)
 }
 
+// Viva modification: reuse kernel process metadata for PID-lifetime binding.
+// This is a lifetime marker, not a principal or authorization decision.
+pub(crate) fn process_lifetime_marker(pid: u32) -> Option<String> {
+    let info = process_bsdinfo(pid)?;
+    Some(format!(
+        "darwin:{pid}:{}:{}",
+        info.pbi_start_tvsec, info.pbi_start_tvusec
+    ))
+}
+
 fn process_bsdinfo(pid: u32) -> Option<libc::proc_bsdinfo> {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;

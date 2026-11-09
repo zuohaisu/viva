@@ -10,6 +10,19 @@ fn protocol_schema_entry<T: schemars::JsonSchema>(name: &str) -> serde_json::Val
     schema
 }
 
+#[test]
+fn viva_client_authentication_debug_redacts_capability() {
+    let request = Request {
+        id: "fixture".into(),
+        method: Method::VivaClientAuthenticate(VivaClientAuthenticateParams {
+            credential: "fixture-secret-never-debug".into(),
+            process_lifetime: Some("fixture-lifetime".into()),
+        }),
+    };
+    assert!(format!("{request:?}").contains("[REDACTED]"));
+    assert!(!format!("{request:?}").contains("fixture-secret-never-debug"));
+}
+
 fn rewrite_schema_refs(value: &mut serde_json::Value, schema_name: &str) {
     match value {
         serde_json::Value::Object(object) => {

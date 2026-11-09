@@ -359,6 +359,33 @@ fn handle_connection_with_stop(
     crate::logging::api_request_started(&request_id, method, changes_ui);
 
     match request.method {
+        Method::VivaClientAuthenticate(params) => {
+            match crate::embedding::authenticate_client(
+                &params.credential,
+                params.process_lifetime.as_deref(),
+                &stream,
+            ) {
+                Ok(()) => write_json_line_allow_disconnect(
+                    &mut stream,
+                    &SuccessResponse {
+                        id: request_id,
+                        result: ResponseResult::Ok {},
+                    },
+                ),
+                Err(error) => write_text_line_allow_disconnect(
+                    &mut stream,
+                    &error_response_json(
+                        request_id,
+                        if error.kind() == io::ErrorKind::WouldBlock {
+                            "client_not_ready"
+                        } else {
+                            "untrusted_client"
+                        },
+                        error.to_string(),
+                    ),
+                ),
+            }
+        }
         #[cfg(unix)]
         Method::ServerSshAgentRegister(params) => {
             let lease = ssh_agents
@@ -575,6 +602,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
     match method {
         Method::Ping(_) => "ping",
         Method::VivaSnapshot(_) => "viva.snapshot",
+        Method::VivaClientAuthenticate(_) => "viva.client.authenticate",
         Method::ServerStop(_) => "server.stop",
         Method::ServerLiveHandoff(_) => "server.live_handoff",
         Method::ServerReloadConfig(_) => "server.reload_config",

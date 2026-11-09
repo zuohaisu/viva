@@ -24,11 +24,11 @@ import fcntl
 import termios
 
 
-def rpc(home, method):
+def rpc(home, method, params=None):
     with socket.socket(socket.AF_UNIX) as connection:
         connection.settimeout(3)
         connection.connect(str(home / "runtime/workbench/herdr.sock"))
-        connection.sendall((json.dumps({"id": "native-fixture", "method": method, "params": {}}) + "\n").encode())
+        connection.sendall((json.dumps({"id": "native-fixture", "method": method, "params": params or {}}) + "\n").encode())
         with connection.makefile("rb") as source:
             return json.loads(source.readline())
 
@@ -108,6 +108,20 @@ def probe(binary):
             assert server_identity and str(binary) + " runtime server" in server_identity, "unexpected private host identity"
             packet["native_autospawn"] = True
             packet["canonical_domain_endpoint"] = True
+            invalid = rpc(home, "viva.client.authenticate", {"credential": "fixture-bootstrap-never-log", "claimed_role": "user"})
+            packet["invalid_capability_response_code"] = invalid.get("error", {}).get("code")
+            packet["invalid_capability_refused"] = packet["invalid_capability_response_code"] == "untrusted_client"
+            # A different, real same-UID process (this controller) has no client
+            # binding. EOF/reset is evidence; a timeout is NOT a refusal/PASS.
+            with socket.socket(socket.AF_UNIX) as unbound:
+                unbound.settimeout(1)
+                unbound.connect(str(runtime / "herdr-client.sock"))
+                try:
+                    packet["unbound_raw_client_refused"] = unbound.recv(1) == b""
+                except ConnectionResetError:
+                    packet["unbound_raw_client_refused"] = True
+                except socket.timeout:
+                    packet["unbound_raw_client_refused"] = False
             drain(2)
             # Command bytes do not contain the marker: seeing it in a rendered
             # frame proves execution output, not just PTY input echo.
@@ -157,6 +171,14 @@ def probe(binary):
             while time.monotonic() < deadline and client.poll() is None:
                 drain(.1)
             assert client.poll() == 0, "reattached client did not detach cleanly"
+            # Assertions come after actual PTY/reattach so the recorded pre-fix
+            # run can show working native input without credential admission.
+            assert packet["unbound_raw_client_refused"], "unbound same-UID raw client was not closed before hello/input"
+            assert packet["invalid_capability_refused"], "invalid capability did not receive the authentication refusal contract"
+            with sqlite3.connect(str(home / "viva.db")) as database:
+                rows = database.execute("SELECT payload FROM events WHERE kind='native_client_admitted'").fetchall()
+            packet["owner_frontend_admitted_processes"] = len({json.loads(row[0])["transport_peer"]["pid"] for row in rows})
+            assert packet["owner_frontend_admitted_processes"] >= 2, "initial and reattached frontends lack canonical admission evidence"
             packet["passed"] = True
         except Exception as error:
             packet["error"] = str(error)

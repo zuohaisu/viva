@@ -919,6 +919,13 @@ impl App {
         };
 
         let response = match request.method {
+            Method::VivaClientAuthenticate(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "connection_local_only",
+                    "Viva client authentication requires its actual transport connection",
+                )
+            }
             Method::VivaSnapshot(_) => match crate::embedding::snapshot() {
                 Ok(snapshot) => SuccessResponse {
                     id: request.id,

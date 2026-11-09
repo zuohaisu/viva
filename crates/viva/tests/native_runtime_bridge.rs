@@ -3,7 +3,7 @@
 #![cfg(all(feature = "herdr-runtime", unix))]
 use serde_json::{Value, json};
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     os::unix::net::UnixStream,
     path::Path,
     process::{Child, Command, Stdio},
@@ -118,6 +118,28 @@ fn actual_native_server_reads_canonical_facts_and_audits_unbound_refusals() {
     );
     assert_eq!(snapshot["tasks"][0]["task_id"], task.task_id.as_str());
     assert_eq!(snapshot["member_dispatch"], "not_integrated");
+    // Real same-UID socket, no host-issued capability: reject before hello/input.
+    let mut raw = UnixStream::connect(runtime.join("herdr-client.sock")).unwrap();
+    raw.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let mut byte = [0u8; 1];
+    match raw.read(&mut byte) {
+        Ok(0) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+        other => panic!("unbound raw client was not closed before protocol: {other:?}"),
+    }
+    let invalid = call(
+        home,
+        "viva.client.authenticate",
+        json!({"credential":"fixture-bootstrap-do-not-persist"}),
+    );
+    assert_eq!(invalid["error"]["code"], "untrusted_client", "{invalid}");
+    // The real frontend/PTY probe separately proves successful capability use.
+    use std::os::unix::fs::PermissionsExt;
+    let capability = runtime.join("owner-channel.json");
+    assert_eq!(
+        std::fs::metadata(&capability).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
     for method in ["server.stop", "server.live_handoff", "workspace.create"] {
         let params = if method == "server.live_handoff" {
             json!({"request_id":"forged", "member_id":"owner", "grant_id":"forged"})
@@ -165,6 +187,9 @@ fn actual_native_server_reads_canonical_facts_and_audits_unbound_refusals() {
     assert!(audit.contains("server.stop"), "{audit}");
     assert!(audit.contains("server.live_handoff"), "{audit}");
     assert!(audit.contains("workspace.create"), "{audit}");
+    assert!(audit.contains("native.raw_client"), "{audit}");
+    assert!(audit.contains("viva.client.authenticate"), "{audit}");
+    assert!(!audit.contains("fixture-bootstrap-do-not-persist"));
     assert!(!audit.contains("fixture-secret-do-not-persist"));
     assert!(!audit.contains("forged"));
     let peer: String = store.connection().query_row(
@@ -188,4 +213,78 @@ fn actual_native_server_reads_canonical_facts_and_audits_unbound_refusals() {
         vec![task]
     );
     assert!(runtime.join("herdr-client.sock").exists());
+}
+
+#[test]
+fn owner_only_preview_refuses_unbound_pending_execution_without_reconciling_it() {
+    use viva::foundation::records::{
+        AttributionSnapshot, ExecutionRecord, get_execution, insert_execution,
+    };
+    let temp = tempfile::Builder::new()
+        .prefix("vn-guard-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let home = temp.path();
+    let store = Store::open(&paths::database_path(home), viva::server::migrations()).unwrap();
+    let member = MemberRegistry::new(&store)
+        .register("pending fixture, no process")
+        .unwrap();
+    let task = TaskRegistry::new(&store)
+        .create_task(
+            "not a native dispatch",
+            vec![],
+            Some(member.member_id.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+    let execution = ExecutionRecord::start(
+        task.task_id.clone(),
+        AttributionSnapshot::capture(member.member_id, "fixture", "fixture", "fixture"),
+    );
+    insert_execution(&store, &execution).unwrap();
+    // Keep this original connection: reopening with Store::open would itself
+    // reconcile data and invalidate the no-reconciliation assertion.
+    let log_path = home.join("native.log");
+    let mut child = Fixture(
+        Command::new(env!("CARGO_BIN_EXE_viva"))
+            .args(["runtime", "server"])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("VIVA_HOME", home)
+            .env("HOME", home)
+            .env("SHELL", "/bin/sh")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(&log_path).unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "owner-only preview unexpectedly stayed active"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    assert!(!status.success());
+    assert!(
+        std::fs::read_to_string(&log_path)
+            .unwrap()
+            .contains("native member/process bindings are not integrated")
+    );
+    assert!(!home.join("runtime/workbench/owner-channel.json").exists());
+    assert!(!home.join("runtime/workbench/herdr-client.sock").exists());
+    assert_eq!(
+        get_execution(&store, &execution.execution_id).unwrap(),
+        Some(execution)
+    );
+    assert_eq!(
+        TaskRegistry::new(&store).get_task(&task.task_id).unwrap(),
+        Some(task)
+    );
 }

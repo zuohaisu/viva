@@ -4366,6 +4366,25 @@
           ],
           "type": "string"
         },
+        "VivaClientAuthenticateParams": {
+          "properties": {
+            "credential": {
+              "type": "string"
+            },
+            "process_lifetime": {
+              "default": null,
+              "description": "Compared with the OS fact, never accepted as identity on its own.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "credential"
+          ],
+          "type": "object"
+        },
         "WorkspaceCloseParams": {
           "properties": {
             "close_group": {
@@ -4705,6 +4724,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "viva.client.authenticate",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/VivaClientAuthenticateParams"
             }
           },
           "required": [

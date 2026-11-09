@@ -1,6 +1,8 @@
 //! Development-only native composition (#191). Herdr owns the PTYs and renderer;
 //! Viva owns member/task facts and refusal auditing. This is deliberately not
 //! wired to the installed default until authority and cross-backend import pass.
+mod client_authority;
+
 use crate::{
     foundation::{
         error::{Error, Result},
@@ -21,9 +23,17 @@ struct DomainBridge {
     home: PathBuf,
     host_id: String,
     store: Mutex<Option<Store>>,
+    clients: Mutex<client_authority::ClientAuthority>,
 }
 
 impl DomainBridge {
+    fn require_owner_only_phase(&self) -> io::Result<()> {
+        self.with_store(|store| {
+            let active: i64 = store.connection().query_row("SELECT (SELECT count(*) FROM executions WHERE status IN ('requested','running')) + (SELECT count(*) FROM worker_credentials WHERE status='active')", [], |row| row.get(0))?;
+            if active != 0 { return Err(Error::Validation("native member/process bindings are not integrated; owner frontend capability is refused while executions are pending/live or worker credentials remain active".into())); }
+            Ok(())
+        })
+    }
     fn with_store<T>(&self, f: impl FnOnce(&Store) -> Result<T>) -> io::Result<T> {
         let mut slot = self
             .store
@@ -60,7 +70,58 @@ impl herdr::embedding::DomainServices for DomainBridge {
                 payload: serde_json::json!({"pid": std::process::id(), "backend": "herdr-source-library", "state": "domain_attached_not_listener_ready"}),
             })?;
             Ok(())
-        })
+        })?;
+        // Do not seed even an ordinary shell beside unbound canonical work.
+        self.require_owner_only_phase()
+    }
+    fn server_ready(&self) -> io::Result<()> {
+        self.require_owner_only_phase()?;
+        self.clients
+            .lock()
+            .map_err(|_| io::Error::other("native client authority poisoned"))?
+            .activate(&self.host_id)
+    }
+    fn client_credential(&self) -> io::Result<String> {
+        client_authority::client_credential(&self.home)
+    }
+    fn authenticate_client(
+        &self,
+        credential: &str,
+        expected_lifetime: Option<&str>,
+        peer: herdr::embedding::TransportPeer,
+    ) -> io::Result<()> {
+        let result = self.require_owner_only_phase().and_then(|_| {
+            self.clients
+                .lock()
+                .map_err(|_| io::Error::other("native client authority poisoned"))?
+                .authenticate(credential, peer, expected_lifetime, |channel, lifetime| self.with_store(|store| {
+                    events::append(store, NewEvent {
+                        domain: crate::server::DOMAIN_HOST,
+                        kind: "native_client_admitted".into(),
+                        subject_type: "runtime_process".into(),
+                        subject_id: self.host_id.clone(),
+                        origin: "native_host".into(),
+                        payload: serde_json::json!({"authority": "host_issued_user_capability", "channel_id": channel.channel_id.as_str(), "process_lifetime": lifetime, "transport_peer": {"pid":peer.pid,"uid":peer.uid}, "state": "process_binding_admitted_not_human_or_current_fd_writer_proof"}),
+                    })?;
+                    Ok(())
+                }))
+        });
+        if result.is_err() {
+            self.refused("viva.client.authenticate", Some(peer))?;
+        }
+        result
+    }
+    fn validate_client(&self, peer: herdr::embedding::TransportPeer) -> io::Result<()> {
+        let result = self.require_owner_only_phase().and_then(|_| {
+            self.clients
+                .lock()
+                .map_err(|_| io::Error::other("native client authority poisoned"))?
+                .validate(peer)
+        });
+        if result.is_err() {
+            self.refused("native.raw_client", Some(peer))?;
+        }
+        result
     }
     fn snapshot(&self) -> io::Result<serde_json::Value> {
         self.with_store(|store| {
@@ -134,6 +195,7 @@ pub fn run(args: &[String]) -> Result<()> {
         arguments,
         child_prefix: vec!["runtime".into()],
         domain: Arc::new(DomainBridge {
+            clients: Mutex::new(client_authority::ClientAuthority::new(&home)),
             home,
             host_id: format!("native-{}", uuid::Uuid::new_v4().simple()),
             store: Mutex::new(None),
