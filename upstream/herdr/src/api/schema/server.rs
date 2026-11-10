@@ -17,6 +17,27 @@ impl std::fmt::Debug for VivaClientAuthenticateParams {
     }
 }
 
+// Viva modification: one canonical execution start, admitted only for a
+// host-issued owner frontend capability and checked against the canonical
+// grant/task/member by the composition root before any process is spawned.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct VivaExecutionStartParams {
+    pub task_id: String,
+    pub member_id: String,
+    pub grant_id: String,
+    pub request_key: String,
+    pub argv: Vec<String>,
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_id: Option<String>,
+}
+impl std::fmt::Debug for VivaExecutionStartParams {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // argv can carry credentials or task data; request Debug is not evidence.
+        formatter.write_str("VivaExecutionStartParams { task_id, member_id, grant_id, request_key, argv: [REDACTED], cwd, worktree_id }")
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ServerLiveHandoffParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]

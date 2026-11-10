@@ -52,6 +52,8 @@ pub enum Method {
     VivaSnapshot(EmptyParams),
     #[serde(rename = "viva.client.authenticate")]
     VivaClientAuthenticate(VivaClientAuthenticateParams),
+    #[serde(rename = "viva.execution.start")]
+    VivaExecutionStart(VivaExecutionStartParams),
     #[serde(rename = "server.stop")]
     ServerStop(EmptyParams),
     #[serde(rename = "server.live_handoff")]

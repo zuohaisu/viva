@@ -344,6 +344,40 @@ impl Workspace {
         )
     }
 
+    /// Viva modification: start one canonical execution command directly as
+    /// the pane's root process. This is only wired through the embedding
+    /// adapter; it is not exposed as a standalone workspace command.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_command(
+        initial_cwd: PathBuf,
+        rows: u16,
+        cols: u16,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
+        shell_config: crate::pane::PaneShellConfig<'_>,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<RenderSignal>,
+        argv: &[String],
+        extra_env: Vec<(String, String)>,
+    ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
+        Self::new_with_tab(
+            initial_cwd,
+            rows,
+            cols,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            host_terminal_appearance,
+            shell_config,
+            events,
+            render_notify,
+            render_dirty,
+            Some(argv),
+            extra_env,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new_with_tab(
         initial_cwd: PathBuf,

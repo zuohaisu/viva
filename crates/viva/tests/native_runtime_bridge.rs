@@ -117,7 +117,7 @@ fn actual_native_server_reads_canonical_facts_and_audits_unbound_refusals() {
         "Native fixture member"
     );
     assert_eq!(snapshot["tasks"][0]["task_id"], task.task_id.as_str());
-    assert_eq!(snapshot["member_dispatch"], "not_integrated");
+    assert_eq!(snapshot["member_dispatch"], "owner_gated_launch_spec");
     // Real same-UID socket, no host-issued capability: reject before hello/input.
     let mut raw = UnixStream::connect(runtime.join("herdr-client.sock")).unwrap();
     raw.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
@@ -175,7 +175,10 @@ fn actual_native_server_reads_canonical_facts_and_audits_unbound_refusals() {
     let recorded_host: String = store.connection().query_row(
         "SELECT subject_id FROM events WHERE kind='native_domain_attached' ORDER BY seq DESC LIMIT 1", [], |row| row.get(0)).unwrap();
     assert_eq!(snapshot["runtime_host_id"], recorded_host);
-    assert_eq!(snapshot["execution_attribution"], "not_integrated");
+    assert_eq!(
+        snapshot["execution_attribution"],
+        "pane_bound_owner_dispatch"
+    );
     let audit: String = store
         .connection()
         .query_row(

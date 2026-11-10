@@ -3581,6 +3581,7 @@ mod tests {
         state.handle_app_event(AppEvent::PaneDied {
             pane_id: bg_pane_id,
             exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_code: None,
         });
 
         assert!(state.pending_agent_notifications.is_empty());

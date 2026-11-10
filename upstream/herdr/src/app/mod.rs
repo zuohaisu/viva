@@ -3217,10 +3217,12 @@ mod tests {
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id: first_pane,
             exit_reason: crate::platform::ChildExitReason::Interrupted,
+            exit_code: None,
         });
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id: second_pane,
             exit_reason: crate::platform::ChildExitReason::Interrupted,
+            exit_code: None,
         });
         assert!(app.state.workspaces.is_empty());
         assert!(app.ensure_default_workspace());
@@ -3253,6 +3255,7 @@ mod tests {
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id,
             exit_reason: crate::platform::ChildExitReason::Interrupted,
+            exit_code: None,
         });
         assert!(crate::persist::load().is_some());
 
@@ -3287,6 +3290,7 @@ mod tests {
             app.handle_internal_event(AppEvent::PaneDied {
                 pane_id,
                 exit_reason: crate::platform::ChildExitReason::Interrupted,
+                exit_code: None,
             });
             app.state.workspaces = vec![Workspace::test_new("newer")];
             app.state.active = Some(0);
@@ -3296,6 +3300,7 @@ mod tests {
                 app.handle_internal_event(AppEvent::PaneDied {
                     pane_id: app.state.workspaces[0].tabs[0].root_pane,
                     exit_reason: crate::platform::ChildExitReason::Interrupted,
+                    exit_code: None,
                 });
             }
             app.save_session_on_shutdown();

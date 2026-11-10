@@ -143,6 +143,44 @@ impl App {
             self.render_dirty.clone(),
             extra_env,
         )?;
+        Ok(self.register_created_workspace(ws, terminal, runtime, focus))
+    }
+
+    /// Viva modification: spawn one execution argv as the root pane process.
+    /// The caller is responsible for the embedding admission and for telling
+    /// the Viva composition root that this process is a canonical execution.
+    pub(crate) fn create_workspace_with_command(
+        &mut self,
+        initial_cwd: PathBuf,
+        focus: bool,
+        extra_env: Vec<(String, String)>,
+        argv: &[String],
+    ) -> std::io::Result<usize> {
+        let (rows, cols) = self.state.new_pane_size(crate::ui::NewPanePlacement::Alone);
+        let (ws, terminal, runtime) = Workspace::new_with_command(
+            initial_cwd,
+            rows,
+            cols,
+            self.state.pane_scrollback_limit_bytes,
+            self.state.host_terminal_theme,
+            self.state.host_terminal_appearance,
+            crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
+            self.event_tx.clone(),
+            self.render_notify.clone(),
+            self.render_dirty.clone(),
+            argv,
+            extra_env,
+        )?;
+        Ok(self.register_created_workspace(ws, terminal, runtime, focus))
+    }
+
+    fn register_created_workspace(
+        &mut self,
+        ws: Workspace,
+        terminal: crate::terminal::TerminalState,
+        runtime: crate::terminal::TerminalRuntime,
+        focus: bool,
+    ) -> usize {
         self.terminal_runtimes.insert(terminal.id.clone(), runtime);
         self.state.terminals.insert(terminal.id.clone(), terminal);
         self.state.workspaces.push(ws);
@@ -157,7 +195,7 @@ impl App {
             self.state.mode = Mode::Terminal;
         }
         self.schedule_session_save();
-        Ok(idx)
+        idx
     }
 
     pub(super) fn collect_panes_for_workspace(

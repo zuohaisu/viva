@@ -21,7 +21,57 @@ pub trait DomainServices: Send + Sync {
     ) -> io::Result<()>;
     fn validate_client(&self, peer: TransportPeer) -> io::Result<()>;
     fn snapshot(&self) -> io::Result<serde_json::Value>;
+    /// Prepare one canonical execution. The composition root performs the
+    /// task/member/grant authority checks and records the intent BEFORE the
+    /// runtime spawns anything. `replayed` means never spawn a second process.
+    fn prepare_execution(&self, request: ExecutionRequest) -> io::Result<ExecutionPlan>;
+    /// Confirm the real OS child that is now running this execution.
+    fn execution_started(
+        &self,
+        execution_id: &str,
+        workspace_id: &str,
+        pane_id: &str,
+        terminal_id: &str,
+        pid: u32,
+    ) -> io::Result<()>;
+    /// The spawn failed after preparation: leave the execution unresolved.
+    fn execution_failed(&self, execution_id: &str) -> io::Result<()>;
+    /// A pane owned by an execution died. This is a process fact, never a
+    /// task completion and never inferred from screen contents.
+    fn execution_exited(
+        &self,
+        workspace_id: &str,
+        pane_id: &str,
+        exit_code: Option<i32>,
+    ) -> io::Result<()>;
     fn refused(&self, method: &'static str, peer: Option<TransportPeer>) -> io::Result<()>;
+}
+
+/// Domain facts required before a native process may start. The runtime does
+/// not authenticate these IDs itself; the composition root does.
+#[derive(Clone, Debug)]
+pub struct ExecutionRequest {
+    pub task_id: String,
+    pub member_id: String,
+    pub grant_id: String,
+    pub request_key: String,
+    pub argv: Vec<String>,
+    pub cwd: PathBuf,
+    pub worktree_id: Option<String>,
+}
+
+/// What the runtime may launch after canonical preparation. The environment
+/// deliberately carries context only; no grant or worker credential is issued
+/// until the member ingress exists.
+#[derive(Clone, Debug)]
+pub struct ExecutionPlan {
+    pub execution_id: String,
+    pub replayed: bool,
+    pub argv: Vec<String>,
+    pub cwd: PathBuf,
+    pub env: Vec<(String, String)>,
+    pub label: String,
+    pub existing_pid: Option<u32>,
 }
 
 /// OS-reported transport facts, NOT a member identity or owner credential.
@@ -258,6 +308,46 @@ pub(crate) fn snapshot() -> io::Result<serde_json::Value> {
         .snapshot()
 }
 
+pub(crate) fn prepare_execution(request: ExecutionRequest) -> io::Result<ExecutionPlan> {
+    context()
+        .ok_or_else(|| io::Error::other("Viva domain services are not embedded"))?
+        .domain
+        .prepare_execution(request)
+}
+
+pub(crate) fn execution_started(
+    execution_id: &str,
+    workspace_id: &str,
+    pane_id: &str,
+    terminal_id: &str,
+    pid: u32,
+) -> io::Result<()> {
+    context()
+        .ok_or_else(|| io::Error::other("Viva domain services are not embedded"))?
+        .domain
+        .execution_started(execution_id, workspace_id, pane_id, terminal_id, pid)
+}
+
+pub(crate) fn execution_failed(execution_id: &str) -> io::Result<()> {
+    context()
+        .ok_or_else(|| io::Error::other("Viva domain services are not embedded"))?
+        .domain
+        .execution_failed(execution_id)
+}
+
+pub(crate) fn execution_pane_exited(
+    workspace_id: &str,
+    pane_id: &str,
+    exit_code: Option<i32>,
+) -> io::Result<()> {
+    match context() {
+        Some(ctx) => ctx
+            .domain
+            .execution_exited(workspace_id, pane_id, exit_code),
+        None => Ok(()),
+    }
+}
+
 pub(crate) fn constrain_config(config: &mut crate::config::Config) {
     if enabled() {
         config.update.version_check = false;
@@ -302,6 +392,15 @@ fn admit_with_peer(
             | "client.window_title.clear"
     ) {
         return Ok(());
+    }
+    if method == "viva.execution.start" {
+        // The socket path must present the host-issued owner capability. The
+        // no-peer form is only the second gate after that admission (or the
+        // already-authenticated client-shell connection).
+        return match peer {
+            Some(peer) => ctx.domain.validate_client(peer),
+            None => Ok(()),
+        };
     }
     // Never accept caller/member/grant claims from pane metadata or JSON params.
     // Unknown automated ingress is unbound, NOT the owner. Log only the schema's
