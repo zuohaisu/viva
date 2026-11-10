@@ -585,3 +585,77 @@ fn two_members_and_two_tasks_get_distinct_pane_bound_executions() {
         assert_ne!(status, "done", "process exits never complete tasks");
     }
 }
+
+#[test]
+fn signal_exit_is_recorded_as_unknown_not_zero() {
+    let temp = tempfile::Builder::new()
+        .prefix("vn-exec-signal-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let home = temp.path();
+    let (member, task, grant) = {
+        let store = Store::open(&paths::database_path(home), viva::server::migrations()).unwrap();
+        let members = MemberRegistry::new(&store);
+        let member = members.register("native signal member").unwrap();
+        members.set_binding(&binding(&member.member_id)).unwrap();
+        let tasks = TaskRegistry::new(&store);
+        let task = tasks
+            .create_task(
+                "native signal task",
+                vec![],
+                Some(member.member_id.clone()),
+                None,
+                None,
+            )
+            .unwrap();
+        let grant = AuthorityEngine::new(&store)
+            .issue_root_grant(
+                Some(member.member_id.clone()),
+                Some(task.task_id.clone()),
+                vec!["dispatch_delegated".into()],
+                GrantMode::ActAutonomously,
+                None,
+            )
+            .unwrap();
+        (member, task, grant)
+    };
+    let _fixture = start_fixture(home);
+    authenticate(home);
+    let response = call(
+        home,
+        "viva.execution.start",
+        json!({
+            "task_id": task.task_id.as_str(),
+            "member_id": member.member_id.as_str(),
+            "grant_id": grant.grant_id.as_str(),
+            "request_key": "signal-key",
+            "argv": ["/bin/sh", "-c", "kill -TERM $$"],
+            "cwd": "/tmp",
+        }),
+    );
+    assert_eq!(response["result"]["replayed"], false, "{response}");
+    let execution_id = response["result"]["execution_id"].as_str().unwrap();
+    let (status, process_exit) = wait_execution_exit(home, execution_id);
+    assert_eq!(status, "stopped");
+    assert_eq!(process_exit, Some(-1));
+    let conn = db(home);
+    let payload: String = conn
+        .query_row(
+            "SELECT payload FROM events WHERE kind='native_execution_exited' AND subject_id=?1 ORDER BY seq DESC LIMIT 1",
+            [execution_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let payload: Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["exit_code"], Value::Null);
+    assert_eq!(payload["exit_code_known"], false);
+    assert_eq!(payload["stored_exit_sentinel"], -1);
+    let task_status: String = conn
+        .query_row(
+            "SELECT status FROM tasks WHERE task_id=?1",
+            [task.task_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_ne!(task_status, "done");
+}
