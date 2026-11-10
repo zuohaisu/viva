@@ -21,7 +21,7 @@
     },
     {
       "command": "ZIG=<zig 0.16.0> cargo +1.96.1 test --workspace --locked --features herdr-runtime --no-fail-fast -- --test-threads=2 --skip <five process-inspection tests>",
-      "result": "40 test targets ok, including 389 lib passed / 1 ignored and all 4 native execution tests. 3 targets still failed only because /bin/ps is blocked by this host environment (Operation not permitted): plugin_runtime, server_restore, v05_terminal. The same computer and server_restore failures were reproduced on base 2e11596; no test or timeout was weakened."
+      "result": "40 test targets ok, including 389 lib passed / 1 ignored and all 5 native execution tests. 3 targets still failed only because /bin/ps is blocked by this host environment (Operation not permitted): plugin_runtime, server_restore, v05_terminal. The same computer and server_restore failures were reproduced on base 2e11596; no test or timeout was weakened."
     },
     {
       "command": "cargo +1.96.1 clippy -p viva --features herdr-runtime --all-targets -- -D warnings; cargo +1.96.1 clippy --manifest-path upstream/herdr/Cargo.toml --all-targets -- -D warnings; cargo +1.96.1 clippy --all-targets -- -D warnings; cargo fmt --all -- --check; git diff --check",
