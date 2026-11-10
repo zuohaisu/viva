@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "issue": 191,
+  "code_commit": "1877f4a",
+  "base_commit": "70e16863",
+  "scope": "First member-initiated native ingress: the native host issues a MemberExecution channel + worker credential when it prepares a dispatch, delivers the credential only to the confirmed pane process environment, and accepts one canonical report action (member_report) when the real socket peer is that process or its descendant, the credential/channel/execution/member match, the execution is running, and the live grant includes member_report. This is NOT full member execution: no task completion, no terminal control, no AgentCli prompt/wait, no pane-output redaction, no stop/pause/resume, no cross-backend inheritance, default entry, packaging, install or UI acceptance.",
+  "existing_capability_and_gap": "Reused Core TaskRegistry::prepare_member_dispatch/confirm_launch/LaunchSpec, AuthorityEngine::issue_worker_credential/revoke_worker_credential/check_bound_worker_action, ChannelRegistry, canonical events, redaction::Redactor, and herdr's real pane PTY. The gap was that a spawned member process had no host-issued identity and no ingress at all; the owner gate refused native starts whenever any active worker credential existed.",
+  "behavior": "prepare_execution issues a MemberExecution channel and a worker credential bound to the new execution/member and returns them only through the child environment (VIVA_MEMBER_CHANNEL, VIVA_MEMBER_CREDENTIAL). The member CLI `viva runtime member report --status <progress|blocked|failed|done> [--detail <text>]` connects to the native socket and sends viva.member.report. The handler captures the real accepted-socket PID/UID, requires the peer UID to match the host, requires the peer PID to be the confirmed execution PID or a descendant (process lineage), re-verifies the confirmed OS start marker, then calls check_bound_worker_action with action member_report and the dispatch grant. On success it appends native_member_reported with execution/task/member/grant/channel/status and a credential-redacted detail. Refusals append native_member_report_refused with fixed reason markers and never the credential, detail or request body. The credential and channel are revoked on process exit and on failed start. The owner gate now accepts active credentials only for executions this host owns; foreign active credentials still refuse the host.",
+  "checks": [
+    {
+      "command": "cargo +1.96.1 test -p viva --locked --features herdr-runtime --test native_member_ingress -- --test-threads=1",
+      "result": "5 passed against the real binary: bound child report is canonical and attributed (status/member/task/grant/source), the credential is redacted from detail and revoked on exit, the task is never completed; an unrelated process holding a valid credential is refused with peer_not_bound_to_execution and no report event; a grant without member_report is refused and audited; a revoked credential cannot report after exit; a foreign active credential still refuses native host startup."
+    },
+    {
+      "command": "cargo +1.96.1 test -p viva --locked --features herdr-runtime --test native_execution --test native_runtime_bridge --test m1_terminal -- --test-threads=1",
+      "result": "12 passed (6 execution lifecycle + 2 bridge + 4 inherited PTY). No regression in owner dispatch, replay intent_state, close settlement or exit recording."
+    },
+    {
+      "command": "cargo +1.96.1 test -p viva --locked --features herdr-runtime --lib native_runtime::tests",
+      "result": "1 passed: close settlement still releases binding/owned and ignores duplicate close."
+    },
+    {
+      "command": "ZIG=<zig 0.16.0> cargo +1.96.1 test --workspace --locked --features herdr-runtime --no-fail-fast -- --test-threads=2 --skip <five process-inspection tests>",
+      "result": "41 test targets ok, including 390 lib passed / 1 ignored, 6 native_execution and 5 native_member_ingress. 3 targets still failed only because this host blocks /bin/ps (Operation not permitted): plugin_runtime, server_restore, v05_terminal. The same failures were reproduced on the #198 base; no test, timeout or assertion was weakened."
+    },
+    {
+      "command": "cargo +1.96.1 clippy -p viva --features herdr-runtime --all-targets -- -D warnings; cargo +1.96.1 clippy --manifest-path upstream/herdr/Cargo.toml --all-targets -- -D warnings; cargo +1.96.1 clippy --all-targets -- -D warnings; cargo fmt --all -- --check; git diff --check",
+      "result": "all exit 0"
+    },
+    {
+      "command": "ZIG=<zig 0.16.0> HERDR_UPDATE_API_SCHEMA=1 cargo +1.96.1 test --manifest-path upstream/herdr/Cargo.toml --lib generated_protocol_schema_artifact_is_current",
+      "result": "passed; herdr-api.schema.json gained 52 additive lines for viva.member.report and viva_member_reported"
+    }
+  ],
+  "negative_fixtures": "No credential; a valid credential used by an unrelated process (lineage refusal); a grant without the member_report action; a revoked credential after execution exit; a foreign active worker credential at host startup. All refusals are audited with fixed markers and no credential/detail/argv. The member client never accepts a credential on argv and never auto-starts a legacy server.",
+  "boundaries": [
+    "The credential is a bearer secret delivered through the process environment; same-UID processes can read it and process lineage is not an OS sandbox. Do not claim general worker isolation.",
+    "Only one member effect exists (progress/blocked/failed/done report). It never completes a task, never changes task status, and never writes task_results.",
+    "Detail redaction covers only the worker credential itself; general native output/persistence redaction and pane history remain disabled.",
+    "Process lineage and start-marker checks are implemented on macOS with libproc and on Linux via /proc; Linux is not executed by this evidence.",
+    "Native host restart leaves DB requested/running executions and active credentials unowned, so the preview still fails closed; no reconciliation.",
+    "Still open: AgentCli prompt/wait/report, terminal control, stop/pause/resume, cross-backend inheritance, default viva entry, release packaging/NOTICE/SBOM, install/update, Tailscale/x86_64, independent QA and human UI."
+  ],
+  "failures": "Local build used a temporary hash-verified Zig 0.16.0 and package cache because this host cannot fetch Zig artifacts; no repository pin, vendor file or lockfile changed. /bin/ps is blocked by this host, so the same five process-inspection tests were skipped and the same three integration targets failed as on the base; these are environment failures, not passes.",
+  "evidence": "research/herdr-191/member-ingress/ (test logs, full-suite log, schema log, source hashes)"
+}

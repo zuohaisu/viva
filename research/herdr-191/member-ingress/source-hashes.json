@@ -1,0 +1,18 @@
+{
+  ".github/workflows/ci.yml": "0bc5958430bd2e2c42375bbc678aa4ac06c924b4db2e0ef9699d3f20d4420eef",
+  "crates/viva/src/native_runtime.rs": "2a9160d262d510a61db74eddc754cc748bdda730d4ce3c208707200d161bdca7",
+  "crates/viva/src/native_runtime/client_authority/tests.rs": "71d8ac3dc758e0c1197568428829cde45ccd106dc3befc4e0cc187f6f5788ec4",
+  "crates/viva/tests/native_member_ingress.rs": "c6b83344d7102d0c3413e11049cd403957a5a8d91a668f312d30b8309ddce6a7",
+  "research/herdr-191/member-ingress/native-execution-regressions.log.gz": "9cb516b213990437d17b5f6d49c5b8619969f83efc007180bb7dd02a68b818ff",
+  "research/herdr-191/member-ingress/native-member-ingress-tests.log.gz": "cc674dbc645d86ec7037ccbb2e67189eb241df8a9022ed8df72a9532dc3ec0c3",
+  "research/herdr-191/member-ingress/native-runtime-unit.log.gz": "29dfbc3a4e83d67358d47c850651714ed1bdc4e65a187d1c8d64b555a0081426",
+  "research/herdr-191/member-ingress/native-workspace-with-env-skips.log.gz": "63f37a568528540e04d3c60241664b60c20ddd7a9f45c0f4c6761dc02d035e3c",
+  "research/herdr-191/member-ingress/schema-generation.log.gz": "d6e359856da50f17207d1272f8f555ded86a477071ace58e3c14fdcd08c06b67",
+  "research/herdr-191/member-ingress/validation.json": "951533eb8e43479bb651fa02220c90c0dc36cb50b2f02badf36b3f3ba212d224",
+  "upstream/herdr/docs/next/api/herdr-api.schema.json": "e44b9b5f2051a8316e217461245503670bc2f3509678256066ead74d50c274e1",
+  "upstream/herdr/src/api/schema.rs": "f17287f9370373004ea911e3b2c1fd945dbc06e967d097f637e3070304b0fc61",
+  "upstream/herdr/src/api/schema/response.rs": "8f7da71964d39e657fbead09d8f4bf094561d8f2ffc7267f3a5523dbd2fec9b7",
+  "upstream/herdr/src/api/schema/server.rs": "b850bd8bd7914b6d503fca7c29e407825adca12dcad6bf2e21594568c45cafd6",
+  "upstream/herdr/src/api/server.rs": "f9f9828a9fda5ab598fa94a111c8be09a21772e5dbe3ef4469674c570a9d0643",
+  "upstream/herdr/src/embedding.rs": "3e7992581c4d6e8f5112346f951046238305b270ed88156f49e22e2ca5ffdcfa"
+}
