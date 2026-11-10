@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "issue": 191,
-  "code_commit": "a437d59944a1764e069388d1cce9fb341cb58277",
+  "code_commit": "c41fe71d2a0c0f6ab9c704580df2d51312a6406e",
   "base_commit": "2e115967763aba6566460ee506616b728d8e03b7",
   "scope": "Owner-gated native dispatch now prepares one canonical Execution, spawns a real herdr pane child, confirms the OS pid/start marker and LaunchSpec, and records the real process exit. NOT member-initiated ingress, cross-backend takeover, default entry, packaging or human UI.",
   "existing_capability_and_gap": "Reuse Viva prepare_member_dispatch/confirm_launch/LaunchSpec/record_exit/record_result, the native owner-frontend capability, and herdr's real PTY/workspace. The gap was that no new-base path connected a canonical execution to a real pane process or its exit.",
@@ -9,7 +9,7 @@
   "checks": [
     {
       "command": "cargo +1.96.1 test -p viva --locked --features herdr-runtime --test native_execution -- --test-threads=1",
-      "result": "5 passed. Covers unbound client refusal before preparation; one canonical execution with real PID, LaunchSpec and exit 7; wrong-member grant refusal plus request-key replay; two members/two tasks with distinct pane-bound PIDs and exits 0/3; a signal exit recorded as -1 with exit_code_known=false. Neither task becomes done."
+      "result": "6 passed. Covers unbound client refusal; one canonical execution with real PID, LaunchSpec and exit 7; wrong-member grant refusal plus request-key replay; two members/two tasks with distinct pane-bound PIDs and exits 0/3; signal exit -1 with exit_code_known=false; deterministic spawn failure followed by a successful dispatch (owner gate not poisoned). Replays expose confirmed/exited intent_state."
     },
     {
       "command": "cargo +1.96.1 test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test m1_terminal -- --test-threads=1",
@@ -21,7 +21,7 @@
     },
     {
       "command": "ZIG=<zig 0.16.0> cargo +1.96.1 test --workspace --locked --features herdr-runtime --no-fail-fast -- --test-threads=2 --skip <five process-inspection tests>",
-      "result": "40 test targets ok, including 389 lib passed / 1 ignored and all 5 native execution tests. 3 targets still failed only because /bin/ps is blocked by this host environment (Operation not permitted): plugin_runtime, server_restore, v05_terminal. The same computer and server_restore failures were reproduced on base 2e11596; no test or timeout was weakened."
+      "result": "40 test targets ok, including 390 lib passed / 1 ignored and all 6 native execution tests. 3 targets still failed only because /bin/ps is blocked by this host environment (Operation not permitted): plugin_runtime, server_restore, v05_terminal. The same computer and server_restore failures were reproduced on base 2e11596; no test or timeout was weakened."
     },
     {
       "command": "cargo +1.96.1 clippy -p viva --features herdr-runtime --all-targets -- -D warnings; cargo +1.96.1 clippy --manifest-path upstream/herdr/Cargo.toml --all-targets -- -D warnings; cargo +1.96.1 clippy --all-targets -- -D warnings; cargo fmt --all -- --check; git diff --check",
@@ -30,6 +30,14 @@
     {
       "command": "ZIG=<zig 0.16.0> HERDR_UPDATE_API_SCHEMA=1 cargo +1.96.1 test --manifest-path upstream/herdr/Cargo.toml generated_protocol_schema_artifact_is_current",
       "result": "passed; herdr-api.schema.json gained 97 additive lines for viva.execution.start"
+    },
+    {
+      "command": "cargo +1.96.1 test -p viva --locked --features herdr-runtime --lib native_runtime::tests",
+      "result": "1 passed: unknown close settles the execution, releases by_execution/by_pane/owned, records exit -1/stopped, keeps task not done, and ignores a duplicate close with a real code."
+    },
+    {
+      "command": "cargo +1.96.1 test --manifest-path upstream/herdr/Cargo.toml close_workspace_reports_execution_panes_before_removal",
+      "result": "1 passed: workspace close resolves and reports every pane public identity before removing state."
     }
   ],
   "negative_fixtures": "Unbound same-UID API request is refused before canonical preparation; forged transport peer/role/member/grant claims are ignored; a grant issued to another member is refused and audited; a replayed request_key returns the original execution/pid without a second spawn; task status is not done after process exit; no argv or request key is written into refusal audit payloads.",
@@ -43,5 +51,14 @@
     "Release build/packaging/NOTICE/SBOM, actual install/update, Tailscale and macOS x86_64",
     "Independent QA of the current head, owner merge, corresponding main CI, MacBook Air installation and human UI"
   ],
-  "test_commit": "744bceb"
+  "test_commit": "744bceb",
+  "qa_fix_commit": "c41fe71d2a0c0f6ab9c704580df2d51312a6406e",
+  "qa_report": ".qa-tmp/pr198-independent-qa-report.md (independent QA, not part of the product tree)",
+  "qa_fixes": {
+    "F1": "Deliberate pane/tab/workspace close now resolves the public pane identity and calls execution_pane_exited(..., None) before the pane/workspace state is removed and the runtime is shut down. New tests: herdr close_workspace_reports_execution_panes_before_removal and Viva execution_exit_settles_and_releases_the_owned_binding (unknown exit -> stopped, binding/owned released, task not done, duplicate close is a no-op).",
+    "F2": "ExecutionPlan and viva.execution.start now carry intent_state. Fresh spawns report confirmed; replays report the recorded state (confirmed/exited/unresolved). Tests assert running replay = confirmed and post-exit replay = exited with the historical pid.",
+    "F3": "source-hashes.json regenerated after the final evidence content and excludes itself (a self-hash cannot be stable).",
+    "F4": "execution_failed keeps the execution in the host-owned set while its intent is unresolved, so a fast-exit/spawn-failure race cannot make owner_only_phase_locked reject every later native start. New deterministic test spawn_failure_does_not_poison_the_owner_gate.",
+    "F5": "PaneDied(Handoff) no longer calls execution_exited: a live PTY moved to another host is not a process exit. Currently unreachable in the embedded preview, but the guard is in place."
+  }
 }
