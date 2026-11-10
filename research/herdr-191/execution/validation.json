@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "issue": 191,
+  "code_commit": "a437d59944a1764e069388d1cce9fb341cb58277",
+  "base_commit": "2e115967763aba6566460ee506616b728d8e03b7",
+  "scope": "Owner-gated native dispatch now prepares one canonical Execution, spawns a real herdr pane child, confirms the OS pid/start marker and LaunchSpec, and records the real process exit. NOT member-initiated ingress, cross-backend takeover, default entry, packaging or human UI.",
+  "existing_capability_and_gap": "Reuse Viva prepare_member_dispatch/confirm_launch/LaunchSpec/record_exit/record_result, the native owner-frontend capability, and herdr's real PTY/workspace. The gap was that no new-base path connected a canonical execution to a real pane process or its exit.",
+  "behavior": "viva.execution.start is admitted only for a host-bound owner frontend on the actual socket peer. prepare_execution checks the persisted pause gate and canonical task/member/live-grant/principal/worktree/idempotency rules, then records the intent before any process exists. The runtime creates a pane whose root argv is the execution command (no shell interpolation), records the real child PID and OS start marker, inserts LaunchSpec and confirms the intent. Pane death reports the child exit code when the OS provides one; signal/unknown exits are recorded with the old -1 sentinel and exit_code_known=false. A process exit never completes a task. Spawn or confirmation failure closes the pane child and marks the intent unresolved.",
+  "checks": [
+    {
+      "command": "cargo +1.96.1 test -p viva --locked --features herdr-runtime --test native_execution -- --test-threads=1",
+      "result": "4 passed. Covers unbound client refusal before preparation; one canonical execution with real PID, LaunchSpec and exit 7; wrong-member grant refusal plus request-key replay; two members/two tasks with distinct pane-bound PIDs and exits 0/3."
+    },
+    {
+      "command": "cargo +1.96.1 test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test m1_terminal -- --test-threads=1",
+      "result": "6 passed (2 actual bridge + 4 inherited PTY). Existing preview snapshot now reports owner_gated_launch_spec / pane_bound_owner_dispatch."
+    },
+    {
+      "command": "cargo +1.96.1 test -p viva --locked --features herdr-runtime --no-run",
+      "result": "compiled the new integration test against the real feature build."
+    },
+    {
+      "command": "ZIG=<zig 0.16.0> cargo +1.96.1 test --workspace --locked --features herdr-runtime --no-fail-fast -- --test-threads=2 --skip <five process-inspection tests>",
+      "result": "40 test targets ok, including 389 lib passed / 1 ignored and all 4 native execution tests. 3 targets still failed only because /bin/ps is blocked by this host environment (Operation not permitted): plugin_runtime, server_restore, v05_terminal. The same computer and server_restore failures were reproduced on base 2e11596; no test or timeout was weakened."
+    },
+    {
+      "command": "cargo +1.96.1 clippy -p viva --features herdr-runtime --all-targets -- -D warnings; cargo +1.96.1 clippy --manifest-path upstream/herdr/Cargo.toml --all-targets -- -D warnings; cargo +1.96.1 clippy --all-targets -- -D warnings; cargo fmt --all -- --check; git diff --check",
+      "result": "all exit 0"
+    },
+    {
+      "command": "ZIG=<zig 0.16.0> HERDR_UPDATE_API_SCHEMA=1 cargo +1.96.1 test --manifest-path upstream/herdr/Cargo.toml generated_protocol_schema_artifact_is_current",
+      "result": "passed; herdr-api.schema.json gained 97 additive lines for viva.execution.start"
+    }
+  ],
+  "negative_fixtures": "Unbound same-UID API request is refused before canonical preparation; forged transport peer/role/member/grant claims are ignored; a grant issued to another member is refused and audited; a replayed request_key returns the original execution/pid without a second spawn; task status is not done after process exit; no argv or request key is written into refusal audit payloads.",
+  "failures": "Local build needed a temporary Zig dependency cache because this host cannot let Zig fetch Codeberg/gh-pages artifacts; no repository pin or vendor file was changed. The host also blocks /bin/ps (PermissionDenied), causing pre-existing process-inspection tests (tools::computer, f03_computer, plugin_runtime, server_restore, v05_terminal) to fail. The computer and server_restore failures were reproduced on base 2e11596. These are environment failures, not passes.",
+  "pending": [
+    "Real native MemberExecution/AgentCli credential issuance and process/descriptor-bound member ingress",
+    "Every automated ingress (JSON, client-shell input, hooks/CLI/plugin) through live grant checks and audit",
+    "Native output/persistence redaction; stop/pause/resume/定向 stop",
+    "Cross-backend old Viva -> Herdr automatic inheritance and failure recovery",
+    "Default viva entry switch and legacy renderer retirement",
+    "Release build/packaging/NOTICE/SBOM, actual install/update, Tailscale and macOS x86_64",
+    "Independent QA of the current head, owner merge, corresponding main CI, MacBook Air installation and human UI"
+  ]
+}
