@@ -547,6 +547,14 @@ impl herdr::embedding::DomainServices for DomainBridge {
             binding.worktree_id.clone(),
         );
         let marker = self.with_store(|store| {
+            // Read the OS start marker first: a command can exit immediately,
+            // and the earlier we read it the smaller the confirmation race.
+            let marker = process_start_marker(pid as i64).ok_or_else(|| {
+                Error::Validation(
+                    "cannot read the OS process start marker; refusing to confirm the launch"
+                        .into(),
+                )
+            })?;
             let record = get_execution(store, &execution)?.ok_or_else(|| Error::NotFound {
                 entity: "execution",
                 id: execution.to_string(),
@@ -574,12 +582,6 @@ impl herdr::embedding::DomainServices for DomainBridge {
                 spec = spec.in_worktree(WorktreeId::from_str(worktree)?);
             }
             records::insert_launch_spec(store, &spec)?;
-            let marker = process_start_marker(pid as i64).ok_or_else(|| {
-                Error::Validation(
-                    "cannot read the OS process start marker; refusing to confirm the launch"
-                        .into(),
-                )
-            })?;
             TaskRegistry::new(store).confirm_launch(&request_key, pid as i64, marker.clone())?;
             events::append(
                 store,

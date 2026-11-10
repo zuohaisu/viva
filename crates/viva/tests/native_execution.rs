@@ -749,7 +749,9 @@ fn spawn_failure_does_not_poison_the_owner_gate() {
             "member_id": member.member_id.as_str(),
             "grant_id": grant.grant_id.as_str(),
             "request_key": "good-after-failure",
-            "argv": ["/bin/sh", "-c", "exit 0"],
+            // A zero-lifetime command can be gone before its start marker is
+            // readable; this test is about the owner gate, not that race.
+            "argv": ["/bin/sh", "-c", "sleep 0.2; exit 0"],
             "cwd": "/tmp",
         }),
     );
