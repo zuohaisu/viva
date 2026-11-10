@@ -4385,6 +4385,46 @@
           ],
           "type": "object"
         },
+        "VivaExecutionStartParams": {
+          "properties": {
+            "argv": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "grant_id": {
+              "type": "string"
+            },
+            "member_id": {
+              "type": "string"
+            },
+            "request_key": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": "string"
+            },
+            "worktree_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "task_id",
+            "member_id",
+            "grant_id",
+            "request_key",
+            "argv",
+            "cwd"
+          ],
+          "type": "object"
+        },
         "WorkspaceCloseParams": {
           "properties": {
             "close_group": {
@@ -4740,6 +4780,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/VivaClientAuthenticateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "viva.execution.start",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/VivaExecutionStartParams"
             }
           },
           "required": [
@@ -10466,6 +10522,52 @@
               "required": [
                 "type",
                 "snapshot"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "One canonical execution whose process was actually spawned in a pane.\n`pid` is the OS child PID, never a pane or screen claim.",
+              "properties": {
+                "execution_id": {
+                  "type": "string"
+                },
+                "intent_state": {
+                  "description": "Intent state: `confirmed` for a fresh spawn, otherwise the recorded\nstate (`exited`, `unresolved`, ...). A replayed pid is historical.",
+                  "type": "string"
+                },
+                "pane_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "pid": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "replayed": {
+                  "type": "boolean"
+                },
+                "type": {
+                  "const": "viva_execution_started",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "execution_id",
+                "replayed",
+                "intent_state"
               ],
               "type": "object"
             },

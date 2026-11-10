@@ -10,6 +10,7 @@ pub(crate) mod plugins;
 pub(super) mod responses;
 mod session;
 mod tabs;
+mod viva;
 mod workspaces;
 mod worktrees;
 
@@ -103,6 +104,7 @@ impl App {
                 AppEvent::PaneDied {
                     pane_id,
                     exit_reason: crate::platform::ChildExitReason::Exited,
+                    exit_code: None,
                 }
             }
             ev => ev,
@@ -244,6 +246,7 @@ impl App {
             AppEvent::PaneDied {
                 pane_id,
                 exit_reason,
+                ..
             } if exit_reason.requires_session_checkpoint() && self.find_pane(*pane_id).is_some() && !self.overlay_panes.contains_key(pane_id)
         );
         if checkpointed_pane_exit {
@@ -274,14 +277,38 @@ impl App {
             None
         };
 
-        if let AppEvent::PaneDied { pane_id, .. } = &ev {
+        if let AppEvent::PaneDied {
+            pane_id,
+            exit_reason,
+            exit_code,
+            ..
+        } = &ev
+        {
             if let Some((ws_idx, _)) = self.find_pane(*pane_id) {
                 if let Some(public_pane_id) = self.public_pane_id(ws_idx, *pane_id) {
+                    let workspace_id = self.public_workspace_id(ws_idx);
+                    // Viva modification: report the real child exit to the
+                    // canonical execution before the pane disappears. A live
+                    // handoff moves a still-running PTY to another host; it is
+                    // not a process exit and must not settle the execution.
+                    if !matches!(exit_reason, crate::platform::ChildExitReason::Handoff) {
+                        if let Err(err) = crate::embedding::execution_pane_exited(
+                            &workspace_id,
+                            &public_pane_id,
+                            *exit_code,
+                        ) {
+                            tracing::error!(
+                                pane = %public_pane_id,
+                                err = %err,
+                                "failed to record native execution exit"
+                            );
+                        }
+                    }
                     self.emit_event(crate::api::schema::EventEnvelope {
                         event: crate::api::schema::EventKind::PaneExited,
                         data: crate::api::schema::EventData::PaneExited {
                             pane_id: public_pane_id,
-                            workspace_id: self.public_workspace_id(ws_idx),
+                            workspace_id,
                         },
                     });
                 }
@@ -925,6 +952,9 @@ impl App {
                     "connection_local_only",
                     "Viva client authentication requires its actual transport connection",
                 )
+            }
+            Method::VivaExecutionStart(params) => {
+                return self.handle_viva_execution_start(request.id, params)
             }
             Method::VivaSnapshot(_) => match crate::embedding::snapshot() {
                 Ok(snapshot) => SuccessResponse {
@@ -2021,6 +2051,7 @@ mod tests {
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id: overlay_pane,
             exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_code: None,
         });
 
         let overlay_tab = &app.state.workspaces[0].tabs[0];
@@ -2050,6 +2081,7 @@ mod tests {
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id: dead_pane,
             exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_code: None,
         });
 
         let events = event_hub.events_after(0);
@@ -2208,6 +2240,7 @@ mod tests {
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id: overlay_pane,
             exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_code: None,
         });
 
         let events = event_hub.events_after(0);
@@ -2234,6 +2267,7 @@ mod tests {
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id: overlay_pane,
             exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_code: None,
         });
 
         let tab = &app.state.workspaces[0].tabs[0];
@@ -2254,6 +2288,7 @@ mod tests {
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id: overlay_pane,
             exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_code: None,
         });
 
         let tab = &app.state.workspaces[0].tabs[0];
@@ -2296,6 +2331,7 @@ mod tests {
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id,
             exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_code: None,
         });
 
         assert!(

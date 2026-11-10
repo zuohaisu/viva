@@ -668,11 +668,88 @@ impl AppState {
         self.close_workspaces(close_indices);
     }
 
+    /// Viva modification: resolve the public identity of panes while their
+    /// workspace state still exists. The close paths remove this state before
+    /// shutting down the runtime, so this must happen first.
+    pub(crate) fn execution_exit_targets_for_panes(
+        &self,
+        panes: impl IntoIterator<Item = (usize, PaneId)>,
+    ) -> Vec<(String, String)> {
+        let mut targets = Vec::new();
+        for (ws_idx, pane_id) in panes {
+            let Some(ws) = self.workspaces.get(ws_idx) else {
+                continue;
+            };
+            let Some(number) = ws.public_pane_number(pane_id) else {
+                continue;
+            };
+            let workspace_id = ws.id.clone();
+            let public_pane_id = crate::workspace::public_pane_id_for_number(&workspace_id, number);
+            targets.push((workspace_id, public_pane_id));
+        }
+        targets
+    }
+
+    /// Viva modification: report the deliberate close of every pane before its
+    /// state disappears. Closing kills the pane runtime, so this is a real
+    /// process termination; the exact signal/code is unknown at this layer.
+    /// `execution_exited` is idempotent for non-execution panes.
+    pub(crate) fn record_execution_exits_for_panes(
+        &self,
+        panes: impl IntoIterator<Item = (usize, PaneId)>,
+    ) {
+        for (workspace_id, public_pane_id) in self.execution_exit_targets_for_panes(panes) {
+            if let Err(err) =
+                crate::embedding::execution_pane_exited(&workspace_id, &public_pane_id, None)
+            {
+                tracing::error!(
+                    workspace = %workspace_id,
+                    pane = %public_pane_id,
+                    err = %err,
+                    "failed to record execution pane close"
+                );
+            }
+        }
+    }
+
     pub(crate) fn close_workspaces(&mut self, close_indices: Vec<usize>) {
+        self.close_workspaces_with_notify(
+            close_indices,
+            |workspace_id, public_pane_id, exit_code| {
+                if let Err(err) =
+                    crate::embedding::execution_pane_exited(workspace_id, public_pane_id, exit_code)
+                {
+                    tracing::error!(
+                        workspace = %workspace_id,
+                        pane = %public_pane_id,
+                        err = %err,
+                        "failed to record execution pane close"
+                    );
+                }
+            },
+        );
+    }
+
+    fn close_workspaces_with_notify(
+        &mut self,
+        close_indices: Vec<usize>,
+        mut notify: impl FnMut(&str, &str, Option<i32>),
+    ) {
         if self.workspaces.is_empty() {
             return;
         }
         self.mark_session_dirty();
+        let closing_panes = close_indices
+            .iter()
+            .flat_map(|idx| {
+                self.pane_ids_for_workspace(*idx)
+                    .into_iter()
+                    .map(move |pane| (*idx, pane))
+            })
+            .collect::<Vec<_>>();
+        for (workspace_id, public_pane_id) in self.execution_exit_targets_for_panes(closing_panes) {
+            notify(&workspace_id, &public_pane_id, None);
+        }
 
         let mut terminal_ids = Vec::new();
         let mut pane_ids = Vec::new();
@@ -2828,6 +2905,25 @@ mod tests {
     }
 
     #[test]
+    fn close_workspace_reports_execution_panes_before_removal() {
+        let mut state = app_with_workspaces(&["a", "b"]);
+        let workspace_id = state.workspaces[1].id.clone();
+        let mut seen = Vec::new();
+        state.close_workspaces_with_notify(vec![1], |workspace, pane, code| {
+            seen.push((workspace.to_string(), pane.to_string(), code));
+        });
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].0, workspace_id);
+        assert!(
+            seen[0].1.starts_with(&format!("{workspace_id}:p")),
+            "{}",
+            seen[0].1
+        );
+        assert_eq!(seen[0].2, None);
+        assert_eq!(state.workspaces.len(), 1);
+    }
+
+    #[test]
     fn close_parent_worktree_workspace_closes_group() {
         let mut state = app_with_workspaces(&["main", "issue", "notes"]);
         state.workspaces[0].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
@@ -3581,6 +3677,7 @@ mod tests {
         state.handle_app_event(AppEvent::PaneDied {
             pane_id: bg_pane_id,
             exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_code: None,
         });
 
         assert!(state.pending_agent_notifications.is_empty());

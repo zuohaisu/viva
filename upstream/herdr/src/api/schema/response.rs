@@ -281,6 +281,21 @@ pub enum ResponseResult {
     VivaSnapshot {
         snapshot: serde_json::Value,
     },
+    /// One canonical execution whose process was actually spawned in a pane.
+    /// `pid` is the OS child PID, never a pane or screen claim.
+    VivaExecutionStarted {
+        execution_id: String,
+        replayed: bool,
+        /// Intent state: `confirmed` for a fresh spawn, otherwise the recorded
+        /// state (`exited`, `unresolved`, ...). A replayed pid is historical.
+        intent_state: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pid: Option<u32>,
+    },
     Ok {},
 }
 

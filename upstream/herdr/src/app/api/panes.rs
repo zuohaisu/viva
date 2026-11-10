@@ -1981,6 +1981,10 @@ impl App {
         }
         let workspace_snapshot = self.workspace_info(ws_idx);
         let terminal_id = self.state.terminal_id_for_pane(ws_idx, pane_id);
+        // The pane state is removed before its runtime is shut down; report the
+        // deliberate termination while the public identity still resolves.
+        self.state
+            .record_execution_exits_for_panes([(ws_idx, pane_id)]);
         let should_close_workspace = {
             let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
                 return Err(pane_not_found(id, &target.pane_id));
