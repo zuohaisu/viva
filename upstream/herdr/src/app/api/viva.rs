@@ -44,6 +44,7 @@ impl App {
                 ResponseResult::VivaExecutionStarted {
                     execution_id: plan.execution_id,
                     replayed: true,
+                    intent_state: plan.intent_state,
                     workspace_id: None,
                     pane_id: None,
                     pid: plan.existing_pid,
@@ -108,6 +109,7 @@ impl App {
             ResponseResult::VivaExecutionStarted {
                 execution_id: plan.execution_id,
                 replayed: false,
+                intent_state: "confirmed".into(),
                 workspace_id: Some(workspace_id),
                 pane_id: Some(public_pane_id),
                 pid: Some(pid),

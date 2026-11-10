@@ -286,6 +286,9 @@ pub enum ResponseResult {
     VivaExecutionStarted {
         execution_id: String,
         replayed: bool,
+        /// Intent state: `confirmed` for a fresh spawn, otherwise the recorded
+        /// state (`exited`, `unresolved`, ...). A replayed pid is historical.
+        intent_state: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workspace_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

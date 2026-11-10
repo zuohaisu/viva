@@ -67,6 +67,10 @@ pub struct ExecutionRequest {
 pub struct ExecutionPlan {
     pub execution_id: String,
     pub replayed: bool,
+    /// Intent state at the time of the replay (`confirmed`, `exited`, ...);
+    /// freshly prepared plans report `intended` and the handler reports the
+    /// post-spawn `confirmed` state.
+    pub intent_state: String,
     pub argv: Vec<String>,
     pub cwd: PathBuf,
     pub env: Vec<(String, String)>,

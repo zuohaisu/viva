@@ -278,25 +278,31 @@ impl App {
         };
 
         if let AppEvent::PaneDied {
-            pane_id, exit_code, ..
+            pane_id,
+            exit_reason,
+            exit_code,
+            ..
         } = &ev
         {
             if let Some((ws_idx, _)) = self.find_pane(*pane_id) {
                 if let Some(public_pane_id) = self.public_pane_id(ws_idx, *pane_id) {
                     let workspace_id = self.public_workspace_id(ws_idx);
                     // Viva modification: report the real child exit to the
-                    // canonical execution before the pane disappears. This is
-                    // a process fact, not a task completion or screen claim.
-                    if let Err(err) = crate::embedding::execution_pane_exited(
-                        &workspace_id,
-                        &public_pane_id,
-                        *exit_code,
-                    ) {
-                        tracing::error!(
-                            pane = %public_pane_id,
-                            err = %err,
-                            "failed to record native execution exit"
-                        );
+                    // canonical execution before the pane disappears. A live
+                    // handoff moves a still-running PTY to another host; it is
+                    // not a process exit and must not settle the execution.
+                    if !matches!(exit_reason, crate::platform::ChildExitReason::Handoff) {
+                        if let Err(err) = crate::embedding::execution_pane_exited(
+                            &workspace_id,
+                            &public_pane_id,
+                            *exit_code,
+                        ) {
+                            tracing::error!(
+                                pane = %public_pane_id,
+                                err = %err,
+                                "failed to record native execution exit"
+                            );
+                        }
                     }
                     self.emit_event(crate::api::schema::EventEnvelope {
                         event: crate::api::schema::EventKind::PaneExited,

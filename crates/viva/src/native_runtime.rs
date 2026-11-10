@@ -318,6 +318,7 @@ impl herdr::embedding::DomainServices for DomainBridge {
                     Ok(ExecutionPlan {
                         execution_id: execution_id.to_string(),
                         replayed: true,
+                        intent_state: intent.state.as_str().to_string(),
                         argv: Vec::new(),
                         cwd: PathBuf::new(),
                         env: Vec::new(),
@@ -359,6 +360,7 @@ impl herdr::embedding::DomainServices for DomainBridge {
                     Ok(ExecutionPlan {
                         execution_id: execution_id.to_string(),
                         replayed: false,
+                        intent_state: "intended".to_string(),
                         argv: request.argv,
                         cwd: request.cwd,
                         env: vec![
@@ -480,7 +482,10 @@ impl herdr::embedding::DomainServices for DomainBridge {
         let Some(binding) = state.by_execution.remove(execution_id) else {
             return Ok(());
         };
-        state.owned.remove(execution_id);
+        // Keep this execution in `owned`: it was prepared by this host and its
+        // intent is now unresolved. Forgetting it here would make the owner
+        // gate reject every later native start as an "unowned" execution.
+        // A later process exit (if any) is still allowed to be unknown.
         if let (Some(workspace_id), Some(pane_id)) = (&binding.workspace_id, &binding.pane_id) {
             state
                 .by_pane
@@ -684,4 +689,143 @@ pub fn run(args: &[String]) -> Result<()> {
         }),
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::authority::{AuthorityEngine, GrantMode};
+    use crate::members::{MemberBinding, MemberRegistry};
+    use crate::tasks::{DispatchRequest, ExecutionStart, TaskRegistry};
+    use herdr::embedding::DomainServices;
+
+    #[test]
+    fn execution_exit_settles_and_releases_the_owned_binding() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let store = Store::open(&paths::database_path(home), crate::server::migrations()).unwrap();
+        let members = MemberRegistry::new(&store);
+        let member = members.register("exit fixture").unwrap();
+        members
+            .set_binding(&MemberBinding {
+                member_id: member.member_id.clone(),
+                role: "exit fixture".into(),
+                model_binding: "fixture:model".into(),
+                tools: vec!["fixture-tool".into()],
+                updated_at: utc_now(),
+            })
+            .unwrap();
+        let tasks = TaskRegistry::new(&store);
+        let task = tasks
+            .create_task(
+                "exit fixture task",
+                vec![],
+                Some(member.member_id.clone()),
+                None,
+                None,
+            )
+            .unwrap();
+        let grant = AuthorityEngine::new(&store)
+            .issue_root_grant(
+                Some(member.member_id.clone()),
+                Some(task.task_id.clone()),
+                vec!["dispatch_delegated".into()],
+                GrantMode::ActAutonomously,
+                None,
+            )
+            .unwrap();
+        let start = tasks
+            .prepare_member_dispatch(DispatchRequest {
+                task_id: &task.task_id,
+                member_id: &member.member_id,
+                grant_id: &grant.grant_id,
+                request_key: "exit-fixture",
+                cwd: std::path::Path::new("/tmp"),
+                worktree_id: None,
+            })
+            .unwrap();
+        let ExecutionStart::Created(intent) = start else {
+            panic!("expected a fresh intent");
+        };
+        let execution_id = intent.execution_id.clone().unwrap();
+        tasks
+            .confirm_launch(
+                &intent.request_key,
+                std::process::id() as i64,
+                "fixture-marker",
+            )
+            .unwrap();
+        let binding = ExecutionBinding {
+            execution_id: execution_id.clone(),
+            task_id: task.task_id.clone(),
+            member_id: member.member_id.clone(),
+            grant_id: grant.grant_id.clone(),
+            request_key: intent.request_key.clone(),
+            argv: vec!["/bin/true".into()],
+            cwd: PathBuf::from("/tmp"),
+            worktree_id: None,
+            workspace_id: Some("ws-fixture".into()),
+            pane_id: Some("pane-fixture".into()),
+        };
+        let bridge = DomainBridge {
+            home: home.to_path_buf(),
+            host_id: "native-exit-fixture".into(),
+            store: Mutex::new(Some(store)),
+            clients: Mutex::new(client_authority::ClientAuthority::new(home)),
+            executions: Mutex::new(NativeExecutionState {
+                by_execution: HashMap::from([(execution_id.to_string(), binding)]),
+                by_pane: HashMap::from([(
+                    ("ws-fixture".into(), "pane-fixture".into()),
+                    execution_id.to_string(),
+                )]),
+                owned: HashSet::from([execution_id.to_string()]),
+            }),
+        };
+
+        bridge
+            .execution_exited("ws-fixture", "pane-fixture", None)
+            .unwrap();
+        // A duplicate close notification must be a no-op, not a second write.
+        bridge
+            .execution_exited("ws-fixture", "pane-fixture", Some(0))
+            .unwrap();
+
+        bridge
+            .with_store(|store| {
+                let (status, exit): (String, Option<i64>) = store
+                    .connection()
+                    .query_row(
+                        "SELECT status, process_exit FROM executions WHERE execution_id=?1",
+                        [execution_id.as_str()],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(status, "stopped");
+                assert_eq!(exit, Some(-1));
+                let intent_state: String = store
+                    .connection()
+                    .query_row(
+                        "SELECT state FROM launch_intents WHERE request_key='exit-fixture'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(intent_state, "exited");
+                let task_status: String = store
+                    .connection()
+                    .query_row(
+                        "SELECT status FROM tasks WHERE task_id=?1",
+                        [task.task_id.as_str()],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_ne!(task_status, "done");
+                Ok(())
+            })
+            .unwrap();
+        let state = bridge.executions.lock().unwrap();
+        assert!(state.by_execution.is_empty());
+        assert!(state.by_pane.is_empty());
+        assert!(state.owned.is_empty());
+    }
 }

@@ -353,6 +353,23 @@ fn owner_dispatch_spawns_a_canonical_execution_and_records_the_real_exit() {
     let exited_event: Value = serde_json::from_str(&exited_event).unwrap();
     assert_eq!(exited_event["exit_code"], 7);
     assert_eq!(exited_event["exit_code_known"], true);
+
+    // A replay must expose the recorded intent state, not imply a live pid.
+    let replay = call(
+        home,
+        "viva.execution.start",
+        json!({
+            "task_id": task.task_id.as_str(),
+            "member_id": member.member_id.as_str(),
+            "grant_id": grant.grant_id.as_str(),
+            "request_key": "live-key",
+            "argv": ["/bin/sh", "-c", "exit 9"],
+            "cwd": "/tmp",
+        }),
+    );
+    assert_eq!(replay["result"]["replayed"], true, "{replay}");
+    assert_eq!(replay["result"]["intent_state"], "exited", "{replay}");
+    assert_eq!(replay["result"]["pid"], pid);
 }
 
 #[test]
@@ -658,4 +675,87 @@ fn signal_exit_is_recorded_as_unknown_not_zero() {
         )
         .unwrap();
     assert_ne!(task_status, "done");
+}
+
+#[test]
+fn spawn_failure_does_not_poison_the_owner_gate() {
+    let temp = tempfile::Builder::new()
+        .prefix("vn-exec-spawnfail-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let home = temp.path();
+    let (member, task, grant) = {
+        let store = Store::open(&paths::database_path(home), viva::server::migrations()).unwrap();
+        let members = MemberRegistry::new(&store);
+        let member = members.register("native spawn failure member").unwrap();
+        members.set_binding(&binding(&member.member_id)).unwrap();
+        let tasks = TaskRegistry::new(&store);
+        let task = tasks
+            .create_task(
+                "native spawn failure task",
+                vec![],
+                Some(member.member_id.clone()),
+                None,
+                None,
+            )
+            .unwrap();
+        let grant = AuthorityEngine::new(&store)
+            .issue_root_grant(
+                Some(member.member_id.clone()),
+                Some(task.task_id.clone()),
+                vec!["dispatch_delegated".into()],
+                GrantMode::ActAutonomously,
+                None,
+            )
+            .unwrap();
+        (member, task, grant)
+    };
+    let _fixture = start_fixture(home);
+    authenticate(home);
+
+    let failed = call(
+        home,
+        "viva.execution.start",
+        json!({
+            "task_id": task.task_id.as_str(),
+            "member_id": member.member_id.as_str(),
+            "grant_id": grant.grant_id.as_str(),
+            "request_key": "bad-spawn",
+            "argv": ["/definitely/not/a/real/viva-executable"],
+            "cwd": "/tmp",
+        }),
+    );
+    assert_eq!(
+        failed["error"]["code"], "execution_spawn_failed",
+        "{failed}"
+    );
+    let conn = db(home);
+    let (status, intent_state): (String, String) = conn
+        .query_row(
+            "SELECT e.status, i.state FROM executions e JOIN launch_intents i
+             ON e.execution_id = i.execution_id WHERE i.request_key='bad-spawn'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "requested");
+    assert_eq!(intent_state, "unresolved");
+    // An unresolved execution owned by this host must not block the next start.
+    let good = call(
+        home,
+        "viva.execution.start",
+        json!({
+            "task_id": task.task_id.as_str(),
+            "member_id": member.member_id.as_str(),
+            "grant_id": grant.grant_id.as_str(),
+            "request_key": "good-after-failure",
+            "argv": ["/bin/sh", "-c", "exit 0"],
+            "cwd": "/tmp",
+        }),
+    );
+    assert_eq!(good["result"]["replayed"], false, "{good}");
+    let execution_id = good["result"]["execution_id"].as_str().unwrap();
+    let (status, process_exit) = wait_execution_exit(home, execution_id);
+    assert_eq!(status, "stopped");
+    assert_eq!(process_exit, Some(0));
 }

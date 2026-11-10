@@ -10531,6 +10531,10 @@
                 "execution_id": {
                   "type": "string"
                 },
+                "intent_state": {
+                  "description": "Intent state: `confirmed` for a fresh spawn, otherwise the recorded\nstate (`exited`, `unresolved`, ...). A replayed pid is historical.",
+                  "type": "string"
+                },
                 "pane_id": {
                   "type": [
                     "string",
@@ -10562,7 +10566,8 @@
               "required": [
                 "type",
                 "execution_id",
-                "replayed"
+                "replayed",
+                "intent_state"
               ],
               "type": "object"
             },

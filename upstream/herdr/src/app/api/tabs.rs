@@ -231,6 +231,10 @@ impl App {
             .get(tab_idx)
             .map(|tab| tab.layout.pane_ids())
             .unwrap_or_default();
+        // Report deliberate pane termination before the tab/workspace state is
+        // removed and its runtime is shut down.
+        self.state
+            .record_execution_exits_for_panes(pane_ids.iter().map(|pane| (ws_idx, *pane)));
 
         if closes_workspace {
             if self.state.confirm_implicit_worktree_group_close(ws_idx) {
