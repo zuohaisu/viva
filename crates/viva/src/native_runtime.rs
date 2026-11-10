@@ -2,6 +2,8 @@
 //! Viva owns member/task facts and refusal auditing. This is deliberately not
 //! wired to the installed default until authority and cross-backend import pass.
 mod client_authority;
+#[cfg(test)]
+mod legacy_import;
 
 use crate::{
     authority::AuthorityEngine,
