@@ -214,6 +214,26 @@ impl App {
     }
 
     pub(super) fn handle_tab_close(&mut self, id: String, target: TabTarget) -> String {
+        self.handle_tab_close_with_notify(id, target, |workspace_id, public_pane_id, exit_code| {
+            if let Err(err) =
+                crate::embedding::execution_pane_exited(workspace_id, public_pane_id, exit_code)
+            {
+                tracing::error!(
+                    workspace = %workspace_id,
+                    pane = %public_pane_id,
+                    err = %err,
+                    "failed to record execution pane close"
+                );
+            }
+        })
+    }
+
+    fn handle_tab_close_with_notify(
+        &mut self,
+        id: String,
+        target: TabTarget,
+        mut notify: impl FnMut(&str, &str, Option<i32>),
+    ) -> String {
         let Some((ws_idx, tab_idx)) = self.parse_tab_id(&target.tab_id) else {
             return tab_not_found(id, &target.tab_id);
         };
@@ -231,10 +251,9 @@ impl App {
             .get(tab_idx)
             .map(|tab| tab.layout.pane_ids())
             .unwrap_or_default();
-        // Report deliberate pane termination before the tab/workspace state is
-        // removed and its runtime is shut down.
-        self.state
-            .record_execution_exits_for_panes(pane_ids.iter().map(|pane| (ws_idx, *pane)));
+        let exit_targets = self
+            .state
+            .execution_exit_targets_for_panes(pane_ids.iter().map(|pane| (ws_idx, *pane)));
 
         if closes_workspace {
             if self.state.confirm_implicit_worktree_group_close(ws_idx) {
@@ -243,6 +262,9 @@ impl App {
                     "confirmation_required",
                     "closing this tab would close a worktree group",
                 );
+            }
+            for (workspace_id, public_pane_id) in &exit_targets {
+                notify(workspace_id, public_pane_id, None);
             }
             let workspace = self.workspace_info(ws_idx);
             self.state.selected = ws_idx;
@@ -275,6 +297,9 @@ impl App {
                 "tab_close_failed",
                 format!("tab {} could not be closed", target.tab_id),
             );
+        }
+        for (workspace_id, public_pane_id) in exit_targets {
+            notify(&workspace_id, &public_pane_id, None);
         }
         self.state.remove_plugin_pane_records(pane_ids);
         self.state.remove_unattached_terminal_ids(terminal_ids);
@@ -476,5 +501,49 @@ mod tests {
             crate::worktree::canonical_or_original(&cached_cwd)
         );
         shutdown_test_runtimes(&mut app);
+    }
+
+    #[test]
+    fn confirmation_required_tab_close_does_not_report_execution_exit() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        let mut parent = Workspace::test_new("tabs-parent");
+        parent.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr".into(),
+            is_linked_worktree: false,
+        });
+        let mut child = Workspace::test_new("tabs-child");
+        child.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr-child".into(),
+            is_linked_worktree: true,
+        });
+        app.state.workspaces = vec![parent, child];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+        let mut seen = Vec::new();
+        let response = app.handle_tab_close_with_notify(
+            "req_tab_close_group".into(),
+            TabTarget { tab_id },
+            |workspace, pane, code| seen.push((workspace.to_string(), pane.to_string(), code)),
+        );
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["error"]["code"], "confirmation_required");
+        assert!(seen.is_empty(), "{seen:?}");
+        assert_eq!(app.state.workspaces.len(), 2);
     }
 }
