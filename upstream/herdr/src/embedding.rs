@@ -44,6 +44,13 @@ pub trait DomainServices: Send + Sync {
         pane_id: &str,
         exit_code: Option<i32>,
     ) -> io::Result<()>;
+    /// Owner-gated stop: verify the execution is one this host owns and is
+    /// live, then return the pane that must be closed. The close itself goes
+    /// through the normal pane-death path so the exit is recorded as a fact.
+    fn prepare_execution_stop(&self, execution_id: &str) -> io::Result<ExecutionStopPlan>;
+    /// Persisted pause gate for NEW dispatches only; running executions are
+    /// never touched by pause.
+    fn set_paused(&self, paused: bool) -> io::Result<()>;
     /// One canonical, member-attributed report. The composition root must
     /// authenticate the host-issued worker credential, bind the calling OS
     /// process to the confirmed execution, and check the live grant before
@@ -63,6 +70,13 @@ pub struct ExecutionRequest {
     pub argv: Vec<String>,
     pub cwd: PathBuf,
     pub worktree_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExecutionStopPlan {
+    pub execution_id: String,
+    pub workspace_id: Option<String>,
+    pub pane_id: Option<String>,
 }
 
 /// A member-initiated report. `credential` is a host-issued bearer secret; it
@@ -372,6 +386,30 @@ pub(crate) fn execution_pane_exited(
     }
 }
 
+pub(crate) fn prepare_execution_stop(execution_id: &str) -> io::Result<ExecutionStopPlan> {
+    context()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Viva embedding unavailable",
+            )
+        })?
+        .domain
+        .prepare_execution_stop(execution_id)
+}
+
+pub(crate) fn set_paused(paused: bool) -> io::Result<()> {
+    context()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Viva embedding unavailable",
+            )
+        })?
+        .domain
+        .set_paused(paused)
+}
+
 pub(crate) fn member_report(
     params: &crate::api::schema::VivaMemberReportParams,
     stream: &crate::ipc::LocalStream,
@@ -441,7 +479,10 @@ fn admit_with_peer(
     ) {
         return Ok(());
     }
-    if method == "viva.execution.start" {
+    if matches!(
+        method,
+        "viva.execution.start" | "viva.execution.stop" | "viva.host.pause"
+    ) {
         // The socket path must present the host-issued owner capability. The
         // no-peer form is only the second gate after that admission (or the
         // already-authenticated client-shell connection).

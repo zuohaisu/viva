@@ -629,6 +629,8 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::VivaClientAuthenticate(_) => "viva.client.authenticate",
         Method::VivaExecutionStart(_) => "viva.execution.start",
         Method::VivaMemberReport(_) => "viva.member.report",
+        Method::VivaExecutionStop(_) => "viva.execution.stop",
+        Method::VivaHostPause(_) => "viva.host.pause",
         Method::ServerStop(_) => "server.stop",
         Method::ServerLiveHandoff(_) => "server.live_handoff",
         Method::ServerReloadConfig(_) => "server.reload_config",

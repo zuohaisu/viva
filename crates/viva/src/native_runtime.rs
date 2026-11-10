@@ -46,6 +46,8 @@ struct ExecutionBinding {
     credential_id: String,
     pid: Option<i64>,
     pid_start_marker: Option<String>,
+    /// A deliberate owner stop was requested; the close path records the exit.
+    stop_requested: bool,
 }
 
 #[derive(Default)]
@@ -497,6 +499,7 @@ impl herdr::embedding::DomainServices for DomainBridge {
                             credential_id: credential.clone(),
                             pid: None,
                             pid_start_marker: None,
+                            stop_requested: false,
                         },
                     );
                     Ok(ExecutionPlan {
@@ -711,6 +714,7 @@ impl herdr::embedding::DomainServices for DomainBridge {
             return Ok(());
         };
         state.owned.remove(&execution_id);
+        let stop_requested = binding.stop_requested;
         drop(state);
         self.with_store(|store| {
             let tasks = TaskRegistry::new(store);
@@ -774,6 +778,7 @@ impl herdr::embedding::DomainServices for DomainBridge {
                     "exit_code": exit_code,
                     "stored_exit_sentinel": stored_code,
                     "exit_code_known": exit_code.is_some(),
+                    "stop_requested": stop_requested,
                     "source": "herdr_pane_child",
                 }),
             );
@@ -794,6 +799,99 @@ impl herdr::embedding::DomainServices for DomainBridge {
                         "exit_code": exit_code,
                         "stored_exit_sentinel": stored_code,
                         "exit_code_known": exit_code.is_some(),
+                        "stop_requested": stop_requested,
+                    }),
+                },
+            )?;
+            Ok(())
+        })
+    }
+    fn prepare_execution_stop(
+        &self,
+        execution_id: &str,
+    ) -> io::Result<herdr::embedding::ExecutionStopPlan> {
+        let mut state = self
+            .executions
+            .lock()
+            .map_err(|_| io::Error::other("native execution state poisoned"))?;
+        if !state.owned.contains(execution_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the execution is not owned by this native host",
+            ));
+        }
+        let Some(binding) = state.by_execution.get_mut(execution_id) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "the execution is not live",
+            ));
+        };
+        let Some(workspace_id) = binding.workspace_id.clone() else {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "the execution has not started",
+            ));
+        };
+        binding.stop_requested = true;
+        let plan = herdr::embedding::ExecutionStopPlan {
+            execution_id: binding.execution_id.to_string(),
+            workspace_id: Some(workspace_id.clone()),
+            pane_id: binding.pane_id.clone(),
+        };
+        let (execution, task, member, grant, pane) = (
+            binding.execution_id.clone(),
+            binding.task_id.clone(),
+            binding.member_id.clone(),
+            binding.grant_id.clone(),
+            binding.pane_id.clone(),
+        );
+        drop(state);
+        self.with_store(|store| {
+            events::append(
+                store,
+                NewEvent {
+                    domain: crate::server::DOMAIN_HOST,
+                    kind: "native_execution_stop_requested".into(),
+                    subject_type: "execution".into(),
+                    subject_id: execution.to_string(),
+                    origin: "native_host".into(),
+                    payload: serde_json::json!({
+                        "execution_id": execution.as_str(),
+                        "task_id": task.as_str(),
+                        "member_id": member.as_str(),
+                        "grant_id": grant.as_str(),
+                        "workspace_id": workspace_id,
+                        "pane_id": pane,
+                        "authority": "owner_capability",
+                    }),
+                },
+            )?;
+            Ok(())
+        })?;
+        Ok(plan)
+    }
+    fn set_paused(&self, paused: bool) -> io::Result<()> {
+        self.with_store(|store| {
+            store.connection().execute(
+                "INSERT OR REPLACE INTO settings(key, value) VALUES ('paused', ?1)",
+                [if paused { "true" } else { "false" }],
+            )?;
+            events::append(
+                store,
+                NewEvent {
+                    domain: crate::server::DOMAIN_HOST,
+                    kind: if paused {
+                        "native_host_paused".into()
+                    } else {
+                        "native_host_resumed".into()
+                    },
+                    subject_type: "runtime_process".into(),
+                    subject_id: self.host_id.clone(),
+                    origin: "native_host".into(),
+                    payload: serde_json::json!({
+                        "paused": paused,
+                        "authority": "owner_capability",
+                        "scope": "new_dispatches_only",
                     }),
                 },
             )?;
@@ -1106,6 +1204,134 @@ fn run_member_client(home: &std::path::Path, args: &[String]) -> Result<()> {
     }
 }
 
+#[cfg(unix)]
+fn send_native_request(
+    socket: &std::path::Path,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket).map_err(|err| {
+        Error::Validation(format!(
+            "cannot reach the native host at {}: {err}",
+            socket.display()
+        ))
+    })?;
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+    writeln!(
+        stream,
+        "{}",
+        serde_json::json!({
+            "id": format!("native-call-{}", uuid::Uuid::new_v4().simple()),
+            "method": method,
+            "params": params,
+        })
+    )
+    .map_err(|err| Error::Validation(format!("cannot send {method}: {err}")))?;
+    let mut line = String::new();
+    BufReader::new(stream)
+        .read_line(&mut line)
+        .map_err(|err| Error::Validation(format!("cannot read {method} reply: {err}")))?;
+    let value: serde_json::Value = serde_json::from_str(&line)
+        .map_err(|err| Error::Validation(format!("invalid {method} reply: {err}")))?;
+    if let Some(error) = value.get("error") {
+        let code = error["code"].as_str().unwrap_or("native_call_failed");
+        let message = error["message"].as_str().unwrap_or("");
+        return Err(Error::Validation(format!(
+            "{method} failed ({code}): {message}"
+        )));
+    }
+    Ok(value["result"].clone())
+}
+
+#[cfg(unix)]
+fn authenticate_owner(socket: &std::path::Path, home: &std::path::Path) -> Result<()> {
+    let capability: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            home.join("runtime")
+                .join("workbench")
+                .join("owner-channel.json"),
+        )
+        .map_err(|err| Error::Validation(format!("owner capability is unavailable: {err}")))?,
+    )
+    .map_err(|err| Error::Validation(format!("invalid owner capability file: {err}")))?;
+    let credential = capability["credential"]
+        .as_str()
+        .ok_or_else(|| Error::Validation("owner capability has no credential".into()))?;
+    let peer = herdr::embedding::TransportPeer {
+        pid: Some(std::process::id()),
+        uid: Some(unsafe { libc::geteuid() }),
+    };
+    let lifetime = herdr::embedding::peer_lifetime_marker(peer).map_err(Error::from)?;
+    send_native_request(
+        socket,
+        "viva.client.authenticate",
+        serde_json::json!({"credential": credential, "process_lifetime": lifetime}),
+    )?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn run_control_client(home: &std::path::Path, args: &[String]) -> Result<()> {
+    let socket = home.join("runtime").join("workbench").join("herdr.sock");
+    let result = match (
+        args.first().map(String::as_str),
+        args.get(1).map(String::as_str),
+    ) {
+        (Some("host"), Some("pause")) => {
+            authenticate_owner(&socket, home)?;
+            send_native_request(
+                &socket,
+                "viva.host.pause",
+                serde_json::json!({"paused": true}),
+            )?
+        }
+        (Some("host"), Some("resume")) => {
+            authenticate_owner(&socket, home)?;
+            send_native_request(
+                &socket,
+                "viva.host.pause",
+                serde_json::json!({"paused": false}),
+            )?
+        }
+        (Some("execution"), Some("stop")) => {
+            let mut execution_id = None;
+            let mut index = 2;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--execution" => {
+                        execution_id = args.get(index + 1).cloned();
+                        index += 2;
+                    }
+                    other => {
+                        return Err(Error::Validation(format!(
+                            "unknown execution stop flag {other}"
+                        )));
+                    }
+                }
+            }
+            let execution_id = execution_id
+                .ok_or_else(|| Error::Validation("execution stop needs --execution <id>".into()))?;
+            authenticate_owner(&socket, home)?;
+            send_native_request(
+                &socket,
+                "viva.execution.stop",
+                serde_json::json!({"execution_id": execution_id}),
+            )?
+        }
+        _ => {
+            return Err(Error::Validation(
+                "runtime control needs host pause | host resume | execution stop --execution <id>"
+                    .into(),
+            ));
+        }
+    };
+    println!("{result}");
+    Ok(())
+}
+
 pub fn run(args: &[String]) -> Result<()> {
     // No accidental installation/user-home trial before the default cutover gate.
     if std::env::var(paths::VIVA_HOME_ENV)
@@ -1127,6 +1353,10 @@ pub fn run(args: &[String]) -> Result<()> {
     #[cfg(unix)]
     if args.first().map(String::as_str) == Some("member") {
         return run_member_client(&home, args.get(1..).unwrap_or(&[]));
+    }
+    #[cfg(unix)]
+    if matches!(args.first().map(String::as_str), Some("host" | "execution")) {
+        return run_control_client(&home, args);
     }
     // Temporary development admission gate, not the final startup behavior.
     // Never launch a second execution host beside a legacy Viva host. The
@@ -1244,6 +1474,7 @@ mod tests {
             credential_id: credential,
             pid: None,
             pid_start_marker: None,
+            stop_requested: false,
         };
         let bridge = DomainBridge {
             home: home.to_path_buf(),

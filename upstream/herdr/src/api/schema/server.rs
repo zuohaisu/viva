@@ -38,6 +38,19 @@ impl std::fmt::Debug for VivaExecutionStartParams {
     }
 }
 
+// Viva modification: owner-gated native control. Stop names one canonical
+// execution; pause/resume affect only NEW dispatches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct VivaExecutionStopParams {
+    pub execution_id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct VivaPauseParams {
+    #[serde(default)]
+    pub paused: bool,
+}
+
 // Viva modification: the first member-initiated ingress. The credential is a
 // host-issued worker credential, never an identity claim; the composition root
 // also binds the calling OS process to the confirmed execution.
