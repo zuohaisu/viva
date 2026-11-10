@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "issue": 191,
-  "code_commit": "c41fe71d2a0c0f6ab9c704580df2d51312a6406e",
+  "code_commit": "688a98dc65eb15a46bc37708542c766efac9f190",
   "base_commit": "2e115967763aba6566460ee506616b728d8e03b7",
   "scope": "Owner-gated native dispatch now prepares one canonical Execution, spawns a real herdr pane child, confirms the OS pid/start marker and LaunchSpec, and records the real process exit. NOT member-initiated ingress, cross-backend takeover, default entry, packaging or human UI.",
   "existing_capability_and_gap": "Reuse Viva prepare_member_dispatch/confirm_launch/LaunchSpec/record_exit/record_result, the native owner-frontend capability, and herdr's real PTY/workspace. The gap was that no new-base path connected a canonical execution to a real pane process or its exit.",
@@ -38,6 +38,18 @@
     {
       "command": "cargo +1.96.1 test --manifest-path upstream/herdr/Cargo.toml close_workspace_reports_execution_panes_before_removal",
       "result": "1 passed: workspace close resolves and reports every pane public identity before removing state."
+    },
+    {
+      "command": "cargo +1.96.1 test --manifest-path upstream/herdr/Cargo.toml confirmation_required_tab_close_does_not_report_execution_exit",
+      "result": "1 passed: confirmation_required returns before any execution exit notification."
+    },
+    {
+      "command": "cargo +1.96.1 test --manifest-path upstream/herdr/Cargo.toml api_tab_close_last_tab_closes_workspace_and_emits_both_events",
+      "result": "1 passed: normal last-tab workspace close still emits both events."
+    },
+    {
+      "command": "cargo +1.96.1 test --manifest-path upstream/herdr/Cargo.toml pane_close_request_requires_confirmation_before_closing_parent_worktree_group",
+      "result": "1 passed: pane close confirmation path unchanged."
     }
   ],
   "negative_fixtures": "Unbound same-UID API request is refused before canonical preparation; forged transport peer/role/member/grant claims are ignored; a grant issued to another member is refused and audited; a replayed request_key returns the original execution/pid without a second spawn; task status is not done after process exit; no argv or request key is written into refusal audit payloads.",
@@ -59,6 +71,10 @@
     "F2": "ExecutionPlan and viva.execution.start now carry intent_state. Fresh spawns report confirmed; replays report the recorded state (confirmed/exited/unresolved). Tests assert running replay = confirmed and post-exit replay = exited with the historical pid.",
     "F3": "source-hashes.json regenerated after the final evidence content and excludes itself (a self-hash cannot be stable).",
     "F4": "execution_failed keeps the execution in the host-owned set while its intent is unresolved, so a fast-exit/spawn-failure race cannot make owner_only_phase_locked reject every later native start. New deterministic test spawn_failure_does_not_poison_the_owner_gate.",
-    "F5": "PaneDied(Handoff) no longer calls execution_exited: a live PTY moved to another host is not a process exit. Currently unreachable in the embedded preview, but the guard is in place."
-  }
+    "F5": "PaneDied(Handoff) no longer calls execution_exited: a live PTY moved to another host is not a process exit. Currently unreachable in the embedded preview, but the guard is in place.",
+    "R1": "Tab close now checks worktree-group confirmation and close_tab success before reporting pane termination. The report is derived from pre-close public identities and delivered through a notify seam; confirmation_required and tab_close_failed leave the binding untouched. Regression test confirmation_required_tab_close_does_not_report_execution_exit passes.",
+    "O1": "Known limitation (not introduced by this PR): direct socket API pane.move changes the public pane identity, so the (workspace_id, public_pane_id) execution key no longer matches on a later close. Not reachable from the owner frontend allowlist; recorded in the PR and Wiki. No production path change.",
+    "R2": "Known limitation already declared: after a native-host restart, DB requested/running executions are not host-owned and the owner gate stays fail-closed until resolved; no reconciliation path yet."
+  },
+  "regression_fix_commit": "688a98dc65eb15a46bc37708542c766efac9f190"
 }
