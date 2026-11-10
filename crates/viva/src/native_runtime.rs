@@ -4,10 +4,12 @@
 mod client_authority;
 
 use crate::{
+    authority::AuthorityEngine,
     foundation::{
+        envelope::{CallerIdentity, CallerRole, ChannelRegistry},
         error::{Error, Result},
         events::{self, NewEvent},
-        ids::{ExecutionId, GrantId, MemberId, TaskId, TerminalId, WorktreeId, utc_now},
+        ids::{ChannelId, ExecutionId, GrantId, MemberId, TaskId, TerminalId, WorktreeId, utc_now},
         paths,
         records::{self, LaunchSpec, RequestOrigin, get_execution},
         store::Store,
@@ -25,6 +27,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[derive(Clone)]
 struct ExecutionBinding {
     execution_id: ExecutionId,
     task_id: TaskId,
@@ -36,6 +39,13 @@ struct ExecutionBinding {
     worktree_id: Option<String>,
     workspace_id: Option<String>,
     pane_id: Option<String>,
+    /// Host-issued MemberExecution channel. In-memory only: a restart cannot
+    /// revive it, so member ingress fails closed instead of trusting DB alone.
+    channel_id: ChannelId,
+    /// Host-issued worker credential (bearer secret). Never written to events.
+    credential_id: String,
+    pid: Option<i64>,
+    pid_start_marker: Option<String>,
 }
 
 #[derive(Default)]
@@ -50,20 +60,37 @@ struct DomainBridge {
     host_id: String,
     store: Mutex<Option<Store>>,
     clients: Mutex<client_authority::ClientAuthority>,
+    channels: Mutex<ChannelRegistry>,
     executions: Mutex<NativeExecutionState>,
 }
+
+/// Fixed grant action for a member progress report. The dispatch grant must
+/// name it; the canonical grant checks then apply the usual principal, task,
+/// live-status and mode rules.
+const MEMBER_REPORT_ACTION: &str = "member_report";
+const MEMBER_REPORT_STATUSES: [&str; 4] = ["progress", "blocked", "failed", "done"];
+const MEMBER_REPORT_DETAIL_LIMIT: usize = 2000;
 
 /// Checks that assume the native execution state lock is already held. The
 /// lock order is always native-execution state -> store.
 fn owner_only_phase_locked(store: &Store, state: &NativeExecutionState) -> Result<()> {
-    let active_credentials: i64 = store.connection().query_row(
-        "SELECT count(*) FROM worker_credentials WHERE status='active'",
-        [],
-        |row| row.get(0),
-    )?;
-    if active_credentials != 0 {
+    // Active worker credentials are only acceptable when this native host
+    // issued them for an execution it owns. Foreign credentials still block
+    // the preview (fail closed); this is what lets the first bound member
+    // ingress coexist with the owner frontend gate.
+    let mut stmt = store
+        .connection()
+        .prepare("SELECT execution_id FROM worker_credentials WHERE status='active'")?;
+    let active_credentials = stmt
+        .query_map([], |row| row.get::<_, Option<String>>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if active_credentials.iter().any(|execution| {
+        execution
+            .as_deref()
+            .is_none_or(|id| !state.owned.contains(id))
+    }) {
         return Err(Error::Validation(
-            "native member/process bindings are not integrated; owner frontend capability is refused while worker credentials remain active".into(),
+            "native owner frontend capability is refused while worker credentials outside this host's executions remain active".into(),
         ));
     }
     let mut stmt = store
@@ -114,6 +141,95 @@ fn refused_event(
                 "grant_id": grant.as_str(),
                 "reason": "canonical_preparation_refused",
                 "detail": detail,
+            }),
+        },
+    )?;
+    Ok(())
+}
+
+/// OS parent PID. Used only for the member ingress process binding; it is
+/// never an identity on its own.
+fn process_parent(pid: i64) -> Option<i64> {
+    #[cfg(target_os = "linux")]
+    {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let after_comm = stat.rsplit_once(") ")?.1;
+        // Fields after `comm`: state ppid pgrp ...
+        after_comm.split_whitespace().nth(1)?.parse().ok()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let written = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::c_int,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                &mut info as *mut _ as *mut libc::c_void,
+                size,
+            )
+        };
+        (written == size).then_some(info.pbi_ppid as i64)
+    }
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+    {
+        let output = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "ppid="])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// The member ingress accepts the confirmed pane root or a process descended
+/// from it. This is a lineage check, not an OS sandbox claim.
+fn is_bound_process(root: i64, caller: i64) -> bool {
+    if root <= 1 || caller <= 1 {
+        return false;
+    }
+    let mut current = caller;
+    for _ in 0..32 {
+        if current == root {
+            return true;
+        }
+        match process_parent(current) {
+            Some(parent) if parent > 1 && parent != current => current = parent,
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn refused_member_report(
+    store: &Store,
+    execution_id: Option<&str>,
+    member_id: Option<&str>,
+    grant_id: Option<&str>,
+    reason: &str,
+) -> Result<()> {
+    // Fixed reason markers only: never the credential, detail or request body.
+    events::append(
+        store,
+        NewEvent {
+            domain: crate::server::DOMAIN_HOST,
+            kind: "native_member_report_refused".into(),
+            subject_type: "execution".into(),
+            subject_id: execution_id.unwrap_or("unbound").to_string(),
+            origin: "native_host".into(),
+            payload: serde_json::json!({
+                "execution_id": execution_id,
+                "member_id": member_id,
+                "grant_id": grant_id,
+                "reason": reason,
             }),
         },
     )?;
@@ -341,6 +457,28 @@ impl herdr::embedding::DomainServices for DomainBridge {
                     if label.chars().count() > 80 {
                         label = label.chars().take(79).collect::<String>() + "…";
                     }
+                    // Host-issued MemberExecution channel: the role binding is
+                    // decided here, never by the child's env or argv.
+                    let caller = self
+                        .channels
+                        .lock()
+                        .map_err(|_| io::Error::other("native channel registry poisoned"))?
+                        .issue(CallerRole::MemberExecution(execution_id.clone()));
+                    let credential = match AuthorityEngine::new(store).issue_worker_credential(
+                        &caller.channel_id,
+                        Some(execution_id.clone()),
+                        member_id.clone(),
+                    ) {
+                        Ok(credential) => credential,
+                        Err(err) => {
+                            let _ = self
+                                .channels
+                                .lock()
+                                .map_err(|_| io::Error::other("native channel registry poisoned"))?
+                                .revoke(&caller.channel_id);
+                            return Err(err);
+                        }
+                    };
                     state.owned.insert(execution_id.to_string());
                     state.by_execution.insert(
                         execution_id.to_string(),
@@ -355,6 +493,10 @@ impl herdr::embedding::DomainServices for DomainBridge {
                             worktree_id: request.worktree_id.clone(),
                             workspace_id: None,
                             pane_id: None,
+                            channel_id: caller.channel_id.clone(),
+                            credential_id: credential.clone(),
+                            pid: None,
+                            pid_start_marker: None,
                         },
                     );
                     Ok(ExecutionPlan {
@@ -368,6 +510,8 @@ impl herdr::embedding::DomainServices for DomainBridge {
                             ("VIVA_MEMBER_ID".into(), member_id.to_string()),
                             ("VIVA_TASK_ID".into(), task_id.to_string()),
                             ("VIVA_EXECUTION_ID".into(), execution_id.to_string()),
+                            ("VIVA_MEMBER_CHANNEL".into(), caller.channel_id.to_string()),
+                            ("VIVA_MEMBER_CREDENTIAL".into(), credential),
                         ],
                         label,
                         existing_pid: None,
@@ -402,7 +546,7 @@ impl herdr::embedding::DomainServices for DomainBridge {
             binding.cwd.clone(),
             binding.worktree_id.clone(),
         );
-        self.with_store(|store| {
+        let marker = self.with_store(|store| {
             let record = get_execution(store, &execution)?.ok_or_else(|| Error::NotFound {
                 entity: "execution",
                 id: execution.to_string(),
@@ -460,7 +604,7 @@ impl herdr::embedding::DomainServices for DomainBridge {
                     }),
                 },
             )?;
-            Ok(())
+            Ok(marker)
         })?;
         let binding = state
             .by_execution
@@ -468,6 +612,8 @@ impl herdr::embedding::DomainServices for DomainBridge {
             .expect("binding remains after confirmation");
         binding.workspace_id = Some(workspace_id.to_string());
         binding.pane_id = Some(pane_id.to_string());
+        binding.pid = Some(pid as i64);
+        binding.pid_start_marker = Some(marker);
         state.by_pane.insert(
             (workspace_id.to_string(), pane_id.to_string()),
             execution_id.to_string(),
@@ -492,6 +638,31 @@ impl herdr::embedding::DomainServices for DomainBridge {
                 .remove(&(workspace_id.clone(), pane_id.clone()));
         }
         self.with_store(|store| {
+            // A failed start must not leave a usable worker credential behind.
+            let revoked = AuthorityEngine::new(store)
+                .revoke_worker_credential(&binding.credential_id)
+                .is_ok();
+            let _ = self
+                .channels
+                .lock()
+                .map_err(|_| io::Error::other("native channel registry poisoned"))?
+                .revoke(&binding.channel_id);
+            if !revoked {
+                events::append(
+                    store,
+                    NewEvent {
+                        domain: crate::server::DOMAIN_HOST,
+                        kind: "native_member_credential_revoke_failed".into(),
+                        subject_type: "execution".into(),
+                        subject_id: binding.execution_id.to_string(),
+                        origin: "native_host".into(),
+                        payload: serde_json::json!({
+                            "execution_id": binding.execution_id.as_str(),
+                            "reason": "unresolved_start",
+                        }),
+                    },
+                )?;
+            }
             let outcome = TaskRegistry::new(store).mark_unresolved(&binding.request_key);
             let kind = if outcome.is_ok() {
                 "native_execution_unresolved"
@@ -541,6 +712,31 @@ impl herdr::embedding::DomainServices for DomainBridge {
         drop(state);
         self.with_store(|store| {
             let tasks = TaskRegistry::new(store);
+            let _ = self
+                .channels
+                .lock()
+                .map_err(|_| Error::Validation("native channel registry poisoned".into()))?
+                .revoke(&binding.channel_id);
+            // The member process is gone: its credential can authorize nothing.
+            if AuthorityEngine::new(store)
+                .revoke_worker_credential(&binding.credential_id)
+                .is_err()
+            {
+                events::append(
+                    store,
+                    NewEvent {
+                        domain: crate::server::DOMAIN_HOST,
+                        kind: "native_member_credential_revoke_failed".into(),
+                        subject_type: "execution".into(),
+                        subject_id: binding.execution_id.to_string(),
+                        origin: "native_host".into(),
+                        payload: serde_json::json!({
+                            "execution_id": binding.execution_id.as_str(),
+                            "reason": "process_exit",
+                        }),
+                    },
+                )?;
+            }
             let stored_code = exit_code.unwrap_or(-1);
             if let Err(err) = tasks.record_exit(&binding.request_key, stored_code) {
                 events::append(
@@ -602,6 +798,173 @@ impl herdr::embedding::DomainServices for DomainBridge {
             Ok(())
         })
     }
+    fn member_report(
+        &self,
+        request: herdr::embedding::MemberReportRequest,
+        peer: herdr::embedding::TransportPeer,
+    ) -> io::Result<i64> {
+        if !MEMBER_REPORT_STATUSES.contains(&request.status.as_str()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unknown member report status",
+            ));
+        }
+        #[cfg(unix)]
+        if peer.uid != Some(unsafe { libc::geteuid() }) {
+            self.with_store(|store| {
+                refused_member_report(store, None, None, None, "peer_uid_mismatch")
+            })?;
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "member report peer uid does not match this host",
+            ));
+        }
+        let peer_pid = peer.pid.map(i64::from).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "member report requires a real socket peer pid",
+            )
+        })?;
+        let state = self
+            .executions
+            .lock()
+            .map_err(|_| io::Error::other("native execution state poisoned"))?;
+        let Some(binding) = state
+            .by_execution
+            .values()
+            .find(|binding| binding.credential_id == request.credential)
+            .cloned()
+        else {
+            drop(state);
+            self.with_store(|store| {
+                refused_member_report(store, None, None, None, "unknown_credential")
+            })?;
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "member credential is not active on this host",
+            ));
+        };
+        let (Some(root_pid), Some(root_marker)) = (binding.pid, binding.pid_start_marker.clone())
+        else {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "execution is not confirmed yet",
+            ));
+        };
+        if process_start_marker(root_pid) != Some(root_marker) {
+            drop(state);
+            self.with_store(|store| {
+                refused_member_report(
+                    store,
+                    Some(binding.execution_id.as_str()),
+                    Some(binding.member_id.as_str()),
+                    Some(binding.grant_id.as_str()),
+                    "process_binding_changed",
+                )
+            })?;
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the confirmed execution process is gone or was reused",
+            ));
+        }
+        if !is_bound_process(root_pid, peer_pid) {
+            drop(state);
+            self.with_store(|store| {
+                refused_member_report(
+                    store,
+                    Some(binding.execution_id.as_str()),
+                    Some(binding.member_id.as_str()),
+                    Some(binding.grant_id.as_str()),
+                    "peer_not_bound_to_execution",
+                )
+            })?;
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the calling process is not the confirmed execution or its descendant",
+            ));
+        }
+        drop(state);
+
+        enum Decision {
+            Accepted(i64),
+            NotReady,
+            Denied(String),
+        }
+        let decision = self.with_store(|store| {
+            let Some(execution) = get_execution(store, &binding.execution_id)? else {
+                return Ok(Decision::Denied("execution_missing".into()));
+            };
+            if execution.status != crate::foundation::records::ExecutionStatus::Running {
+                return Ok(Decision::NotReady);
+            }
+            let caller = CallerIdentity {
+                channel_id: binding.channel_id.clone(),
+                claimed_role: CallerRole::MemberExecution(binding.execution_id.clone()),
+            };
+            let channels = self
+                .channels
+                .lock()
+                .map_err(|_| Error::Validation("native channel registry poisoned".into()))?;
+            let verdict = AuthorityEngine::new(store).check_bound_worker_action(
+                &channels,
+                &caller,
+                &request.credential,
+                Some(binding.grant_id.clone()),
+                MEMBER_REPORT_ACTION,
+                Some(&binding.task_id),
+            )?;
+            let member = match verdict {
+                Ok(member) => member,
+                Err(reason) => {
+                    refused_member_report(
+                        store,
+                        Some(binding.execution_id.as_str()),
+                        Some(binding.member_id.as_str()),
+                        Some(binding.grant_id.as_str()),
+                        &format!("authority_refused:{reason}"),
+                    )?;
+                    return Ok(Decision::Denied(reason.to_string()));
+                }
+            };
+            let redactor = crate::redaction::Redactor::new([request.credential.clone()]);
+            let detail = redactor.redact_str(&request.detail);
+            let detail: String = detail.chars().take(MEMBER_REPORT_DETAIL_LIMIT).collect();
+            let recorded = events::append(
+                store,
+                NewEvent {
+                    domain: crate::server::DOMAIN_HOST,
+                    kind: "native_member_reported".into(),
+                    subject_type: "execution".into(),
+                    subject_id: binding.execution_id.to_string(),
+                    origin: "native_host".into(),
+                    payload: serde_json::json!({
+                        "execution_id": binding.execution_id.as_str(),
+                        "task_id": binding.task_id.as_str(),
+                        "member_id": member.as_str(),
+                        "grant_id": binding.grant_id.as_str(),
+                        "channel_id": binding.channel_id.as_str(),
+                        "status": request.status,
+                        "detail": detail,
+                        "detail_chars": detail.chars().count(),
+                        "source": "native_member_process",
+                        "claim_scope": "member_report_not_task_completion",
+                    }),
+                },
+            )?;
+            Ok(Decision::Accepted(recorded.seq))
+        })?;
+        match decision {
+            Decision::Accepted(seq) => Ok(seq),
+            Decision::NotReady => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "execution is not confirmed yet",
+            )),
+            Decision::Denied(reason) => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("member report refused: {reason}"),
+            )),
+        }
+    }
     fn snapshot(&self) -> io::Result<serde_json::Value> {
         let native_execution_count = self
             .executions
@@ -617,7 +980,8 @@ impl herdr::embedding::DomainServices for DomainBridge {
                 "execution_attribution": "pane_bound_owner_dispatch",
                 "integration_state": "development-owner-dispatch",
                 "member_dispatch": "owner_gated_launch_spec",
-                "member_process_ingress": "not_integrated",
+                "member_process_ingress": "bound_worker_report_only",
+                "member_report_action": MEMBER_REPORT_ACTION,
                 "native_execution_count": native_execution_count,
                 "members": MemberRegistry::new(store).list()?,
                 "tasks": TaskRegistry::new(store).list_tasks(0, 100)?,
@@ -648,6 +1012,98 @@ impl herdr::embedding::DomainServices for DomainBridge {
     }
 }
 
+#[cfg(unix)]
+fn run_member_client(home: &std::path::Path, args: &[String]) -> Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    if args.first().map(String::as_str) != Some("report") {
+        return Err(Error::Validation(
+            "runtime member needs: report --status <progress|blocked|failed|done> [--detail <text>]"
+                .into(),
+        ));
+    }
+    let mut status: Option<String> = None;
+    let mut detail = String::new();
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--status" => {
+                status = args.get(index + 1).cloned();
+                index += 2;
+            }
+            "--detail" => {
+                detail = args.get(index + 1).cloned().unwrap_or_default();
+                index += 2;
+            }
+            other => {
+                return Err(Error::Validation(format!(
+                    "unknown runtime member flag {other}"
+                )));
+            }
+        }
+    }
+    let status =
+        status.ok_or_else(|| Error::Validation("runtime member report needs --status".into()))?;
+    // The credential is delivered through the process environment on purpose:
+    // argv is visible in the process list and is not a safe channel.
+    let credential = std::env::var("VIVA_MEMBER_CREDENTIAL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            Error::Validation(
+                "VIVA_MEMBER_CREDENTIAL is not set; this process was not started as a bound member execution"
+                    .into(),
+            )
+        })?;
+    let socket = home.join("runtime").join("workbench").join("herdr.sock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let mut stream = match UnixStream::connect(&socket) {
+            Ok(stream) => stream,
+            Err(err) => {
+                return Err(Error::Validation(format!(
+                    "cannot reach the native host at {}: {err}",
+                    socket.display()
+                )));
+            }
+        };
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+        let request = serde_json::json!({
+            "id": format!("member-report-{}", uuid::Uuid::new_v4().simple()),
+            "method": "viva.member.report",
+            "params": {"credential": credential, "status": status, "detail": detail},
+        });
+        writeln!(stream, "{request}")
+            .map_err(|err| Error::Validation(format!("cannot send the member report: {err}")))?;
+        let mut line = String::new();
+        BufReader::new(stream)
+            .read_line(&mut line)
+            .map_err(|err| Error::Validation(format!("cannot read the member reply: {err}")))?;
+        let value: serde_json::Value = serde_json::from_str(&line)
+            .map_err(|err| Error::Validation(format!("invalid member reply: {err}")))?;
+        if let Some(error) = value.get("error") {
+            let code = error["code"].as_str().unwrap_or("member_report_failed");
+            if code == "member_not_ready" && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                continue;
+            }
+            let message = error["message"].as_str().unwrap_or("");
+            return Err(Error::Validation(format!(
+                "member report refused ({code}): {message}"
+            )));
+        }
+        let seq = value["result"]["event_seq"].as_i64().ok_or_else(|| {
+            Error::Validation("member report reply has no canonical event sequence".into())
+        })?;
+        println!(
+            "{}",
+            serde_json::json!({"accepted": true, "event_seq": seq})
+        );
+        return Ok(());
+    }
+}
+
 pub fn run(args: &[String]) -> Result<()> {
     // No accidental installation/user-home trial before the default cutover gate.
     if std::env::var(paths::VIVA_HOME_ENV)
@@ -664,6 +1120,12 @@ pub fn run(args: &[String]) -> Result<()> {
     }
     let home = paths::viva_home(None);
     paths::ensure_private_dir(&home)?;
+    // A bound member process is a client of the running host, never a second
+    // host: never auto-start anything and never touch the legacy server.
+    #[cfg(unix)]
+    if args.first().map(String::as_str) == Some("member") {
+        return run_member_client(&home, args.get(1..).unwrap_or(&[]));
+    }
     // Temporary development admission gate, not the final startup behavior.
     // Never launch a second execution host beside a legacy Viva host. The
     // production workbench still uses automatic same-backend takeover (#196).
@@ -682,6 +1144,7 @@ pub fn run(args: &[String]) -> Result<()> {
         child_prefix: vec!["runtime".into()],
         domain: Arc::new(DomainBridge {
             clients: Mutex::new(client_authority::ClientAuthority::new(&home)),
+            channels: Mutex::new(ChannelRegistry::new()),
             executions: Mutex::new(NativeExecutionState::default()),
             home,
             host_id: format!("native-{}", uuid::Uuid::new_v4().simple()),
@@ -755,6 +1218,15 @@ mod tests {
                 "fixture-marker",
             )
             .unwrap();
+        let mut channels = ChannelRegistry::new();
+        let caller = channels.issue(CallerRole::MemberExecution(execution_id.clone()));
+        let credential = AuthorityEngine::new(&store)
+            .issue_worker_credential(
+                &caller.channel_id,
+                Some(execution_id.clone()),
+                member.member_id.clone(),
+            )
+            .unwrap();
         let binding = ExecutionBinding {
             execution_id: execution_id.clone(),
             task_id: task.task_id.clone(),
@@ -766,12 +1238,17 @@ mod tests {
             worktree_id: None,
             workspace_id: Some("ws-fixture".into()),
             pane_id: Some("pane-fixture".into()),
+            channel_id: caller.channel_id.clone(),
+            credential_id: credential,
+            pid: None,
+            pid_start_marker: None,
         };
         let bridge = DomainBridge {
             home: home.to_path_buf(),
             host_id: "native-exit-fixture".into(),
             store: Mutex::new(Some(store)),
             clients: Mutex::new(client_authority::ClientAuthority::new(home)),
+            channels: Mutex::new(channels),
             executions: Mutex::new(NativeExecutionState {
                 by_execution: HashMap::from([(execution_id.to_string(), binding)]),
                 by_pane: HashMap::from([(

@@ -4425,6 +4425,24 @@
           ],
           "type": "object"
         },
+        "VivaMemberReportParams": {
+          "properties": {
+            "credential": {
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "credential",
+            "status"
+          ],
+          "type": "object"
+        },
         "WorkspaceCloseParams": {
           "properties": {
             "close_group": {
@@ -4796,6 +4814,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/VivaExecutionStartParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "viva.member.report",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/VivaMemberReportParams"
             }
           },
           "required": [
@@ -10568,6 +10602,24 @@
                 "execution_id",
                 "replayed",
                 "intent_state"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "One canonical member-attributed report accepted from a bound worker\nprocess. `event_seq` is the canonical event that carries the fact.",
+              "properties": {
+                "event_seq": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "viva_member_reported",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "event_seq"
               ],
               "type": "object"
             },

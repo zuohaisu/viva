@@ -296,6 +296,11 @@ pub enum ResponseResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pid: Option<u32>,
     },
+    /// One canonical member-attributed report accepted from a bound worker
+    /// process. `event_seq` is the canonical event that carries the fact.
+    VivaMemberReported {
+        event_seq: i64,
+    },
     Ok {},
 }
 

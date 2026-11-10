@@ -44,6 +44,11 @@ pub trait DomainServices: Send + Sync {
         pane_id: &str,
         exit_code: Option<i32>,
     ) -> io::Result<()>;
+    /// One canonical, member-attributed report. The composition root must
+    /// authenticate the host-issued worker credential, bind the calling OS
+    /// process to the confirmed execution, and check the live grant before
+    /// any canonical write. Returns the canonical event sequence.
+    fn member_report(&self, request: MemberReportRequest, peer: TransportPeer) -> io::Result<i64>;
     fn refused(&self, method: &'static str, peer: Option<TransportPeer>) -> io::Result<()>;
 }
 
@@ -60,9 +65,24 @@ pub struct ExecutionRequest {
     pub worktree_id: Option<String>,
 }
 
+/// A member-initiated report. `credential` is a host-issued bearer secret; it
+/// is never an identity claim and never written to events or logs.
+#[derive(Clone)]
+pub struct MemberReportRequest {
+    pub credential: String,
+    pub status: String,
+    pub detail: String,
+}
+impl std::fmt::Debug for MemberReportRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .write_str("MemberReportRequest { credential: [REDACTED], status, detail: [REDACTED] }")
+    }
+}
+
 /// What the runtime may launch after canonical preparation. The environment
-/// deliberately carries context only; no grant or worker credential is issued
-/// until the member ingress exists.
+/// carries context plus the host-issued member credential for the bound
+/// process; no grant id or user authority is delivered through it.
 #[derive(Clone, Debug)]
 pub struct ExecutionPlan {
     pub execution_id: String,
@@ -352,6 +372,30 @@ pub(crate) fn execution_pane_exited(
     }
 }
 
+pub(crate) fn member_report(
+    params: &crate::api::schema::VivaMemberReportParams,
+    stream: &crate::ipc::LocalStream,
+) -> io::Result<i64> {
+    let ctx = context().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Viva embedding unavailable",
+        )
+    })?;
+    // Captured from the accepted connection, never a JSON peer claim. The
+    // composition root additionally verifies the caller is the confirmed
+    // process (or a descendant) before any canonical write.
+    let peer = crate::ipc::transport_peer(stream)?;
+    ctx.domain.member_report(
+        MemberReportRequest {
+            credential: params.credential.clone(),
+            status: params.status.clone(),
+            detail: params.detail.clone(),
+        },
+        peer,
+    )
+}
+
 pub(crate) fn constrain_config(config: &mut crate::config::Config) {
     if enabled() {
         config.update.version_check = false;
@@ -405,6 +449,13 @@ fn admit_with_peer(
             Some(peer) => ctx.domain.validate_client(peer),
             None => Ok(()),
         };
+    }
+    if method == "viva.member.report" {
+        // Reachable without owner capability by design: the member process is
+        // not the owner frontend. The typed handler is the gate — it verifies
+        // the host-issued worker credential, the confirmed process lineage and
+        // the live grant before any write, and audits every refusal.
+        return Ok(());
     }
     // Never accept caller/member/grant claims from pane metadata or JSON params.
     // Unknown automated ingress is unbound, NOT the owner. Log only the schema's

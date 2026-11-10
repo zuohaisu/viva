@@ -30,6 +30,7 @@ fn active_worker_credential_without_execution_blocks_owner_only_phase() {
         host_id: "native-guard-unit".into(),
         store: Mutex::new(Some(store)),
         clients: Mutex::new(ClientAuthority::new(home.path())),
+        channels: Mutex::new(crate::foundation::envelope::ChannelRegistry::new()),
         executions: Mutex::new(super::super::NativeExecutionState::default()),
     };
     assert!(bridge.require_owner_only_phase().is_err());

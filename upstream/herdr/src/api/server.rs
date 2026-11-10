@@ -386,6 +386,30 @@ fn handle_connection_with_stop(
                 ),
             }
         }
+        Method::VivaMemberReport(params) => {
+            match crate::embedding::member_report(&params, &stream) {
+                Ok(event_seq) => write_json_line_allow_disconnect(
+                    &mut stream,
+                    &SuccessResponse {
+                        id: request_id,
+                        result: ResponseResult::VivaMemberReported { event_seq },
+                    },
+                ),
+                Err(error) => write_text_line_allow_disconnect(
+                    &mut stream,
+                    &error_response_json(
+                        request_id,
+                        match error.kind() {
+                            io::ErrorKind::WouldBlock => "member_not_ready",
+                            io::ErrorKind::PermissionDenied => "member_refused",
+                            io::ErrorKind::InvalidInput => "member_report_invalid",
+                            _ => "member_report_failed",
+                        },
+                        error.to_string(),
+                    ),
+                ),
+            }
+        }
         #[cfg(unix)]
         Method::ServerSshAgentRegister(params) => {
             let lease = ssh_agents
@@ -604,6 +628,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::VivaSnapshot(_) => "viva.snapshot",
         Method::VivaClientAuthenticate(_) => "viva.client.authenticate",
         Method::VivaExecutionStart(_) => "viva.execution.start",
+        Method::VivaMemberReport(_) => "viva.member.report",
         Method::ServerStop(_) => "server.stop",
         Method::ServerLiveHandoff(_) => "server.live_handoff",
         Method::ServerReloadConfig(_) => "server.reload_config",
