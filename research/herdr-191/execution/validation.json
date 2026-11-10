@@ -9,7 +9,7 @@
   "checks": [
     {
       "command": "cargo +1.96.1 test -p viva --locked --features herdr-runtime --test native_execution -- --test-threads=1",
-      "result": "4 passed. Covers unbound client refusal before preparation; one canonical execution with real PID, LaunchSpec and exit 7; wrong-member grant refusal plus request-key replay; two members/two tasks with distinct pane-bound PIDs and exits 0/3."
+      "result": "5 passed. Covers unbound client refusal before preparation; one canonical execution with real PID, LaunchSpec and exit 7; wrong-member grant refusal plus request-key replay; two members/two tasks with distinct pane-bound PIDs and exits 0/3; a signal exit recorded as -1 with exit_code_known=false. Neither task becomes done."
     },
     {
       "command": "cargo +1.96.1 test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test m1_terminal -- --test-threads=1",
@@ -37,10 +37,11 @@
   "pending": [
     "Real native MemberExecution/AgentCli credential issuance and process/descriptor-bound member ingress",
     "Every automated ingress (JSON, client-shell input, hooks/CLI/plugin) through live grant checks and audit",
-    "Native output/persistence redaction; stop/pause/resume/定向 stop",
+    "Native output/persistence redaction; stop/pause/resume/\u5b9a\u5411 stop",
     "Cross-backend old Viva -> Herdr automatic inheritance and failure recovery",
     "Default viva entry switch and legacy renderer retirement",
     "Release build/packaging/NOTICE/SBOM, actual install/update, Tailscale and macOS x86_64",
     "Independent QA of the current head, owner merge, corresponding main CI, MacBook Air installation and human UI"
-  ]
+  ],
+  "test_commit": "744bceb"
 }
