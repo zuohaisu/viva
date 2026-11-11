@@ -79,21 +79,40 @@ def probe(binary, legacy_live=False):
                                       cwd=root, stdin=subprocess.DEVNULL,
                                       stdout=subprocess.DEVNULL, stderr=legacy_stderr,
                                       start_new_session=True)
+            # `viva terminal create` goes through Client::ensure_server, which
+            # SPAWNS its own detached legacy host when server.sock is not yet
+            # bound. Wait until THIS process answers the non-spawning `viva
+            # status`; otherwise the handoff can come from a host the probe
+            # does not own while its own child exits on the bind refusal
+            # (the CI-only 28f8552 failure).
             deadline = time.monotonic() + 20
             while True:
                 if legacy.poll() is not None:
                     raise AssertionError("legacy host exited before serving: " +
                                          (root / "legacy.log").read_text(errors="replace")[-2500:])
-                created = subprocess.run(
-                    [str(binary), "terminal", "create", "--cols", "80", "--rows", "24",
-                     "--purpose", "legacy-live-probe", "--", "/bin/sh"],
-                    env=environment, cwd=root, capture_output=True, text=True, timeout=15)
-                if created.returncode == 0:
+                status = subprocess.run([str(binary), "status"], env=environment,
+                                        cwd=root, capture_output=True, text=True, timeout=15)
+                try:
+                    live = json.loads(status.stdout)
+                except json.JSONDecodeError:
+                    live = {}
+                if live.get("pid") == legacy.pid:
                     break
                 if time.monotonic() > deadline:
-                    raise AssertionError("legacy terminal create never succeeded: " +
-                                         created.stderr[-2000:])
+                    raise AssertionError("legacy host never answered `viva status`: " +
+                                         status.stderr[-2000:])
                 time.sleep(.1)
+            packet["legacy_host_owns_socket"] = True
+            created = subprocess.run(
+                [str(binary), "terminal", "create", "--cols", "80", "--rows", "24",
+                 "--purpose", "legacy-live-probe", "--", "/bin/sh"],
+                env=environment, cwd=root, capture_output=True, text=True, timeout=15)
+            assert created.returncode == 0, "legacy terminal create failed: " + created.stderr[-2000:]
+            assert legacy.poll() is None, "the probe's legacy host exited while creating its terminal"
+            # Client::ensure_server explains a detached spawn in server.log;
+            # if that file exists here, the handoff is not from our child.
+            assert not (home / "server.log").exists(), \
+                "a second legacy host was auto-spawned; the probe no longer owns the handoff"
             packet["legacy_terminal_created"] = True
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 120, 0, 0))
@@ -142,10 +161,40 @@ def probe(binary, legacy_live=False):
                 assert snapshot["integration_state"] == "native-default-entry-legacy-inheritance", snapshot
                 assert snapshot["legacy_handoff"]["inherited"] is True, snapshot
                 assert snapshot["legacy_handoff"]["adopted_panes"] == 1, snapshot
-                legacy_status = legacy.wait(timeout=20)
-                assert legacy_status == 0, "legacy host did not retire after the acknowledged handoff"
+                # Retirement is a process fact, not a timing guess: poll it so
+                # the recorded packet names the real exit status. A CI-only
+                # failure at 28f8552 exited immediately, so this also retains
+                # the legacy stderr instead of asserting a bare message.
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline and legacy.poll() is None:
+                    time.sleep(.1)
+                legacy_status = legacy.poll()
+                packet["legacy_exit_status"] = legacy_status
+                if legacy_status is None:
+                    legacy_stderr.flush()
+                    packet["legacy_log_tail"] = (root / "legacy.log").read_text(
+                        errors="replace")[-2500:]
+                    raise AssertionError(
+                        "legacy host was still serving 60s after the acknowledged handoff")
+                if legacy_status != 0:
+                    legacy_stderr.flush()
+                    log_tail = (root / "legacy.log").read_text(errors="replace")[-2500:]
+                    packet["legacy_log_tail"] = log_tail
+                    raise AssertionError(
+                        "legacy host exited with status "
+                        f"{legacy_status} after the acknowledged handoff; stderr: {log_tail[-1200:]}")
                 packet["legacy_host_retired"] = True
                 packet["legacy_handoff"] = snapshot["legacy_handoff"]
+                old_host_id = snapshot["legacy_handoff"]["old_host_id"]
+                with sqlite3.connect(str(home / "viva.db")) as database:
+                    exit_kind = database.execute(
+                        "SELECT exit_kind FROM hosts WHERE host_id = ?", (old_host_id,)).fetchone()
+                    packet["legacy_host_exit_kind"] = exit_kind[0] if exit_kind else None
+                    packet["legacy_handoff_recorded"] = database.execute(
+                        "SELECT COUNT(*) FROM recovery_events WHERE host_id = ? AND kind = 'graceful_handoff_after_transfer'",
+                        (old_host_id,)).fetchone()[0] == 1
+                assert packet["legacy_host_exit_kind"] == "graceful", packet
+                assert packet["legacy_handoff_recorded"], packet
             invalid = rpc(home, "viva.client.authenticate", {"credential": "fixture-bootstrap-never-log", "claimed_role": "user"})
             packet["invalid_capability_response_code"] = invalid.get("error", {}).get("code")
             packet["invalid_capability_refused"] = packet["invalid_capability_response_code"] == "untrusted_client"
@@ -220,6 +269,10 @@ def probe(binary, legacy_live=False):
             packet["passed"] = True
         except Exception as error:
             packet["error"] = str(error)
+            if "legacy_log_tail" not in packet and legacy_stderr is not None:
+                legacy_stderr.flush()
+                packet["legacy_log_tail"] = (root / "legacy.log").read_text(
+                    errors="replace")[-2500:]
             # Task-owned /tmp paths are disclosed; no production data is loaded.
             packet["frame_tail"] = frame.decode(errors="replace")[-2500:]
         finally:
