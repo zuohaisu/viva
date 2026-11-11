@@ -26,8 +26,8 @@
   "research/herdr-191/inheritance/qa-fix-clippy-fmt.log.gz": "7c6199b5105fedc1b757a03f5ac20e91c050d36ff54bb357dbae37f5935b0a93",
   "research/herdr-191/inheritance/qa-fix-full-workspace.log.gz": "5c4275b753fe46bd218c4fefe9e2fae98c6ed4557cf756d09a1f0b0d91600a01",
   "research/herdr-191/inheritance/qa-fix-lib.log.gz": "e6da2725378b31c622c03a4e63bd17912672084b4f4d194cd997b565f68441c4",
-  "research/herdr-191/inheritance/qa-fix-probe-fresh.json.gz": "acb455ffa8522305b02845526c519175736618f6945d1bd00f7aaaa3da7b452b",
-  "research/herdr-191/inheritance/qa-fix-probe-legacy.json.gz": "ca929064b27c96c34a8a2002589ee8283cb2e09457473a42f9eb803c273d7c8c",
+  "research/herdr-191/inheritance/qa-fix-probe-fresh.json.gz": "5414b4a02a75d3accccdec0dbb24d4b6f21b0e53289b703668ec5cebe55f948d",
+  "research/herdr-191/inheritance/qa-fix-probe-legacy.json.gz": "bcfa4a44331bae4403ed0b1bdc702c8cbfaca4c1b430aae9c1687d2c830c58af",
   "research/herdr-191/inheritance/qa-fix-release-build.log.gz": "c2bc4b985facb110d1bbc7310fadfead79e3fea91fa12f2dbf2d18af91940d18",
   "research/herdr-191/inheritance/qa-fix-required-suites.log.gz": "926ae36c4443f58bc462bf8bc9f8df5a8530ac4f09c7686e79715a85354feeaa",
   "research/herdr-191/inheritance/qa-fix-schema.log.gz": "15cc982354a537e99457193739efeac5c55a5120fad86e3084777561d75686b6",
@@ -42,10 +42,12 @@
   "research/herdr-191/inheritance/upstream-live-handoff.log.gz": "cb5d4c6ffcb38568bd061491a0cc76d2c73014e73233d143e8bc68baa0b7c6aa",
   "research/herdr-191/inheritance/upstream-sigpipe-isolated-client-writer.log.gz": "511407381b0234a84ec29c1c25f4cd029d1dffc386bdfdd21c0b3187949a9d5e",
   "research/herdr-191/inheritance/upstream-sigpipe-isolated-pty-actor.log.gz": "75d65e358a96530a1759de14e0a0737eed8bb6999300c10623a283360a805a49",
-  "research/herdr-191/inheritance/validation.json": "9ffc906cca9ddccf176b475fc648b89ad6315d65824d853bfd0a7c54edd9c8ad",
-  "tooling/herdr-integration/native_runtime.py": "3b368aa34e326addacdc6eab45e113bfab7f4cbf172bea960d8ec9c346937600",
+  "research/herdr-191/inheritance/validation.json": "ff917b745abc72474f64c40c42dd880dcfdb4b260b6412a4d2c21d9724f1eb56",
+  "tooling/herdr-integration/native_runtime.py": "b676e5d32fd4da4bd51417d12d5b42d68ff7de626029501be0f4f4aabd1fe96d",
   "upstream/herdr/src/embedding.rs": "9c822186817ce2cdc8d2c7ffdab6d469bd4946476ba0b390fecd9d0996ddf342",
   "upstream/herdr/src/persist.rs": "4584a38592678366ab015734cf609612b17c78685b2870abc773b7fd591f426c",
   "upstream/herdr/src/persist/snapshot.rs": "5f2850551ce725688bbf4324b128b54714414c651bc4291bd3af085544a1f7e2",
-  "upstream/herdr/src/server/headless/bootstrap.rs": "3300e447c3b8608f46db6801e261e233a41c76344397734c5c2725eea33bd520"
+  "upstream/herdr/src/server/headless/bootstrap.rs": "3300e447c3b8608f46db6801e261e233a41c76344397734c5c2725eea33bd520",
+  "research/herdr-191/inheritance/qa-probe-race-prefix.json.gz": "87767db1b4f92288544f75e051813781bc630719e9e610395eab4c77c4a15918",
+  "research/herdr-191/inheritance/qa-probe-race-postfix.log.gz": "9389d5f4695322f044b5e4fb0b8c2a7f11aae5f163e9095573d9cea21352b69a"
 }
