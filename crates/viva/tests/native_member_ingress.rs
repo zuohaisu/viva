@@ -372,7 +372,7 @@ fn a_revoked_credential_cannot_report_after_exit() {
     let home = temp.path();
     let data = seed(home, &["dispatch_delegated", "member_report"]);
     let _fixture = start_fixture(home);
-    let execution_id = start_execution(home, &data, "member-revoked", "exit 0");
+    let execution_id = start_execution(home, &data, "member-revoked", "sleep 0.2; exit 0");
     wait_execution_exit(home, &execution_id);
     let credential = credential_for(home, &execution_id);
     let refused = member_call(home, &credential, "progress", "after exit");
