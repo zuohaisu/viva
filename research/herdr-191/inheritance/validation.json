@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "issue": 191,
-  "code_commit": "b5dafc9",
+  "code_commit": "58b6a84",
   "base_commit": "70e1686",
   "scope": "First real legacy-Viva to native-Herdr live inheritance at the native default entry. A feature-enabled bare `viva` starts the native host; when a live legacy `viva server` owns the same VIVA_HOME, the native host receives protocol-2 handoff entries with no early ACK, adopts every PTY master into a Herdr session built from the persisted SceneBook, and only then acknowledges so the old host exits. This is a DEGRADED IMPORT, not a lossless takeover, not member execution, not agent/terminal control, not Linux/x86_64 packaging acceptance, and not a released or merged product. The legacy UI remains reachable as `viva workbench`; legacy control commands (`status`, `shutdown`, `dispatch`) still refuse behind a native host.",
   "existing_capability_and_gap": "Reused the existing legacy handoff protocol 2 (`send_entries`/`receive_entries`, `acknowledge_prepared`, one PTY master fd per terminal over SCM_RIGHTS), the legacy `Client::connect`/`ServerRestart` control path, the persisted `workbench_layout` SceneBook, and Herdr's existing `App::new_from_handoff` + `ImportedHandoffRuntime` + `HandoffRuntimeState` adoption machinery. The gap was that the native host had no handoff receiver, no mapping from a legacy SceneBook/manifest to a Herdr SessionSnapshot, and bare `viva` either refused or started an empty native session instead of inheriting the only live session.",
@@ -28,7 +28,7 @@
     },
     {
       "command": "ZIG=<zig 0.16.0> cargo +1.96.1 test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test native_execution --test native_member_ingress --test native_control --test native_legacy_inheritance --test m1_terminal -- --nocapture",
-      "result": "24 passed, 0 failed. This is the exact command the native CI job now runs (ci.yml adds native_legacy_inheritance)."
+      "result": "24 passed, 0 failed. This is the exact command the native CI job runs (ci.yml adds native_legacy_inheritance). After the fixture fix below it passed again locally."
     },
     {
       "command": "ZIG=<zig 0.16.0> cargo +1.96.1 test -p viva --locked --features herdr-runtime --lib -- --test-threads=1",
@@ -65,6 +65,10 @@
     {
       "command": "PR CI run 42962076446 (head b5dafc9)",
       "result": "Four jobs success. The native job now explicitly runs native_legacy_inheritance (3 passed: live inheritance with unchanged shell PID/screen, corrupt-book refusal with the old host still serving, stale-socket fresh start), together with execution 6, member ingress 5, control 4, bridge 2 and m1_terminal 4; upstream nextest 3719/3719 passed (12 skipped); the autospawn/PTY/detach probe reports passed:true, cross_backend_inheritance covered_by_test, human_visual HUMAN_VISUAL_REVIEW_PENDING, binary SHA-256 438866640c592e957a5f9832d4caca8b6cb8600b3a2fb1ffb9302dafb2bed39d."
+    },
+    {
+      "command": "cargo +1.96.1 test -p viva --locked --features herdr-runtime --test native_member_ingress -- --nocapture (five consecutive runs)",
+      "result": "5 passed in every run. This followed a CI-only flake: run 42964565260 (evidence-only head b840e33) failed `a_revoked_credential_cannot_report_after_exit` because its fixture started `/bin/sh -c 'exit 0'` and the process vanished before the OS start marker could be read (`execution_confirm_failed`). The fixture now uses `sleep 0.2; exit 0`, the same non-zero-lifetime rule as the earlier owner-gate fixture; no product check or timeout was weakened. The failed CI log excerpt is retained in native-member-ingress-ci-flake.log.gz."
     }
   ],
   "negative_fixtures": "Live inheritance success fixture: old `viva server` + real shell prints ALIVE-42; after takeover `pane.process_info` shows the unchanged shell PID, `pane.read` still contains ALIVE-42, old host exits 0, `server.sock` disappears. Refusal fixture: `workbench_layout` is replaced with `not-json` AFTER the live shell exists, so the native host takes the fds, then refuses the invalid SceneBook; it must exit non-zero, never bind herdr.sock, leave the old host alive, keep the shell PID alive, execute STILL-42 through the old host, and record `live_handoff_failed`. Stale-socket fixture: a bound-then-dropped `server.sock` does not block a fresh native session, `legacy_handoff.inherited` is false, the log says `starting a fresh native session`, and the stale file remains. Unit fixtures also cover duplicate placements, orphan panes, uncovered manifest entries and a full wire round-trip with ACK.",
@@ -79,6 +83,6 @@
     "All real takeover tests used task-created HOME/VIVA_HOME fixtures under /tmp. The user's real ~/.viva was not touched. No merge, approval, version bump, tag, npm publish or release occurred.",
     "Independent QA and Haisu's MacBook Air installation/manual UI acceptance remain pending and are not replaced by these checks."
   ],
-  "failures": "The upstream herdr full lib suite cannot complete under local `cargo test` in one process because two pipe-writing tests kill the runner with SIGPIPE; both pass in isolation and CI uses nextest. The full native workspace run predates a string-only fidelity-label edit and the affected native suites/lib were rerun at the final head. Release-workflow execution, x86_64/Intel artifact, Linux runtime, native-host in-place update, and human UI acceptance were not tested.",
+  "failures": "CI run 42964565260 failed the revoked-credential test on a zero-lifetime fixture race; fixed in 58b6a84 and the suite passed five consecutive local runs. The upstream herdr full lib suite cannot complete under local `cargo test` in one process because two pipe-writing tests kill the runner with SIGPIPE; both pass in isolation and CI uses nextest. The full native workspace run predates a string-only fidelity-label edit and the affected native suites/lib were rerun at the final head. Release-workflow execution, x86_64/Intel artifact, Linux runtime, native-host in-place update, and human UI acceptance were not tested.",
   "evidence": "research/herdr-191/inheritance/ (required-suite, lib, full-workspace, upstream live_handoff, SIGPIPE runner-limit, clippy, schema, bare-viva probe, and release-build logs; source hashes in source-hashes.json)"
 }
