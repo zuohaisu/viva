@@ -251,12 +251,57 @@ pub struct Context {
     pub arguments: Vec<String>,
     pub child_prefix: Vec<String>,
     pub domain: Arc<dyn DomainServices>,
+    /// Cross-backend inheritance prepared by the composition root. The
+    /// server bootstrap consumes it; the TUI process leaves it empty.
+    #[cfg(unix)]
+    pub legacy_import: std::sync::Mutex<Option<LegacyImport>>,
 }
+
+/// A fully prepared takeover of a live legacy Viva host: the snapshot Herdr
+/// restores plus one owned PTY master per pane. Building this value already
+/// received the fds; nothing here may be acknowledged before adoption.
+#[cfg(unix)]
+pub struct LegacyImport {
+    pub snapshot: crate::persist::SessionSnapshot,
+    pub panes: Vec<LegacyImportPane>,
+    /// Sends the prepared ACK that retires the old host. The bootstrap calls
+    /// it exactly once, after every pane is adopted and both endpoints serve.
+    pub confirm: Box<dyn FnOnce() -> io::Result<()> + Send>,
+}
+
+/// One adopted legacy pane. `master_fd` ownership transfers to the runtime
+/// when `TerminalRuntime::from_handoff_fd` takes it.
+#[cfg(unix)]
+pub struct LegacyImportPane {
+    pub pane_id: u32,
+    pub master_fd: std::os::fd::RawFd,
+    pub child_pid: u32,
+    pub rows: u16,
+    pub cols: u16,
+    pub cell_width_px: u32,
+    pub cell_height_px: u32,
+    pub initial_history_ansi: Option<String>,
+}
+
+// The snapshot shape is built by the composition root, so the exact same
+// structs Herdr persistence uses are part of the embedding contract.
+#[cfg(unix)]
+pub use crate::persist::{
+    DirectionSnapshot, LayoutSnapshot, PaneSnapshot, SessionSnapshot, TabSnapshot,
+    WorkspaceSnapshot, SNAPSHOT_VERSION,
+};
 
 static CONTEXT: OnceLock<Context> = OnceLock::new();
 
 pub fn context() -> Option<&'static Context> {
     CONTEXT.get()
+}
+
+/// Move the prepared legacy takeover out of the context. `None` in the TUI
+/// process and for ordinary native starts.
+#[cfg(unix)]
+pub(crate) fn take_legacy_import() -> Option<LegacyImport> {
+    context()?.legacy_import.lock().ok()?.take()
 }
 pub fn enabled() -> bool {
     context().is_some()
@@ -312,7 +357,7 @@ fn validate_arguments(args: &[String]) -> io::Result<()> {
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "native preview operation is not integrated with Viva authority; no legacy UI fallback",
+            "native operation is not integrated with Viva authority; no legacy UI fallback",
         ));
     }
     Ok(())
@@ -476,6 +521,13 @@ fn admit_with_peer(
             | "client_shell.surface.set"
             | "client.window_title.set"
             | "client.window_title.clear"
+            // Observation is not authority: these read the live grid and OS
+            // process facts, exactly what the same-uid legacy client could
+            // ask the old host. They mutate nothing and are what makes an
+            // inherited session verifiable after a takeover.
+            | "pane.list"
+            | "pane.read"
+            | "pane.process_info"
     ) {
         return Ok(());
     }

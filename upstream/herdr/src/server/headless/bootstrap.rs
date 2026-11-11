@@ -32,6 +32,10 @@ pub fn run_server() -> io::Result<()> {
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_hub = api::EventHub::default();
     let should_quit = Arc::new(AtomicBool::new(false));
+    // Taken once: a prepared cross-backend takeover, if the composition root
+    // received one. Ordinary native starts leave this empty.
+    #[cfg(unix)]
+    let legacy_import = crate::embedding::take_legacy_import();
 
     // Start the JSON API socket server.
     let _api_server = match api::start_server_with_stop_control(
@@ -55,14 +59,72 @@ pub fn run_server() -> io::Result<()> {
 
     let result = rt.block_on(async {
         // Create the App (with AppState, event channels, etc.).
-        let mut app = app::App::new(
-            &loaded_config.config,
-            app::AppPolicy::PRODUCTION,
-            config::config_diagnostic_summary(&loaded_config.diagnostics),
-            api_rx,
-            event_hub,
-        );
-        seed_startup_workspace_if_empty(&mut app);
+        #[cfg(unix)]
+        let (app, legacy_confirm) = match legacy_import {
+            Some(import) => {
+                let crate::embedding::LegacyImport {
+                    snapshot,
+                    panes,
+                    confirm,
+                } = import;
+                let mut imports = HashMap::new();
+                for pane in panes {
+                    let pane_id = pane.pane_id;
+                    imports.insert(
+                        pane_id,
+                        crate::handoff_runtime::ImportedHandoffRuntime {
+                            master_fd: pane.master_fd,
+                            state: crate::handoff_runtime::HandoffRuntimeState {
+                                pane_id,
+                                child_pid: pane.child_pid,
+                                rows: pane.rows,
+                                cols: pane.cols,
+                                cell_width_px: pane.cell_width_px,
+                                cell_height_px: pane.cell_height_px,
+                                keyboard_protocol_flags: 0,
+                                keyboard_protocol_ansi: None,
+                                input_state: None,
+                                terminal_title: None,
+                                initial_history_ansi: pane.initial_history_ansi,
+                                agent_state: None,
+                            },
+                        },
+                    );
+                }
+                let app = app::App::new_from_handoff(
+                    &loaded_config.config,
+                    config::config_diagnostic_summary(&loaded_config.diagnostics),
+                    api_rx,
+                    event_hub,
+                    &snapshot,
+                    &mut imports,
+                )?;
+                (app, Some(confirm))
+            }
+            None => {
+                let mut app = app::App::new(
+                    &loaded_config.config,
+                    app::AppPolicy::PRODUCTION,
+                    config::config_diagnostic_summary(&loaded_config.diagnostics),
+                    api_rx,
+                    event_hub,
+                );
+                seed_startup_workspace_if_empty(&mut app);
+                (app, None)
+            }
+        };
+        #[cfg(not(unix))]
+        let mut app = {
+            let mut app = app::App::new(
+                &loaded_config.config,
+                app::AppPolicy::PRODUCTION,
+                config::config_diagnostic_summary(&loaded_config.diagnostics),
+                api_rx,
+                event_hub,
+            );
+            seed_startup_workspace_if_empty(&mut app);
+            app
+        };
 
         // Create the headless server.
         let mut server = match HeadlessServer::new(
@@ -88,6 +150,16 @@ pub fn run_server() -> io::Result<()> {
         );
         // Viva modification: publish capabilities only after BOTH endpoints bind.
         crate::embedding::server_ready()?;
+        #[cfg(unix)]
+        if let Some(confirm) = legacy_confirm {
+            // Every legacy pane is adopted and both endpoints answer. Only
+            // now may the old host be retired; a failure here (the sender is
+            // gone or still serving) aborts before any reader resumed.
+            confirm()?;
+            server.app.assume_handoff_ownership();
+            server.app.unpause_handoff_readers();
+            server.pending_handoff_repaint_nudge = true;
+        }
         print_ready_message(&api::socket_path(), &client_socket_path());
         server.app.run_plugin_startup_hooks();
 

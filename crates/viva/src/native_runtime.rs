@@ -1,8 +1,8 @@
-//! Development-only native composition (#191). Herdr owns the PTYs and renderer;
-//! Viva owns member/task facts and refusal auditing. This is deliberately not
-//! wired to the installed default until authority and cross-backend import pass.
+//! Native composition (#191). Herdr owns the PTYs and renderer; Viva owns
+//! member/task facts and refusal auditing. A feature-enabled build is the
+//! default `viva` entry; the legacy entry remains as `viva workbench`.
 mod client_authority;
-#[cfg(test)]
+#[cfg(unix)]
 mod legacy_import;
 
 use crate::{
@@ -66,6 +66,16 @@ struct DomainBridge {
     clients: Mutex<client_authority::ClientAuthority>,
     channels: Mutex<ChannelRegistry>,
     executions: Mutex<NativeExecutionState>,
+    /// Present when this host took over a live legacy session. A degraded
+    /// import, never a lossless claim.
+    legacy_handoff: Option<LegacyHandoffEvidence>,
+}
+
+#[derive(Clone)]
+struct LegacyHandoffEvidence {
+    old_host_id: String,
+    old_host_pid: u32,
+    adopted_panes: usize,
 }
 
 /// Fixed grant action for a member progress report. The dispatch grant must
@@ -80,7 +90,7 @@ const MEMBER_REPORT_DETAIL_LIMIT: usize = 2000;
 fn owner_only_phase_locked(store: &Store, state: &NativeExecutionState) -> Result<()> {
     // Active worker credentials are only acceptable when this native host
     // issued them for an execution it owns. Foreign credentials still block
-    // the preview (fail closed); this is what lets the first bound member
+    // the host (fail closed); this is what lets the first bound member
     // ingress coexist with the owner frontend gate.
     let mut stmt = store
         .connection()
@@ -307,7 +317,7 @@ impl DomainBridge {
         if slot.is_none() {
             paths::ensure_private_dir(&self.home)?;
             let path = paths::database_path(&self.home);
-            // Existing data is never migrated/reconciled by this preview. Reuse
+            // Existing data is never migrated/reconciled at attach. Reuse
             // exact-schema attach; normal crash reconciliation would incorrectly
             // stop executions whose live ownership has not been integrated yet.
             *slot = Some(
@@ -1073,6 +1083,18 @@ impl herdr::embedding::DomainServices for DomainBridge {
             .lock()
             .map(|state| state.by_execution.len())
             .unwrap_or(0);
+        let legacy_handoff = match &self.legacy_handoff {
+            Some(evidence) => serde_json::json!({
+                "inherited": true,
+                "old_host_id": &evidence.old_host_id,
+                "old_host_pid": evidence.old_host_pid,
+                "adopted_panes": evidence.adopted_panes,
+                "fidelity": "degraded_import",
+                "preserved": ["live_child_process", "rows_cols", "screen_and_scrollback_ansi", "scene_and_tab_names", "tab_order_and_active_tab"],
+                "not_preserved": ["legacy_terminal_ids", "pane_cwd", "pane_purpose", "split_ratios_focus_zoom", "cell_pixel_size", "agent_state", "worktree_space"],
+            }),
+            None => serde_json::json!({"inherited": false}),
+        };
         self.with_store(|store| {
             Ok(serde_json::json!({
                 "schema": 1,
@@ -1080,7 +1102,12 @@ impl herdr::embedding::DomainServices for DomainBridge {
                 "runtime_pid": std::process::id(),
                 "runtime_host_id": self.host_id,
                 "execution_attribution": "pane_bound_owner_dispatch",
-                "integration_state": "development-owner-dispatch",
+                "integration_state": if self.legacy_handoff.is_some() {
+                    "native-default-entry-legacy-inheritance"
+                } else {
+                    "native-default-entry"
+                },
+                "legacy_handoff": legacy_handoff,
                 "member_dispatch": "owner_gated_launch_spec",
                 "member_process_ingress": "bound_worker_report_only",
                 "member_report_action": MEMBER_REPORT_ACTION,
@@ -1335,16 +1362,9 @@ fn run_control_client(home: &std::path::Path, args: &[String]) -> Result<()> {
 }
 
 pub fn run(args: &[String]) -> Result<()> {
-    // No accidental installation/user-home trial before the default cutover gate.
-    if std::env::var(paths::VIVA_HOME_ENV)
-        .ok()
-        .is_none_or(|value| value.trim().is_empty())
-    {
-        return Err(Error::Validation("native development preview requires an explicit isolated VIVA_HOME; it is not an installation/upgrade acceptance build".into()));
-    }
     if crate::machines::invocation_target().is_some() {
         return Err(Error::Validation(
-            "native preview remote machine ingress is not integrated; refusing local fallback"
+            "native runtime remote machine ingress is not integrated; refusing local fallback"
                 .into(),
         ));
     }
@@ -1360,16 +1380,40 @@ pub fn run(args: &[String]) -> Result<()> {
     if matches!(args.first().map(String::as_str), Some("host" | "execution")) {
         return run_control_client(&home, args);
     }
-    // Temporary development admission gate, not the final startup behavior.
-    // Never launch a second execution host beside a legacy Viva host. The
-    // production workbench still uses automatic same-backend takeover (#196).
-    // Cross-backend inheritance remains required BEFORE default cutover.
-    if crate::server::Client::connect(&home).is_ok() {
-        return Err(Error::Validation("native development preview cannot yet inherit this live legacy host; it has been left untouched. This preview is not the #191 default-startup implementation.".into()));
+    // The TUI process only embeds the renderer; the server child it spawns
+    // (`viva runtime server`) is the process that may inherit a live legacy
+    // session. A legacy socket that is present but does not answer blocks a
+    // fresh start: two hosts on one home must never exist.
+    let mut legacy_evidence = None;
+    let mut legacy_import = None;
+    if args.first().map(String::as_str) == Some("server")
+        && legacy_import::legacy_control_socket_present(&home)
+    {
+        match prepare_legacy_import(&home) {
+            Ok(prepared) => {
+                eprintln!(
+                    "native: inheriting {} live terminal(s) from legacy host {} (pid {}); \
+                     degraded import — pane cwd, split ratios, focus/zoom, cell pixel size and \
+                     agent/worktree metadata are not preserved",
+                    prepared.evidence.adopted_panes,
+                    prepared.evidence.old_host_id,
+                    prepared.evidence.old_host_pid
+                );
+                legacy_evidence = Some(prepared.evidence);
+                legacy_import = Some(prepared.import);
+            }
+            Err(error) if legacy_import::only_stale_control_sockets(&home) => {
+                // A crashed legacy host leaves its socket file behind. Only
+                // refused sockets may be ignored; a live or wedged host still
+                // aborts above.
+                eprintln!(
+                    "native: no legacy host answered its control socket; \
+                     starting a fresh native session ({error})"
+                );
+            }
+            Err(error) => return Err(error),
+        }
     }
-    eprintln!(
-        "native development preview: use isolated HOME/VIVA_HOME only; member execution and cross-backend inheritance are not integrated; not an installation acceptance build"
-    );
     let mut arguments = vec!["viva-runtime".to_owned()];
     arguments.extend_from_slice(args);
     herdr::embedding::run(herdr::embedding::Context {
@@ -1383,9 +1427,92 @@ pub fn run(args: &[String]) -> Result<()> {
             home,
             host_id: format!("native-{}", uuid::Uuid::new_v4().simple()),
             store: Mutex::new(None),
+            legacy_handoff: legacy_evidence,
         }),
+        #[cfg(unix)]
+        legacy_import: Mutex::new(legacy_import),
     })?;
     Ok(())
+}
+
+struct PreparedLegacyImport {
+    import: herdr::embedding::LegacyImport,
+    evidence: LegacyHandoffEvidence,
+}
+
+/// Receive the live legacy session and convert it into Herdr's adoption
+/// inputs. Every error path before `LegacyConfirm::confirm` drops the fds
+/// without acknowledging, so the old host reattaches its readers.
+fn prepare_legacy_import(home: &std::path::Path) -> Result<PreparedLegacyImport> {
+    use std::os::fd::IntoRawFd as _;
+
+    // The stored layout is loaded BEFORE the old host is asked to hand over,
+    // so an unreadable store aborts while it still serves every terminal.
+    // Its schema is validated in `build_plan` after the fds arrive; a failure
+    // there drops the fds without acknowledging, so the old host reattaches.
+    let layout = legacy_import::read_layout(home)?;
+    let handoff = legacy_import::receive_from_live_host(home)?;
+    let old_host_id = handoff.manifest.host_id.clone();
+    let old_host_pid = handoff.old_host_pid;
+    let plan = legacy_import::build_plan(&handoff.manifest, layout.as_deref())?;
+    let planned = legacy_import::build_snapshot(&plan, &handoff.manifest)?;
+    let (_manifest, fds, confirm) = handoff.into_parts();
+
+    let mut covered = vec![false; fds.len()];
+    for pane in &planned.panes {
+        let Some(slot) = covered.get_mut(pane.entry_index) else {
+            return Err(Error::Validation(
+                "import plan references a manifest entry without an fd".into(),
+            ));
+        };
+        if *slot {
+            return Err(Error::Validation(
+                "import plan adopts one terminal twice; refusing an ambiguous takeover".into(),
+            ));
+        }
+        *slot = true;
+    }
+    if covered.iter().any(|covered| !covered) || planned.panes.len() != fds.len() {
+        return Err(Error::Validation(format!(
+            "legacy handoff carries {} live terminal(s) but the import plan adopts {}; \
+             refusing to acknowledge a partial takeover",
+            fds.len(),
+            planned.panes.len()
+        )));
+    }
+
+    let mut slots: Vec<Option<std::os::fd::OwnedFd>> = fds.into_iter().map(Some).collect();
+    let mut panes = Vec::with_capacity(planned.panes.len());
+    for pane in planned.panes {
+        let fd = slots[pane.entry_index]
+            .take()
+            .expect("every fd is covered exactly once");
+        panes.push(herdr::embedding::LegacyImportPane {
+            pane_id: pane.pane_id,
+            master_fd: fd.into_raw_fd(),
+            child_pid: pane.child_pid,
+            rows: pane.rows,
+            cols: pane.cols,
+            cell_width_px: legacy_import::DEFAULT_CELL_WIDTH_PX,
+            cell_height_px: legacy_import::DEFAULT_CELL_HEIGHT_PX,
+            initial_history_ansi: pane.history_ansi,
+        });
+    }
+    let adopted_panes = panes.len();
+    let confirm: Box<dyn FnOnce() -> io::Result<()> + Send> =
+        Box::new(move || confirm.confirm().map_err(io::Error::other));
+    Ok(PreparedLegacyImport {
+        import: herdr::embedding::LegacyImport {
+            snapshot: planned.snapshot,
+            panes,
+            confirm,
+        },
+        evidence: LegacyHandoffEvidence {
+            old_host_id,
+            old_host_pid,
+            adopted_panes,
+        },
+    })
 }
 
 #[cfg(test)]
@@ -1492,6 +1619,7 @@ mod tests {
                 )]),
                 owned: HashSet::from([execution_id.to_string()]),
             }),
+            legacy_handoff: None,
         };
 
         bridge

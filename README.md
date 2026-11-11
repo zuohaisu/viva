@@ -36,7 +36,10 @@ are configuration, and every completion claim carries recorded evidence.
   single resident server for the home (a second start refuses and names the
   running one); it owns the store, every terminal and a private Unix-socket
   channel until `viva shutdown` ends it. Plain `viva` attaches the workbench
-  and spawns a detached server first when none runs. From any other process:
+  and spawns a detached server first when none runs. Release builds (compiled
+  with the embedded Herdr runtime) start the native workbench instead and
+  inherit a live legacy server on first start; `viva workbench` keeps the
+  legacy UI explicitly reachable. From any other process:
   `viva status/dispatch/terminals/stop-terminal/result/handoff/shutdown`.
   Dispatch is grant-checked at the moment of effect, idempotent by request
   key, and launches a real PTY in the task's worktree. With no server
@@ -262,9 +265,10 @@ A PR build can still print the version in `Cargo.toml`; record
 **Run Viva:**
 
 ```bash
-viva                     # attach the workbench (starts the resident server if needed)
-viva status              # from any second terminal/process
-viva shutdown            # stop the resident server and its owned processes
+viva                     # workbench (native default in release builds)
+viva workbench           # the legacy workbench explicitly
+viva status              # legacy resident server, from any second process
+viva shutdown            # stop the legacy resident server and owned processes
 ```
 
 ## Documentation

@@ -119,7 +119,9 @@ pub fn run(args: &[String]) -> Result<()> {
         (Some(entry), Mode::Install { restart: true }) => {
             restart_running_server(&crate::foundation::paths::viva_home(None), &entry)
         }
-        (Some(_), Mode::Install { restart: false }) => print_restart_skipped(),
+        (Some(_), Mode::Install { restart: false }) => {
+            print_restart_skipped(&crate::foundation::paths::viva_home(None))
+        }
         _ => {}
     }
     Ok(())
@@ -550,6 +552,18 @@ fn restart_running_server(home: &Path, entry: &Path) {
         );
         return;
     }
+    // A native host cannot be handed to the fresh binary in place yet: the
+    // installed update is real, but pretending there was no host to restart
+    // (or handing it to the legacy resume path) would be a silent lie.
+    #[cfg(unix)]
+    if std::os::unix::net::UnixStream::connect(home.join("runtime/workbench/herdr.sock")).is_ok() {
+        eprintln!(
+            "viva: update installed, but a native runtime host is still running the previous \
+             binary and cannot be restarted in place; terminate that host (its sessions are \
+             not owned by the updater) and start `viva` again to use the new version."
+        );
+        return;
+    }
     let socket = home.join(crate::server::SOCKET_NAME);
     if !socket.exists() {
         println!("No running resident server; the next `viva` start will use the new version.");
@@ -577,7 +591,15 @@ fn restart_running_server(home: &Path, entry: &Path) {
     }
 }
 
-fn print_restart_skipped() {
+fn print_restart_skipped(home: &Path) {
+    #[cfg(unix)]
+    if std::os::unix::net::UnixStream::connect(home.join("runtime/workbench/herdr.sock")).is_ok() {
+        println!(
+            "Server restart skipped (--no-restart). A native runtime host keeps the previous \
+             binary until you terminate it and start `viva` again."
+        );
+        return;
+    }
     println!(
         "Server restart skipped (--no-restart). A running server keeps the old version until `viva server-restart`; reconnect the TUI afterwards."
     );

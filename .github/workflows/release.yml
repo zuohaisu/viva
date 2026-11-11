@@ -34,28 +34,65 @@ jobs:
           rustup toolchain install
           rustup target add ${{ matrix.target }}
 
-      - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Install the original hash-pinned Zig 0.16.0 (native terminal build)
+        run: |
+          curl --fail --location --retry 2 https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz -o "$RUNNER_TEMP/zig.tar.xz"
+          echo "b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489  $RUNNER_TEMP/zig.tar.xz" | shasum -a 256 -c -
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP"
+          echo "ZIG=$RUNNER_TEMP/zig-aarch64-macos-0.16.0/zig" >> "$GITHUB_ENV"
+
+      - name: Build release binary (native runtime is the default entry)
+        run: cargo build --release -p viva --features herdr-runtime --target ${{ matrix.target }}
 
       - name: Smoke test the built binary (real startup, not a file check)
         shell: bash
         run: |
           BIN="target/${{ matrix.target }}/release/viva"
           "$BIN" --version
+          "$BIN" runtime --version
           SMOKE_HOME="$(mktemp -d)/viva-smoke"
           VIVA_HOME="$SMOKE_HOME" "$BIN" init
           VIVA_HOME="$SMOKE_HOME" "$BIN" doctor | grep "state:     openable"
           VIVA_HOME="$SMOKE_HOME" "$BIN" data export --out "$(mktemp -d)/export" | grep exported
 
-      - name: Package (binary + Pi extension + licenses)
+      - name: Package (binary + Pi extension + licenses + notices)
         shell: bash
         run: |
           DIR="viva-${{ matrix.name }}"
-          mkdir -p "$DIR/extensions"
+          mkdir -p "$DIR/extensions" "$DIR/licenses"
           cp "target/${{ matrix.target }}/release/viva" "$DIR/viva"
           cp -R extensions/pi "$DIR/extensions/pi"
           rm -rf "$DIR/extensions/pi/node_modules"
           cp LICENSE README.md "$DIR/"
+          cp upstream/herdr/LICENSE "$DIR/licenses/herdr-LICENSE"
+          cat > "$DIR/NOTICE" <<'EOF'
+          Viva includes modified source from Herdr 0.9.3
+          (https://github.com/herdrdev/herdr), licensed under the Apache
+          License, Version 2.0. Viva's modifications are the embedding
+          integration: the Herdr runtime is compiled into the `viva` binary and
+          driven by Viva's domain services, authority gates and packaging.
+          Herdr binds a vendored libghostty-vt, also Apache-2.0.
+
+          The object code in this artifact is built from the Viva source tag
+          whose version matches this release. That tag contains the complete
+          corresponding source, including upstream/herdr/ with every change,
+          and licenses/herdr-LICENSE is the applicable license text.
+
+          This artifact is not the original Herdr distribution and is not
+          endorsed by the Herdr authors.
+          EOF
+          cat > "$DIR/SBOM.txt" <<'EOF'
+          Viva release component inventory (text SBOM)
+          ============================================
+          First-party:
+            viva            MIT           this repository
+          Embedded third-party source (compiled into the binary):
+            herdr 0.9.3     Apache-2.0    upstream/herdr/ (modified: embedding glue)
+            ghostty-vt      Apache-2.0    upstream/herdr/crates/ghostty-vt (vendored)
+            portable-pty    MIT           upstream/herdr/vendor/portable-pty (patched)
+          The complete transitive dependency graph, with exact versions and
+          checksums, is the Cargo.lock of the source tag named in NOTICE.
+          EOF
           tar -czf "viva-${{ matrix.name }}.tar.gz" "$DIR"
           shasum -a 256 "viva-${{ matrix.name }}.tar.gz" > "viva-${{ matrix.name }}.tar.gz.sha256"
 

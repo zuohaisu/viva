@@ -161,14 +161,16 @@ fn actual_native_server_reads_canonical_facts_and_audits_unbound_refusals() {
         ping["result"]["capabilities"]["ssh_agent_registration"],
         false
     );
-    // The explicit native preview must not silently invoke the old host/UI.
+    // The legacy CLI must not silently invoke the old host/UI behind a native host.
     let output = Command::new(env!("CARGO_BIN_EXE_viva"))
         .arg("status")
         .env("VIVA_HOME", home)
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("native development preview"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("a native runtime host owns this home")
+    );
     assert!(!home.join("server.sock").exists());
     assert_eq!(std::fs::read_dir(&foreign).unwrap().count(), 1);
     let store = Store::open(&paths::database_path(home), viva::server::migrations()).unwrap();

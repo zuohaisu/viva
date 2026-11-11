@@ -101,7 +101,7 @@ impl Client {
         if crate::machines::invocation_target().is_some() {
             return Self::connect(home);
         }
-        super::reject_native_preview_owner(home)?;
+        super::reject_legacy_entry_behind_native_host(home)?;
         if crate::foundation::legacy::old_control_socket_alive(home)? {
             return Err(Error::Validation(format!(
                 "the previous control socket {} is still serving; refusing to start a second \

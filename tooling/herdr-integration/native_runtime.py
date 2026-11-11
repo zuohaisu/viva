@@ -3,7 +3,9 @@
 
 Reuse the imported client/daemon/PTY implementation. Only a private temporary
 HOME/VIVA_HOME is used. Detach is measured separately from forced fixture cleanup.
-No member execution/task completion or old-Viva -> Herdr inheritance is claimed.
+No member execution/task completion is claimed. Old-Viva -> Herdr inheritance is
+covered by a different real-process test (crates/viva/tests/native_legacy_inheritance.rs),
+not by this probe.
 """
 import argparse
 import hashlib
@@ -45,7 +47,8 @@ def process_identity(pid):
 def probe(binary):
     packet = {"schema": 1, "binary": binary.name,
               "human_visual": "HUMAN_VISUAL_REVIEW_PENDING",
-              "cross_backend_inheritance": "not_tested", "passed": False}
+              "cross_backend_inheritance": "covered_by_test:crates/viva/tests/native_legacy_inheritance.rs",
+              "passed": False}
     with tempfile.TemporaryDirectory(prefix="vnui-", dir="/tmp") as folder:
         root = Path(folder)
         private_binary = root / "viva"

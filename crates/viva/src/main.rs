@@ -32,11 +32,20 @@ fn run(args: &[String]) -> Result<()> {
         None
     };
     match args.first().map(String::as_str) {
-        // Bare `viva` IS the workbench: attach as a client of the resident
-        // server (auto-starting one when none runs). The TUI is a
-        // detachable view now — ctrl+b q detaches, the server keeps every
-        // terminal alive (ADR 0012 / issue #43). Usage: `viva help`.
-        None => cmd_workbench(),
+        // Bare `viva` is the default entry. A build with the native runtime
+        // starts the Herdr-based workbench (which inherits a live legacy
+        // session); every other build keeps the legacy server client. The
+        // legacy UI stays reachable as the explicit `viva workbench`.
+        None => {
+            #[cfg(feature = "herdr-runtime")]
+            {
+                viva::native_runtime::run(&[])
+            }
+            #[cfg(not(feature = "herdr-runtime"))]
+            {
+                cmd_workbench()
+            }
+        }
         Some("help" | "--help" | "-h") => {
             print_usage();
             Ok(())
@@ -858,9 +867,15 @@ fn print_usage() {
 
 USAGE:
     viva
-        Attach the interactive parallel-development workbench to the
-        resident server (one is spawned detached when none runs).
-        ctrl+b q detaches the client; the server keeps every terminal running.
+        Attach the interactive workbench. A build with the native runtime
+        starts the Herdr-based runtime and inherits a live legacy session
+        when one is running; a build without it attaches to the resident
+        legacy server. ctrl+b q detaches the client; the host keeps every
+        terminal running.
+
+    viva runtime [server | host ... | execution ... | member report ...]
+        The native runtime entry. Feature-enabled builds start it from bare
+        `viva`; `server` is the detached host child.
 
     viva help
         Print this usage text.
@@ -1040,8 +1055,8 @@ USAGE:
         Conversation metadata (Viva-owned tree; the harness owns the transcript).
 
     viva workbench
-        Same as bare `viva`: attach the interactive workbench to the
-        resident server.
+        Attach the legacy workbench explicitly, even in a build whose bare
+        `viva` entry is the native runtime.
 
     viva data export --out <dir>
         Read-only export (dump) of every fact table in this VIVA_HOME to
@@ -1342,7 +1357,7 @@ fn parse_domain(name: &str) -> Result<viva::foundation::store::Domain> {
 fn cmd_control(args: &[String]) -> Result<()> {
     let home = viva::foundation::paths::viva_home(None);
     if viva::machines::invocation_target().is_none() {
-        viva::server::reject_native_preview_owner(&home)?;
+        viva::server::reject_legacy_entry_behind_native_host(&home)?;
     }
     match args.first().map(String::as_str) {
         Some("server" | "start") => {

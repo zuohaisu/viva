@@ -36,6 +36,10 @@ mod resume;
 
 pub use client::{Client, restart_server, restart_server_with};
 pub use handoff::{HandoffEntry, HandoffManifest};
+// The native host is a second receiver of the same live-handoff protocol; it
+// must use the identical framing instead of re-implementing SCM_RIGHTS.
+#[allow(unused_imports)] // `send_entries` is exercised only by protocol tests
+pub(crate) use handoff::{HANDOFF_PROTOCOL, acknowledge_prepared, receive_entries, send_entries};
 pub use protocol::{
     MACHINE_REFRESH_TIMEOUT, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, Request, RequestKind, Response,
     WorkbenchTreeOp, new_request, read_message, round_trip, with_grant, write_message,
@@ -129,9 +133,9 @@ CREATE TABLE agent_native_sessions (
 /// Socket file name inside `VIVA_HOME`.
 pub const SOCKET_NAME: &str = "server.sock";
 
-/// Development composition fence, not a cross-backend handoff implementation.
-/// Do not spawn a legacy PTY owner/renderer behind an active native preview.
-pub fn reject_native_preview_owner(home: &Path) -> Result<()> {
+/// Socket fence, not a cross-backend handoff implementation. Do not spawn a
+/// legacy PTY owner/renderer behind an active native host.
+pub fn reject_legacy_entry_behind_native_host(home: &Path) -> Result<()> {
     let socket = home.join("runtime/workbench/herdr.sock");
     if std::os::unix::net::UnixStream::connect(socket).is_ok() {
         // Refusal facts only: do not migrate/reconcile or log caller arguments.
@@ -147,10 +151,10 @@ pub fn reject_native_preview_owner(home: &Path) -> Result<()> {
                 subject_type: "native_ingress".into(),
                 subject_id: uuid::Uuid::new_v4().to_string(),
                 origin: "legacy_entry:unbound".into(),
-                payload: serde_json::json!({"reason": "native_adapter_not_integrated"}),
+                payload: serde_json::json!({"reason": "native_host_owns_home"}),
             },
         )?;
-        return Err(Error::Validation("an isolated native development preview owns this home; legacy operations are not integrated and will not start a second host or fall back to the legacy workbench".into()));
+        return Err(Error::Validation("a native runtime host owns this home; the legacy entry will not start a second host or fall back behind it".into()));
     }
     Ok(())
 }
@@ -362,7 +366,7 @@ impl Host {
     }
 
     fn open_at(home: &Path, socket_path: PathBuf, preparing: bool) -> Result<Self> {
-        reject_native_preview_owner(home)?;
+        reject_legacy_entry_behind_native_host(home)?;
         let binary_sha256 = client::executable_sha256()?;
         crate::foundation::paths::ensure_private_dir(home)?;
         let host_id = format!("host-{}", uuid::Uuid::new_v4().simple());
