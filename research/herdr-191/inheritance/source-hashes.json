@@ -30,7 +30,7 @@
   "research/herdr-191/inheritance/upstream-live-handoff.log.gz": "cb5d4c6ffcb38568bd061491a0cc76d2c73014e73233d143e8bc68baa0b7c6aa",
   "research/herdr-191/inheritance/upstream-sigpipe-isolated-client-writer.log.gz": "511407381b0234a84ec29c1c25f4cd029d1dffc386bdfdd21c0b3187949a9d5e",
   "research/herdr-191/inheritance/upstream-sigpipe-isolated-pty-actor.log.gz": "75d65e358a96530a1759de14e0a0737eed8bb6999300c10623a283360a805a49",
-  "research/herdr-191/inheritance/validation.json": "303ed588fde42cc6e5ee3cc196a58172dd191311cfab9a42f7997112728bb184",
+  "research/herdr-191/inheritance/validation.json": "4c8781cea4bf163ae361b8816d021872c4bc78051b677d7e39b73268b9694224",
   "tooling/herdr-integration/native_runtime.py": "5821486c830040f21d01d7e4b714deef7dd8f1d2800d8506223974c329df53e1",
   "upstream/herdr/src/embedding.rs": "9e5906f75e883b4c18f4b4fba0e7ebdfa6d139f7f72d1d62da5f09da8f710690",
   "upstream/herdr/src/persist.rs": "4584a38592678366ab015734cf609612b17c78685b2870abc773b7fd591f426c",
