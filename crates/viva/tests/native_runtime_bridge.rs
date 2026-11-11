@@ -1,12 +1,14 @@
 //! Executed only by the explicit native integration build, never counted as
 //! coverage from the default zero-test feature-disabled run. Not UI acceptance.
 #![cfg(all(feature = "herdr-runtime", unix))]
+#[path = "support/owner_anchor.rs"]
+mod owner_support;
+use owner_support::{call, spawn_with, wait_ready};
 use serde_json::{Value, json};
 use std::{
-    io::{BufRead, BufReader, Read, Write},
+    io::Read,
     os::unix::net::UnixStream,
-    path::Path,
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -15,31 +17,6 @@ use viva::{
     members::MemberRegistry,
     tasks::TaskRegistry,
 };
-
-struct Fixture(Child);
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        // Exact task-owned PID. Forced fixture cleanup is not lifecycle/UI PASS.
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-fn call(home: &Path, method: &str, params: Value) -> Value {
-    let mut socket = UnixStream::connect(home.join("runtime/workbench/herdr.sock")).unwrap();
-    socket
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    writeln!(
-        socket,
-        "{}",
-        json!({"id":"fixture-secret-do-not-persist", "method":method, "params":params,
-            "transport_peer":{"pid":1,"uid":0}, "peer_pid":1, "peer_uid":0, "claimed_role":"user"})
-    )
-    .unwrap();
-    let mut line = String::new();
-    BufReader::new(socket).read_line(&mut line).unwrap();
-    serde_json::from_str(&line).unwrap()
-}
 
 #[test]
 fn actual_native_server_reads_canonical_facts_and_audits_unbound_refusals() {
@@ -68,45 +45,23 @@ fn actual_native_server_reads_canonical_facts_and_audits_unbound_refusals() {
     let foreign = home.join("foreign");
     std::fs::create_dir(&foreign).unwrap();
     std::fs::write(foreign.join("sentinel"), "unchanged").unwrap();
-    let log = std::fs::File::create(home.join("native.log")).unwrap();
-    let mut child = Fixture(
-        Command::new(env!("CARGO_BIN_EXE_viva"))
-            .args(["runtime", "server"])
+    let mut child = spawn_with(home, "bridge-snapshot", |command| {
+        command
             .current_dir(home)
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("HOME", home)
-            .env("SHELL", "/bin/sh")
-            .env("TERM", "xterm-256color")
-            .env("VIVA_HOME", home)
             .env("XDG_CONFIG_HOME", &foreign)
             .env("XDG_STATE_HOME", &foreign)
             .env("HERDR_CONFIG_PATH", foreign.join("bad.toml"))
             .env("HERDR_SOCKET_PATH", foreign.join("bad.sock"))
             .env("HERDR_CLIENT_SOCKET_PATH", foreign.join("bad-client.sock"))
-            .env("HERDR_SESSION", "foreign-session")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(log)
-            .spawn()
-            .unwrap(),
-    );
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !runtime.join("herdr.sock").exists() {
-        assert!(
-            child.0.try_wait().unwrap().is_none(),
-            "native host exited: {}",
-            std::fs::read_to_string(home.join("native.log")).unwrap()
-        );
-        assert!(Instant::now() < deadline, "native startup deadline");
-        thread::sleep(Duration::from_millis(25));
-    }
+            .env("HERDR_SESSION", "foreign-session");
+    });
+    wait_ready(home, &child);
     let response = call(home, "viva.snapshot", json!({}));
     let snapshot = &response["result"]["snapshot"];
     assert_eq!(snapshot["backend"], "herdr-source-library", "{response}");
     assert_eq!(
         snapshot["runtime_pid"].as_u64(),
-        Some(u64::from(child.0.id()))
+        Some(u64::from(child.pid()))
     );
     assert_eq!(
         snapshot["members"][0]["member_id"],
@@ -132,14 +87,14 @@ fn actual_native_server_reads_canonical_facts_and_audits_unbound_refusals() {
         "viva.client.authenticate",
         json!({"credential":"fixture-bootstrap-do-not-persist"}),
     );
-    assert_eq!(invalid["error"]["code"], "untrusted_client", "{invalid}");
-    // The real frontend/PTY probe separately proves successful capability use.
-    use std::os::unix::fs::PermissionsExt;
-    let capability = runtime.join("owner-channel.json");
     assert_eq!(
-        std::fs::metadata(&capability).unwrap().permissions().mode() & 0o777,
-        0o600
+        invalid["error"]["code"], "owner_anchor_mismatch",
+        "{invalid}"
     );
+    // The real frontend/PTY probe separately proves successful capability use.
+    // The owner capability is never a file: only the spawned server holds the
+    // anchor, delivered over its inherited descriptor.
+    assert!(!runtime.join("owner-channel.json").exists());
     for method in ["server.stop", "server.live_handoff", "workspace.create"] {
         let params = if method == "server.live_handoff" {
             json!({"request_id":"forged", "member_id":"owner", "grant_id":"forged"})
@@ -151,7 +106,7 @@ fn actual_native_server_reads_canonical_facts_and_audits_unbound_refusals() {
             response["error"]["code"], "authority_not_integrated",
             "{method}: {response}"
         );
-        assert!(child.0.try_wait().unwrap().is_none());
+        assert!(child.try_wait().unwrap().is_none());
     }
     let ping = call(home, "ping", json!({}));
     assert_eq!(ping["result"]["type"], "pong");
@@ -161,14 +116,16 @@ fn actual_native_server_reads_canonical_facts_and_audits_unbound_refusals() {
         ping["result"]["capabilities"]["ssh_agent_registration"],
         false
     );
-    // The explicit native preview must not silently invoke the old host/UI.
+    // The legacy CLI must not silently invoke the old host/UI behind a native host.
     let output = Command::new(env!("CARGO_BIN_EXE_viva"))
         .arg("status")
         .env("VIVA_HOME", home)
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("native development preview"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("a native runtime host owns this home")
+    );
     assert!(!home.join("server.sock").exists());
     assert_eq!(std::fs::read_dir(&foreign).unwrap().count(), 1);
     let store = Store::open(&paths::database_path(home), viva::server::migrations()).unwrap();
@@ -249,23 +206,22 @@ fn owner_only_preview_refuses_unbound_pending_execution_without_reconciling_it()
     // Keep this original connection: reopening with Store::open would itself
     // reconcile data and invalidate the no-reconciliation assertion.
     let log_path = home.join("native.log");
-    let mut child = Fixture(
-        Command::new(env!("CARGO_BIN_EXE_viva"))
-            .args(["runtime", "server"])
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("VIVA_HOME", home)
-            .env("HOME", home)
-            .env("SHELL", "/bin/sh")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(std::fs::File::create(&log_path).unwrap())
-            .spawn()
-            .unwrap(),
-    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_viva"))
+        .args(["runtime", "server"])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("VIVA_HOME", home)
+        .env("HOME", home)
+        .env("SHELL", "/bin/sh")
+        .env("VIVA_OWNER_KEYCHAIN", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&log_path).unwrap())
+        .spawn()
+        .unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
     let status = loop {
-        if let Some(status) = child.0.try_wait().unwrap() {
+        if let Some(status) = child.try_wait().unwrap() {
             break status;
         }
         assert!(

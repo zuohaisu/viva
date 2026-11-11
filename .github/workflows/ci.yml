@@ -180,8 +180,8 @@ jobs:
       - name: Test native client capability and lifetime admission
         run: |
           cargo test -p viva --locked --features herdr-runtime --lib native_runtime:: -- --nocapture
-      - name: Test actual source-linked domain bridge and inherited PTY contract
-        run: cargo test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test native_execution --test m1_terminal -- --nocapture
+      - name: Test actual source-linked domain bridge, execution and inheritance contract
+        run: cargo test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test native_execution --test native_member_ingress --test native_control --test native_legacy_inheritance --test m1_terminal -- --nocapture
       - name: Install the original hash-pinned isolated test runner
         run: |
           curl --fail --location --retry 2 https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-universal-apple-darwin.tar.gz -o "$RUNNER_TEMP/nextest.tar.gz"
@@ -208,12 +208,16 @@ jobs:
         run: cargo build -p viva --locked --features herdr-runtime
       - name: Verify native autospawn, PTY, detach and live reattach
         run: python tooling/herdr-integration/native_runtime.py --viva target/debug/viva --output "$RUNNER_TEMP/native-runtime.json"
+      - name: Verify bare default entry inherits a live legacy host
+        run: python tooling/herdr-integration/native_runtime.py --viva target/debug/viva --legacy-live --output "$RUNNER_TEMP/native-runtime-legacy.json"
       - name: Retain native evidence including failures
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: native-runtime-evidence
-          path: ${{ runner.temp }}/native-runtime.json
+          path: |
+            ${{ runner.temp }}/native-runtime.json
+            ${{ runner.temp }}/native-runtime-legacy.json
           if-no-files-found: warn
 
   pi-extension:

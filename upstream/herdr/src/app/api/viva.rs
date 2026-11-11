@@ -4,7 +4,9 @@
 //! a host-issued owner frontend capability on the actual socket peer. The
 //! composition root performs the canonical task/member/grant checks before
 //! this handler creates a workspace, and confirms the real OS child after.
-use crate::api::schema::{ResponseResult, VivaExecutionStartParams};
+use crate::api::schema::{
+    ResponseResult, VivaExecutionStartParams, VivaExecutionStopParams, VivaPauseParams,
+};
 use crate::app::App;
 use crate::embedding::ExecutionRequest;
 
@@ -18,6 +20,65 @@ impl App {
             if let Some(runtime) = self.terminal_runtimes.remove(&terminal_id) {
                 runtime.shutdown();
             }
+        }
+    }
+
+    pub(super) fn handle_viva_execution_stop(
+        &mut self,
+        id: String,
+        params: VivaExecutionStopParams,
+    ) -> String {
+        let plan = match crate::embedding::prepare_execution_stop(&params.execution_id) {
+            Ok(plan) => plan,
+            Err(err) => return encode_error(id, "execution_stop_refused", err.to_string()),
+        };
+        let Some(workspace_id) = plan.workspace_id.clone() else {
+            return encode_error(
+                id,
+                "execution_not_started",
+                "the execution has no live workspace",
+            );
+        };
+        let Some(ws_idx) = self
+            .state
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == workspace_id)
+        else {
+            // The pane is already gone: record the process fact directly so a
+            // stale binding cannot leave the execution running forever.
+            if let Some(pane_id) = plan.pane_id.as_deref() {
+                let _ = crate::embedding::execution_pane_exited(&workspace_id, pane_id, None);
+            }
+            return encode_success(
+                id,
+                ResponseResult::VivaExecutionStopped {
+                    execution_id: plan.execution_id,
+                    workspace_id: Some(workspace_id),
+                    pane_id: plan.pane_id,
+                },
+            );
+        };
+        self.close_execution_workspace(ws_idx);
+        encode_success(
+            id,
+            ResponseResult::VivaExecutionStopped {
+                execution_id: plan.execution_id,
+                workspace_id: Some(workspace_id),
+                pane_id: plan.pane_id,
+            },
+        )
+    }
+
+    pub(super) fn handle_viva_host_pause(&mut self, id: String, params: VivaPauseParams) -> String {
+        match crate::embedding::set_paused(params.paused) {
+            Ok(()) => encode_success(
+                id,
+                ResponseResult::VivaHostPaused {
+                    paused: params.paused,
+                },
+            ),
+            Err(err) => encode_error(id, "pause_failed", err.to_string()),
         }
     }
 

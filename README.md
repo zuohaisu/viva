@@ -36,7 +36,10 @@ are configuration, and every completion claim carries recorded evidence.
   single resident server for the home (a second start refuses and names the
   running one); it owns the store, every terminal and a private Unix-socket
   channel until `viva shutdown` ends it. Plain `viva` attaches the workbench
-  and spawns a detached server first when none runs. From any other process:
+  and spawns a detached server first when none runs. Release builds (compiled
+  with the embedded Herdr runtime) start the native workbench instead and
+  inherit a live legacy server on first start; `viva workbench` keeps the
+  legacy UI explicitly reachable. From any other process:
   `viva status/dispatch/terminals/stop-terminal/result/handoff/shutdown`.
   Dispatch is grant-checked at the moment of effect, idempotent by request
   key, and launches a real PTY in the task's worktree. With no server
@@ -68,6 +71,37 @@ are configuration, and every completion claim carries recorded evidence.
 - **Data preservation** — `viva data export --out <dir>` dumps every fact
   table read-only to JSON with a manifest. Historical Ticket Autopilot data
   is never read, written or migrated.
+
+**Native entry boundaries.** The embedded Herdr entry is Unix-only and a
+**degraded import**, not a seamless takeover: live child processes, screen and
+scrollback, rows/columns and scene/tab names survive, while terminal ids, pane
+cwd/purpose, split ratios, focus/zoom, cell size and agent/worktree metadata
+do not. The owner capability is a per-host-incarnation anchor that is never
+written to disk: the TUI that spawns the host passes it over an inherited pipe
+(`VIVA_OWNER_ANCHOR_FD`), and a separately started TUI that attaches to the
+running host obtains the same anchor from a macOS login-Keychain item whose
+access list is empty, so the OS gates every read on user presence (the user
+approves the prompt). A process that has neither refuses with a fixed reason
+(`owner_anchor_missing` / `owner_anchor_unavailable` / `owner_anchor_mismatch`);
+an anchor from an earlier host incarnation is refused as `stale_owner_anchor`.
+Anchor rotation is per host start: each incarnation generates a new anchor and
+an old one is rejected by host id. A process-lineage refusal
+(`peer_is_host_descendant` / `peer_is_execution_descendant`) remains as defense
+in depth, but the boundary no longer depends on ancestry: an independent
+same-UID process, including a worker that deliberately reparents itself
+(setsid/double-fork), cannot read any 0600 owner file and cannot obtain the
+anchor, so it is refused and audited without producing `native_host_paused`.
+Detach/reattach is preserved on macOS: the host keeps running, and a new TUI
+regains owner capability through the Keychain prompt. Linux has no
+user-presence anchor in this build, so a *new* TUI process cannot regain owner
+capability there (the original TUI's inherited descriptor still works); this is
+an explicit refusal, not a fallback. `pane.list` / `pane.read` /
+`pane.process_info` are same-UID observation by design: any process with the
+home can read live pane text and OS process facts; they mutate nothing, and
+dispatch/stop/pause still require the owner anchor. Native pane-output
+redaction, in-place native-host update (stop the host to update), Linux/x86_64
+execution, macOS Keychain interaction in CI, and human visual acceptance are
+not verified.
 
 **Not implemented, and never faked**: automatic reflection, self-model
 evolution, automatic memory promotion, starting at login (planned, to be
@@ -262,9 +296,10 @@ A PR build can still print the version in `Cargo.toml`; record
 **Run Viva:**
 
 ```bash
-viva                     # attach the workbench (starts the resident server if needed)
-viva status              # from any second terminal/process
-viva shutdown            # stop the resident server and its owned processes
+viva                     # workbench (native default in release builds)
+viva workbench           # the legacy workbench explicitly
+viva status              # legacy resident server, from any second process
+viva shutdown            # stop the legacy resident server and owned processes
 ```
 
 ## Documentation

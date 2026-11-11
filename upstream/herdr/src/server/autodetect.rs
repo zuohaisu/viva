@@ -212,11 +212,23 @@ pub fn spawn_server_daemon() -> io::Result<u32> {
     info!(exe = %exe.display(), "spawning server daemon");
 
     let mut command = build_server_daemon_command(exe);
+    // The owner anchor reaches the server only through this inherited pipe.
+    let anchor_fd = crate::embedding::prepare_owner_anchor(&mut command)?;
 
     let pid =
         crate::platform::launch_server_daemon_command(&mut command).map_err(|err: io::Error| {
             io::Error::new(err.kind(), format!("failed to spawn herdr server: {err}"))
         })?;
+    #[cfg(unix)]
+    if let Some(fd) = anchor_fd {
+        // The child now owns the descriptor; keep the anchor out of unrelated
+        // future children of this client.
+        unsafe {
+            libc::close(fd);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = anchor_fd;
     info!(pid, "server daemon spawned");
 
     Ok(pid)

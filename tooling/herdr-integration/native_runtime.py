@@ -3,7 +3,9 @@
 
 Reuse the imported client/daemon/PTY implementation. Only a private temporary
 HOME/VIVA_HOME is used. Detach is measured separately from forced fixture cleanup.
-No member execution/task completion or old-Viva -> Herdr inheritance is claimed.
+No member execution/task completion is claimed. `--legacy-live` first starts a
+real legacy `viva server` with one live terminal and then runs bare `viva`, so
+the default entry must inherit that session before the old host retires.
 """
 import argparse
 import hashlib
@@ -12,6 +14,7 @@ import os
 from pathlib import Path
 import pty
 import sqlite3
+import secrets
 import select
 import signal
 import shutil
@@ -42,10 +45,14 @@ def process_identity(pid):
         return None
 
 
-def probe(binary):
+def probe(binary, legacy_live=False):
     packet = {"schema": 1, "binary": binary.name,
+              "entry": "bare_viva",
+              "legacy_live_prelude": legacy_live,
               "human_visual": "HUMAN_VISUAL_REVIEW_PENDING",
-              "cross_backend_inheritance": "not_tested", "passed": False}
+              "cross_backend_inheritance": ("real live legacy host" if legacy_live
+                                            else "covered_by_test:crates/viva/tests/native_legacy_inheritance.rs"),
+              "passed": False}
     with tempfile.TemporaryDirectory(prefix="vnui-", dir="/tmp") as folder:
         root = Path(folder)
         private_binary = root / "viva"
@@ -65,6 +72,64 @@ def probe(binary):
         environment = {"PATH": "/usr/bin:/bin", "HOME": str(user_home),
                        "VIVA_HOME": str(home), "SHELL": "/bin/sh",
                        "TERM": "xterm-256color", "LANG": "en_US.UTF-8"}
+        # The owner capability is never a file. This harness plays the spawning
+        # TUI and delivers one per-fixture anchor over an inherited descriptor;
+        # keychain access is disabled so the probe never prompts a human.
+        owner_anchor = "native-anchor:native-probe-{}:{}".format(
+            secrets.token_hex(8), secrets.token_hex(16))
+
+        def owner_frontend_environment(frontend_environment):
+            read_fd, write_fd = os.pipe()
+            os.write(write_fd, (owner_anchor + "\n").encode())
+            os.close(write_fd)
+            os.set_inheritable(read_fd, True)
+            frontend_environment = dict(frontend_environment)
+            frontend_environment["VIVA_OWNER_ANCHOR_FD"] = str(read_fd)
+            frontend_environment["VIVA_OWNER_KEYCHAIN"] = "0"
+            return read_fd, frontend_environment
+        legacy = None
+        legacy_stderr = None
+        if legacy_live:
+            legacy_stderr = (root / "legacy.log").open("wb")
+            legacy = subprocess.Popen([str(binary), "server"], env=environment,
+                                      cwd=root, stdin=subprocess.DEVNULL,
+                                      stdout=subprocess.DEVNULL, stderr=legacy_stderr,
+                                      start_new_session=True)
+            # `viva terminal create` goes through Client::ensure_server, which
+            # SPAWNS its own detached legacy host when server.sock is not yet
+            # bound. Wait until THIS process answers the non-spawning `viva
+            # status`; otherwise the handoff can come from a host the probe
+            # does not own while its own child exits on the bind refusal
+            # (the CI-only 28f8552 failure).
+            deadline = time.monotonic() + 20
+            while True:
+                if legacy.poll() is not None:
+                    raise AssertionError("legacy host exited before serving: " +
+                                         (root / "legacy.log").read_text(errors="replace")[-2500:])
+                status = subprocess.run([str(binary), "status"], env=environment,
+                                        cwd=root, capture_output=True, text=True, timeout=15)
+                try:
+                    live = json.loads(status.stdout)
+                except json.JSONDecodeError:
+                    live = {}
+                if live.get("pid") == legacy.pid:
+                    break
+                if time.monotonic() > deadline:
+                    raise AssertionError("legacy host never answered `viva status`: " +
+                                         status.stderr[-2000:])
+                time.sleep(.1)
+            packet["legacy_host_owns_socket"] = True
+            created = subprocess.run(
+                [str(binary), "terminal", "create", "--cols", "80", "--rows", "24",
+                 "--purpose", "legacy-live-probe", "--", "/bin/sh"],
+                env=environment, cwd=root, capture_output=True, text=True, timeout=15)
+            assert created.returncode == 0, "legacy terminal create failed: " + created.stderr[-2000:]
+            assert legacy.poll() is None, "the probe's legacy host exited while creating its terminal"
+            # Client::ensure_server explains a detached spawn in server.log;
+            # if that file exists here, the handoff is not from our child.
+            assert not (home / "server.log").exists(), \
+                "a second legacy host was auto-spawned; the probe no longer owns the handoff"
+            packet["legacy_terminal_created"] = True
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 120, 0, 0))
         client = None
@@ -85,11 +150,15 @@ def probe(binary):
                         break
 
         try:
-            client = subprocess.Popen([str(binary), "runtime"], env=environment,
+            anchor_fd, frontend_environment = owner_frontend_environment(environment)
+            client = subprocess.Popen([str(binary)], env=frontend_environment,
                                       cwd=root, stdin=slave, stdout=slave, stderr=slave,
-                                      start_new_session=True)
+                                      start_new_session=True, pass_fds=(anchor_fd,))
+            os.close(anchor_fd)
             os.close(slave)
             slave = None
+            packet["owner_anchor_transport"] = "inherited_fd"
+            packet["owner_keychain_disabled"] = True
             deadline = time.monotonic() + 20
             snapshot = None
             while time.monotonic() < deadline:
@@ -108,9 +177,47 @@ def probe(binary):
             assert server_identity and str(binary) + " runtime server" in server_identity, "unexpected private host identity"
             packet["native_autospawn"] = True
             packet["canonical_domain_endpoint"] = True
+            if legacy_live:
+                assert snapshot["integration_state"] == "native-default-entry-legacy-inheritance", snapshot
+                assert snapshot["legacy_handoff"]["inherited"] is True, snapshot
+                assert snapshot["legacy_handoff"]["adopted_panes"] == 1, snapshot
+                # Retirement is a process fact, not a timing guess: poll it so
+                # the recorded packet names the real exit status. A CI-only
+                # failure at 28f8552 exited immediately, so this also retains
+                # the legacy stderr instead of asserting a bare message.
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline and legacy.poll() is None:
+                    time.sleep(.1)
+                legacy_status = legacy.poll()
+                packet["legacy_exit_status"] = legacy_status
+                if legacy_status is None:
+                    legacy_stderr.flush()
+                    packet["legacy_log_tail"] = (root / "legacy.log").read_text(
+                        errors="replace")[-2500:]
+                    raise AssertionError(
+                        "legacy host was still serving 60s after the acknowledged handoff")
+                if legacy_status != 0:
+                    legacy_stderr.flush()
+                    log_tail = (root / "legacy.log").read_text(errors="replace")[-2500:]
+                    packet["legacy_log_tail"] = log_tail
+                    raise AssertionError(
+                        "legacy host exited with status "
+                        f"{legacy_status} after the acknowledged handoff; stderr: {log_tail[-1200:]}")
+                packet["legacy_host_retired"] = True
+                packet["legacy_handoff"] = snapshot["legacy_handoff"]
+                old_host_id = snapshot["legacy_handoff"]["old_host_id"]
+                with sqlite3.connect(str(home / "viva.db")) as database:
+                    exit_kind = database.execute(
+                        "SELECT exit_kind FROM hosts WHERE host_id = ?", (old_host_id,)).fetchone()
+                    packet["legacy_host_exit_kind"] = exit_kind[0] if exit_kind else None
+                    packet["legacy_handoff_recorded"] = database.execute(
+                        "SELECT COUNT(*) FROM recovery_events WHERE host_id = ? AND kind = 'graceful_handoff_after_transfer'",
+                        (old_host_id,)).fetchone()[0] == 1
+                assert packet["legacy_host_exit_kind"] == "graceful", packet
+                assert packet["legacy_handoff_recorded"], packet
             invalid = rpc(home, "viva.client.authenticate", {"credential": "fixture-bootstrap-never-log", "claimed_role": "user"})
             packet["invalid_capability_response_code"] = invalid.get("error", {}).get("code")
-            packet["invalid_capability_refused"] = packet["invalid_capability_response_code"] == "untrusted_client"
+            packet["invalid_capability_refused"] = packet["invalid_capability_response_code"] == "owner_anchor_mismatch"
             # A different, real same-UID process (this controller) has no client
             # binding. EOF/reset is evidence; a timeout is NOT a refusal/PASS.
             with socket.socket(socket.AF_UNIX) as unbound:
@@ -149,9 +256,11 @@ def probe(binary):
             os.close(master)
             master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 120, 0, 0))
-            client = subprocess.Popen([str(binary), "runtime"], env=environment,
+            anchor_fd, frontend_environment = owner_frontend_environment(environment)
+            client = subprocess.Popen([str(binary)], env=frontend_environment,
                                       cwd=root, stdin=slave, stdout=slave, stderr=slave,
-                                      start_new_session=True)
+                                      start_new_session=True, pass_fds=(anchor_fd,))
+            os.close(anchor_fd)
             os.close(slave)
             slave = None
             frame.clear()
@@ -182,6 +291,10 @@ def probe(binary):
             packet["passed"] = True
         except Exception as error:
             packet["error"] = str(error)
+            if "legacy_log_tail" not in packet and legacy_stderr is not None:
+                legacy_stderr.flush()
+                packet["legacy_log_tail"] = (root / "legacy.log").read_text(
+                    errors="replace")[-2500:]
             # Task-owned /tmp paths are disclosed; no production data is loaded.
             packet["frame_tail"] = frame.decode(errors="replace")[-2500:]
         finally:
@@ -222,6 +335,12 @@ def probe(binary):
                     packet["server_fixture_cleanup"] = "exact private PID/start/argv verified; not a lifecycle acceptance claim"
                     if not packet["server_fixture_exited"]:
                         packet["passed"] = False
+            if legacy is not None and legacy.poll() is None:
+                legacy.kill()
+                legacy.wait(timeout=5)
+                packet["legacy_fixture_cleanup"] = True
+            if legacy_stderr is not None:
+                legacy_stderr.close()
             if slave is not None:
                 os.close(slave)
             os.close(master)
@@ -232,8 +351,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--viva", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--legacy-live", action="store_true",
+                        help="start a real legacy host with one live terminal before bare viva")
     arguments = parser.parse_args()
-    result = probe(arguments.viva.resolve())
+    result = probe(arguments.viva.resolve(), arguments.legacy_live)
     arguments.output.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result))
     raise SystemExit(0 if result["passed"] else 1)

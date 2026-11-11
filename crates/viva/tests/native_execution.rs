@@ -2,12 +2,12 @@
 //! a real pane-bound process, and honest exit facts. Runs only with the
 //! explicit herdr-runtime feature and never claims installation/UI acceptance.
 #![cfg(all(feature = "herdr-runtime", unix))]
+#[path = "support/owner_anchor.rs"]
+mod owner_support;
+use owner_support::{OwnerHost, authenticate, call, spawn, wait_owner_ready, wait_ready};
 use serde_json::{Value, json};
 use std::{
-    io::{BufRead, BufReader, Write},
-    os::unix::net::UnixStream,
     path::Path,
-    process::{Child, Command, Stdio},
     str::FromStr,
     thread,
     time::{Duration, Instant},
@@ -23,53 +23,8 @@ use viva::{
     tasks::TaskRegistry,
 };
 
-struct Fixture(Child);
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        // Exact task-owned PID. Forced fixture cleanup is not lifecycle PASS.
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
 fn db(home: &Path) -> rusqlite::Connection {
     rusqlite::Connection::open(paths::database_path(home)).unwrap()
-}
-
-fn call(home: &Path, method: &str, params: Value) -> Value {
-    let mut socket = UnixStream::connect(home.join("runtime/workbench/herdr.sock")).unwrap();
-    socket
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
-    writeln!(
-        socket,
-        "{}",
-        json!({"id":"fixture-secret-do-not-persist", "method":method, "params":params,
-            "transport_peer":{"pid":1,"uid":0}, "peer_pid":1, "peer_uid":0,
-            "claimed_role":"member_execution:forged", "member_id":"forged", "grant_id":"forged"})
-    )
-    .unwrap();
-    let mut line = String::new();
-    BufReader::new(socket).read_line(&mut line).unwrap();
-    serde_json::from_str(&line).unwrap()
-}
-
-fn authenticate(home: &Path) {
-    let capability: Value = serde_json::from_slice(
-        &std::fs::read(home.join("runtime/workbench/owner-channel.json")).unwrap(),
-    )
-    .unwrap();
-    let peer = herdr::embedding::TransportPeer {
-        pid: Some(std::process::id()),
-        uid: Some(unsafe { libc::geteuid() }),
-    };
-    let lifetime = herdr::embedding::peer_lifetime_marker(peer).unwrap();
-    let response = call(
-        home,
-        "viva.client.authenticate",
-        json!({"credential": capability["credential"], "process_lifetime": lifetime}),
-    );
-    assert_eq!(response["result"]["type"], "ok", "{response}");
 }
 
 fn binding(member: &viva::foundation::ids::MemberId) -> MemberBinding {
@@ -82,43 +37,10 @@ fn binding(member: &viva::foundation::ids::MemberId) -> MemberBinding {
     }
 }
 
-fn start_fixture(home: &Path) -> Fixture {
-    let runtime = home.join("runtime/workbench");
-    std::fs::create_dir_all(&runtime).unwrap();
-    std::fs::write(
-        runtime.join("config.toml"),
-        "[terminal]\ndefault_shell = '/bin/sh'\nshell_mode = 'non_login'\n[update]\nversion_check = false\nmanifest_check = false\n[experimental]\npane_history = false\n",
-    )
-    .unwrap();
-    let log = std::fs::File::create(home.join("native.log")).unwrap();
-    let mut fixture = Fixture(
-        Command::new(env!("CARGO_BIN_EXE_viva"))
-            .args(["runtime", "server"])
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-            .env("HOME", home)
-            .env("SHELL", "/bin/sh")
-            .env("TERM", "xterm-256color")
-            .env("VIVA_HOME", home)
-            .env("XDG_CONFIG_HOME", home.join("xdg-config"))
-            .env("XDG_STATE_HOME", home.join("xdg-state"))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(log)
-            .spawn()
-            .unwrap(),
-    );
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !runtime.join("herdr.sock").exists() || !runtime.join("owner-channel.json").exists() {
-        assert!(
-            fixture.0.try_wait().unwrap().is_none(),
-            "native host exited: {}",
-            std::fs::read_to_string(home.join("native.log")).unwrap_or_default()
-        );
-        assert!(Instant::now() < deadline, "native startup deadline");
-        thread::sleep(Duration::from_millis(25));
-    }
-    fixture
+fn start_fixture(home: &Path, tag: &str) -> OwnerHost {
+    let host = spawn(home, tag);
+    wait_owner_ready(home, &host);
+    host
 }
 
 fn wait_execution_exit(home: &Path, execution_id: &str) -> (String, Option<i64>) {
@@ -173,7 +95,8 @@ fn unbound_execution_start_is_refused_before_preparation() {
             .unwrap();
         (member, task, grant)
     };
-    let _fixture = start_fixture(home);
+    let fixture = spawn(home, "execution-unbound");
+    wait_ready(home, &fixture);
 
     let refused = call(
         home,
@@ -241,8 +164,8 @@ fn owner_dispatch_spawns_a_canonical_execution_and_records_the_real_exit() {
             .unwrap();
         (member, task, grant)
     };
-    let _fixture = start_fixture(home);
-    authenticate(home);
+    let fixture = start_fixture(home, "execution-start");
+    authenticate(home, fixture.anchor());
 
     let response = call(
         home,
@@ -407,8 +330,8 @@ fn wrong_member_grant_and_replay_do_not_spawn_a_second_process() {
             .unwrap();
         (member, other, task, grant)
     };
-    let _fixture = start_fixture(home);
-    authenticate(home);
+    let fixture = start_fixture(home, "execution-exit");
+    authenticate(home, fixture.anchor());
 
     let wrong = call(
         home,
@@ -513,8 +436,8 @@ fn two_members_and_two_tasks_get_distinct_pane_bound_executions() {
         let first = fixtures.pop().unwrap();
         (first, second)
     };
-    let _fixture = start_fixture(home);
-    authenticate(home);
+    let fixture = start_fixture(home, "execution-replay");
+    authenticate(home, fixture.anchor());
 
     let dispatch = |member: &viva::members::MemberRecord,
                     task: &viva::tasks::TaskRecord,
@@ -636,8 +559,8 @@ fn signal_exit_is_recorded_as_unknown_not_zero() {
             .unwrap();
         (member, task, grant)
     };
-    let _fixture = start_fixture(home);
-    authenticate(home);
+    let fixture = start_fixture(home, "execution-failure");
+    authenticate(home, fixture.anchor());
     let response = call(
         home,
         "viva.execution.start",
@@ -710,8 +633,8 @@ fn spawn_failure_does_not_poison_the_owner_gate() {
             .unwrap();
         (member, task, grant)
     };
-    let _fixture = start_fixture(home);
-    authenticate(home);
+    let fixture = start_fixture(home, "execution-cwd");
+    authenticate(home, fixture.anchor());
 
     let failed = call(
         home,
@@ -749,7 +672,9 @@ fn spawn_failure_does_not_poison_the_owner_gate() {
             "member_id": member.member_id.as_str(),
             "grant_id": grant.grant_id.as_str(),
             "request_key": "good-after-failure",
-            "argv": ["/bin/sh", "-c", "exit 0"],
+            // A zero-lifetime command can be gone before its start marker is
+            // readable; this test is about the owner gate, not that race.
+            "argv": ["/bin/sh", "-c", "sleep 0.2; exit 0"],
             "cwd": "/tmp",
         }),
     );

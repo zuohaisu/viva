@@ -374,12 +374,28 @@ fn handle_connection_with_stop(
                 ),
                 Err(error) => write_text_line_allow_disconnect(
                     &mut stream,
+                    &error_response_json(request_id, owner_auth_code(&error), error.to_string()),
+                ),
+            }
+        }
+        Method::VivaMemberReport(params) => {
+            match crate::embedding::member_report(&params, &stream) {
+                Ok(event_seq) => write_json_line_allow_disconnect(
+                    &mut stream,
+                    &SuccessResponse {
+                        id: request_id,
+                        result: ResponseResult::VivaMemberReported { event_seq },
+                    },
+                ),
+                Err(error) => write_text_line_allow_disconnect(
+                    &mut stream,
                     &error_response_json(
                         request_id,
-                        if error.kind() == io::ErrorKind::WouldBlock {
-                            "client_not_ready"
-                        } else {
-                            "untrusted_client"
+                        match error.kind() {
+                            io::ErrorKind::WouldBlock => "member_not_ready",
+                            io::ErrorKind::PermissionDenied => "member_refused",
+                            io::ErrorKind::InvalidInput => "member_report_invalid",
+                            _ => "member_report_failed",
                         },
                         error.to_string(),
                     ),
@@ -604,6 +620,9 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::VivaSnapshot(_) => "viva.snapshot",
         Method::VivaClientAuthenticate(_) => "viva.client.authenticate",
         Method::VivaExecutionStart(_) => "viva.execution.start",
+        Method::VivaMemberReport(_) => "viva.member.report",
+        Method::VivaExecutionStop(_) => "viva.execution.stop",
+        Method::VivaHostPause(_) => "viva.host.pause",
         Method::ServerStop(_) => "server.stop",
         Method::ServerLiveHandoff(_) => "server.live_handoff",
         Method::ServerReloadConfig(_) => "server.reload_config",
@@ -1132,6 +1151,30 @@ fn caller_timeout_dispatch_uses_timeout_error() {
     );
     let error: ErrorResponse = serde_json::from_str(&response).unwrap();
     assert_eq!(error.error.code, "timeout");
+}
+
+/// Fixed owner-authentication codes so a client can distinguish "host is not
+/// ready yet" from "this anchor belongs to a dead incarnation" from "no anchor
+/// was presented". The message still carries the detailed reason.
+fn owner_auth_code(error: &io::Error) -> &'static str {
+    if error.kind() == io::ErrorKind::WouldBlock {
+        return "client_not_ready";
+    }
+    let message = error.to_string();
+    for code in [
+        "owner_anchor_unavailable",
+        "owner_anchor_missing",
+        "stale_owner_anchor",
+        "owner_anchor_mismatch",
+        "owner_client_limit",
+        "peer_is_host_descendant",
+        "peer_is_execution_descendant",
+    ] {
+        if message.starts_with(code) {
+            return code;
+        }
+    }
+    "untrusted_client"
 }
 
 fn error_response_json(id: String, code: &str, message: String) -> String {

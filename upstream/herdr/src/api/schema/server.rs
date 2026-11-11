@@ -38,6 +38,38 @@ impl std::fmt::Debug for VivaExecutionStartParams {
     }
 }
 
+// Viva modification: owner-gated native control. Stop names one canonical
+// execution; pause/resume affect only NEW dispatches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct VivaExecutionStopParams {
+    pub execution_id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct VivaPauseParams {
+    #[serde(default)]
+    pub paused: bool,
+}
+
+// Viva modification: the first member-initiated ingress. The credential is a
+// host-issued worker credential, never an identity claim; the composition root
+// also binds the calling OS process to the confirmed execution.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct VivaMemberReportParams {
+    pub credential: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+impl std::fmt::Debug for VivaMemberReportParams {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The credential is a bearer secret; Debug is never evidence.
+        formatter.write_str(
+            "VivaMemberReportParams { credential: [REDACTED], status, detail: [REDACTED] }",
+        )
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ServerLiveHandoffParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]

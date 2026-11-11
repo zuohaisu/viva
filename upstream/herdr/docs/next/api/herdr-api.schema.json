@@ -4425,6 +4425,44 @@
           ],
           "type": "object"
         },
+        "VivaExecutionStopParams": {
+          "properties": {
+            "execution_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "execution_id"
+          ],
+          "type": "object"
+        },
+        "VivaMemberReportParams": {
+          "properties": {
+            "credential": {
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "credential",
+            "status"
+          ],
+          "type": "object"
+        },
+        "VivaPauseParams": {
+          "properties": {
+            "paused": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
         "WorkspaceCloseParams": {
           "properties": {
             "close_group": {
@@ -4796,6 +4834,54 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/VivaExecutionStartParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "viva.member.report",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/VivaMemberReportParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "viva.execution.stop",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/VivaExecutionStopParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "viva.host.pause",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/VivaPauseParams"
             }
           },
           "required": [
@@ -10568,6 +10654,70 @@
                 "execution_id",
                 "replayed",
                 "intent_state"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "One execution was deliberately stopped; the pane child was closed and\nthe canonical exit is recorded through the normal process-exit path.",
+              "properties": {
+                "execution_id": {
+                  "type": "string"
+                },
+                "pane_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "const": "viva_execution_stopped",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "execution_id"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "The persisted pause gate for new dispatches.",
+              "properties": {
+                "paused": {
+                  "type": "boolean"
+                },
+                "type": {
+                  "const": "viva_host_paused",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "paused"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "One canonical member-attributed report accepted from a bound worker\nprocess. `event_seq` is the canonical event that carries the fact.",
+              "properties": {
+                "event_seq": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "viva_member_reported",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "event_seq"
               ],
               "type": "object"
             },

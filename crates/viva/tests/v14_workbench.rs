@@ -148,10 +148,11 @@ fn the_workbench_entry_exists_and_fails_honestly_without_a_tty() {
 
 #[test]
 fn bare_viva_opens_the_workbench_and_fails_honestly_without_a_tty() {
-    // Bare `viva` (no subcommand) is the workbench entry: typing `viva`
-    // in a real terminal opens the TUI directly. Without a terminal it
-    // must fail exactly like `viva workbench` — loudly, never
-    // half-running against a pipe.
+    // Bare `viva` (no subcommand) is the default workbench entry: typing
+    // `viva` in a real terminal opens the UI directly. Without a terminal it
+    // must fail loudly, never half-running against a pipe. A feature-enabled
+    // build starts the native runtime; every other build keeps the legacy
+    // entry. Both must refuse a piped stdin.
     let out = Command::new(env!("CARGO_BIN_EXE_viva"))
         .env(
             "VIVA_HOME",
@@ -165,6 +166,12 @@ fn bare_viva_opens_the_workbench_and_fails_honestly_without_a_tty() {
         !out.status.success(),
         "a piped stdin must not silently pass: {stderr}"
     );
+    #[cfg(feature = "herdr-runtime")]
+    assert!(
+        stderr.contains("cannot attach without a usable terminal"),
+        "got: {stderr}"
+    );
+    #[cfg(not(feature = "herdr-runtime"))]
     assert!(stderr.contains("interactive terminal"), "got: {stderr}");
 }
 

@@ -7,12 +7,24 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+/// The stable public pane id for a restored workspace pane. Viva needs it to
+/// bind an adopted legacy execution to the pane id the runtime will report on
+/// exit; it is the same encoding the runtime's own public API uses.
+pub fn public_pane_id(workspace_id: &str, pane_number: usize) -> String {
+    crate::workspace::public_pane_id_for_number(workspace_id, pane_number)
+}
+
 /// Narrow dependency inversion: the runtime does not own Viva domain records.
 /// No dispatch/stop capability is exposed until ingress authority is integrated.
 pub trait DomainServices: Send + Sync {
     fn server_started(&self) -> io::Result<()>;
     fn server_ready(&self) -> io::Result<()>;
     fn client_credential(&self) -> io::Result<String>;
+    /// Retrieve this host incarnation's owner anchor after user presence has
+    /// been established. A reattaching TUI has no inherited descriptor, so the
+    /// composition root resolves the anchor from the OS user-presence store
+    /// for exactly the host identity the running host reports.
+    fn owner_anchor_for_host(&self, host_id: &str) -> io::Result<String>;
     fn authenticate_client(
         &self,
         credential: &str,
@@ -44,6 +56,18 @@ pub trait DomainServices: Send + Sync {
         pane_id: &str,
         exit_code: Option<i32>,
     ) -> io::Result<()>;
+    /// Owner-gated stop: verify the execution is one this host owns and is
+    /// live, then return the pane that must be closed. The close itself goes
+    /// through the normal pane-death path so the exit is recorded as a fact.
+    fn prepare_execution_stop(&self, execution_id: &str) -> io::Result<ExecutionStopPlan>;
+    /// Persisted pause gate for NEW dispatches only; running executions are
+    /// never touched by pause.
+    fn set_paused(&self, paused: bool) -> io::Result<()>;
+    /// One canonical, member-attributed report. The composition root must
+    /// authenticate the host-issued worker credential, bind the calling OS
+    /// process to the confirmed execution, and check the live grant before
+    /// any canonical write. Returns the canonical event sequence.
+    fn member_report(&self, request: MemberReportRequest, peer: TransportPeer) -> io::Result<i64>;
     fn refused(&self, method: &'static str, peer: Option<TransportPeer>) -> io::Result<()>;
 }
 
@@ -60,9 +84,31 @@ pub struct ExecutionRequest {
     pub worktree_id: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ExecutionStopPlan {
+    pub execution_id: String,
+    pub workspace_id: Option<String>,
+    pub pane_id: Option<String>,
+}
+
+/// A member-initiated report. `credential` is a host-issued bearer secret; it
+/// is never an identity claim and never written to events or logs.
+#[derive(Clone)]
+pub struct MemberReportRequest {
+    pub credential: String,
+    pub status: String,
+    pub detail: String,
+}
+impl std::fmt::Debug for MemberReportRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .write_str("MemberReportRequest { credential: [REDACTED], status, detail: [REDACTED] }")
+    }
+}
+
 /// What the runtime may launch after canonical preparation. The environment
-/// deliberately carries context only; no grant or worker credential is issued
-/// until the member ingress exists.
+/// carries context plus the host-issued member credential for the bound
+/// process; no grant id or user authority is delivered through it.
 #[derive(Clone, Debug)]
 pub struct ExecutionPlan {
     pub execution_id: String,
@@ -147,18 +193,54 @@ pub(crate) fn validate_client(stream: &crate::ipc::LocalStream) -> io::Result<()
     Ok(())
 }
 
+/// The host identity the *running* server advertises. The client process has
+/// its own domain bridge but not the server's identity, so this asks the live
+/// endpoint instead of reading a local field.
+fn running_host_id() -> io::Result<String> {
+    use crate::api::client::{parse_response_value, ApiClient};
+    let request = crate::api::schema::Request {
+        id: "viva.owner-anchor-host-id".into(),
+        method: crate::api::schema::Method::VivaSnapshot(crate::api::schema::EmptyParams {}),
+    };
+    let response = ApiClient::local()
+        .request_value_with_timeout(&request, std::time::Duration::from_secs(5))
+        .and_then(parse_response_value)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let value = serde_json::to_value(&response.result).map_err(io::Error::other)?;
+    value
+        .get("snapshot")
+        .and_then(|snapshot| snapshot.get("runtime_host_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| io::Error::other("running host has no runtime identity"))
+}
+
+/// The anchor this process can present. A spawning TUI holds it in memory or
+/// over an inherited descriptor; a reattaching TUI resolves it from the OS
+/// user-presence store for the host identity the running host advertises.
+fn owner_credential(ctx: &Context) -> io::Result<String> {
+    match ctx.domain.client_credential() {
+        Ok(anchor) => Ok(anchor),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let host_id = running_host_id()?;
+            ctx.domain.owner_anchor_for_host(&host_id)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) fn authenticate_local_client() -> io::Result<()> {
     let Some(ctx) = context() else {
         return Ok(());
     };
     // The client socket can appear just before the ready capability is published.
-    // Retry only readiness or a visible private-file credential rotation,
-    // never an unchanged bad credential and never an execution effect.
+    // Retry only readiness or an anchor the host no longer accepts after a new
+    // incarnation; never an unchanged bad credential and never an effect.
     use crate::api::client::{parse_response_value, ApiClient, ApiClientError};
     use std::time::{Duration, Instant};
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let credential = match ctx.domain.client_credential() {
+        let credential = match owner_credential(ctx) {
             Ok(value) => value,
             Err(error) if error.kind() == io::ErrorKind::NotFound && Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10));
@@ -196,15 +278,25 @@ pub(crate) fn authenticate_local_client() -> io::Result<()> {
                 std::thread::sleep(Duration::from_millis(10))
             }
             Err(ApiClientError::ErrorResponse(error))
-                if error.error.code == "untrusted_client"
-                    && Instant::now() < deadline
+                if matches!(
+                    error.error.code.as_str(),
+                    "untrusted_client" | "stale_owner_anchor"
+                ) && Instant::now() < deadline
                     && ctx
                         .domain
                         .client_credential()
                         .is_ok_and(|latest| latest != credential) =>
             {
-                // A stale file can be read just before the ready host atomically
-                // replaces it. Reload the changed proof; do not retry a bad key.
+                // The anchor changed under us (a new host incarnation). Reload
+                // the changed proof; do not retry an unchanged bad key.
+                continue;
+            }
+            Err(ApiClientError::ErrorResponse(error))
+                if error.error.code == "stale_owner_anchor" && Instant::now() < deadline =>
+            {
+                // A spawned or keychain-cached anchor belongs to a dead host
+                // incarnation. Drop it and resolve the live host's anchor once.
+                clear_spawned_owner_anchor();
                 continue;
             }
             Err(error) => return Err(io::Error::other(error)),
@@ -216,13 +308,125 @@ pub struct Context {
     pub directory: PathBuf,
     pub arguments: Vec<String>,
     pub child_prefix: Vec<String>,
+    /// Candidate owner anchor for the server this process may spawn. Delivered
+    /// over an inherited descriptor; never written to disk by the client.
+    pub owner_anchor: Option<String>,
     pub domain: Arc<dyn DomainServices>,
+    /// Cross-backend inheritance prepared by the composition root. The
+    /// server bootstrap consumes it; the TUI process leaves it empty.
+    #[cfg(unix)]
+    pub legacy_import: std::sync::Mutex<Option<LegacyImport>>,
 }
+
+/// A fully prepared takeover of a live legacy Viva host: the snapshot Herdr
+/// restores plus one owned PTY master per pane. Building this value already
+/// received the fds; nothing here may be acknowledged before adoption.
+#[cfg(unix)]
+pub struct LegacyImport {
+    pub snapshot: crate::persist::SessionSnapshot,
+    pub panes: Vec<LegacyImportPane>,
+    /// Sends the prepared ACK that retires the old host. The bootstrap calls
+    /// it exactly once, after every pane is adopted and both endpoints serve.
+    pub confirm: Box<dyn FnOnce() -> io::Result<()> + Send>,
+}
+
+/// One adopted legacy pane. `master_fd` ownership transfers to the runtime
+/// when `TerminalRuntime::from_handoff_fd` takes it.
+#[cfg(unix)]
+pub struct LegacyImportPane {
+    pub pane_id: u32,
+    pub master_fd: std::os::fd::RawFd,
+    pub child_pid: u32,
+    pub rows: u16,
+    pub cols: u16,
+    pub cell_width_px: u32,
+    pub cell_height_px: u32,
+    pub initial_history_ansi: Option<String>,
+}
+
+// The snapshot shape is built by the composition root, so the exact same
+// structs Herdr persistence uses are part of the embedding contract.
+#[cfg(unix)]
+pub use crate::persist::{
+    DirectionSnapshot, LayoutSnapshot, PaneSnapshot, SessionSnapshot, TabSnapshot,
+    WorkspaceSnapshot, SNAPSHOT_VERSION,
+};
 
 static CONTEXT: OnceLock<Context> = OnceLock::new();
 
+/// The anchor handed to the server this process spawned. The client keeps it
+/// only in memory so it can authenticate to its own child.
+static SPAWNED_OWNER_ANCHOR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn spawned_owner_anchor() -> Option<String> {
+    SPAWNED_OWNER_ANCHOR.lock().ok()?.clone()
+}
+
+pub(crate) fn set_spawned_owner_anchor(anchor: &str) {
+    if let Ok(mut slot) = SPAWNED_OWNER_ANCHOR.lock() {
+        *slot = Some(anchor.to_owned());
+    }
+}
+
+pub(crate) fn clear_spawned_owner_anchor() {
+    if let Ok(mut slot) = SPAWNED_OWNER_ANCHOR.lock() {
+        *slot = None;
+    }
+}
+
+/// Deliver the candidate anchor to a server we are about to spawn over a pipe
+/// that is not close-on-exec. Returns the parent's read end, which the spawner
+/// must close after the child exists so only the child holds the descriptor.
+#[cfg(unix)]
+pub(crate) fn prepare_owner_anchor(
+    command: &mut Command,
+) -> io::Result<Option<std::os::fd::RawFd>> {
+    use std::io::Write;
+    use std::os::fd::FromRawFd;
+    let Some(anchor) = context().and_then(|ctx| ctx.owner_anchor.clone()) else {
+        return Ok(None);
+    };
+    let mut fds = [0; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let (read_fd, write_fd) = (fds[0], fds[1]);
+    let written = {
+        let mut pipe = unsafe { std::fs::File::from_raw_fd(write_fd) };
+        pipe.write_all(format!("{anchor}\n").as_bytes())
+    };
+    if let Err(error) = written {
+        unsafe {
+            libc::close(read_fd);
+        }
+        return Err(error);
+    }
+    if unsafe { libc::fcntl(read_fd, libc::F_SETFD, 0) } < 0 {
+        let error = io::Error::last_os_error();
+        unsafe {
+            libc::close(read_fd);
+        }
+        return Err(error);
+    }
+    command.env("VIVA_OWNER_ANCHOR_FD", read_fd.to_string());
+    set_spawned_owner_anchor(&anchor);
+    Ok(Some(read_fd))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn prepare_owner_anchor(_command: &mut Command) -> io::Result<Option<i32>> {
+    Ok(None)
+}
+
 pub fn context() -> Option<&'static Context> {
     CONTEXT.get()
+}
+
+/// Move the prepared legacy takeover out of the context. `None` in the TUI
+/// process and for ordinary native starts.
+#[cfg(unix)]
+pub(crate) fn take_legacy_import() -> Option<LegacyImport> {
+    context()?.legacy_import.lock().ok()?.take()
 }
 pub fn enabled() -> bool {
     context().is_some()
@@ -278,7 +482,7 @@ fn validate_arguments(args: &[String]) -> io::Result<()> {
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "native preview operation is not integrated with Viva authority; no legacy UI fallback",
+            "native operation is not integrated with Viva authority; no legacy UI fallback",
         ));
     }
     Ok(())
@@ -352,6 +556,54 @@ pub(crate) fn execution_pane_exited(
     }
 }
 
+pub(crate) fn prepare_execution_stop(execution_id: &str) -> io::Result<ExecutionStopPlan> {
+    context()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Viva embedding unavailable",
+            )
+        })?
+        .domain
+        .prepare_execution_stop(execution_id)
+}
+
+pub(crate) fn set_paused(paused: bool) -> io::Result<()> {
+    context()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Viva embedding unavailable",
+            )
+        })?
+        .domain
+        .set_paused(paused)
+}
+
+pub(crate) fn member_report(
+    params: &crate::api::schema::VivaMemberReportParams,
+    stream: &crate::ipc::LocalStream,
+) -> io::Result<i64> {
+    let ctx = context().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Viva embedding unavailable",
+        )
+    })?;
+    // Captured from the accepted connection, never a JSON peer claim. The
+    // composition root additionally verifies the caller is the confirmed
+    // process (or a descendant) before any canonical write.
+    let peer = crate::ipc::transport_peer(stream)?;
+    ctx.domain.member_report(
+        MemberReportRequest {
+            credential: params.credential.clone(),
+            status: params.status.clone(),
+            detail: params.detail.clone(),
+        },
+        peer,
+    )
+}
+
 pub(crate) fn constrain_config(config: &mut crate::config::Config) {
     if enabled() {
         config.update.version_check = false;
@@ -394,10 +646,20 @@ fn admit_with_peer(
             | "client_shell.surface.set"
             | "client.window_title.set"
             | "client.window_title.clear"
+            // Observation is not authority: these read the live grid and OS
+            // process facts, exactly what the same-uid legacy client could
+            // ask the old host. They mutate nothing and are what makes an
+            // inherited session verifiable after a takeover.
+            | "pane.list"
+            | "pane.read"
+            | "pane.process_info"
     ) {
         return Ok(());
     }
-    if method == "viva.execution.start" {
+    if matches!(
+        method,
+        "viva.execution.start" | "viva.execution.stop" | "viva.host.pause"
+    ) {
         // The socket path must present the host-issued owner capability. The
         // no-peer form is only the second gate after that admission (or the
         // already-authenticated client-shell connection).
@@ -405,6 +667,13 @@ fn admit_with_peer(
             Some(peer) => ctx.domain.validate_client(peer),
             None => Ok(()),
         };
+    }
+    if method == "viva.member.report" {
+        // Reachable without owner capability by design: the member process is
+        // not the owner frontend. The typed handler is the gate — it verifies
+        // the host-issued worker credential, the confirmed process lineage and
+        // the live grant before any write, and audits every refusal.
+        return Ok(());
     }
     // Never accept caller/member/grant claims from pane metadata or JSON params.
     // Unknown automated ingress is unbound, NOT the owner. Log only the schema's

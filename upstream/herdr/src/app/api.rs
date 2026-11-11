@@ -956,6 +956,12 @@ impl App {
             Method::VivaExecutionStart(params) => {
                 return self.handle_viva_execution_start(request.id, params)
             }
+            Method::VivaExecutionStop(params) => {
+                return self.handle_viva_execution_stop(request.id, params)
+            }
+            Method::VivaHostPause(params) => {
+                return self.handle_viva_host_pause(request.id, params)
+            }
             Method::VivaSnapshot(_) => match crate::embedding::snapshot() {
                 Ok(snapshot) => SuccessResponse {
                     id: request.id,
