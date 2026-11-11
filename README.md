@@ -76,13 +76,20 @@ are configuration, and every completion claim carries recorded evidence.
 **degraded import**, not a seamless takeover: live child processes, screen and
 scrollback, rows/columns and scene/tab names survive, while terminal ids, pane
 cwd/purpose, split ratios, focus/zoom, cell size and agent/worktree metadata
-do not. The owner capability is a host-issued credential plus a process-lineage
-refusal, not a same-UID OS sandbox. `pane.list` / `pane.read` /
-`pane.process_info` are same-UID observation by design: any process with the
-home can read live pane text and OS process facts; they mutate nothing, and
-dispatch/stop/pause still require the owner capability. Native pane-output
-redaction, in-place native-host update (stop the host to update), Linux/x86_64
-execution and human visual acceptance are not verified.
+do not. The owner capability is a host-issued credential read from a 0600 file
+plus a process-lineage refusal. That refusal covers host descendants and
+descendants of host-owned executions, but it is **not** a same-UID OS sandbox:
+an independent same-UID process — including a worker that deliberately
+reparents itself out of the host's ancestry — can still read the file and
+authenticate as the owner. Closing that gap needs an OS/user-presence trust
+anchor or a TUI-bound capability whose cost is a detach/reattach redesign; it
+is an open owner decision and must be settled before this entry becomes the
+released default. `pane.list` / `pane.read` / `pane.process_info` are same-UID
+observation by design: any process with the home can read live pane text and
+OS process facts; they mutate nothing, and dispatch/stop/pause still require
+the owner capability. Native pane-output redaction, in-place native-host
+update (stop the host to update), Linux/x86_64 execution and human visual
+acceptance are not verified.
 
 **Not implemented, and never faked**: automatic reflection, self-model
 evolution, automatic memory promotion, starting at login (planned, to be
