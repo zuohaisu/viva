@@ -1,28 +1,58 @@
 //! Owner-frontend capability for the gated native development runtime.
 //! Reuses Core channels. This is not MemberExecution issuance and not a same-UID
-//! sandbox. The parent bridge refuses this owner-only phase if any execution is
-//! requested/running or a worker credential is active; real member/agent process
-//! and descriptor binding must replace that guard
-//! BEFORE native member dispatch is enabled.
+//! sandbox. The credential is a host-incarnation anchor delivered over an
+//! inherited pipe from the spawning TUI, or retrieved from the login keychain
+//! by a reattaching TUI with user presence. It is never a file. The parent
+//! bridge refuses this owner-only phase if any execution is requested/running
+//! or a worker credential is active; real member/agent process and descriptor
+//! binding must replace that guard BEFORE native member dispatch is enabled.
+use super::owner_anchor;
 use crate::foundation::envelope::{CallerIdentity, CallerRole, ChannelRegistry};
 use herdr::embedding::{TransportPeer, peer_lifetime_marker};
-use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    io,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, io};
 
-const FILE_NAME: &str = "owner-channel.json";
-#[derive(Serialize, Deserialize)]
-struct OwnerFile {
-    schema: u32,
-    host_id: String,
-    credential: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AuthRefusal {
+    NotReady,
+    Unavailable,
+    Missing,
+    Stale,
+    Mismatch,
+    ClientLimit,
 }
+#[derive(Debug)]
+pub(super) enum AuthOutcome {
+    Refused(AuthRefusal),
+    Internal(io::Error),
+}
+
+impl AuthRefusal {
+    pub(super) fn reason(self) -> &'static str {
+        match self {
+            Self::NotReady => "client_not_ready",
+            Self::Unavailable => "owner_anchor_unavailable",
+            Self::Missing => "owner_anchor_missing",
+            Self::Stale => "stale_owner_anchor",
+            Self::Mismatch => "owner_anchor_mismatch",
+            Self::ClientLimit => "owner_client_limit",
+        }
+    }
+    pub(super) fn into_error(self, detail: &str) -> io::Error {
+        let kind = match self {
+            Self::NotReady => io::ErrorKind::WouldBlock,
+            Self::Unavailable => io::ErrorKind::Unsupported,
+            Self::Missing | Self::Stale | Self::Mismatch | Self::ClientLimit => {
+                io::ErrorKind::PermissionDenied
+            }
+        };
+        io::Error::new(kind, format!("{}: {detail}", self.reason()))
+    }
+}
+
 struct Bootstrap {
     channel: CallerIdentity,
-    credential: String,
+    anchor: String,
+    host_id: String,
 }
 struct BoundClient {
     peer: TransportPeer,
@@ -32,91 +62,41 @@ struct BoundClient {
 pub(super) struct ClientAuthority {
     channels: ChannelRegistry,
     bootstrap: Option<Bootstrap>,
+    activated: bool,
     clients: HashMap<u32, BoundClient>,
-    path: PathBuf,
 }
-fn denied(message: &str) -> io::Error {
+fn denied(message: String) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, message)
 }
-fn private_file(path: &Path) -> io::Result<()> {
-    let meta = std::fs::symlink_metadata(path)?;
-    if !meta.is_file() || meta.file_type().is_symlink() {
-        return Err(denied("native client capability is not a regular file"));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        // SAFETY: argument-free OS query, no mutable memory.
-        if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
-            return Err(denied(
-                "native client capability is not private to this account",
-            ));
-        }
-    }
-    Ok(())
-}
-pub(super) fn client_credential(home: &Path) -> io::Result<String> {
-    let path = home.join("runtime/workbench").join(FILE_NAME);
-    private_file(&path)?;
-    let file: OwnerFile = serde_json::from_slice(&std::fs::read(path)?)
-        .map_err(|_| denied("invalid native client capability file"))?;
-    if file.schema != 1 || !file.host_id.starts_with("native-") {
-        return Err(denied("unknown native client capability format"));
-    }
-    Ok(file.credential)
-}
 impl ClientAuthority {
-    pub(super) fn new(home: &Path) -> Self {
+    pub(super) fn new() -> Self {
         Self {
             channels: ChannelRegistry::new(),
             bootstrap: None,
+            activated: false,
             clients: HashMap::new(),
-            path: home.join("runtime/workbench").join(FILE_NAME),
         }
     }
-    /// Called only after both native endpoints have been claimed. A failed
-    /// competing startup never rotates an already-live host's capability.
-    pub(super) fn activate(&mut self, host_id: &str) -> io::Result<()> {
-        if self.bootstrap.is_some() {
-            return Err(denied("native client authority already activated"));
+    /// Called only after both native endpoints have been claimed. `anchor` is
+    /// the credential accepted from the spawning TUI or stored in the login
+    /// keychain; `None` leaves the host running with owner admission refused.
+    /// A failed competing startup must not activate a second authority.
+    pub(super) fn activate(&mut self, anchor: Option<String>) -> io::Result<()> {
+        if self.activated {
+            return Err(denied("native client authority already activated".into()));
         }
-        match std::fs::symlink_metadata(&self.path) {
-            Ok(_) => {
-                // Unlike try_exists, this also rejects a dangling symlink.
-                private_file(&self.path)?;
-                let old: OwnerFile = serde_json::from_slice(&std::fs::read(&self.path)?)
-                    .map_err(|_| denied("refusing to replace an unknown capability file"))?;
-                if old.schema != 1 || !old.host_id.starts_with("native-") {
-                    return Err(denied("refusing to replace an unknown capability file"));
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        let caller = self.channels.issue(CallerRole::User);
-        // Channel IDs are identifiers, not bearer credentials. Keep a separate
-        // random secret, using the same proven UUID source as Core credentials.
-        let credential = format!("native-cap-{}", uuid::Uuid::new_v4().simple());
-        let record = OwnerFile {
-            schema: 1,
-            host_id: host_id.into(),
-            credential: credential.clone(),
+        self.activated = true;
+        let Some(anchor) = anchor else {
+            return Ok(());
         };
-        let mut temp =
-            tempfile::NamedTempFile::new_in(self.path.parent().expect("runtime directory"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            temp.as_file()
-                .set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        }
-        use std::io::Write;
-        temp.write_all(&serde_json::to_vec(&record).map_err(io::Error::other)?)?;
-        temp.as_file().sync_all()?;
-        temp.persist(&self.path).map_err(io::Error::other)?;
+        let host_id = owner_anchor::host_id(&anchor)
+            .ok_or_else(|| denied("native owner anchor has an unknown format".into()))?
+            .to_string();
+        let caller = self.channels.issue(CallerRole::User);
         self.bootstrap = Some(Bootstrap {
             channel: caller,
-            credential,
+            anchor,
+            host_id,
         });
         Ok(())
     }
@@ -126,35 +106,44 @@ impl ClientAuthority {
         peer: TransportPeer,
         expected_lifetime: Option<&str>,
         admitted: impl FnOnce(&CallerIdentity, &str) -> io::Result<()>,
-    ) -> io::Result<()> {
-        let bootstrap = self.bootstrap.as_ref().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "native client authority not ready",
-            )
-        })?;
-        if bootstrap.credential != credential
-            || self.channels.validate(&bootstrap.channel) != Ok(CallerRole::User)
-        {
-            return Err(denied("untrusted native client capability"));
+    ) -> Result<(), AuthOutcome> {
+        if !self.activated {
+            return Err(AuthOutcome::Refused(AuthRefusal::NotReady));
         }
-        let pid = peer
-            .pid
-            .ok_or_else(|| denied("native client PID unavailable"))?;
+        let bootstrap = self
+            .bootstrap
+            .as_ref()
+            .ok_or(AuthOutcome::Refused(AuthRefusal::Unavailable))?;
+        if credential.is_empty() {
+            return Err(AuthOutcome::Refused(AuthRefusal::Missing));
+        }
+        if credential != bootstrap.anchor {
+            let presented = owner_anchor::host_id(credential)
+                .ok_or(AuthOutcome::Refused(AuthRefusal::Mismatch))?;
+            let refusal = if presented != bootstrap.host_id {
+                AuthRefusal::Stale
+            } else {
+                AuthRefusal::Mismatch
+            };
+            return Err(AuthOutcome::Refused(refusal));
+        }
+        if self.channels.validate(&bootstrap.channel) != Ok(CallerRole::User) {
+            return Err(AuthOutcome::Refused(AuthRefusal::Mismatch));
+        }
+        let pid = peer.pid.ok_or(AuthOutcome::Refused(AuthRefusal::Missing))?;
         #[cfg(unix)]
         {
             if peer.uid != Some(unsafe { libc::geteuid() }) {
-                return Err(denied("native client account mismatch"));
+                return Err(AuthOutcome::Refused(AuthRefusal::Mismatch));
             }
         }
-        let lifetime = peer_lifetime_marker(peer)?;
+        let lifetime =
+            peer_lifetime_marker(peer).map_err(|_| AuthOutcome::Refused(AuthRefusal::Missing))?;
         // Bind the credential-bearing message to its sender's own lifetime.
         // A delayed request from a dead PID must not bind a reused PID instead.
         // The claim is only compared to the OS fact; it never overrides it.
         if expected_lifetime != Some(lifetime.as_str()) {
-            return Err(denied(
-                "native client lifetime proof does not match the OS process",
-            ));
+            return Err(AuthOutcome::Refused(AuthRefusal::Missing));
         }
         let stale: Vec<_> = self
             .clients
@@ -173,14 +162,14 @@ impl ClientAuthority {
             let _ = self.channels.revoke(&old.channel.channel_id);
         }
         if self.clients.len() >= 128 {
-            return Err(denied("native client binding limit reached"));
+            return Err(AuthOutcome::Refused(AuthRefusal::ClientLimit));
         }
         // Audit BEFORE installing a usable binding. Channel IDs are safe
-        // correlation facts; unlike the bootstrap credential they are not secrets.
+        // correlation facts; unlike the anchor they are not secrets.
         let channel = self.channels.issue(CallerRole::User);
         if let Err(error) = admitted(&channel, &lifetime) {
             let _ = self.channels.revoke(&channel.channel_id);
-            return Err(error);
+            return Err(AuthOutcome::Internal(error));
         }
         self.clients.insert(
             pid,
@@ -195,16 +184,18 @@ impl ClientAuthority {
     pub(super) fn validate(&self, peer: TransportPeer) -> io::Result<()> {
         let pid = peer
             .pid
-            .ok_or_else(|| denied("native client PID unavailable"))?;
+            .ok_or_else(|| denied("native client PID unavailable".into()))?;
         let client = self
             .clients
             .get(&pid)
-            .ok_or_else(|| denied("native raw client has no host-issued binding"))?;
+            .ok_or_else(|| denied("native raw client has no host-issued binding".into()))?;
         if client.peer != peer
             || self.channels.validate(&client.channel) != Ok(CallerRole::User)
             || peer_lifetime_marker(peer)? != client.lifetime
         {
-            return Err(denied("native client process binding is no longer live"));
+            return Err(denied(
+                "native client process binding is no longer live".into(),
+            ));
         }
         Ok(())
     }

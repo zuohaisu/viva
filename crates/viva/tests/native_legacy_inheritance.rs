@@ -5,10 +5,12 @@
 //! the fds arrived: the old host must reattach its readers and keep serving.
 //! Never counted as coverage from the default zero-test feature-disabled run.
 #![cfg(all(feature = "herdr-runtime", unix))]
+#[path = "support/owner_anchor.rs"]
+mod owner_support;
+use owner_support::{OwnerHost, authenticate, call, spawn_with, wait_ready};
 use serde_json::{Value, json};
 use std::{
-    io::{BufRead, BufReader, Write},
-    os::unix::net::{UnixListener, UnixStream},
+    os::unix::net::UnixListener,
     path::Path,
     process::{Child, Command, Stdio},
     thread,
@@ -54,23 +56,10 @@ fn spawn_legacy(home: &Path) -> Fixture {
     )
 }
 
-fn spawn_native(home: &Path) -> Fixture {
-    Fixture(
-        Command::new(env!("CARGO_BIN_EXE_viva"))
-            .args(["runtime", "server"])
-            .current_dir(home)
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("HOME", home)
-            .env("SHELL", "/bin/sh")
-            .env("TERM", "xterm-256color")
-            .env("VIVA_HOME", home)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(std::fs::File::create(home.join("native.log")).unwrap())
-            .spawn()
-            .unwrap(),
-    )
+fn spawn_native(home: &Path) -> OwnerHost {
+    spawn_with(home, "legacy-inherit", |command| {
+        command.current_dir(home);
+    })
 }
 
 fn connect_legacy(home: &Path, legacy: &mut Fixture) -> Client {
@@ -278,16 +267,17 @@ fn wait_legacy_execution_running(home: &Path, execution_id: &str) {
     }
 }
 
-fn wait_native_ready(home: &Path, native: &mut Fixture) {
+fn wait_native_ready(home: &Path, native: &mut OwnerHost) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        if let Some(status) = native.0.try_wait().unwrap() {
+        if let Some(status) = native.try_wait().unwrap() {
             panic!(
                 "native host exited before serving: {status}; log: {}",
                 log_tail(home, "native.log")
             );
         }
         if home.join("runtime/workbench/herdr.sock").exists() {
+            wait_ready(home, native);
             return;
         }
         assert!(
@@ -299,32 +289,18 @@ fn wait_native_ready(home: &Path, native: &mut Fixture) {
     }
 }
 
-fn wait_exit(child: &mut Fixture, what: &str) -> std::process::ExitStatus {
+fn wait_exit(
+    mut try_wait: impl FnMut() -> std::io::Result<Option<std::process::ExitStatus>>,
+    what: &str,
+) -> std::process::ExitStatus {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        if let Some(status) = child.0.try_wait().unwrap() {
+        if let Some(status) = try_wait().unwrap() {
             return status;
         }
         assert!(Instant::now() < deadline, "{what} did not exit");
         thread::sleep(Duration::from_millis(25));
     }
-}
-
-fn call(home: &Path, method: &str, params: Value) -> Value {
-    let mut socket = UnixStream::connect(home.join("runtime/workbench/herdr.sock")).unwrap();
-    socket
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    writeln!(
-        socket,
-        "{}",
-        json!({"id":"inheritance-fixture", "method":method, "params":params,
-            "transport_peer":{"pid":1,"uid":0}, "peer_pid":1, "peer_uid":0, "claimed_role":"user"})
-    )
-    .unwrap();
-    let mut line = String::new();
-    BufReader::new(socket).read_line(&mut line).unwrap();
-    serde_json::from_str(&line).unwrap()
 }
 
 #[test]
@@ -342,7 +318,7 @@ fn a_live_legacy_execution_is_inherited_and_stoppable() {
     // gate must still refuse it through the adopted execution binding.
     let member_command = format!(
         "printf 'MEMBER-ALIVE\\n'; while [ ! -f '{}' ]; do sleep 0.1; done; \
-         VIVA_HOME='{}' '{}' runtime host pause >/dev/null 2>&1; \
+         VIVA_HOME='{}' VIVA_OWNER_KEYCHAIN=0 '{}' runtime host pause >/dev/null 2>&1; \
          printf '%s' $? > '{}'; sleep 60",
         pause_go.display(),
         home.display(),
@@ -368,7 +344,10 @@ fn a_live_legacy_execution_is_inherited_and_stoppable() {
 
     let mut native = spawn_native(home);
     wait_native_ready(home, &mut native);
-    let status = wait_exit(&mut legacy, "legacy host after the prepared takeover");
+    let status = wait_exit(
+        || legacy.0.try_wait(),
+        "legacy host after the prepared takeover",
+    );
     assert!(
         status.success(),
         "the acknowledged legacy host should retire cleanly: {status}; log: {}",
@@ -433,7 +412,7 @@ fn a_live_legacy_execution_is_inherited_and_stoppable() {
     );
     drop(conn);
 
-    authenticate_owner(home);
+    authenticate(home, native.anchor());
     let stopped = call(
         home,
         "viva.execution.stop",
@@ -472,24 +451,6 @@ fn a_live_legacy_execution_is_inherited_and_stoppable() {
     );
 }
 
-fn authenticate_owner(home: &Path) {
-    let capability: Value = serde_json::from_slice(
-        &std::fs::read(home.join("runtime/workbench/owner-channel.json")).unwrap(),
-    )
-    .unwrap();
-    let peer = herdr::embedding::TransportPeer {
-        pid: Some(std::process::id()),
-        uid: Some(unsafe { libc::geteuid() }),
-    };
-    let lifetime = herdr::embedding::peer_lifetime_marker(peer).unwrap();
-    let response = call(
-        home,
-        "viva.client.authenticate",
-        json!({"credential": capability["credential"], "process_lifetime": lifetime}),
-    );
-    assert_eq!(response["result"]["type"], "ok", "{response}");
-}
-
 #[test]
 fn live_legacy_session_is_inherited_with_its_process_and_screen() {
     let temp = tempfile::Builder::new()
@@ -521,7 +482,10 @@ fn live_legacy_session_is_inherited_with_its_process_and_screen() {
 
     let mut native = spawn_native(home);
     wait_native_ready(home, &mut native);
-    let status = wait_exit(&mut legacy, "legacy host after the prepared takeover");
+    let status = wait_exit(
+        || legacy.0.try_wait(),
+        "legacy host after the prepared takeover",
+    );
     assert!(
         status.success(),
         "the acknowledged legacy host should retire cleanly: {status}; log: {}",
@@ -625,7 +589,7 @@ fn failed_adoption_leaves_the_old_host_serving_and_its_process_alive() {
     drop(store);
 
     let mut native = spawn_native(home);
-    let status = wait_exit(&mut native, "native host after a refused takeover");
+    let status = wait_exit(|| native.try_wait(), "native host after a refused takeover");
     assert!(!status.success(), "a refused takeover must not serve");
     let native_log = log_tail(home, "native.log");
     assert!(

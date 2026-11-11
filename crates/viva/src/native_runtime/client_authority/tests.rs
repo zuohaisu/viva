@@ -1,16 +1,25 @@
 use super::*;
-fn fixture() -> (tempfile::TempDir, ClientAuthority, String, TransportPeer) {
-    let home = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(home.path().join("runtime/workbench")).unwrap();
-    let mut authority = ClientAuthority::new(home.path());
-    authority.activate("native-unit-fixture").unwrap();
-    let credential = client_credential(home.path()).unwrap();
+use crate::native_runtime::owner_anchor;
+
+fn fixture() -> (ClientAuthority, String, TransportPeer) {
+    let (_, anchor) = owner_anchor::generate();
+    let mut authority = ClientAuthority::new();
+    authority.activate(Some(anchor.clone())).unwrap();
     let peer = TransportPeer {
         pid: Some(std::process::id()),
         uid: Some(unsafe { libc::geteuid() }),
     };
-    (home, authority, credential, peer)
+    (authority, anchor, peer)
 }
+
+fn refused(outcome: Result<(), AuthOutcome>) -> AuthRefusal {
+    match outcome {
+        Err(AuthOutcome::Refused(reason)) => reason,
+        Err(AuthOutcome::Internal(error)) => panic!("unexpected internal error: {error}"),
+        Ok(()) => panic!("authentication unexpectedly admitted"),
+    }
+}
+
 #[test]
 fn active_worker_credential_without_execution_blocks_owner_only_phase() {
     use crate::{authority::AuthorityEngine, foundation::store::Store, members::MemberRegistry};
@@ -29,7 +38,9 @@ fn active_worker_credential_without_execution_blocks_owner_only_phase() {
         home: home.path().into(),
         host_id: "native-guard-unit".into(),
         store: Mutex::new(Some(store)),
-        clients: Mutex::new(ClientAuthority::new(home.path())),
+        clients: Mutex::new(ClientAuthority::new()),
+        owner_anchor: Mutex::new(None),
+        pre_provisioned_anchor: None,
         channels: Mutex::new(crate::foundation::envelope::ChannelRegistry::new()),
         executions: Mutex::new(super::super::NativeExecutionState::default()),
         legacy_handoff: None,
@@ -47,21 +58,21 @@ fn active_worker_credential_without_execution_blocks_owner_only_phase() {
 // or Native member-process evidence. Real bridge/probe tests cover transport.
 #[test]
 fn owner_capability_needs_proof_and_live_process_not_uid_alone() {
-    let (_home, mut authority, credential, peer) = fixture();
+    let (mut authority, anchor, peer) = fixture();
     let lifetime = peer_lifetime_marker(peer).unwrap();
-    assert!(
-        authority
-            .authenticate(&credential, peer, None, |_, _| panic!(
-                "missing lifetime admitted"
-            ))
-            .is_err()
+    assert_eq!(
+        refused(authority.authenticate(&anchor, peer, None, |_, _| panic!(
+            "missing lifetime admitted"
+        ))),
+        AuthRefusal::Missing
     );
-    assert!(
-        authority
-            .authenticate(&credential, peer, Some("wrong-lifetime"), |_, _| panic!(
+    assert_eq!(
+        refused(
+            authority.authenticate(&anchor, peer, Some("wrong-lifetime"), |_, _| panic!(
                 "wrong lifetime admitted"
             ))
-            .is_err()
+        ),
+        AuthRefusal::Missing
     );
     assert!(authority.validate(peer).is_err());
     let channel_id = authority
@@ -72,45 +83,45 @@ fn owner_capability_needs_proof_and_live_process_not_uid_alone() {
         .channel_id
         .to_string();
     assert_ne!(
-        channel_id, credential,
+        channel_id, anchor,
         "an identifier must not be the credential"
     );
-    assert!(
-        authority
-            .authenticate(&channel_id, peer, Some(&lifetime), |_, _| panic!(
+    assert_eq!(
+        refused(
+            authority.authenticate(&channel_id, peer, Some(&lifetime), |_, _| panic!(
                 "identifier admitted as a secret"
             ))
-            .is_err()
+        ),
+        AuthRefusal::Mismatch
     );
-    assert!(
-        authority
-            .authenticate("unknown", peer, Some(&lifetime), |_, _| panic!(
+    assert_eq!(
+        refused(
+            authority.authenticate("unknown", peer, Some(&lifetime), |_, _| panic!(
                 "bad proof reached audit"
             ))
-            .is_err()
+        ),
+        AuthRefusal::Mismatch
     );
-    assert!(
-        authority
-            .authenticate(
-                &credential,
-                TransportPeer { pid: None, ..peer },
-                Some(&lifetime),
-                |_, _| panic!("missing PID admitted")
-            )
-            .is_err()
+    assert_eq!(
+        refused(authority.authenticate(
+            &anchor,
+            TransportPeer { pid: None, ..peer },
+            Some(&lifetime),
+            |_, _| panic!("missing PID admitted")
+        )),
+        AuthRefusal::Missing
     );
-    assert!(
-        authority
-            .authenticate(
-                &credential,
-                TransportPeer { uid: None, ..peer },
-                Some(&lifetime),
-                |_, _| panic!("missing UID admitted")
-            )
-            .is_err()
+    assert_eq!(
+        refused(authority.authenticate(
+            &anchor,
+            TransportPeer { uid: None, ..peer },
+            Some(&lifetime),
+            |_, _| panic!("missing UID admitted")
+        )),
+        AuthRefusal::Mismatch
     );
     authority
-        .authenticate(&credential, peer, Some(&lifetime), |_, _| Ok(()))
+        .authenticate(&anchor, peer, Some(&lifetime), |_, _| Ok(()))
         .unwrap();
     authority.validate(peer).unwrap();
     authority
@@ -123,63 +134,80 @@ fn owner_capability_needs_proof_and_live_process_not_uid_alone() {
         "mismatched lifetime must not retain authority"
     );
 }
+
 #[test]
-fn failed_admission_audit_leaves_no_usable_client_channel() {
-    let (_home, mut authority, credential, peer) = fixture();
+fn an_anchor_from_a_dead_incarnation_is_refused_as_stale() {
+    let (mut authority, _anchor, peer) = fixture();
     let lifetime = peer_lifetime_marker(peer).unwrap();
-    assert!(
-        authority
-            .authenticate(&credential, peer, Some(&lifetime), |_, _| Err(
-                io::Error::other("fixture audit failure")
+    let stale = owner_anchor::with_host("native-dead-incarnation");
+    assert_eq!(
+        refused(
+            authority.authenticate(&stale, peer, Some(&lifetime), |_, _| panic!(
+                "stale anchor admitted"
             ))
-            .is_err()
+        ),
+        AuthRefusal::Stale
     );
-    assert!(authority.validate(peer).is_err());
+    assert_eq!(AuthRefusal::Stale.reason(), "stale_owner_anchor");
     assert!(authority.clients.is_empty());
 }
+
 #[test]
-fn stale_capability_rotates_but_unknown_file_and_symlink_are_preserved() {
-    use std::os::unix::fs::PermissionsExt;
-    let (home, mut authority, credential, peer) = fixture();
+fn a_foreign_anchor_for_the_live_host_is_refused_as_mismatch() {
+    let (mut authority, anchor, peer) = fixture();
+    let host = owner_anchor::host_id(&anchor).unwrap();
+    let lifetime = peer_lifetime_marker(peer).unwrap();
+    let forged = owner_anchor::with_host(host);
+    assert_eq!(
+        refused(
+            authority.authenticate(&forged, peer, Some(&lifetime), |_, _| panic!(
+                "forged anchor admitted"
+            ))
+        ),
+        AuthRefusal::Mismatch
+    );
+}
+
+#[test]
+fn activation_without_an_anchor_refuses_every_authentication() {
+    let mut authority = ClientAuthority::new();
+    authority.activate(None).unwrap();
+    let peer = TransportPeer {
+        pid: Some(std::process::id()),
+        uid: Some(unsafe { libc::geteuid() }),
+    };
+    let (_, anchor) = owner_anchor::generate();
     let lifetime = peer_lifetime_marker(peer).unwrap();
     assert_eq!(
-        std::fs::metadata(&authority.path)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777,
-        0o600
+        refused(
+            authority.authenticate(&anchor, peer, Some(&lifetime), |_, _| panic!(
+                "anchor admitted without activation anchor"
+            ))
+        ),
+        AuthRefusal::Unavailable
     );
-    assert!(authority.activate("native-double").is_err());
-    let mut next = ClientAuthority::new(home.path());
-    next.activate("native-next-fixture").unwrap();
-    assert_ne!(credential, client_credential(home.path()).unwrap());
-    assert!(
-        next.authenticate(&credential, peer, Some(&lifetime), |_, _| panic!(
-            "stale credential admitted"
-        ))
-        .is_err()
-    );
-    std::fs::write(&next.path, b"unrelated private fixture").unwrap();
-    let mut unknown = ClientAuthority::new(home.path());
-    assert!(unknown.activate("native-unknown").is_err());
     assert_eq!(
-        std::fs::read(&next.path).unwrap(),
-        b"unrelated private fixture"
+        AuthRefusal::Unavailable.reason(),
+        "owner_anchor_unavailable"
     );
-    let sentinel = home.path().join("sentinel");
-    std::fs::write(&sentinel, b"unchanged").unwrap();
-    std::fs::remove_file(&next.path).unwrap();
-    std::os::unix::fs::symlink(&sentinel, &next.path).unwrap();
-    assert!(unknown.activate("native-symlink").is_err());
-    assert_eq!(std::fs::read(&sentinel).unwrap(), b"unchanged");
-    std::fs::remove_file(&next.path).unwrap();
-    std::os::unix::fs::symlink(home.path().join("missing"), &next.path).unwrap();
-    assert!(unknown.activate("native-dangling-symlink").is_err());
-    assert!(
-        std::fs::symlink_metadata(&next.path)
-            .unwrap()
-            .file_type()
-            .is_symlink()
-    );
+}
+
+#[test]
+fn a_second_activation_is_rejected() {
+    let (mut authority, anchor, _peer) = fixture();
+    assert!(authority.activate(Some(anchor)).is_err());
+}
+
+#[test]
+fn failed_admission_audit_leaves_no_usable_client_channel() {
+    let (mut authority, anchor, peer) = fixture();
+    let lifetime = peer_lifetime_marker(peer).unwrap();
+    match authority.authenticate(&anchor, peer, Some(&lifetime), |_, _| {
+        Err(io::Error::other("fixture audit failure"))
+    }) {
+        Err(AuthOutcome::Internal(_)) => {}
+        _ => panic!("audit failure must be internal, not admitted"),
+    }
+    assert!(authority.validate(peer).is_err());
+    assert!(authority.clients.is_empty());
 }

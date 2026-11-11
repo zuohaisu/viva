@@ -76,20 +76,32 @@ are configuration, and every completion claim carries recorded evidence.
 **degraded import**, not a seamless takeover: live child processes, screen and
 scrollback, rows/columns and scene/tab names survive, while terminal ids, pane
 cwd/purpose, split ratios, focus/zoom, cell size and agent/worktree metadata
-do not. The owner capability is a host-issued credential read from a 0600 file
-plus a process-lineage refusal. That refusal covers host descendants and
-descendants of host-owned executions, but it is **not** a same-UID OS sandbox:
-an independent same-UID process — including a worker that deliberately
-reparents itself out of the host's ancestry — can still read the file and
-authenticate as the owner. Closing that gap needs an OS/user-presence trust
-anchor or a TUI-bound capability whose cost is a detach/reattach redesign; it
-is an open owner decision and must be settled before this entry becomes the
-released default. `pane.list` / `pane.read` / `pane.process_info` are same-UID
-observation by design: any process with the home can read live pane text and
-OS process facts; they mutate nothing, and dispatch/stop/pause still require
-the owner capability. Native pane-output redaction, in-place native-host
-update (stop the host to update), Linux/x86_64 execution and human visual
-acceptance are not verified.
+do not. The owner capability is a per-host-incarnation anchor that is never
+written to disk: the TUI that spawns the host passes it over an inherited pipe
+(`VIVA_OWNER_ANCHOR_FD`), and a separately started TUI that attaches to the
+running host obtains the same anchor from a macOS login-Keychain item whose
+access list is empty, so the OS gates every read on user presence (the user
+approves the prompt). A process that has neither refuses with a fixed reason
+(`owner_anchor_missing` / `owner_anchor_unavailable` / `owner_anchor_mismatch`);
+an anchor from an earlier host incarnation is refused as `stale_owner_anchor`.
+Anchor rotation is per host start: each incarnation generates a new anchor and
+an old one is rejected by host id. A process-lineage refusal
+(`peer_is_host_descendant` / `peer_is_execution_descendant`) remains as defense
+in depth, but the boundary no longer depends on ancestry: an independent
+same-UID process, including a worker that deliberately reparents itself
+(setsid/double-fork), cannot read any 0600 owner file and cannot obtain the
+anchor, so it is refused and audited without producing `native_host_paused`.
+Detach/reattach is preserved on macOS: the host keeps running, and a new TUI
+regains owner capability through the Keychain prompt. Linux has no
+user-presence anchor in this build, so a *new* TUI process cannot regain owner
+capability there (the original TUI's inherited descriptor still works); this is
+an explicit refusal, not a fallback. `pane.list` / `pane.read` /
+`pane.process_info` are same-UID observation by design: any process with the
+home can read live pane text and OS process facts; they mutate nothing, and
+dispatch/stop/pause still require the owner anchor. Native pane-output
+redaction, in-place native-host update (stop the host to update), Linux/x86_64
+execution, macOS Keychain interaction in CI, and human visual acceptance are
+not verified.
 
 **Not implemented, and never faked**: automatic reflection, self-model
 evolution, automatic memory promotion, starting at login (planned, to be

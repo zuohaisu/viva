@@ -2,12 +2,12 @@
 //! stop one canonical execution through its real pane. Runs only with the
 //! explicit herdr-runtime feature; not installation/UI acceptance.
 #![cfg(all(feature = "herdr-runtime", unix))]
+#[path = "support/owner_anchor.rs"]
+mod owner_support;
+use owner_support::{OwnerHost, authenticate, call, spawn, wait_owner_ready, wait_ready};
 use serde_json::{Value, json};
 use std::{
-    io::{BufRead, BufReader, Write},
-    os::unix::net::UnixStream,
     path::Path,
-    process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -18,50 +18,8 @@ use viva::{
     tasks::TaskRegistry,
 };
 
-struct Fixture(Child);
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
 fn db(home: &Path) -> rusqlite::Connection {
     rusqlite::Connection::open(paths::database_path(home)).unwrap()
-}
-
-fn call(home: &Path, method: &str, params: Value) -> Value {
-    let mut socket = UnixStream::connect(home.join("runtime/workbench/herdr.sock")).unwrap();
-    socket
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
-    writeln!(
-        socket,
-        "{}",
-        json!({"id":"fixture-secret-do-not-persist", "method":method, "params":params})
-    )
-    .unwrap();
-    let mut line = String::new();
-    BufReader::new(socket).read_line(&mut line).unwrap();
-    serde_json::from_str(&line).unwrap()
-}
-
-fn authenticate(home: &Path) {
-    let capability: Value = serde_json::from_slice(
-        &std::fs::read(home.join("runtime/workbench/owner-channel.json")).unwrap(),
-    )
-    .unwrap();
-    let peer = herdr::embedding::TransportPeer {
-        pid: Some(std::process::id()),
-        uid: Some(unsafe { libc::geteuid() }),
-    };
-    let lifetime = herdr::embedding::peer_lifetime_marker(peer).unwrap();
-    let response = call(
-        home,
-        "viva.client.authenticate",
-        json!({"credential": capability["credential"], "process_lifetime": lifetime}),
-    );
-    assert_eq!(response["result"]["type"], "ok", "{response}");
 }
 
 fn binding(member: &viva::foundation::ids::MemberId) -> MemberBinding {
@@ -74,43 +32,10 @@ fn binding(member: &viva::foundation::ids::MemberId) -> MemberBinding {
     }
 }
 
-fn start_fixture(home: &Path) -> Fixture {
-    let runtime = home.join("runtime/workbench");
-    std::fs::create_dir_all(&runtime).unwrap();
-    std::fs::write(
-        runtime.join("config.toml"),
-        "[terminal]\ndefault_shell = '/bin/sh'\nshell_mode = 'non_login'\n[update]\nversion_check = false\nmanifest_check = false\n[experimental]\npane_history = false\n",
-    )
-    .unwrap();
-    let log = std::fs::File::create(home.join("native.log")).unwrap();
-    let mut fixture = Fixture(
-        Command::new(env!("CARGO_BIN_EXE_viva"))
-            .args(["runtime", "server"])
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-            .env("HOME", home)
-            .env("SHELL", "/bin/sh")
-            .env("TERM", "xterm-256color")
-            .env("VIVA_HOME", home)
-            .env("XDG_CONFIG_HOME", home.join("xdg-config"))
-            .env("XDG_STATE_HOME", home.join("xdg-state"))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(log)
-            .spawn()
-            .unwrap(),
-    );
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !runtime.join("herdr.sock").exists() || !runtime.join("owner-channel.json").exists() {
-        assert!(
-            fixture.0.try_wait().unwrap().is_none(),
-            "native host exited: {}",
-            std::fs::read_to_string(home.join("native.log")).unwrap_or_default()
-        );
-        assert!(Instant::now() < deadline, "native startup deadline");
-        thread::sleep(Duration::from_millis(25));
-    }
-    fixture
+fn start_fixture(home: &Path, tag: &str) -> OwnerHost {
+    let host = spawn(home, tag);
+    wait_owner_ready(home, &host);
+    host
 }
 
 struct FixtureData {
@@ -191,8 +116,8 @@ fn pause_blocks_new_dispatch_and_resume_reopens_it() {
         .unwrap();
     let home = temp.path();
     let data = seed(home);
-    let _fixture = start_fixture(home);
-    authenticate(home);
+    let fixture = start_fixture(home, "control-pause");
+    authenticate(home, fixture.anchor());
 
     let paused = call(home, "viva.host.pause", json!({"paused": true}));
     assert_eq!(paused["result"]["type"], "viva_host_paused", "{paused}");
@@ -229,8 +154,8 @@ fn stop_closes_the_pane_and_records_a_deliberate_exit() {
         .unwrap();
     let home = temp.path();
     let data = seed(home);
-    let _fixture = start_fixture(home);
-    authenticate(home);
+    let fixture = start_fixture(home, "control-stop");
+    authenticate(home, fixture.anchor());
     let started = try_start(home, &data, "stop-key", "sleep 30");
     assert_eq!(
         started["result"]["type"], "viva_execution_started",
@@ -298,7 +223,9 @@ fn stop_without_owner_capability_is_refused_before_any_state_change() {
         .unwrap();
     let home = temp.path();
     let _ = seed(home);
-    let _fixture = start_fixture(home);
+    // Deliberately unbound: never authenticate this process.
+    let fixture = spawn(home, "control-unbound");
+    wait_ready(home, &fixture);
     let refused = call(
         home,
         "viva.execution.stop",
@@ -326,8 +253,8 @@ fn stopping_an_unknown_execution_is_refused() {
         .unwrap();
     let home = temp.path();
     let _ = seed(home);
-    let _fixture = start_fixture(home);
-    authenticate(home);
+    let fixture = start_fixture(home, "control-unknown");
+    authenticate(home, fixture.anchor());
     let refused = call(
         home,
         "viva.execution.stop",

@@ -4,6 +4,7 @@
 mod client_authority;
 #[cfg(unix)]
 mod legacy_import;
+mod owner_anchor;
 
 use crate::{
     authority::AuthorityEngine,
@@ -78,6 +79,11 @@ struct DomainBridge {
     host_id: String,
     store: Mutex<Option<Store>>,
     clients: Mutex<client_authority::ClientAuthority>,
+    /// Server role: the anchor this host accepts (delivered by the spawning
+    /// TUI, or generated and stored in the login keychain at ready). TUI role:
+    /// the anchor supplied by the harness over an inherited descriptor.
+    owner_anchor: Mutex<Option<String>>,
+    pre_provisioned_anchor: Option<String>,
     channels: Mutex<ChannelRegistry>,
     executions: Mutex<NativeExecutionState>,
     /// Present when this host took over a live legacy session. A degraded
@@ -324,6 +330,72 @@ impl DomainBridge {
         self.with_store(|store| owner_only_phase_locked(store, &state))
     }
 
+    fn record_anchor_event(&self, kind: &'static str) -> io::Result<()> {
+        self.with_store(|store| {
+            events::append(
+                store,
+                NewEvent {
+                    domain: crate::server::DOMAIN_HOST,
+                    kind: kind.into(),
+                    subject_type: "runtime_process".into(),
+                    subject_id: self.host_id.clone(),
+                    origin: "native_host".into(),
+                    payload: serde_json::json!({"anchor": "inherited_fd_or_login_keychain"}),
+                },
+            )?;
+            Ok(())
+        })
+    }
+    fn record_anchor_keychain(
+        &self,
+        stored_kind: &'static str,
+        result: &io::Result<()>,
+    ) -> io::Result<()> {
+        match result {
+            Ok(()) => self.record_anchor_event(stored_kind),
+            Err(error) => {
+                let detail: String = error.to_string().chars().take(300).collect();
+                self.with_store(|store| {
+                    events::append(
+                        store,
+                        NewEvent {
+                            domain: crate::server::DOMAIN_HOST,
+                            kind: "native_owner_anchor_keychain_failed".into(),
+                            subject_type: "runtime_process".into(),
+                            subject_id: self.host_id.clone(),
+                            origin: "native_host".into(),
+                            payload: serde_json::json!({"detail": detail}),
+                        },
+                    )?;
+                    Ok(())
+                })
+            }
+        }
+    }
+    fn record_owner_refusal(
+        &self,
+        reason: &'static str,
+        peer: herdr::embedding::TransportPeer,
+    ) -> io::Result<()> {
+        self.with_store(|store| {
+            events::append(
+                store,
+                NewEvent {
+                    domain: crate::server::DOMAIN_HOST,
+                    kind: "native_owner_auth_refused".into(),
+                    subject_type: "runtime_process".into(),
+                    subject_id: self.host_id.clone(),
+                    origin: "native_host".into(),
+                    payload: serde_json::json!({
+                        "reason": reason,
+                        "execution_id": null,
+                        "transport_peer": {"pid": peer.pid, "uid": peer.uid},
+                    }),
+                },
+            )?;
+            Ok(())
+        })
+    }
     fn with_store<T>(&self, f: impl FnOnce(&Store) -> Result<T>) -> io::Result<T> {
         let mut slot = self
             .store
@@ -366,13 +438,70 @@ impl herdr::embedding::DomainServices for DomainBridge {
     }
     fn server_ready(&self) -> io::Result<()> {
         self.require_owner_only_phase()?;
+        let delivered = self
+            .owner_anchor
+            .lock()
+            .map_err(|_| io::Error::other("native owner anchor poisoned"))?
+            .clone();
+        let accepted = match delivered {
+            Some(anchor) => {
+                // The spawning TUI delivered this incarnation's anchor over an
+                // inherited pipe. Persist it for a later reattaching TUI, but
+                // never fail startup or fall back to a file when the keychain
+                // refuses: without the keychain a reattach is simply refused.
+                let stored = if owner_anchor::keychain_enabled() {
+                    let result = owner_anchor::store_keychain(&self.home, &anchor);
+                    self.record_anchor_keychain("native_owner_anchor_keychain_stored", &result)?;
+                    result.is_ok()
+                } else {
+                    false
+                };
+                if !stored {
+                    self.record_anchor_event("native_owner_anchor_keychain_unavailable")?;
+                }
+                Some(anchor)
+            }
+            None => {
+                // A manually started host has no pipe. It can still mint an
+                // anchor for the keychain; without a keychain it runs with
+                // owner admission refused.
+                if !owner_anchor::keychain_enabled() {
+                    self.record_anchor_event("native_owner_anchor_unavailable")?;
+                    None
+                } else {
+                    let anchor = owner_anchor::with_host(&self.host_id);
+                    let result = owner_anchor::store_keychain(&self.home, &anchor);
+                    self.record_anchor_keychain("native_owner_anchor_keychain_stored", &result)?;
+                    if result.is_ok() { Some(anchor) } else { None }
+                }
+            }
+        };
+        if let Some(anchor) = &accepted {
+            *self
+                .owner_anchor
+                .lock()
+                .map_err(|_| io::Error::other("native owner anchor poisoned"))? =
+                Some(anchor.clone());
+        }
         self.clients
             .lock()
             .map_err(|_| io::Error::other("native client authority poisoned"))?
-            .activate(&self.host_id)
+            .activate(accepted)
     }
     fn client_credential(&self) -> io::Result<String> {
-        client_authority::client_credential(&self.home)
+        if let Some(anchor) = &self.pre_provisioned_anchor {
+            return Ok(anchor.clone());
+        }
+        if let Some(anchor) = herdr::embedding::spawned_owner_anchor() {
+            return Ok(anchor);
+        }
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "owner anchor is available only from an inherited spawn descriptor or the login keychain",
+        ))
+    }
+    fn owner_anchor_for_host(&self, host_id: &str) -> io::Result<String> {
+        owner_anchor::load_keychain(&self.home, host_id)
     }
     fn authenticate_client(
         &self,
@@ -380,13 +509,12 @@ impl herdr::embedding::DomainServices for DomainBridge {
         expected_lifetime: Option<&str>,
         peer: herdr::embedding::TransportPeer,
     ) -> io::Result<()> {
-        // Every pane process this host starts is a host descendant. The owner
-        // capability is a same-UID file, so without this check a member shell
-        // could read it and authenticate as the owner frontend. Inherited
-        // legacy executions are reparented when their old host exits, so
-        // their confirmed process roots are checked too. This is a lineage
-        // refusal, not a same-UID sandbox (a deliberately reparented process
-        // is outside what PID ancestry can prove).
+        // Every pane process this host starts is a host descendant. Keeping
+        // this check refuses a member process even if it somehow obtained the
+        // anchor; the anchor check below refuses every process that did not
+        // receive this host incarnation's anchor. Inherited legacy executions
+        // are reparented when their old host exits, so their confirmed process
+        // roots are checked too. The anchor, not lineage, is the capability.
         if let Some(pid) = peer.pid {
             let caller = i64::from(pid);
             let host = std::process::id() as i64;
@@ -438,26 +566,43 @@ impl herdr::embedding::DomainServices for DomainBridge {
                 ));
             }
         }
-        let result = self.require_owner_only_phase().and_then(|_| {
-            self.clients
-                .lock()
-                .map_err(|_| io::Error::other("native client authority poisoned"))?
-                .authenticate(credential, peer, expected_lifetime, |channel, lifetime| self.with_store(|store| {
-                    events::append(store, NewEvent {
-                        domain: crate::server::DOMAIN_HOST,
-                        kind: "native_client_admitted".into(),
-                        subject_type: "runtime_process".into(),
-                        subject_id: self.host_id.clone(),
-                        origin: "native_host".into(),
-                        payload: serde_json::json!({"authority": "host_issued_user_capability", "channel_id": channel.channel_id.as_str(), "process_lifetime": lifetime, "transport_peer": {"pid":peer.pid,"uid":peer.uid}, "state": "process_binding_admitted_not_human_or_current_fd_writer_proof"}),
-                    })?;
-                    Ok(())
-                }))
-        });
-        if result.is_err() {
+        if let Err(error) = self.require_owner_only_phase() {
             self.refused("viva.client.authenticate", Some(peer))?;
+            return Err(error);
         }
-        result
+        let outcome = self
+            .clients
+            .lock()
+            .map_err(|_| io::Error::other("native client authority poisoned"))?
+            .authenticate(credential, peer, expected_lifetime, |channel, lifetime| {
+                self.with_store(|store| {
+                    events::append(
+                        store,
+                        NewEvent {
+                            domain: crate::server::DOMAIN_HOST,
+                            kind: "native_client_admitted".into(),
+                            subject_type: "runtime_process".into(),
+                            subject_id: self.host_id.clone(),
+                            origin: "native_host".into(),
+                            payload: serde_json::json!({"authority": "inherited_fd_anchor", "channel_id": channel.channel_id.as_str(), "process_lifetime": lifetime, "transport_peer": {"pid":peer.pid,"uid":peer.uid}, "state": "anchor_possession_admitted"}),
+                        },
+                    )?;
+                    Ok(())
+                })
+            });
+        match outcome {
+            Ok(()) => Ok(()),
+            Err(client_authority::AuthOutcome::Refused(refusal)) => {
+                self.record_owner_refusal(refusal.reason(), peer)?;
+                self.refused("viva.client.authenticate", Some(peer))?;
+                Err(refusal
+                    .into_error("the caller does not hold this host incarnation's owner anchor"))
+            }
+            Err(client_authority::AuthOutcome::Internal(error)) => {
+                self.refused("viva.client.authenticate", Some(peer))?;
+                Err(error)
+            }
+        }
     }
     fn validate_client(&self, peer: herdr::embedding::TransportPeer) -> io::Result<()> {
         let result = self.require_owner_only_phase().and_then(|_| {
@@ -1351,20 +1496,34 @@ fn send_native_request(
     Ok(value["result"].clone())
 }
 
+/// Owner authentication for a TUI or control client. The anchor comes from
+/// the spawning descriptor when the harness supplies one, otherwise from the
+/// login keychain under the running host's identity, which always requires
+/// user presence. When neither is available the host receives an empty
+/// credential so the refusal is audited with a fixed reason instead of the
+/// client silently giving up.
 #[cfg(unix)]
 fn authenticate_owner(socket: &std::path::Path, home: &std::path::Path) -> Result<()> {
-    let capability: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(
-            home.join("runtime")
-                .join("workbench")
-                .join("owner-channel.json"),
-        )
-        .map_err(|err| Error::Validation(format!("owner capability is unavailable: {err}")))?,
-    )
-    .map_err(|err| Error::Validation(format!("invalid owner capability file: {err}")))?;
-    let credential = capability["credential"]
-        .as_str()
-        .ok_or_else(|| Error::Validation("owner capability has no credential".into()))?;
+    let anchor = match owner_anchor::take_inherited()
+        .map_err(|error| Error::Validation(format!("owner anchor is unusable: {error}")))?
+    {
+        Some(anchor) => Some(anchor),
+        None if owner_anchor::keychain_enabled() => {
+            let snapshot = send_native_request(socket, "viva.snapshot", serde_json::json!({}))?;
+            let host_id = snapshot["runtime_host_id"]
+                .as_str()
+                .ok_or_else(|| Error::Validation("running host has no runtime identity".into()))?;
+            match owner_anchor::load_keychain(home, host_id) {
+                Ok(anchor) => Some(anchor),
+                Err(error) => {
+                    eprintln!("native: login-keychain owner anchor unavailable: {error}");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    let credential = anchor.unwrap_or_default();
     let peer = herdr::embedding::TransportPeer {
         pid: Some(std::process::id()),
         uid: Some(unsafe { libc::geteuid() }),
@@ -1497,18 +1656,49 @@ pub fn run(args: &[String]) -> Result<()> {
     for binding in legacy_executions {
         adopted_state.adopt(binding);
     }
+    // The owner anchor is delivered by the process that spawned this one:
+    // the TUI gives it to the server it launches, and a harness/client gets
+    // it from its own parent. Never a file, never an environment secret.
+    let pre_provisioned_anchor = owner_anchor::take_inherited()
+        .map_err(|error| Error::Validation(format!("owner anchor is unusable: {error}")))?;
+    let server_role = args.first().map(String::as_str) == Some("server");
+    let host_id = if server_role {
+        match pre_provisioned_anchor.as_deref() {
+            Some(anchor) => owner_anchor::host_id(anchor)
+                .ok_or_else(|| Error::Validation("owner anchor has an unknown format".into()))?
+                .to_string(),
+            None => format!("native-{}", uuid::Uuid::new_v4().simple()),
+        }
+    } else {
+        format!("native-{}", uuid::Uuid::new_v4().simple())
+    };
+    // Only the process that may spawn a server carries a candidate anchor.
+    // A reattaching TUI never spawns, so its candidate is unused and the
+    // keychain (or an inherited descriptor) supplies the credential.
+    let spawn_anchor = (!server_role).then(|| {
+        pre_provisioned_anchor
+            .clone()
+            .unwrap_or_else(|| owner_anchor::with_host(&host_id))
+    });
     let mut arguments = vec!["viva-runtime".to_owned()];
     arguments.extend_from_slice(args);
     herdr::embedding::run(herdr::embedding::Context {
         directory: home.join("runtime").join("workbench"),
         arguments,
         child_prefix: vec!["runtime".into()],
+        owner_anchor: spawn_anchor,
         domain: Arc::new(DomainBridge {
-            clients: Mutex::new(client_authority::ClientAuthority::new(&home)),
+            clients: Mutex::new(client_authority::ClientAuthority::new()),
+            owner_anchor: Mutex::new(if server_role {
+                pre_provisioned_anchor.clone()
+            } else {
+                None
+            }),
+            pre_provisioned_anchor: pre_provisioned_anchor.clone(),
             channels: Mutex::new(ChannelRegistry::new()),
             executions: Mutex::new(adopted_state),
             home,
-            host_id: format!("native-{}", uuid::Uuid::new_v4().simple()),
+            host_id,
             store: Mutex::new(None),
             legacy_handoff: legacy_evidence,
         }),
@@ -1750,7 +1940,9 @@ mod tests {
             home: home.to_path_buf(),
             host_id: "native-exit-fixture".into(),
             store: Mutex::new(Some(store)),
-            clients: Mutex::new(client_authority::ClientAuthority::new(home)),
+            clients: Mutex::new(client_authority::ClientAuthority::new()),
+            owner_anchor: Mutex::new(None),
+            pre_provisioned_anchor: None,
             channels: Mutex::new(channels),
             executions: Mutex::new(NativeExecutionState {
                 by_execution: HashMap::from([(execution_id.to_string(), binding)]),

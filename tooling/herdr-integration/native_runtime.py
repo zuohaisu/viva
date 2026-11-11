@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import pty
 import sqlite3
+import secrets
 import select
 import signal
 import shutil
@@ -71,6 +72,21 @@ def probe(binary, legacy_live=False):
         environment = {"PATH": "/usr/bin:/bin", "HOME": str(user_home),
                        "VIVA_HOME": str(home), "SHELL": "/bin/sh",
                        "TERM": "xterm-256color", "LANG": "en_US.UTF-8"}
+        # The owner capability is never a file. This harness plays the spawning
+        # TUI and delivers one per-fixture anchor over an inherited descriptor;
+        # keychain access is disabled so the probe never prompts a human.
+        owner_anchor = "native-anchor:native-probe-{}:{}".format(
+            secrets.token_hex(8), secrets.token_hex(16))
+
+        def owner_frontend_environment(frontend_environment):
+            read_fd, write_fd = os.pipe()
+            os.write(write_fd, (owner_anchor + "\n").encode())
+            os.close(write_fd)
+            os.set_inheritable(read_fd, True)
+            frontend_environment = dict(frontend_environment)
+            frontend_environment["VIVA_OWNER_ANCHOR_FD"] = str(read_fd)
+            frontend_environment["VIVA_OWNER_KEYCHAIN"] = "0"
+            return read_fd, frontend_environment
         legacy = None
         legacy_stderr = None
         if legacy_live:
@@ -134,11 +150,15 @@ def probe(binary, legacy_live=False):
                         break
 
         try:
-            client = subprocess.Popen([str(binary)], env=environment,
+            anchor_fd, frontend_environment = owner_frontend_environment(environment)
+            client = subprocess.Popen([str(binary)], env=frontend_environment,
                                       cwd=root, stdin=slave, stdout=slave, stderr=slave,
-                                      start_new_session=True)
+                                      start_new_session=True, pass_fds=(anchor_fd,))
+            os.close(anchor_fd)
             os.close(slave)
             slave = None
+            packet["owner_anchor_transport"] = "inherited_fd"
+            packet["owner_keychain_disabled"] = True
             deadline = time.monotonic() + 20
             snapshot = None
             while time.monotonic() < deadline:
@@ -197,7 +217,7 @@ def probe(binary, legacy_live=False):
                 assert packet["legacy_handoff_recorded"], packet
             invalid = rpc(home, "viva.client.authenticate", {"credential": "fixture-bootstrap-never-log", "claimed_role": "user"})
             packet["invalid_capability_response_code"] = invalid.get("error", {}).get("code")
-            packet["invalid_capability_refused"] = packet["invalid_capability_response_code"] == "untrusted_client"
+            packet["invalid_capability_refused"] = packet["invalid_capability_response_code"] == "owner_anchor_mismatch"
             # A different, real same-UID process (this controller) has no client
             # binding. EOF/reset is evidence; a timeout is NOT a refusal/PASS.
             with socket.socket(socket.AF_UNIX) as unbound:
@@ -236,9 +256,11 @@ def probe(binary, legacy_live=False):
             os.close(master)
             master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 120, 0, 0))
-            client = subprocess.Popen([str(binary)], env=environment,
+            anchor_fd, frontend_environment = owner_frontend_environment(environment)
+            client = subprocess.Popen([str(binary)], env=frontend_environment,
                                       cwd=root, stdin=slave, stdout=slave, stderr=slave,
-                                      start_new_session=True)
+                                      start_new_session=True, pass_fds=(anchor_fd,))
+            os.close(anchor_fd)
             os.close(slave)
             slave = None
             frame.clear()
