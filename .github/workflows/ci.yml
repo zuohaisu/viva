@@ -180,8 +180,8 @@ jobs:
       - name: Test native client capability and lifetime admission
         run: |
           cargo test -p viva --locked --features herdr-runtime --lib native_runtime:: -- --nocapture
-      - name: Test actual source-linked domain bridge and inherited PTY contract
-        run: cargo test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test native_execution --test native_member_ingress --test native_control --test m1_terminal -- --nocapture
+      - name: Test actual source-linked domain bridge, execution and inheritance contract
+        run: cargo test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test native_execution --test native_member_ingress --test native_control --test native_legacy_inheritance --test m1_terminal -- --nocapture
       - name: Install the original hash-pinned isolated test runner
         run: |
           curl --fail --location --retry 2 https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-universal-apple-darwin.tar.gz -o "$RUNNER_TEMP/nextest.tar.gz"
