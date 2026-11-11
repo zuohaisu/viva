@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "issue": 191,
-  "code_commit": "33ecf96",
+  "code_commit": "8c6ff58",
   "base_commit": "70e1686",
   "scope": "First real legacy-Viva to native-Herdr live inheritance at the native default entry. A feature-enabled bare `viva` starts the native host; when a live legacy `viva server` owns the same VIVA_HOME, the native host receives protocol-2 handoff entries with no early ACK, adopts every PTY master into a Herdr session built from the persisted SceneBook, and only then acknowledges so the old host exits. This is a DEGRADED IMPORT, not a lossless takeover, not member execution, not agent/terminal control, not Linux/x86_64 packaging acceptance, and not a released or merged product. The legacy UI remains reachable as `viva workbench`; legacy control commands (`status`, `shutdown`, `dispatch`) still refuse behind a native host.",
   "existing_capability_and_gap": "Reused the existing legacy handoff protocol 2 (`send_entries`/`receive_entries`, `acknowledge_prepared`, one PTY master fd per terminal over SCM_RIGHTS), the legacy `Client::connect`/`ServerRestart` control path, the persisted `workbench_layout` SceneBook, and Herdr's existing `App::new_from_handoff` + `ImportedHandoffRuntime` + `HandoffRuntimeState` adoption machinery. The gap was that the native host had no handoff receiver, no mapping from a legacy SceneBook/manifest to a Herdr SessionSnapshot, and bare `viva` either refused or started an empty native session instead of inheriting the only live session.",
@@ -11,7 +11,8 @@
     "rows and columns",
     "ANSI screen and scrollback when the legacy entry carries them",
     "scene and tab custom names",
-    "tab order and active tab"
+    "tab order and active tab",
+    "confirmed member execution attribution/task/member/grant bindings for adopted live executions (synthetic native binding without a native credential)"
   ],
   "not_preserved": [
     "legacy terminal ids (new pane numbers are assigned)",
@@ -73,9 +74,49 @@
     {
       "command": "PR CI run 42966871921 (head 33ecf96, after the fixture fix)",
       "result": "Four jobs success. The native job executed the inheritance tests 3 passed (live inheritance with unchanged shell PID/screen; corrupt-book refusal with the old host still serving; stale-socket fresh start), member ingress 5 passed including a_revoked_credential_cannot_report_after_exit, execution 6, control 4, bridge 2 and m1_terminal 4; upstream nextest 3719/3719 passed (12 skipped); the autospawn/PTY/detach probe reports passed:true, cross_backend_inheritance covered_by_test, human_visual HUMAN_VISUAL_REVIEW_PENDING, binary SHA-256 438866640c592e957a5f9832d4caca8b6cb8600b3a2fb1ffb9302dafb2bed39d."
+    },
+    {
+      "command": "clean 1257b37 archive + only the QA-fix tests: ZIG=<zig 0.16.0> cargo +1.96.1 test -p viva --locked --features herdr-runtime --test native_member_ingress a_member_process_cannot_pause_the_owner_host -- --nocapture",
+      "result": "FAILED exactly as QA reported: the member shell's `viva runtime host pause` exited 0 and the test assertion `left \"0\" right \"0\"` failed. Retained in qa-prefix-owner-auth.log.gz; this is a reproduction on the recorded pre-fix head, not a manufactured failure on main."
+    },
+    {
+      "command": "clean 1257b37 archive: ZIG=<zig 0.16.0> cargo +1.96.1 test -p viva --locked --features herdr-runtime --test native_legacy_inheritance a_live_legacy_execution_is_inherited_and_stoppable -- --nocapture",
+      "result": "FAILED exactly as QA reported: `native host exited before serving: exit status: 1` after `native: inheriting 1 live terminal(s) ...` and `viva: io error: validation: native member/process bindings are not integrated; owner frontend capability is refused while unowned executions are pending/live`; the legacy host kept serving. Retained in qa-prefix-inheritance.log.gz."
+    },
+    {
+      "command": "same owner test at code_commit 8c6ff58",
+      "result": "1 passed: the member shell process itself exits 0, the nested control command exits non-zero, no native_host_paused event exists, and native_owner_auth_refused records reason peer_is_host_descendant. Retained in qa-postfix-owner-auth.log.gz."
+    },
+    {
+      "command": "ZIG=<zig 0.16.0> cargo +1.96.1 test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test native_execution --test native_member_ingress --test native_control --test native_legacy_inheritance --test native_worker_binding --test m1_terminal -- --nocapture",
+      "result": "30 passed, 0 failed at 8c6ff58: m1_terminal 4, native_control 4, native_execution 6, native_legacy_inheritance 4, native_member_ingress 6, native_runtime_bridge 2, native_worker_binding 4. The six binaries the native CI job runs account for 26 of them. Retained in qa-fix-required-suites.log.gz."
+    },
+    {
+      "command": "ZIG=<zig 0.16.0> cargo +1.96.1 test -p viva --locked --features herdr-runtime --lib",
+      "result": "397 passed, 1 ignored, 0 failed. Retained in qa-fix-lib.log.gz."
+    },
+    {
+      "command": "ZIG=<zig 0.16.0> cargo +1.96.1 clippy -p viva --locked --features herdr-runtime --all-targets -- -D warnings; cargo +1.96.1 clippy --workspace --locked --all-targets -- -D warnings; cargo +1.96.1 clippy --manifest-path upstream/herdr/Cargo.toml --locked --all-targets -- -D warnings; cargo +1.96.1 fmt --all -- --check; git diff --check",
+      "result": "all exit 0 at 8c6ff58. Retained in qa-fix-clippy-fmt.log.gz."
+    },
+    {
+      "command": "ZIG=<zig 0.16.0> HERDR_UPDATE_API_SCHEMA=1 cargo +1.96.1 test --manifest-path upstream/herdr/Cargo.toml --locked --lib api::schema::tests::generated_protocol_schema_artifact_is_current -- --exact",
+      "result": "1 passed; the generated schema artifact is current and no schema file changed. Retained in qa-fix-schema.log.gz."
+    },
+    {
+      "command": "ZIG=<zig 0.16.0> cargo +1.96.1 build --release -p viva --locked --features herdr-runtime; ./target/release/viva --version; ./target/release/viva runtime --version; shasum -a 256 target/release/viva",
+      "result": "release build succeeded in 55s; `viva 0.3.9` and `herdr 0.9.3` printed; binary SHA-256 7810b7aaa7c49e6d7aef6e2f12285ed55480fca09a23780922ea38d7c6f4eca6 (local aarch64 macOS, not a release-workflow run). Retained in qa-fix-release-build.log.gz."
+    },
+    {
+      "command": "python3 tooling/herdr-integration/native_runtime.py --viva target/debug/viva --output /tmp/final-probe-fresh-2.json; python3 tooling/herdr-integration/native_runtime.py --viva target/debug/viva --legacy-live --output /tmp/final-probe-legacy-2.json",
+      "result": "both passed: true. Fresh probe: bare viva autospawn, real PTY marker, detach exit 0, same host incarnation, reattach retains shell state, two admitted frontend PIDs. Legacy-live probe: a real legacy host with one live terminal retires with exit 0 after the bare default entry adopts 1 pane and reports native-default-entry-legacy-inheritance; adopted_executions is 0 because the probe terminal is created directly, not by a member dispatch (execution adoption is covered by the inheritance test). Debug binary SHA-256 8a6b2f0792052506e344c134dbc9f3225a07bfbc208548eda6fa7d01b9e6d35e. Retained in qa-fix-probe-fresh.json.gz and qa-fix-probe-legacy.json.gz."
+    },
+    {
+      "command": "ZIG=<zig 0.16.0> cargo +1.96.1 test --workspace --locked --features herdr-runtime --no-fail-fast",
+      "result": "46 test targets, 658 passed, 1 ignored, 0 failed, EXIT:0 at 8c6ff58 (includes the new owner-capability test and the extended live-inheritance test). Retained in qa-fix-full-workspace.log.gz."
     }
   ],
-  "negative_fixtures": "Live inheritance success fixture: old `viva server` + real shell prints ALIVE-42; after takeover `pane.process_info` shows the unchanged shell PID, `pane.read` still contains ALIVE-42, old host exits 0, `server.sock` disappears. Refusal fixture: `workbench_layout` is replaced with `not-json` AFTER the live shell exists, so the native host takes the fds, then refuses the invalid SceneBook; it must exit non-zero, never bind herdr.sock, leave the old host alive, keep the shell PID alive, execute STILL-42 through the old host, and record `live_handoff_failed`. Stale-socket fixture: a bound-then-dropped `server.sock` does not block a fresh native session, `legacy_handoff.inherited` is false, the log says `starting a fresh native session`, and the stale file remains. Unit fixtures also cover duplicate placements, orphan panes, uncovered manifest entries and a full wire round-trip with ACK.",
+  "negative_fixtures": "Live inheritance success fixture: old `viva server` + real shell prints ALIVE-42; after takeover `pane.process_info` shows the unchanged shell PID, `pane.read` still contains ALIVE-42, old host exits 0, `server.sock` disappears. Refusal fixture: `workbench_layout` is replaced with `not-json` AFTER the live shell exists, so the native host takes the fds, then refuses the invalid SceneBook; it must exit non-zero, never bind herdr.sock, leave the old host alive, keep the shell PID alive, execute STILL-42 through the old host, and record `live_handoff_failed`. Stale-socket fixture: a bound-then-dropped `server.sock` does not block a fresh native session, `legacy_handoff.inherited` is false, the log says `starting a fresh native session`, and the stale file remains. Unit fixtures also cover duplicate placements, orphan panes, uncovered manifest entries and a full wire round-trip with ACK. Owner-capability fixtures: a member execution runs `viva runtime host pause` from inside its pane; the member shell must exit 0, the nested command non-zero, no native_host_paused event may exist, and native_owner_auth_refused must record peer_is_host_descendant. The live inheritance test additionally waits for native takeover and old-host exit, then the ADOPTED (reparented) member attempts the same pause; it must be refused via peer_is_execution_descendant while the owner stop still settles the execution as stopped with process_exit.",
   "boundaries": [
     "This is a degraded import, not seamless or lossless: pane cwd, split ratios/focus/zoom, cell pixel size, terminal ids, pane purpose, agent state and worktree space are lost. Do not describe the takeover as preserving the workbench layout.",
     "Ownership is preserved only for the child processes: the old host retires after ACK, the new host owns the duplicated PTY masters, and the child shell PID does not change. Shell state, foreground job state and terminal modes are whatever the ANSI/recent screen restores.",
@@ -85,8 +126,12 @@
     "The release workflow was updated to build with `--features herdr-runtime`, hash-pin Zig 0.16.0, add NOTICE/SBOM/herdr license and smoke `runtime --version`; the workflow itself was NOT executed (no tag, no release, no publication). Local release smoke covers the aarch64 macOS host build only.",
     "`viva update` now detects a running native host and tells the user to terminate it; no in-place native host takeover/restart was implemented or tested. Legacy `viva status`/`shutdown`/`dispatch` refuse behind a native host and do not silently fall back.",
     "All real takeover tests used task-created HOME/VIVA_HOME fixtures under /tmp. The user's real ~/.viva was not touched. No merge, approval, version bump, tag, npm publish or release occurred.",
-    "Independent QA and Haisu's MacBook Air installation/manual UI acceptance remain pending and are not replaced by these checks."
+    "Independent QA and Haisu's MacBook Air installation/manual UI acceptance remain pending and are not replaced by these checks.",
+    "The owner capability is still a 0600 same-UID file. The lineage refusal (host descendants and descendants of host-owned executions) is an authenticate-time check, not an OS sandbox: a process that deliberately escapes its ancestry, or any same-UID process that can read the file without being caught by that ancestry walk, is outside what this check proves. Same-UID read of pane.list/pane.read/pane.process_info is observation by design and mutates nothing; dispatch/stop/pause remain owner-gated.",
+    "Adopted legacy executions are only requested/running executions with a confirmed launch intent, a persisted launch spec, a named terminal carried by the handoff, a positive PID and a member/automation grant origin; PID equality between the canonical intent and the live pane child is required. They receive a synthetic native binding with an empty credential id, so no native worker credential is revoked on exit. A requested, unconfirmed, unmapped or PID-mismatched execution aborts the takeover before any fd is requested, with the old host still serving.",
+    "Native host crash/restart does not reconcile persisted requested/running executions; the owner gate keeps refusing them until a legacy host (via `viva workbench`) or a new adoption path owns them."
   ],
-  "failures": "CI run 42964565260 failed the revoked-credential test on a zero-lifetime fixture race; fixed in 58b6a84 and the suite passed five consecutive local runs. The upstream herdr full lib suite cannot complete under local `cargo test` in one process because two pipe-writing tests kill the runner with SIGPIPE; both pass in isolation and CI uses nextest. The full native workspace run predates a string-only fidelity-label edit and the affected native suites/lib were rerun at the final head. Release-workflow execution, x86_64/Intel artifact, Linux runtime, native-host in-place update, and human UI acceptance were not tested.",
-  "evidence": "research/herdr-191/inheritance/ (required-suite, lib, full-workspace, upstream live_handoff, SIGPIPE runner-limit, clippy, schema, bare-viva probe, and release-build logs; source hashes in source-hashes.json)"
+  "failures": "Independent QA on 1257b37 found a real owner-capability impersonation blocker and a real live-inheritance blocker; both were reproduced on that head and fixed in 8c6ff58, not explained away. A first pinned parallel lib run failed server::v15_tests::handoff_moves_a_worktree_between_agents_with_a_brief with spawn ENOENT; it passed alone, serially and on repeat parallel runs (397 passed / 1 ignored), and is recorded as transient rather than a passing check that never failed. The upstream herdr full lib suite cannot complete under local `cargo test` in one process because two pipe-writing tests kill the runner with SIGPIPE; both pass in isolation and CI uses nextest. CI run 42964565260 failed the revoked-credential test on a zero-lifetime fixture race; fixed in 58b6a84 and the suite passed five consecutive local runs. The upstream herdr full lib suite cannot complete under local `cargo test` in one process because two pipe-writing tests kill the runner with SIGPIPE; both pass in isolation and CI uses nextest. The full native workspace run predates a string-only fidelity-label edit and the affected native suites/lib were rerun at the final head. Release-workflow execution, x86_64/Intel artifact, Linux runtime, native-host in-place update, and human UI acceptance were not tested.",
+  "evidence": "research/herdr-191/inheritance/ (earlier required-suite, lib, full-workspace, upstream live_handoff, SIGPIPE runner-limit, clippy, schema, bare-viva probe and release logs; QA pre-fix reproductions, post-fix owner test, final required suites/lib/clippy/schema/release/probes; source hashes in source-hashes.json)",
+  "qa_fix": "Independent QA on head 1257b37 reported four findings; all four were judged correct and fixed. (1) BLOCKER: a same-UID member execution sharing VIVA_HOME could read the 0600 runtime/workbench/owner-channel.json and run `viva runtime host pause` successfully. (2) IMPORTANT: when the live legacy host had a requested/running execution, the native host logged the inheritance line and then exited after the owner gate refused unowned work, leaving the old host serving. (3) MINOR: pane.list/pane.read/pane.process_info are unauthenticated same-UID observation. (4) MINOR: the member-ingress source-hash bundle was stale. This commit refuses owner authentication for host descendants and for descendants of any execution this host owns (audited as native_owner_auth_refused with peer_is_host_descendant / peer_is_execution_descendant), preflights canonical active executions before requesting fds and adopts every confirmed one onto its planned pane with a synthetic binding that carries no native worker credential, documents the pane-observation boundary in README, and annotates/regenerates the member-ingress hash bundle. Pre-fix logs were produced from a clean 1257b37 archive with only the new test files applied."
 }
