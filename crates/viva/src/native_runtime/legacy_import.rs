@@ -5,6 +5,8 @@
 //! and persisted layout only. The receiver still owns the PTY fds and must not
 //! acknowledge the old host until every pane has been adopted.
 use crate::foundation::error::{Error, Result};
+use crate::foundation::ids::{ExecutionId, GrantId, MemberId, TaskId};
+use crate::foundation::records::RequestOrigin;
 use crate::foundation::store::Store;
 use crate::server::{Client, HandoffManifest, RequestKind};
 use crate::tui::layout::PaneContent;
@@ -14,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ImportedPane {
@@ -205,6 +208,10 @@ pub(crate) const DEFAULT_CELL_HEIGHT_PX: u32 = 16;
 /// caller can take the matching received fd exactly once.
 pub(crate) struct PlannedPane {
     pub pane_id: u32,
+    pub workspace_id: String,
+    pub public_pane_number: usize,
+    pub public_pane_id: String,
+    pub terminal_id: String,
     pub entry_index: usize,
     pub child_pid: u32,
     pub rows: u16,
@@ -258,6 +265,8 @@ pub(crate) fn build_snapshot(
     let mut panes = Vec::new();
     let mut workspaces = Vec::new();
     for scene in &plan.scenes {
+        let workspace_id = format!("ws-legacy-{}", workspaces.len() + 1);
+        let mut next_public_pane_number = 1usize;
         let mut tabs = Vec::new();
         for tab in &scene.tabs {
             let mut pane_ids = Vec::new();
@@ -284,8 +293,17 @@ pub(crate) fn build_snapshot(
                         launch_argv: None,
                     },
                 );
+                let public_pane_number = next_public_pane_number;
+                next_public_pane_number += 1;
                 panes.push(PlannedPane {
                     pane_id,
+                    workspace_id: workspace_id.clone(),
+                    public_pane_number,
+                    public_pane_id: herdr::embedding::public_pane_id(
+                        &workspace_id,
+                        public_pane_number,
+                    ),
+                    terminal_id: pane.terminal_id.clone(),
                     entry_index: index,
                     child_pid: pane.pid,
                     rows: pane.rows,
@@ -309,14 +327,19 @@ pub(crate) fn build_snapshot(
         if tabs.is_empty() {
             continue;
         }
+        let public_pane_numbers: HashMap<u32, usize> = panes
+            .iter()
+            .filter(|pane| pane.workspace_id == workspace_id)
+            .map(|pane| (pane.pane_id, pane.public_pane_number))
+            .collect();
         let active_tab = scene.active_tab.min(tabs.len() - 1);
         workspaces.push(WorkspaceSnapshot {
-            id: Some(format!("ws-legacy-{}", workspaces.len() + 1)),
+            id: Some(workspace_id),
             custom_name: (!scene.name.trim().is_empty()).then(|| scene.name.clone()),
             identity_cwd: cwd.clone(),
             worktree_space: None,
-            public_pane_numbers: HashMap::new(),
-            next_public_pane_number: 0,
+            public_pane_numbers,
+            next_public_pane_number,
             public_tab_numbers: Vec::new(),
             next_public_tab_number: 0,
             tabs,
@@ -522,6 +545,191 @@ pub(crate) fn read_layout(home: &Path) -> Result<Option<String>> {
         )
         .optional()?;
     Ok(saved.filter(|value| !value.is_empty()))
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ActiveLegacyExecution {
+    pub execution_id: ExecutionId,
+    pub task_id: TaskId,
+    pub member_id: MemberId,
+    pub grant_id: GrantId,
+    pub request_key: String,
+    pub terminal_id: String,
+    pub argv: Vec<String>,
+    pub cwd: PathBuf,
+    pub worktree_id: Option<String>,
+    pub pid: i64,
+    pub pid_start_marker: Option<String>,
+}
+
+struct LaunchIntentRow {
+    request_key: String,
+    member_id: String,
+    state: String,
+    pid: Option<i64>,
+    pid_start_marker: Option<String>,
+}
+
+struct LaunchSpecRow {
+    terminal_id: Option<String>,
+    argv: String,
+    cwd: String,
+    worktree_id: Option<String>,
+    origin: String,
+}
+
+fn cannot_adopt(execution: &str, reason: &str) -> Error {
+    Error::Validation(format!(
+        "legacy execution `{execution}` cannot be inherited: {reason}. The old host is still \
+         serving. Stop that execution in the legacy workbench, or keep using `viva workbench`."
+    ))
+}
+
+/// Canonical executions that are still requested/running in the legacy host.
+/// Every one must be adoptable before this process may take the live session:
+/// otherwise the native owner gate would have to treat a running member as
+/// unowned work. No ACK has happened when this check fails.
+pub(crate) fn active_executions(home: &Path) -> Result<Vec<ActiveLegacyExecution>> {
+    let path = crate::foundation::paths::database_path(home);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let store = Store::attach_for_handoff(&path, crate::server::migrations())?;
+    let rows: Vec<(String, String, String)> = {
+        let mut stmt = store.connection().prepare(
+            "SELECT execution_id, task_id, status FROM executions \
+             WHERE status IN ('requested','running') ORDER BY created_at, execution_id",
+        )?;
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<std::result::Result<_, _>>()?
+    };
+    let mut active = Vec::with_capacity(rows.len());
+    for (execution_id, task_id, status) in rows {
+        if status == "requested" {
+            return Err(cannot_adopt(
+                &execution_id,
+                "it is still requested and has no confirmed live process",
+            ));
+        }
+        let intent: Option<LaunchIntentRow> = store
+            .connection()
+            .query_row(
+                "SELECT request_key, member_id, state, pid, pid_start_marker \
+                 FROM launch_intents WHERE execution_id=?1 \
+                 ORDER BY intended_at DESC LIMIT 1",
+                [&execution_id],
+                |row| {
+                    Ok(LaunchIntentRow {
+                        request_key: row.get(0)?,
+                        member_id: row.get(1)?,
+                        state: row.get(2)?,
+                        pid: row.get(3)?,
+                        pid_start_marker: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        let Some(LaunchIntentRow {
+            request_key,
+            member_id,
+            state: intent_state,
+            pid,
+            pid_start_marker,
+        }) = intent
+        else {
+            return Err(cannot_adopt(
+                &execution_id,
+                "it has no persisted launch intent",
+            ));
+        };
+        if intent_state != "confirmed" {
+            return Err(cannot_adopt(
+                &execution_id,
+                &format!("its launch intent is `{intent_state}`, not confirmed"),
+            ));
+        }
+        let Some(pid) = pid.filter(|pid| *pid > 0) else {
+            return Err(cannot_adopt(
+                &execution_id,
+                "its confirmed launch intent carries no process id",
+            ));
+        };
+        let spec: Option<LaunchSpecRow> = store
+            .connection()
+            .query_row(
+                "SELECT terminal_id, argv, cwd, worktree_id, request_origin \
+                 FROM launch_specs WHERE execution_id=?1 ORDER BY created_at DESC LIMIT 1",
+                [&execution_id],
+                |row| {
+                    Ok(LaunchSpecRow {
+                        terminal_id: row.get(0)?,
+                        argv: row.get(1)?,
+                        cwd: row.get(2)?,
+                        worktree_id: row.get(3)?,
+                        origin: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        let Some(LaunchSpecRow {
+            terminal_id,
+            argv,
+            cwd,
+            worktree_id,
+            origin,
+        }) = spec
+        else {
+            return Err(cannot_adopt(
+                &execution_id,
+                "it has no persisted launch specification",
+            ));
+        };
+        let Some(terminal_id) = terminal_id.filter(|id| !id.is_empty()) else {
+            return Err(cannot_adopt(
+                &execution_id,
+                "its launch specification names no terminal",
+            ));
+        };
+        let argv: Vec<String> = serde_json::from_str(&argv)
+            .map_err(|err| cannot_adopt(&execution_id, &format!("invalid argv: {err}")))?;
+        if argv.is_empty() || cwd.is_empty() {
+            return Err(cannot_adopt(
+                &execution_id,
+                "its launch specification has no argv or cwd",
+            ));
+        }
+        let grant_id = match serde_json::from_str::<RequestOrigin>(&origin)
+            .map_err(|err| cannot_adopt(&execution_id, &format!("invalid request origin: {err}")))?
+        {
+            RequestOrigin::MemberDispatch { grant_id } | RequestOrigin::Automation { grant_id } => {
+                grant_id
+            }
+            RequestOrigin::UserDirect => {
+                return Err(cannot_adopt(
+                    &execution_id,
+                    "its launch origin carries no member/automation grant",
+                ));
+            }
+        };
+        active.push(ActiveLegacyExecution {
+            execution_id: ExecutionId::from_str(&execution_id).map_err(|err| {
+                cannot_adopt(&execution_id, &format!("invalid execution id: {err}"))
+            })?,
+            task_id: TaskId::from_str(&task_id)
+                .map_err(|err| cannot_adopt(&execution_id, &format!("invalid task id: {err}")))?,
+            member_id: MemberId::from_str(&member_id)
+                .map_err(|err| cannot_adopt(&execution_id, &format!("invalid member id: {err}")))?,
+            grant_id,
+            request_key,
+            terminal_id,
+            argv,
+            cwd: PathBuf::from(cwd),
+            worktree_id,
+            pid,
+            pid_start_marker,
+        });
+    }
+    Ok(active)
 }
 
 /// Ask the live legacy host for its terminals and take the fd copies. NO

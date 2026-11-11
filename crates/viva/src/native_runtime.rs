@@ -59,6 +59,20 @@ struct NativeExecutionState {
     owned: HashSet<String>,
 }
 
+impl NativeExecutionState {
+    fn adopt(&mut self, binding: ExecutionBinding) {
+        let execution_id = binding.execution_id.to_string();
+        if let (Some(workspace_id), Some(pane_id)) = (&binding.workspace_id, &binding.pane_id) {
+            self.by_pane.insert(
+                (workspace_id.clone(), pane_id.clone()),
+                execution_id.clone(),
+            );
+        }
+        self.owned.insert(execution_id.clone());
+        self.by_execution.insert(execution_id, binding);
+    }
+}
+
 struct DomainBridge {
     home: PathBuf,
     host_id: String,
@@ -76,6 +90,7 @@ struct LegacyHandoffEvidence {
     old_host_id: String,
     old_host_pid: u32,
     adopted_panes: usize,
+    adopted_executions: usize,
 }
 
 /// Fixed grant action for a member progress report. The dispatch grant must
@@ -365,6 +380,64 @@ impl herdr::embedding::DomainServices for DomainBridge {
         expected_lifetime: Option<&str>,
         peer: herdr::embedding::TransportPeer,
     ) -> io::Result<()> {
+        // Every pane process this host starts is a host descendant. The owner
+        // capability is a same-UID file, so without this check a member shell
+        // could read it and authenticate as the owner frontend. Inherited
+        // legacy executions are reparented when their old host exits, so
+        // their confirmed process roots are checked too. This is a lineage
+        // refusal, not a same-UID sandbox (a deliberately reparented process
+        // is outside what PID ancestry can prove).
+        if let Some(pid) = peer.pid {
+            let caller = i64::from(pid);
+            let host = std::process::id() as i64;
+            let execution = {
+                let state = self
+                    .executions
+                    .lock()
+                    .map_err(|_| io::Error::other("native execution state poisoned"))?;
+                state
+                    .by_execution
+                    .iter()
+                    .find_map(|(execution_id, binding)| {
+                        binding
+                            .pid
+                            .filter(|root| is_bound_process(*root, caller))
+                            .map(|_| execution_id.clone())
+                    })
+            };
+            let (reason, execution) = if is_bound_process(host, caller) {
+                ("peer_is_host_descendant", None)
+            } else {
+                match execution {
+                    Some(execution) => ("peer_is_execution_descendant", Some(execution)),
+                    None => ("", None),
+                }
+            };
+            if !reason.is_empty() {
+                self.with_store(|store| {
+                    events::append(
+                        store,
+                        NewEvent {
+                            domain: crate::server::DOMAIN_HOST,
+                            kind: "native_owner_auth_refused".into(),
+                            subject_type: "runtime_process".into(),
+                            subject_id: self.host_id.clone(),
+                            origin: "native_host".into(),
+                            payload: serde_json::json!({
+                                "reason": reason,
+                                "execution_id": execution,
+                                "transport_peer": {"pid": peer.pid, "uid": peer.uid},
+                            }),
+                        },
+                    )?;
+                    Ok(())
+                })?;
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "native owner capability is not available to a member or host-descendant process",
+                ));
+            }
+        }
         let result = self.require_owner_only_phase().and_then(|_| {
             self.clients
                 .lock()
@@ -736,9 +809,11 @@ impl herdr::embedding::DomainServices for DomainBridge {
                 .map_err(|_| Error::Validation("native channel registry poisoned".into()))?
                 .revoke(&binding.channel_id);
             // The member process is gone: its credential can authorize nothing.
-            if AuthorityEngine::new(store)
-                .revoke_worker_credential(&binding.credential_id)
-                .is_err()
+            // An adopted legacy execution never had a native worker credential.
+            if !binding.credential_id.is_empty()
+                && AuthorityEngine::new(store)
+                    .revoke_worker_credential(&binding.credential_id)
+                    .is_err()
             {
                 events::append(
                     store,
@@ -1089,6 +1164,7 @@ impl herdr::embedding::DomainServices for DomainBridge {
                 "old_host_id": &evidence.old_host_id,
                 "old_host_pid": evidence.old_host_pid,
                 "adopted_panes": evidence.adopted_panes,
+                "adopted_executions": evidence.adopted_executions,
                 "fidelity": "degraded_import",
                 "preserved": ["live_child_process", "rows_cols", "screen_and_scrollback_ansi", "scene_and_tab_names", "tab_order_and_active_tab"],
                 "not_preserved": ["legacy_terminal_ids", "pane_cwd", "pane_purpose", "split_ratios_focus_zoom", "cell_pixel_size", "agent_state", "worktree_space"],
@@ -1386,21 +1462,24 @@ pub fn run(args: &[String]) -> Result<()> {
     // fresh start: two hosts on one home must never exist.
     let mut legacy_evidence = None;
     let mut legacy_import = None;
+    let mut legacy_executions = Vec::new();
     if args.first().map(String::as_str) == Some("server")
         && legacy_import::legacy_control_socket_present(&home)
     {
         match prepare_legacy_import(&home) {
             Ok(prepared) => {
                 eprintln!(
-                    "native: inheriting {} live terminal(s) from legacy host {} (pid {}); \
-                     degraded import — pane cwd, split ratios, focus/zoom, cell pixel size and \
-                     agent/worktree metadata are not preserved",
+                    "native: inheriting {} live terminal(s) and {} member execution(s) from \
+                     legacy host {} (pid {}); degraded import — pane cwd, split ratios, \
+                     focus/zoom, cell pixel size and agent/worktree metadata are not preserved",
                     prepared.evidence.adopted_panes,
+                    prepared.evidence.adopted_executions,
                     prepared.evidence.old_host_id,
                     prepared.evidence.old_host_pid
                 );
                 legacy_evidence = Some(prepared.evidence);
                 legacy_import = Some(prepared.import);
+                legacy_executions = prepared.adoptions;
             }
             Err(error) if legacy_import::only_stale_control_sockets(&home) => {
                 // A crashed legacy host leaves its socket file behind. Only
@@ -1414,6 +1493,10 @@ pub fn run(args: &[String]) -> Result<()> {
             Err(error) => return Err(error),
         }
     }
+    let mut adopted_state = NativeExecutionState::default();
+    for binding in legacy_executions {
+        adopted_state.adopt(binding);
+    }
     let mut arguments = vec!["viva-runtime".to_owned()];
     arguments.extend_from_slice(args);
     herdr::embedding::run(herdr::embedding::Context {
@@ -1423,7 +1506,7 @@ pub fn run(args: &[String]) -> Result<()> {
         domain: Arc::new(DomainBridge {
             clients: Mutex::new(client_authority::ClientAuthority::new(&home)),
             channels: Mutex::new(ChannelRegistry::new()),
-            executions: Mutex::new(NativeExecutionState::default()),
+            executions: Mutex::new(adopted_state),
             home,
             host_id: format!("native-{}", uuid::Uuid::new_v4().simple()),
             store: Mutex::new(None),
@@ -1438,6 +1521,7 @@ pub fn run(args: &[String]) -> Result<()> {
 struct PreparedLegacyImport {
     import: herdr::embedding::LegacyImport,
     evidence: LegacyHandoffEvidence,
+    adoptions: Vec<ExecutionBinding>,
 }
 
 /// Receive the live legacy session and convert it into Herdr's adoption
@@ -1450,12 +1534,67 @@ fn prepare_legacy_import(home: &std::path::Path) -> Result<PreparedLegacyImport>
     // so an unreadable store aborts while it still serves every terminal.
     // Its schema is validated in `build_plan` after the fds arrive; a failure
     // there drops the fds without acknowledging, so the old host reattaches.
+    // No ACK has happened yet. Refuse requested or unconfirmed live work
+    // before asking the old host to transfer anything.
+    let active = legacy_import::active_executions(home)?;
     let layout = legacy_import::read_layout(home)?;
     let handoff = legacy_import::receive_from_live_host(home)?;
     let old_host_id = handoff.manifest.host_id.clone();
     let old_host_pid = handoff.old_host_pid;
     let plan = legacy_import::build_plan(&handoff.manifest, layout.as_deref())?;
     let planned = legacy_import::build_snapshot(&plan, &handoff.manifest)?;
+
+    // Each still-running canonical execution must correspond to exactly one
+    // adopted pane. Anything else cannot be called owned by this host.
+    let mut by_terminal: HashMap<&str, &legacy_import::PlannedPane> = HashMap::new();
+    for pane in &planned.panes {
+        if by_terminal
+            .insert(pane.terminal_id.as_str(), pane)
+            .is_some()
+        {
+            return Err(Error::Validation(format!(
+                "legacy handoff carries terminal `{}` more than once; refusing an ambiguous \
+                 execution adoption",
+                pane.terminal_id
+            )));
+        }
+    }
+    let mut adoptions = Vec::with_capacity(active.len());
+    for execution in &active {
+        let Some(pane) = by_terminal.get(execution.terminal_id.as_str()) else {
+            return Err(Error::Validation(format!(
+                "legacy execution `{}` owns terminal `{}` that the handoff did not carry; the \
+                 old host is still serving. Stop that execution in the legacy workbench, or keep \
+                 using `viva workbench`.",
+                execution.execution_id, execution.terminal_id
+            )));
+        };
+        if i64::from(pane.child_pid) != execution.pid {
+            return Err(Error::Validation(format!(
+                "legacy execution `{}` recorded pid {} but its live terminal carries pid {}; \
+                 refusing an ambiguous process adoption",
+                execution.execution_id, execution.pid, pane.child_pid
+            )));
+        }
+        adoptions.push(ExecutionBinding {
+            execution_id: execution.execution_id.clone(),
+            task_id: execution.task_id.clone(),
+            member_id: execution.member_id.clone(),
+            grant_id: execution.grant_id.clone(),
+            request_key: execution.request_key.clone(),
+            argv: execution.argv.clone(),
+            cwd: execution.cwd.clone(),
+            worktree_id: execution.worktree_id.clone(),
+            workspace_id: Some(pane.workspace_id.clone()),
+            pane_id: Some(pane.public_pane_id.clone()),
+            channel_id: ChannelId::new(),
+            credential_id: String::new(),
+            pid: Some(execution.pid),
+            pid_start_marker: execution.pid_start_marker.clone(),
+            stop_requested: false,
+        });
+    }
+    let adopted_executions = adoptions.len();
     let (_manifest, fds, confirm) = handoff.into_parts();
 
     let mut covered = vec![false; fds.len()];
@@ -1511,7 +1650,9 @@ fn prepare_legacy_import(home: &std::path::Path) -> Result<PreparedLegacyImport>
             old_host_id,
             old_host_pid,
             adopted_panes,
+            adopted_executions,
         },
+        adoptions,
     })
 }
 

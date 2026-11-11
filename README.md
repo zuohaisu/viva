@@ -72,6 +72,18 @@ are configuration, and every completion claim carries recorded evidence.
   table read-only to JSON with a manifest. Historical Ticket Autopilot data
   is never read, written or migrated.
 
+**Native entry boundaries.** The embedded Herdr entry is Unix-only and a
+**degraded import**, not a seamless takeover: live child processes, screen and
+scrollback, rows/columns and scene/tab names survive, while terminal ids, pane
+cwd/purpose, split ratios, focus/zoom, cell size and agent/worktree metadata
+do not. The owner capability is a host-issued credential plus a process-lineage
+refusal, not a same-UID OS sandbox. `pane.list` / `pane.read` /
+`pane.process_info` are same-UID observation by design: any process with the
+home can read live pane text and OS process facts; they mutate nothing, and
+dispatch/stop/pause still require the owner capability. Native pane-output
+redaction, in-place native-host update (stop the host to update), Linux/x86_64
+execution and human visual acceptance are not verified.
+
 **Not implemented, and never faked**: automatic reflection, self-model
 evolution, automatic memory promotion, starting at login (planned, to be
 configurable), an automatic task-scheduling daemon (a required goal; today

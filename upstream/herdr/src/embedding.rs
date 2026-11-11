@@ -7,6 +7,13 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+/// The stable public pane id for a restored workspace pane. Viva needs it to
+/// bind an adopted legacy execution to the pane id the runtime will report on
+/// exit; it is the same encoding the runtime's own public API uses.
+pub fn public_pane_id(workspace_id: &str, pane_number: usize) -> String {
+    crate::workspace::public_pane_id_for_number(workspace_id, pane_number)
+}
+
 /// Narrow dependency inversion: the runtime does not own Viva domain records.
 /// No dispatch/stop capability is exposed until ingress authority is integrated.
 pub trait DomainServices: Send + Sync {

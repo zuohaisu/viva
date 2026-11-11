@@ -388,6 +388,57 @@ fn a_revoked_credential_cannot_report_after_exit() {
 }
 
 #[test]
+fn a_member_process_cannot_pause_the_owner_host() {
+    let temp = tempfile::Builder::new()
+        .prefix("vn-member-owner-capability-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let home = temp.path();
+    let data = seed(home, &["dispatch_delegated", "member_report"]);
+    let _fixture = start_fixture(home);
+    let marker = home.join("control-result");
+    let command = format!(
+        "VIVA_HOME='{}' HOME='{}' '{}' runtime host pause >/dev/null 2>&1; \
+         printf '%s' $? > '{}'",
+        home.display(),
+        home.display(),
+        env!("CARGO_BIN_EXE_viva"),
+        marker.display()
+    );
+    let execution_id = start_execution(home, &data, "member-owner-capability", &command);
+    let (status, process_exit) = wait_execution_exit(home, &execution_id);
+    assert_eq!(status, "stopped");
+    assert_eq!(process_exit, Some(0), "the member shell itself exits 0");
+    let control_exit = std::fs::read_to_string(&marker).unwrap();
+    assert_ne!(
+        control_exit.trim(),
+        "0",
+        "a member execution must not authenticate as the owner frontend"
+    );
+    let conn = db(home);
+    let paused: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind='native_host_paused'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(paused, 0, "the member process paused the owner host");
+    let refused: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind='native_owner_auth_refused' \
+             AND payload LIKE '%peer_is_host_descendant%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        refused >= 1,
+        "the refused owner authentication was not audited"
+    );
+}
+
+#[test]
 fn foreign_active_credentials_still_block_the_owner_gate() {
     let temp = tempfile::Builder::new()
         .prefix("vn-member-foreign-")
