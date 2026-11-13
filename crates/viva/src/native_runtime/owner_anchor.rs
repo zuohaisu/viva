@@ -1,31 +1,33 @@
-//! Owner anchor for the native runtime.
+//! Per-host local runtime capability. This is NOT proof of human presence.
 //!
-//! The owner credential is never a file. The spawning TUI generates it and
-//! hands it to the server over an inherited pipe (`VIVA_OWNER_ANCHOR_FD`); a
-//! reattaching TUI/control process obtains the same anchor from the login
-//! keychain, which requires the user's presence. A plain same-UID process
-//! holds neither and is refused by the host. Tests and the probe supply the
-//! anchor through the same inherited-fd protocol.
+//! Reuse the native host-incarnation anchor and inherited spawn descriptor.
+//! Fresh processes resolve the live host's anchor in a private runtime file.
+//! The local account (including its explicitly credential-bearing controllers)
+//! is trusted; this is not an OS sandbox against arbitrary same-UID programs.
 use std::{
-    io::{self, Read},
+    ffi::CString,
+    fs::{DirBuilder, File},
+    io::{self, Read, Write},
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::fs::DirBuilderExt,
+    },
     path::Path,
 };
 
 pub(super) const FD_ENV: &str = "VIVA_OWNER_ANCHOR_FD";
-pub(super) const KEYCHAIN_ENV: &str = "VIVA_OWNER_KEYCHAIN";
 const PREFIX: &str = "native-anchor:";
 const MAX_ANCHOR_BYTES: usize = 512;
+const DIRECTORY: &str = "runtime-capability";
+const FILE: &str = "owner-anchor";
 
-/// A fresh host incarnation plus its anchor. The host id travels inside the
-/// anchor so a stale credential can be named as stale.
 #[cfg(test)]
 pub(super) fn generate() -> (String, String) {
     let host_id = format!("native-{}", uuid::Uuid::new_v4().simple());
-    let anchor = format!("{PREFIX}{host_id}:{}", uuid::Uuid::new_v4().simple());
+    let anchor = with_host(&host_id);
     (host_id, anchor)
 }
 
-/// An anchor for a host id that was chosen before the anchor existed.
 pub(super) fn with_host(host_id: &str) -> String {
     format!("{PREFIX}{host_id}:{}", uuid::Uuid::new_v4().simple())
 }
@@ -33,278 +35,342 @@ pub(super) fn with_host(host_id: &str) -> String {
 pub(super) fn host_id(anchor: &str) -> Option<&str> {
     let rest = anchor.strip_prefix(PREFIX)?;
     let (host, secret) = rest.split_once(':')?;
-    (host.starts_with("native-") && !host.contains(':') && !secret.is_empty()).then_some(host)
+    let safe = |value: &str| {
+        value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    };
+    (anchor.len() <= MAX_ANCHOR_BYTES
+        && host.starts_with("native-")
+        && host.len() > 7
+        && safe(host)
+        && !secret.is_empty()
+        && safe(secret))
+    .then_some(host)
 }
 
-/// Reads the anchor from the inherited descriptor named by `FD_ENV`.
-///
-/// `Ok(None)` means the variable is absent. A set but unreadable descriptor is
-/// an error: the caller must not silently fall back to a weaker anchor.
+/// A set but unreadable descriptor is an error, never a reason to fall back.
 pub(super) fn take_inherited() -> io::Result<Option<String>> {
     let Some(raw) = std::env::var_os(FD_ENV) else {
         return Ok(None);
     };
-    // The descriptor is inherited by contract; panes must not inherit it.
-    // SAFETY: environment mutation is process-global and startup is still
-    // single-threaded here.
+    // SAFETY: single-threaded process startup; panes must not inherit this fd.
     unsafe { std::env::remove_var(FD_ENV) };
     let fd: libc::c_int = raw
         .to_str()
         .and_then(|value| value.parse().ok())
         .filter(|fd| *fd >= 0)
         .ok_or_else(|| invalid("owner anchor descriptor is not a number"))?;
-    // SAFETY: fcntl on a caller-owned descriptor.
+    // SAFETY: fcntl checks a caller-owned descriptor and only changes CLOEXEC.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags < 0 {
         return Err(invalid("owner anchor descriptor is not open"));
     }
-    // SAFETY: as above; only the close-on-exec flag changes.
     if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
         return Err(io::Error::last_os_error());
     }
-    let file = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) };
-    let mut value = Vec::new();
-    file.take(MAX_ANCHOR_BYTES as u64 + 1)
-        .read_to_end(&mut value)?;
-    let value = String::from_utf8(value)
-        .map_err(|_| invalid("owner anchor is not valid UTF-8"))?
-        .trim()
-        .to_string();
-    if value.is_empty() {
-        return Err(invalid("owner anchor is empty"));
-    }
-    if value.len() > MAX_ANCHOR_BYTES || host_id(&value).is_none() {
+    // SAFETY: this process consumes the inherited descriptor exactly once.
+    let file = unsafe { File::from_raw_fd(fd) };
+    read_anchor(file).map(Some)
+}
+
+fn read_anchor(file: File) -> io::Result<String> {
+    let mut bytes = Vec::new();
+    file.take(MAX_ANCHOR_BYTES as u64 + 2)
+        .read_to_end(&mut bytes)?;
+    let text = String::from_utf8(bytes).map_err(|_| invalid("runtime capability is not UTF-8"))?;
+    let value = text.strip_suffix('\n').unwrap_or(&text);
+    if value.len() > MAX_ANCHOR_BYTES || host_id(value).is_none() {
         return Err(invalid(
-            "owner anchor does not have the native anchor format",
+            "runtime capability has an invalid native anchor format",
         ));
     }
-    Ok(Some(value))
+    Ok(value.to_owned())
 }
 
-pub(super) fn keychain_enabled() -> bool {
-    std::env::var(KEYCHAIN_ENV).map_or(true, |value| value != "0")
+/// Do not chmod/follow an existing insecure or symlinked state root.
+pub(super) fn prepare_home(home: &Path) -> io::Result<()> {
+    DirBuilder::new().recursive(true).mode(0o700).create(home)?;
+    open_home(home).map(|_| ())
 }
 
-fn keychain_account(home: &Path, host_id: &str) -> String {
-    format!("{}|{host_id}", home.display())
+fn open_home(home: &Path) -> io::Result<File> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = CString::new(home.as_os_str().as_bytes())
+        .map_err(|_| invalid("state root contains NUL"))?;
+    // SAFETY: a valid C path; the returned fd is owned below.
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    checked_file(fd, true)
 }
 
-pub(super) fn store_keychain(home: &Path, anchor: &str) -> io::Result<()> {
-    if !keychain_enabled() {
-        return Err(unsupported("owner keychain anchor is disabled"));
+fn checked_file(fd: libc::c_int, directory: bool) -> io::Result<File> {
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
     }
-    let host_id =
-        host_id(anchor).ok_or_else(|| invalid("cannot store a malformed owner anchor"))?;
-    keychain::store(&keychain_account(home, host_id), anchor)
+    // SAFETY: a newly opened fd transferred exactly once to File.
+    let file = unsafe { File::from_raw_fd(fd) };
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(file.as_raw_fd(), &mut stat) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    validate_stat(&stat, directory)?;
+    Ok(file)
 }
 
-pub(super) fn load_keychain(home: &Path, host_id: &str) -> io::Result<String> {
-    if !keychain_enabled() {
-        return Err(unsupported("owner keychain anchor is disabled"));
+fn validate_stat(stat: &libc::stat, directory: bool) -> io::Result<()> {
+    let (kind, mode) = if directory {
+        (libc::S_IFDIR, 0o700)
+    } else {
+        (libc::S_IFREG, 0o600)
+    };
+    if stat.st_uid != unsafe { libc::geteuid() }
+        || stat.st_mode & libc::S_IFMT != kind
+        || stat.st_mode & 0o7777 != mode
+        || (!directory && stat.st_nlink != 1)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "runtime capability requires owned 0700 directories and a single-link 0600 regular file",
+        ));
     }
-    keychain::load(&keychain_account(home, host_id))
+    Ok(())
+}
+
+fn open_at(
+    directory: &File,
+    name: &str,
+    flags: libc::c_int,
+    is_directory: bool,
+) -> io::Result<File> {
+    let name = CString::new(name).map_err(|_| invalid("runtime capability path contains NUL"))?;
+    // SAFETY: valid dirfd/name; O_NONBLOCK prevents a substituted FIFO hanging.
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+            0o600,
+        )
+    };
+    checked_file(fd, is_directory)
+}
+
+fn directory(home: &Path, create: bool) -> io::Result<File> {
+    let home = open_home(home)?;
+    if create {
+        let name = CString::new(DIRECTORY).expect("static path");
+        // SAFETY: valid dirfd/name; an existing entry is checked by openat.
+        if unsafe { libc::mkdirat(home.as_raw_fd(), name.as_ptr(), 0o700) } < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::AlreadyExists {
+                return Err(error);
+            }
+        }
+    }
+    open_at(&home, DIRECTORY, libc::O_RDONLY | libc::O_DIRECTORY, true)
+}
+
+/// Publish only after claiming both host endpoints. Rename makes readers see
+/// either a complete previous incarnation or a complete new one, never a tear.
+pub(super) fn store_runtime(home: &Path, anchor: &str) -> io::Result<()> {
+    host_id(anchor).ok_or_else(|| invalid("cannot store a malformed runtime capability"))?;
+    let directory = directory(home, true)?;
+    match open_at(&directory, FILE, libc::O_RDONLY, false) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let temporary = format!(".anchor-{}", uuid::Uuid::new_v4().simple());
+    let mut file = open_at(
+        &directory,
+        &temporary,
+        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        false,
+    )?;
+    let temporary = CString::new(temporary).expect("generated path");
+    let target = CString::new(FILE).expect("static path");
+    let result = (|| {
+        writeln!(file, "{anchor}")?;
+        file.sync_all()?;
+        // SAFETY: both names are relative to the pinned, private directory.
+        if unsafe {
+            libc::renameat(
+                directory.as_raw_fd(),
+                temporary.as_ptr(),
+                directory.as_raw_fd(),
+                target.as_ptr(),
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        directory.sync_all()
+    })();
+    if result.is_err() {
+        // Only our unique temporary entry, never unrelated or old credentials.
+        unsafe { libc::unlinkat(directory.as_raw_fd(), temporary.as_ptr(), 0) };
+    }
+    result
+}
+
+pub(super) fn load_runtime(home: &Path, expected_host: &str) -> io::Result<String> {
+    let directory = directory(home, false)?;
+    let anchor = read_anchor(open_at(&directory, FILE, libc::O_RDONLY, false)?)?;
+    if host_id(&anchor) != Some(expected_host) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "stale_owner_anchor: runtime capability belongs to another host incarnation",
+        ));
+    }
+    Ok(anchor)
 }
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-fn unsupported(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::Unsupported, message)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
-#[cfg(target_os = "macos")]
-mod keychain {
-    //! Login-keychain item with no trusted applications: every read is a
-    //! user-presence gate (the user approves or enters the keychain password).
-    //! The legacy API is used deliberately; the data-protection keychain needs
-    //! an entitlement an unsigned CLI does not have.
-    use super::{invalid, unsupported};
-    use std::{
-        ffi::{CString, c_char, c_void},
-        io, ptr,
-    };
-
-    type CfRef = *const c_void;
-    type OsStatus = i32;
-    const SUCCESS: OsStatus = 0;
-    const ITEM_NOT_FOUND: OsStatus = -25300;
-    const DUPLICATE_ITEM: OsStatus = -25299;
-    const INTERACTION_NOT_ALLOWED: OsStatus = -25308;
-    const USER_CANCELED: OsStatus = -128;
-    const AUTH_FAILED: OsStatus = -25293;
-    const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
-    const SERVICE: &str = "viva-native-owner";
-
-    #[link(name = "CoreFoundation", kind = "framework")]
-    unsafe extern "C" {
-        fn CFStringCreateWithCString(
-            allocator: CfRef,
-            value: *const c_char,
-            encoding: u32,
-        ) -> CfRef;
-        fn CFRelease(value: CfRef);
+    fn fixture() -> tempfile::TempDir {
+        let home = tempfile::Builder::new().prefix("ac").tempdir().unwrap();
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        home
     }
 
-    #[link(name = "Security", kind = "framework")]
-    unsafe extern "C" {
-        fn SecAccessCreate(descriptor: CfRef, trusted: CfRef, access: *mut CfRef) -> OsStatus;
-        fn SecKeychainAddGenericPassword(
-            keychain: CfRef,
-            service_len: u32,
-            service: *const c_char,
-            account_len: u32,
-            account: *const c_char,
-            password_len: u32,
-            password: *const c_void,
-            item: *mut CfRef,
-        ) -> OsStatus;
-        fn SecKeychainFindGenericPassword(
-            keychain_or_array: CfRef,
-            service_len: u32,
-            service: *const c_char,
-            account_len: u32,
-            account: *const c_char,
-            password_len: *mut u32,
-            password_data: *mut *mut c_void,
-            item: *mut CfRef,
-        ) -> OsStatus;
-        fn SecKeychainItemSetAccess(item: CfRef, access: CfRef) -> OsStatus;
-        fn SecKeychainItemFreeContent(attributes: *mut c_void, data: *mut c_void) -> OsStatus;
+    #[test]
+    fn private_store_roundtrip_rotates_incarnation_atomically() {
+        let home = fixture();
+        let (host, anchor) = generate();
+        store_runtime(home.path(), &anchor).unwrap();
+        let dir = home.path().join(DIRECTORY);
+        let path = dir.join(FILE);
+        assert_eq!(dir.metadata().unwrap().mode() & 0o7777, 0o700);
+        assert_eq!(path.metadata().unwrap().mode() & 0o7777, 0o600);
+        assert_eq!(load_runtime(home.path(), &host).unwrap(), anchor);
+        let previous = File::open(&path).unwrap();
+        let (next_host, next) = generate();
+        store_runtime(home.path(), &next).unwrap();
+        assert_eq!(
+            read_anchor(previous).unwrap(),
+            anchor,
+            "atomic replacement, not in-place truncation"
+        );
+        assert_eq!(load_runtime(home.path(), &next_host).unwrap(), next);
+        assert_eq!(
+            load_runtime(home.path(), &host).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(std::fs::read_dir(dir).unwrap().count(), 1);
     }
 
-    struct Cf(CfRef);
-    impl Drop for Cf {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                // SAFETY: created by a CoreFoundation/Security function.
-                unsafe { CFRelease(self.0) };
-            }
+    #[test]
+    fn maximum_size_anchor_roundtrips_with_its_newline() {
+        let home = fixture();
+        let mut anchor = String::from("native-anchor:native-boundary:");
+        anchor.push_str(&"a".repeat(MAX_ANCHOR_BYTES - anchor.len()));
+        store_runtime(home.path(), &anchor).unwrap();
+        assert_eq!(
+            load_runtime(home.path(), "native-boundary").unwrap(),
+            anchor
+        );
+    }
+
+    #[test]
+    fn malformed_truncated_oversized_and_non_utf8_files_are_refused() {
+        let home = fixture();
+        let (host, anchor) = generate();
+        store_runtime(home.path(), &anchor).unwrap();
+        let path = home.path().join(DIRECTORY).join(FILE);
+        for bytes in [
+            vec![],
+            b"native-anchor:native-x:".to_vec(),
+            b"native-anchor:native-x:a:b".to_vec(),
+            b"native-anchor:../x:secret".to_vec(),
+            b"native-anchor:native-x:secret\nextra".to_vec(),
+            vec![b'a'; MAX_ANCHOR_BYTES + 2],
+            vec![0xff],
+        ] {
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(
+                load_runtime(home.path(), &host).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
         }
+        assert!(store_runtime(home.path(), "native-anchor:native-x:a:b").is_err());
     }
 
-    fn status_error(status: OsStatus, operation: &str) -> io::Error {
-        let hint = match status {
-            ITEM_NOT_FOUND => "no owner anchor exists for this host incarnation",
-            INTERACTION_NOT_ALLOWED => "user presence is unavailable or was not allowed",
-            USER_CANCELED => "the user canceled the owner anchor prompt",
-            AUTH_FAILED => "owner anchor authentication failed",
-            _ => "keychain reported a failure",
-        };
-        io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("{operation} refused: {hint} ({status})"),
-        )
+    #[test]
+    fn unsafe_file_modes_and_links_are_refused_on_both_read_and_write() {
+        let home = fixture();
+        let (host, anchor) = generate();
+        store_runtime(home.path(), &anchor).unwrap();
+        let path = home.path().join(DIRECTORY).join(FILE);
+        for mode in [0o644, 0o666, 0o400, 0o1600] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(load_runtime(home.path(), &host).is_err());
+            assert!(store_runtime(home.path(), &anchor).is_err());
+            assert_eq!(path.metadata().unwrap().mode() & 0o7777, mode);
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let other = home.path().join("sentinel");
+        std::fs::rename(&path, &other).unwrap();
+        symlink(&other, &path).unwrap();
+        assert!(load_runtime(home.path(), &host).is_err());
+        assert!(store_runtime(home.path(), &anchor).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&other).unwrap(),
+            format!("{anchor}\n")
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::fs::hard_link(&other, &path).unwrap();
+        assert!(load_runtime(home.path(), &host).is_err());
+        assert!(store_runtime(home.path(), &anchor).is_err());
     }
 
-    fn cf_string(value: &str) -> io::Result<Cf> {
-        let value = CString::new(value).map_err(|_| invalid("keychain text contains NUL"))?;
-        // SAFETY: a NUL-terminated string and the documented UTF-8 encoding.
-        let raw = unsafe {
-            CFStringCreateWithCString(ptr::null(), value.as_ptr(), CF_STRING_ENCODING_UTF8)
-        };
-        (!raw.is_null())
-            .then_some(Cf(raw))
-            .ok_or_else(|| invalid("cannot create a keychain string"))
+    #[test]
+    fn unsafe_directory_mode_and_symlink_never_get_repaired_or_followed() {
+        let home = fixture();
+        let (host, anchor) = generate();
+        store_runtime(home.path(), &anchor).unwrap();
+        let dir = home.path().join(DIRECTORY);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(load_runtime(home.path(), &host).is_err());
+        assert!(store_runtime(home.path(), &anchor).is_err());
+        assert_eq!(dir.metadata().unwrap().mode() & 0o7777, 0o755);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let other = home.path().join("other");
+        std::fs::rename(&dir, &other).unwrap();
+        symlink(&other, &dir).unwrap();
+        assert!(load_runtime(home.path(), &host).is_err());
+        assert!(store_runtime(home.path(), &anchor).is_err());
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(prepare_home(home.path()).is_err());
+        assert_eq!(home.path().metadata().unwrap().mode() & 0o7777, 0o755);
     }
 
-    pub(super) fn store(account: &str, anchor: &str) -> io::Result<()> {
-        let service = CString::new(SERVICE).expect("static service");
-        let account =
-            CString::new(account).map_err(|_| invalid("keychain account contains NUL"))?;
-        // An empty trusted-application list makes every future read a prompt.
-        let descriptor = cf_string("Viva native owner anchor")?;
-        let mut access: CfRef = ptr::null();
-        // SAFETY: a valid descriptor and a null trusted list.
-        let status = unsafe { SecAccessCreate(descriptor.0, ptr::null(), &mut access) };
-        if status != SUCCESS {
-            return Err(status_error(status, "creating the owner keychain access"));
-        }
-        let access = Cf(access);
-        let mut item: CfRef = ptr::null();
-        // SAFETY: lengths match the pointers; the default keychain is null.
-        let status = unsafe {
-            SecKeychainAddGenericPassword(
-                ptr::null(),
-                service.as_bytes().len() as u32,
-                service.as_ptr(),
-                account.as_bytes().len() as u32,
-                account.as_ptr(),
-                anchor.len() as u32,
-                anchor.as_ptr() as *const c_void,
-                &mut item,
-            )
-        };
-        if status == DUPLICATE_ITEM {
-            return Err(unsupported(
-                "an owner anchor already exists for this host incarnation",
-            ));
-        }
-        if status != SUCCESS {
-            return Err(status_error(status, "storing the owner anchor"));
-        }
-        let item = Cf(item);
-        // SAFETY: both references are live for this call.
-        let status = unsafe { SecKeychainItemSetAccess(item.0, access.0) };
-        if status != SUCCESS {
-            return Err(status_error(status, "protecting the owner anchor"));
-        }
-        Ok(())
-    }
-
-    pub(super) fn load(account: &str) -> io::Result<String> {
-        let service = CString::new(SERVICE).expect("static service");
-        let account =
-            CString::new(account).map_err(|_| invalid("keychain account contains NUL"))?;
-        let mut length = 0_u32;
-        let mut data: *mut c_void = ptr::null_mut();
-        let mut item: CfRef = ptr::null();
-        // SAFETY: out-parameters are valid; a null keychain means the default
-        // login keychain. The access object has no trusted apps, so this call
-        // asks the user before returning the anchor.
-        let status = unsafe {
-            SecKeychainFindGenericPassword(
-                ptr::null(),
-                service.as_bytes().len() as u32,
-                service.as_ptr(),
-                account.as_bytes().len() as u32,
-                account.as_ptr(),
-                &mut length,
-                &mut data,
-                &mut item,
-            )
-        };
-        if status != SUCCESS {
-            return Err(status_error(status, "reading the owner anchor"));
-        }
-        let item = Cf(item);
-        // SAFETY: the Security framework returned `length` readable bytes.
-        let value = unsafe { std::slice::from_raw_parts(data as *const u8, length as usize) };
-        let value = String::from_utf8(value.to_vec())
-            .map_err(|_| invalid("owner anchor is not valid UTF-8"));
-        // SAFETY: the buffer belongs to the item and is released exactly once.
-        unsafe {
-            SecKeychainItemFreeContent(ptr::null_mut(), data);
-        }
-        let _ = item;
-        value
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-mod keychain {
-    use super::unsupported;
-    use std::io;
-
-    pub(super) fn store(_account: &str, _anchor: &str) -> io::Result<()> {
-        Err(unsupported(
-            "no user-presence owner anchor exists on this platform",
-        ))
-    }
-
-    pub(super) fn load(_account: &str) -> io::Result<String> {
-        Err(unsupported(
-            "no user-presence owner anchor exists on this platform",
-        ))
+    #[test]
+    fn wrong_owner_metadata_is_refused() {
+        // Constructed metadata isolates the ownership rule without requiring
+        // root/chown on the real machine. Other tests open actual filesystem fds.
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        stat.st_uid = unsafe { libc::geteuid() };
+        stat.st_mode = libc::S_IFREG | 0o600;
+        stat.st_nlink = 1;
+        validate_stat(&stat, false).unwrap();
+        stat.st_uid = stat.st_uid.wrapping_add(1);
+        assert_eq!(
+            validate_stat(&stat, false).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        stat.st_mode = libc::S_IFDIR | 0o700;
+        assert!(validate_stat(&stat, true).is_err());
     }
 }

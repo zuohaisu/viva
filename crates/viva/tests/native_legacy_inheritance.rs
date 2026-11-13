@@ -305,10 +305,7 @@ fn wait_exit(
 
 #[test]
 fn a_live_legacy_execution_is_inherited_and_stoppable() {
-    let temp = tempfile::Builder::new()
-        .prefix("legacy-live-execution-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let data = seed_dispatch(home);
     let pause_marker = home.join("inherited-pause-exit");
@@ -318,7 +315,7 @@ fn a_live_legacy_execution_is_inherited_and_stoppable() {
     // gate must still refuse it through the adopted execution binding.
     let member_command = format!(
         "printf 'MEMBER-ALIVE\\n'; while [ ! -f '{}' ]; do sleep 0.1; done; \
-         VIVA_HOME='{}' VIVA_OWNER_KEYCHAIN=0 '{}' runtime host pause >/dev/null 2>&1; \
+         VIVA_HOME='{}' '{}' runtime host pause >/dev/null 2>&1; \
          printf '%s' $? > '{}'; sleep 60",
         pause_go.display(),
         home.display(),
@@ -453,10 +450,7 @@ fn a_live_legacy_execution_is_inherited_and_stoppable() {
 
 #[test]
 fn live_legacy_session_is_inherited_with_its_process_and_screen() {
-    let temp = tempfile::Builder::new()
-        .prefix("legacy-inherit-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let mut legacy = spawn_legacy(home);
     let mut client = connect_legacy(home, &mut legacy);
@@ -565,10 +559,7 @@ fn live_legacy_session_is_inherited_with_its_process_and_screen() {
 
 #[test]
 fn failed_adoption_leaves_the_old_host_serving_and_its_process_alive() {
-    let temp = tempfile::Builder::new()
-        .prefix("legacy-refuse-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let mut legacy = spawn_legacy(home);
     let mut client = connect_legacy(home, &mut legacy);
@@ -642,10 +633,7 @@ fn failed_adoption_leaves_the_old_host_serving_and_its_process_alive() {
 
 #[test]
 fn a_stale_legacy_socket_does_not_block_a_fresh_native_session() {
-    let temp = tempfile::Builder::new()
-        .prefix("legacy-stale-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     // A crashed host leaves the bound path on disk; connecting refuses.
     let stale = home.join(viva::server::SOCKET_NAME);

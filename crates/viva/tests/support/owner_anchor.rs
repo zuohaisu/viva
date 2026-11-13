@@ -1,9 +1,7 @@
 //! Task-owned native-host fixture for the #191 owner-anchor protocol.
 //!
-//! The owner capability is no longer a file: the test that spawns the server
-//! is the process that hands it the anchor over an inherited pipe, exactly as
-//! the embedded TUI does. Keychain access is disabled so CI and tests never
-//! prompt a human.
+//! Explicit descriptor fixtures retain the spawn protocol; fresh-process
+//! controls and the real TUI probe separately exercise the default runtime file.
 #![allow(dead_code)]
 use serde_json::{Value, json};
 use std::{
@@ -54,6 +52,7 @@ fn fresh_anchor(tag: &str) -> String {
 }
 
 fn write_config(home: &Path) {
+    viva::foundation::paths::ensure_private_dir(home).unwrap();
     let runtime = home.join("runtime/workbench");
     std::fs::create_dir_all(&runtime).unwrap();
     if !runtime.join("config.toml").exists() {
@@ -67,17 +66,16 @@ pub fn spawn(home: &Path, tag: &str) -> OwnerHost {
     spawn_with(home, tag, |_| {})
 }
 
-pub fn spawn_with(home: &Path, tag: &str, configure: impl FnOnce(&mut Command)) -> OwnerHost {
-    write_config(home);
-    let anchor = fresh_anchor(tag);
-    let mut fds = [0; 2];
-    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-    let (read_fd, write_fd) = (fds[0], fds[1]);
-    {
-        let mut pipe = unsafe { std::fs::File::from_raw_fd(write_fd) };
-        pipe.write_all(format!("{anchor}\n").as_bytes()).unwrap();
+/// The real manual-host path: no inherited anchor and no credential switch.
+pub fn spawn_manual(home: &Path) -> OwnerHost {
+    OwnerHost {
+        anchor: String::new(),
+        child: server_command(home).spawn().unwrap(),
     }
-    assert!(unsafe { libc::fcntl(read_fd, libc::F_SETFD, 0) } >= 0);
+}
+
+fn server_command(home: &Path) -> Command {
+    write_config(home);
     let log = std::fs::File::create(home.join("native.log")).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_viva"));
     command
@@ -90,11 +88,24 @@ pub fn spawn_with(home: &Path, tag: &str, configure: impl FnOnce(&mut Command)) 
         .env("VIVA_HOME", home)
         .env("XDG_CONFIG_HOME", home.join("xdg-config"))
         .env("XDG_STATE_HOME", home.join("xdg-state"))
-        .env("VIVA_OWNER_ANCHOR_FD", read_fd.to_string())
-        .env("VIVA_OWNER_KEYCHAIN", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(log);
+    command
+}
+
+pub fn spawn_with(home: &Path, tag: &str, configure: impl FnOnce(&mut Command)) -> OwnerHost {
+    let anchor = fresh_anchor(tag);
+    let mut fds = [0; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    let (read_fd, write_fd) = (fds[0], fds[1]);
+    {
+        let mut pipe = unsafe { std::fs::File::from_raw_fd(write_fd) };
+        pipe.write_all(format!("{anchor}\n").as_bytes()).unwrap();
+    }
+    assert!(unsafe { libc::fcntl(read_fd, libc::F_SETFD, 0) } >= 0);
+    let mut command = server_command(home);
+    command.env("VIVA_OWNER_ANCHOR_FD", read_fd.to_string());
     configure(&mut command);
     let child = command.spawn().unwrap();
     // Only the server keeps the descriptor.
