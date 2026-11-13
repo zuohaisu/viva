@@ -20,10 +20,10 @@ pub trait DomainServices: Send + Sync {
     fn server_started(&self) -> io::Result<()>;
     fn server_ready(&self) -> io::Result<()>;
     fn client_credential(&self) -> io::Result<String>;
-    /// Retrieve this host incarnation's owner anchor after user presence has
-    /// been established. A reattaching TUI has no inherited descriptor, so the
-    /// composition root resolves the anchor from the OS user-presence store
-    /// for exactly the host identity the running host reports.
+    /// Resolve this host incarnation's local runtime capability. A reattaching
+    /// TUI has no inherited spawn descriptor; the composition root loads the
+    /// private runtime file for the identity the running host reports. This
+    /// is capability possession, not human-presence authentication.
     fn owner_anchor_for_host(&self, host_id: &str) -> io::Result<String>;
     fn authenticate_client(
         &self,
@@ -216,8 +216,8 @@ fn running_host_id() -> io::Result<String> {
 }
 
 /// The anchor this process can present. A spawning TUI holds it in memory or
-/// over an inherited descriptor; a reattaching TUI resolves it from the OS
-/// user-presence store for the host identity the running host advertises.
+/// over an inherited descriptor; a reattaching TUI resolves it from the private
+/// runtime store for the host identity the running host advertises.
 fn owner_credential(ctx: &Context) -> io::Result<String> {
     match ctx.domain.client_credential() {
         Ok(anchor) => Ok(anchor),
@@ -294,7 +294,7 @@ pub(crate) fn authenticate_local_client() -> io::Result<()> {
             Err(ApiClientError::ErrorResponse(error))
                 if error.error.code == "stale_owner_anchor" && Instant::now() < deadline =>
             {
-                // A spawned or keychain-cached anchor belongs to a dead host
+                // A spawned or runtime-stored anchor belongs to a dead host
                 // incarnation. Drop it and resolve the live host's anchor once.
                 clear_spawned_owner_anchor();
                 continue;

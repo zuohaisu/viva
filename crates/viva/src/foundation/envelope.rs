@@ -36,7 +36,7 @@ pub enum CallerRole {
     User,
     /// A supervised member execution.
     MemberExecution(ExecutionId),
-    /// An external agent CLI the user started by hand.
+    /// A local CLI/controller, not a verified human principal.
     AgentCli,
     /// A test fixture. Never used in production paths.
     TestRun,
