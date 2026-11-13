@@ -224,7 +224,7 @@ pub(super) fn load_runtime(home: &Path, expected_host: &str) -> io::Result<Strin
     if host_id(&anchor) != Some(expected_host) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "stale_owner_anchor: runtime capability belongs to another host incarnation",
+            herdr::embedding::OwnerAnchorHostMismatch,
         ));
     }
     Ok(anchor)
@@ -269,6 +269,127 @@ mod tests {
             io::ErrorKind::PermissionDenied
         );
         assert_eq!(std::fs::read_dir(dir).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn snapshot_file_rotation_recovers_only_after_live_identity_changes() {
+        use std::{
+            cell::Cell,
+            time::{Duration, Instant},
+        };
+        let home = fixture();
+        let (host_a, _) = generate();
+        let (host_b, anchor_b) = generate();
+        store_runtime(home.path(), &anchor_b).unwrap();
+        let snapshots = Cell::new(0);
+        let mut loads = Vec::new();
+        let anchor = herdr::embedding::owner_credential_for_host(
+            Instant::now() + Duration::from_secs(1),
+            |_| {
+                snapshots.set(snapshots.get() + 1);
+                Ok(if snapshots.get() == 1 {
+                    &host_a
+                } else {
+                    &host_b
+                }
+                .clone())
+            },
+            |host| {
+                loads.push(host.to_owned());
+                load_runtime(home.path(), host)
+            },
+        )
+        .unwrap();
+        assert_eq!(anchor, anchor_b);
+        assert_eq!(loads, [host_a, host_b]);
+        assert_eq!(snapshots.get(), 2);
+    }
+
+    #[test]
+    fn unchanged_live_identity_refuses_stale_file_without_reloading() {
+        use std::{
+            cell::Cell,
+            time::{Duration, Instant},
+        };
+        let home = fixture();
+        let (host, _) = generate();
+        let (_, stale) = generate();
+        store_runtime(home.path(), &stale).unwrap();
+        let snapshots = Cell::new(0);
+        let mut loads = 0;
+        let error = herdr::embedding::owner_credential_for_host(
+            Instant::now() + Duration::from_secs(1),
+            |_| {
+                snapshots.set(snapshots.get() + 1);
+                Ok(host.clone())
+            },
+            |host| {
+                loads += 1;
+                load_runtime(home.path(), host)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            snapshots.get(),
+            2,
+            "only recheck identity, never retry an unchanged host"
+        );
+        assert_eq!(loads, 1);
+    }
+
+    fn assert_resolution_refused_without_recheck(home: &Path, host: &str) {
+        use std::{
+            cell::Cell,
+            time::{Duration, Instant},
+        };
+        let snapshots = Cell::new(0);
+        let error = herdr::embedding::owner_credential_for_host(
+            Instant::now() + Duration::from_secs(1),
+            |_| {
+                snapshots.set(snapshots.get() + 1);
+                Ok(host.to_owned())
+            },
+            |host| load_runtime(home, host),
+        )
+        .unwrap_err();
+        assert!(
+            !error
+                .get_ref()
+                .is_some_and(|cause| cause.is::<herdr::embedding::OwnerAnchorHostMismatch>())
+        );
+        assert_eq!(
+            snapshots.get(),
+            1,
+            "unsafe/malformed storage is terminal, even during rollover"
+        );
+    }
+
+    #[test]
+    fn unsafe_or_malformed_storage_cannot_request_an_identity_recheck() {
+        let home = fixture();
+        let (host, anchor) = generate();
+        store_runtime(home.path(), &anchor).unwrap();
+        let path = home.path().join(DIRECTORY).join(FILE);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_resolution_refused_without_recheck(home.path(), &host);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&path, b"malformed capability").unwrap();
+        assert_resolution_refused_without_recheck(home.path(), &host);
+        std::fs::write(&path, &anchor).unwrap();
+        let sentinel = home.path().join("sentinel");
+        std::fs::rename(&path, &sentinel).unwrap();
+        symlink(&sentinel, &path).unwrap();
+        assert_resolution_refused_without_recheck(home.path(), &host);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::hard_link(&sentinel, &path).unwrap();
+        assert_resolution_refused_without_recheck(home.path(), &host);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(&sentinel, &path).unwrap();
+        let dir = path.parent().unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_resolution_refused_without_recheck(home.path(), &host);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), anchor);
     }
 
     #[test]
@@ -366,9 +487,12 @@ mod tests {
         stat.st_nlink = 1;
         validate_stat(&stat, false).unwrap();
         stat.st_uid = stat.st_uid.wrapping_add(1);
-        assert_eq!(
-            validate_stat(&stat, false).unwrap_err().kind(),
-            io::ErrorKind::PermissionDenied
+        let error = validate_stat(&stat, false).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            !error
+                .get_ref()
+                .is_some_and(|cause| cause.is::<herdr::embedding::OwnerAnchorHostMismatch>())
         );
         stat.st_mode = libc::S_IFDIR | 0o700;
         assert!(validate_stat(&stat, true).is_err());

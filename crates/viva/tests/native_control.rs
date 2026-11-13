@@ -75,6 +75,61 @@ fn db(home: &Path) -> rusqlite::Connection {
 }
 
 #[test]
+fn fresh_controls_follow_capability_rotation_after_a_private_host_restart() {
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
+    let home = temp.path();
+    let capability = home.join("runtime-capability/owner-anchor");
+    let mut previous = String::new();
+    let mut previous_host_id = String::new();
+    for action in ["pause", "resume"] {
+        // Dropping this task-owned child ends A before starting B on the same
+        // private state root. No real user's runtime or process is involved.
+        let host = owner_support::spawn_manual(home);
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let current = loop {
+            if let Ok(value) = std::fs::read_to_string(&capability)
+                && value != previous
+            {
+                break value;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "new incarnation never published its capability"
+            );
+            thread::sleep(Duration::from_millis(25));
+        };
+        let snapshot = call(home, "viva.snapshot", json!({}));
+        let identity = snapshot["result"]["snapshot"]["runtime_host_id"]
+            .as_str()
+            .unwrap();
+        assert_ne!(identity, previous_host_id);
+        assert_eq!(snapshot["result"]["snapshot"]["runtime_pid"], host.pid());
+        let output = Command::new(env!("CARGO_BIN_EXE_viva"))
+            .args(["runtime", "host", action])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", home)
+            .env("VIVA_HOME", home)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fresh {action}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let paused: String = db(home)
+            .query_row("SELECT value FROM settings WHERE key='paused'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(paused, if action == "pause" { "true" } else { "false" });
+        previous = current;
+        previous_host_id = identity.to_owned();
+        drop(host);
+    }
+}
+
+#[test]
 fn fresh_controllers_refuse_stale_wrong_malformed_and_unsafe_runtime_files() {
     use std::os::unix::fs::{PermissionsExt, symlink};
     let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();

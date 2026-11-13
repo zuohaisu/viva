@@ -5,6 +5,8 @@ mod client_authority;
 #[cfg(unix)]
 mod legacy_import;
 mod owner_anchor;
+#[cfg(all(test, unix))]
+mod reconnect_tests;
 
 use crate::{
     authority::AuthorityEngine,
@@ -1407,6 +1409,16 @@ fn send_native_request(
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value> {
+    send_native_request_with_timeout(socket, method, params, std::time::Duration::from_secs(10))
+}
+
+#[cfg(unix)]
+fn send_native_request_with_timeout(
+    socket: &std::path::Path,
+    method: &str,
+    params: serde_json::Value,
+    timeout: std::time::Duration,
+) -> Result<serde_json::Value> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
 
@@ -1416,7 +1428,8 @@ fn send_native_request(
             socket.display()
         ))
     })?;
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
     writeln!(
         stream,
         "{}",
@@ -1449,16 +1462,32 @@ fn send_native_request(
 /// no proof, so the host records the normal credential refusal.
 #[cfg(unix)]
 fn authenticate_owner(socket: &std::path::Path, home: &std::path::Path) -> Result<()> {
+    use std::time::{Duration, Instant};
+    // Keep the existing CLI request budget; rotations cannot renew it.
+    let deadline = Instant::now() + Duration::from_secs(10);
     let anchor = match owner_anchor::take_inherited()
         .map_err(|error| Error::Validation(format!("owner anchor is unusable: {error}")))?
     {
         Some(anchor) => Some(anchor),
         None => {
-            let snapshot = send_native_request(socket, "viva.snapshot", serde_json::json!({}))?;
-            let host_id = snapshot["snapshot"]["runtime_host_id"]
-                .as_str()
-                .ok_or_else(|| Error::Validation("running host has no runtime identity".into()))?;
-            match owner_anchor::load_runtime(home, host_id) {
+            let resolved = herdr::embedding::owner_credential_for_host(
+                deadline,
+                |remaining| {
+                    let snapshot = send_native_request_with_timeout(
+                        socket,
+                        "viva.snapshot",
+                        serde_json::json!({}),
+                        remaining,
+                    )
+                    .map_err(io::Error::other)?;
+                    snapshot["snapshot"]["runtime_host_id"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| io::Error::other("running host has no runtime identity"))
+                },
+                |host_id| owner_anchor::load_runtime(home, host_id),
+            );
+            match resolved {
                 Ok(anchor) => Some(anchor),
                 Err(error) => {
                     eprintln!("native: local runtime capability unavailable: {error}");
@@ -1473,10 +1502,20 @@ fn authenticate_owner(socket: &std::path::Path, home: &std::path::Path) -> Resul
         uid: Some(unsafe { libc::geteuid() }),
     };
     let lifetime = herdr::embedding::peer_lifetime_marker(peer).map_err(Error::from)?;
-    send_native_request(
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "native client authentication timed out",
+            )
+        })?;
+    send_native_request_with_timeout(
         socket,
         "viva.client.authenticate",
         serde_json::json!({"credential": credential, "process_lifetime": lifetime}),
+        remaining,
     )?;
     Ok(())
 }
