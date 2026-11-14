@@ -1,3 +1,4 @@
+// Modified for Viva #191: replace scheduler-dependent idle-timeout coverage.
 //! Blocking client socket transport for the headless server.
 //!
 //! This module owns the thin-client handshake, read loop, and writer loop.
@@ -1711,12 +1712,15 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn observer_write_timeout_resets_when_sending_makes_progress() {
+    fn observer_framed_write_delivers_large_payload() {
         use std::io::Read as _;
 
-        let (mut client, mut server, _path) = local_stream_pair("slow-observer");
+        // Deadline resets are covered with a scripted clock in unix_common.
+        // This checks the real socket/poll path using the production idle timeout,
+        // without assuming either thread will be scheduled within 100ms.
+        let (mut client, mut server, _path) = local_stream_pair("observer-payload");
         server
-            .set_send_timeout(Some(Duration::from_millis(100)))
+            .set_send_timeout(Some(OBSERVER_WRITE_TIMEOUT))
             .unwrap();
         server.set_nonblocking(true).unwrap();
         let worker = std::thread::spawn(move || {
@@ -1730,8 +1734,8 @@ mod tests {
         while received < 1024 * 1024 {
             let count = client.read(&mut buffer).unwrap();
             assert_ne!(count, 0, "observer disconnected while making progress");
+            assert!(buffer[..count].iter().all(|&byte| byte == b'x'));
             received += count;
-            std::thread::sleep(Duration::from_millis(5));
         }
         worker.join().unwrap();
     }

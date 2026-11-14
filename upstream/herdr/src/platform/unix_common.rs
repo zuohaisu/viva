@@ -1,3 +1,4 @@
+// Modified for Viva #191: isolate observer idle-write policy for deterministic tests.
 use std::path::{Path, PathBuf};
 
 pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::ChildExitReason {
@@ -67,7 +68,7 @@ impl std::io::Read for ClientStreamReader<'_> {
 
 pub(crate) fn write_client_stream(
     stream: &crate::ipc::LocalStream,
-    mut data: &[u8],
+    data: &[u8],
 ) -> std::io::Result<()> {
     use std::io::{self, Write as _};
     use std::os::fd::AsRawFd as _;
@@ -78,21 +79,64 @@ pub(crate) fn write_client_stream(
     let Some(timeout) = socket.write_timeout()? else {
         return socket.write_all(data);
     };
-    let timed_out = || {
+    let started = Instant::now();
+    let fd = socket.as_raw_fd();
+    let result = write_with_progress_timeout(
+        data,
+        timeout,
+        |data| socket.write(data),
+        |remaining| {
+            let mut descriptor = libc::pollfd {
+                fd,
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            let wait_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+            let ready = unsafe { libc::poll(&mut descriptor, 1, wait_ms) };
+            if ready == 0 {
+                return Err(observer_write_timed_out());
+            }
+            if ready < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+            Ok(())
+        },
+        || started.elapsed(),
+    );
+    if matches!(&result, Err(error) if error.kind() == io::ErrorKind::TimedOut) {
         // Dropping the writer clone alone would leave the reader blocked.
         let _ = shutdown_client_stream(stream);
-        io::Error::new(
-            io::ErrorKind::TimedOut,
-            "terminal observer stopped receiving output",
-        )
-    };
-    let mut progress = Instant::now();
+    }
+    result
+}
+
+fn observer_write_timed_out() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "terminal observer stopped receiving output",
+    )
+}
+
+// Keep the real write/retry loop testable without depending on thread scheduling.
+fn write_with_progress_timeout(
+    mut data: &[u8],
+    timeout: std::time::Duration,
+    mut write: impl FnMut(&[u8]) -> std::io::Result<usize>,
+    mut wait: impl FnMut(std::time::Duration) -> std::io::Result<()>,
+    mut now: impl FnMut() -> std::time::Duration,
+) -> std::io::Result<()> {
+    use std::io;
+
+    let mut progress = now();
     while !data.is_empty() {
-        match socket.write(data) {
+        match write(data) {
             Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
             Ok(written) => {
                 data = &data[written..];
-                progress = Instant::now();
+                progress = now();
                 continue;
             }
             Err(error)
@@ -103,24 +147,9 @@ pub(crate) fn write_client_stream(
             Err(error) => return Err(error),
         }
         let remaining = timeout
-            .checked_sub(progress.elapsed())
-            .ok_or_else(timed_out)?;
-        let mut descriptor = libc::pollfd {
-            fd: socket.as_raw_fd(),
-            events: libc::POLLOUT,
-            revents: 0,
-        };
-        let wait_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
-        let ready = unsafe { libc::poll(&mut descriptor, 1, wait_ms) };
-        if ready == 0 {
-            return Err(timed_out());
-        }
-        if ready < 0 {
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::Interrupted {
-                return Err(error);
-            }
-        }
+            .checked_sub(now() - progress)
+            .ok_or_else(observer_write_timed_out)?;
+        wait(remaining)?;
     }
     Ok(())
 }
@@ -479,6 +508,78 @@ pub(crate) fn set_default_plugin_pane_pwd(env: &mut Vec<(String, String)>, cwd: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observer_write_timeout_resets_when_sending_makes_progress() {
+        use std::{cell::Cell, collections::VecDeque, io, time::Duration};
+
+        let millis = Duration::from_millis;
+        let clock = Cell::new(Duration::ZERO);
+        let mut writes = VecDeque::from([
+            (90, Ok(1)),
+            (20, Err(io::ErrorKind::WouldBlock)),
+            (10, Ok(1)),
+            (20, Err(io::ErrorKind::WouldBlock)),
+            (10, Ok(1)),
+        ]);
+        let mut waits = Vec::new();
+        let mut remaining_lengths = Vec::new();
+        write_with_progress_timeout(
+            b"abc",
+            millis(100),
+            |data| {
+                remaining_lengths.push(data.len());
+                let (elapsed, result) = writes.pop_front().expect("scripted write");
+                clock.set(clock.get() + millis(elapsed));
+                result.map_err(io::Error::from)
+            },
+            |remaining| {
+                waits.push(remaining);
+                clock.set(clock.get() + millis(40));
+                Ok(())
+            },
+            || clock.get(),
+        )
+        .expect("successful writes reset the idle deadline");
+        assert!(writes.is_empty());
+        assert_eq!(remaining_lengths, [3, 2, 2, 1, 1]);
+        assert_eq!(waits, [millis(80), millis(80)]);
+        assert_eq!(clock.get(), millis(230));
+    }
+
+    #[test]
+    fn observer_write_timeout_is_not_reset_by_retry_or_readiness() {
+        use std::{cell::Cell, collections::VecDeque, io, time::Duration};
+
+        let millis = Duration::from_millis;
+        let clock = Cell::new(Duration::ZERO);
+        let mut writes = VecDeque::from([
+            (0, Ok(1)),
+            (40, Err(io::ErrorKind::Interrupted)),
+            (40, Err(io::ErrorKind::WouldBlock)),
+        ]);
+        let mut waits = Vec::new();
+        let error = write_with_progress_timeout(
+            b"ab",
+            millis(100),
+            |_| {
+                let (elapsed, result) = writes.pop_front().expect("scripted write");
+                clock.set(clock.get() + millis(elapsed));
+                result.map_err(io::Error::from)
+            },
+            |remaining| {
+                waits.push(remaining);
+                clock.set(clock.get() + millis(30));
+                Ok(())
+            },
+            || clock.get(),
+        )
+        .expect_err("readiness without a successful write must still time out");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(writes.is_empty());
+        assert_eq!(waits, [millis(60)]);
+        assert_eq!(clock.get(), millis(110));
+    }
 
     #[test]
     fn plugin_pane_pwd_defaults_to_cwd_without_overriding_explicit_env() {
