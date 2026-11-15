@@ -37,6 +37,9 @@ fn cli_recovers_when_capability_rotates_after_snapshot() {
                     Err(error) => panic!("fixture accept: {error}"),
                 }
             };
+            // macOS inherits O_NONBLOCK from the listener. The accept deadline
+            // needs nonblocking polling, but read_line must wait for request bytes.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                 .unwrap();
