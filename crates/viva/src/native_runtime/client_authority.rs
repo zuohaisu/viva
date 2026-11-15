@@ -1,11 +1,9 @@
-//! Owner-frontend capability for the gated native development runtime.
-//! Reuses Core channels. This is not MemberExecution issuance and not a same-UID
-//! sandbox. The credential is a host-incarnation anchor delivered over an
-//! inherited pipe from the spawning TUI, or retrieved from the login keychain
-//! by a reattaching TUI with user presence. It is never a file. The parent
-//! bridge refuses this owner-only phase if any execution is requested/running
-//! or a worker credential is active; real member/agent process and descriptor
-//! binding must replace that guard BEFORE native member dispatch is enabled.
+//! Local runtime-controller capability, reusing Core channels and native
+//! host-incarnation anchors. Inherited spawn descriptors and the private runtime
+//! store carry the same proof. Possession is not human presence or a User role.
+//! The bridge separately rejects known execution/host descendants and unknown
+//! live work; member ingress retains its real execution, channel and live grant.
+//! This is not an OS sandbox against arbitrary same-UID programs.
 use super::owner_anchor;
 use crate::foundation::envelope::{CallerIdentity, CallerRole, ChannelRegistry};
 use herdr::embedding::{TransportPeer, peer_lifetime_marker};
@@ -78,8 +76,8 @@ impl ClientAuthority {
         }
     }
     /// Called only after both native endpoints have been claimed. `anchor` is
-    /// the credential accepted from the spawning TUI or stored in the login
-    /// keychain; `None` leaves the host running with owner admission refused.
+    /// the credential accepted from the spawning TUI or private runtime file;
+    /// `None` leaves the host running with controller admission refused.
     /// A failed competing startup must not activate a second authority.
     pub(super) fn activate(&mut self, anchor: Option<String>) -> io::Result<()> {
         if self.activated {
@@ -92,7 +90,7 @@ impl ClientAuthority {
         let host_id = owner_anchor::host_id(&anchor)
             .ok_or_else(|| denied("native owner anchor has an unknown format".into()))?
             .to_string();
-        let caller = self.channels.issue(CallerRole::User);
+        let caller = self.channels.issue(CallerRole::AgentCli);
         self.bootstrap = Some(Bootstrap {
             channel: caller,
             anchor,
@@ -127,7 +125,7 @@ impl ClientAuthority {
             };
             return Err(AuthOutcome::Refused(refusal));
         }
-        if self.channels.validate(&bootstrap.channel) != Ok(CallerRole::User) {
+        if self.channels.validate(&bootstrap.channel) != Ok(CallerRole::AgentCli) {
             return Err(AuthOutcome::Refused(AuthRefusal::Mismatch));
         }
         let pid = peer.pid.ok_or(AuthOutcome::Refused(AuthRefusal::Missing))?;
@@ -166,7 +164,7 @@ impl ClientAuthority {
         }
         // Audit BEFORE installing a usable binding. Channel IDs are safe
         // correlation facts; unlike the anchor they are not secrets.
-        let channel = self.channels.issue(CallerRole::User);
+        let channel = self.channels.issue(CallerRole::AgentCli);
         if let Err(error) = admitted(&channel, &lifetime) {
             let _ = self.channels.revoke(&channel.channel_id);
             return Err(AuthOutcome::Internal(error));
@@ -190,7 +188,7 @@ impl ClientAuthority {
             .get(&pid)
             .ok_or_else(|| denied("native raw client has no host-issued binding".into()))?;
         if client.peer != peer
-            || self.channels.validate(&client.channel) != Ok(CallerRole::User)
+            || self.channels.validate(&client.channel) != Ok(CallerRole::AgentCli)
             || peer_lifetime_marker(peer)? != client.lifetime
         {
             return Err(denied(

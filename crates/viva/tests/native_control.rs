@@ -8,6 +8,7 @@ use owner_support::{OwnerHost, authenticate, call, spawn, wait_owner_ready, wait
 use serde_json::{Value, json};
 use std::{
     path::Path,
+    process::Command,
     thread,
     time::{Duration, Instant},
 };
@@ -18,8 +19,191 @@ use viva::{
     tasks::TaskRegistry,
 };
 
+#[test]
+fn manual_host_and_fresh_control_processes_use_default_runtime_capability() {
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
+    let home = temp.path();
+    let host = owner_support::spawn_manual(home);
+    wait_ready(home, &host);
+    // Socket binding precedes publication of the complete capability.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while db(home)
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind='native_runtime_capability_stored'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+        == 0
+    {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(25));
+    }
+    for action in ["pause", "resume"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_viva"))
+            .args(["runtime", "host", action])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", home)
+            .env("VIVA_HOME", home)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fresh {action} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let payloads: Vec<String> = db(home)
+        .prepare("SELECT payload FROM events WHERE kind='native_client_admitted'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(payloads.len(), 2);
+    for payload in payloads {
+        let value: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value["source"], "local_runtime_controller");
+        assert_eq!(value["caller_role"], "agent_cli");
+        assert_eq!(value["human_presence_verified"], false);
+    }
+}
+
 fn db(home: &Path) -> rusqlite::Connection {
     rusqlite::Connection::open(paths::database_path(home)).unwrap()
+}
+
+#[test]
+fn fresh_controls_follow_capability_rotation_after_a_private_host_restart() {
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
+    let home = temp.path();
+    let capability = home.join("runtime-capability/owner-anchor");
+    let mut previous = String::new();
+    let mut previous_host_id = String::new();
+    for action in ["pause", "resume"] {
+        // Dropping this task-owned child ends A before starting B on the same
+        // private state root. No real user's runtime or process is involved.
+        let host = owner_support::spawn_manual(home);
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let current = loop {
+            if let Ok(value) = std::fs::read_to_string(&capability)
+                && value != previous
+            {
+                break value;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "new incarnation never published its capability"
+            );
+            thread::sleep(Duration::from_millis(25));
+        };
+        let snapshot = call(home, "viva.snapshot", json!({}));
+        let identity = snapshot["result"]["snapshot"]["runtime_host_id"]
+            .as_str()
+            .unwrap();
+        assert_ne!(identity, previous_host_id);
+        assert_eq!(snapshot["result"]["snapshot"]["runtime_pid"], host.pid());
+        let output = Command::new(env!("CARGO_BIN_EXE_viva"))
+            .args(["runtime", "host", action])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", home)
+            .env("VIVA_HOME", home)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fresh {action}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let paused: String = db(home)
+            .query_row("SELECT value FROM settings WHERE key='paused'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(paused, if action == "pause" { "true" } else { "false" });
+        previous = current;
+        previous_host_id = identity.to_owned();
+        drop(host);
+    }
+}
+
+#[test]
+fn fresh_controllers_refuse_stale_wrong_malformed_and_unsafe_runtime_files() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
+    let home = temp.path();
+    let fixture = start_fixture(home, "bad-runtime-file");
+    let path = home.join("runtime-capability/owner-anchor");
+    let original = std::fs::read(&path).unwrap();
+    let host = fixture.anchor().rsplit_once(':').unwrap().0;
+    for (value, message) in [
+        (
+            b"native-anchor:native-dead:old-proof\n".to_vec(),
+            "stale_owner_anchor",
+        ),
+        (
+            format!("{host}:wrong-proof\n").into_bytes(),
+            "owner_anchor_mismatch",
+        ),
+        (b"not-an-anchor\n".to_vec(), "invalid native anchor format"),
+    ] {
+        std::fs::write(&path, value).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_viva"))
+            .args(["runtime", "host", "pause"])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", home)
+            .env("VIVA_HOME", home)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(message),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    std::fs::write(&path, &original).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let unsafe_mode = Command::new(env!("CARGO_BIN_EXE_viva"))
+        .args(["runtime", "host", "pause"])
+        .env_clear()
+        .env("HOME", home)
+        .env("VIVA_HOME", home)
+        .output()
+        .unwrap();
+    assert!(!unsafe_mode.status.success());
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let sentinel = home.join("sentinel");
+    std::fs::rename(&path, &sentinel).unwrap();
+    symlink(&sentinel, &path).unwrap();
+    let linked = Command::new(env!("CARGO_BIN_EXE_viva"))
+        .args(["runtime", "host", "pause"])
+        .env_clear()
+        .env("HOME", home)
+        .env("VIVA_HOME", home)
+        .output()
+        .unwrap();
+    assert!(!linked.status.success());
+    assert_eq!(std::fs::read(&sentinel).unwrap(), original);
+    let paused: i64 = db(home)
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind='native_host_paused'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(paused, 0, "bad runtime storage must never mutate the host");
+    let leaked: i64 = db(home)
+        .query_row(
+            "SELECT count(*) FROM events WHERE payload LIKE ?1",
+            [format!("%{}%", fixture.anchor())],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(leaked, 0, "runtime proof is not audit data");
 }
 
 fn binding(member: &viva::foundation::ids::MemberId) -> MemberBinding {
@@ -110,10 +294,7 @@ fn wait_execution_exit(home: &Path, execution_id: &str) -> (String, Option<i64>)
 
 #[test]
 fn pause_blocks_new_dispatch_and_resume_reopens_it() {
-    let temp = tempfile::Builder::new()
-        .prefix("vn-control-pause-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let data = seed(home);
     let fixture = start_fixture(home, "control-pause");
@@ -148,10 +329,7 @@ fn pause_blocks_new_dispatch_and_resume_reopens_it() {
 
 #[test]
 fn stop_closes_the_pane_and_records_a_deliberate_exit() {
-    let temp = tempfile::Builder::new()
-        .prefix("vn-control-stop-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let data = seed(home);
     let fixture = start_fixture(home, "control-stop");
@@ -217,10 +395,7 @@ fn stop_closes_the_pane_and_records_a_deliberate_exit() {
 
 #[test]
 fn stop_without_owner_capability_is_refused_before_any_state_change() {
-    let temp = tempfile::Builder::new()
-        .prefix("vn-control-unbound-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let _ = seed(home);
     // Deliberately unbound: never authenticate this process.
@@ -247,10 +422,7 @@ fn stop_without_owner_capability_is_refused_before_any_state_change() {
 
 #[test]
 fn stopping_an_unknown_execution_is_refused() {
-    let temp = tempfile::Builder::new()
-        .prefix("vn-control-unknown-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let _ = seed(home);
     let fixture = start_fixture(home, "control-unknown");

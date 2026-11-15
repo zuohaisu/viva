@@ -64,10 +64,7 @@ fn wait_execution_exit(home: &Path, execution_id: &str) -> (String, Option<i64>)
 
 #[test]
 fn unbound_execution_start_is_refused_before_preparation() {
-    let temp = tempfile::Builder::new()
-        .prefix("vn-exec-refuse-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let (member, task, grant) = {
         let store = Store::open(&paths::database_path(home), viva::server::migrations()).unwrap();
@@ -133,10 +130,7 @@ fn unbound_execution_start_is_refused_before_preparation() {
 
 #[test]
 fn owner_dispatch_spawns_a_canonical_execution_and_records_the_real_exit() {
-    let temp = tempfile::Builder::new()
-        .prefix("vn-exec-live-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let (member, task, grant) = {
         let store = Store::open(&paths::database_path(home), viva::server::migrations()).unwrap();
@@ -297,10 +291,7 @@ fn owner_dispatch_spawns_a_canonical_execution_and_records_the_real_exit() {
 
 #[test]
 fn wrong_member_grant_and_replay_do_not_spawn_a_second_process() {
-    let temp = tempfile::Builder::new()
-        .prefix("vn-exec-authority-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let (member, other, task, grant) = {
         let store = Store::open(&paths::database_path(home), viva::server::migrations()).unwrap();
@@ -401,10 +392,7 @@ fn wrong_member_grant_and_replay_do_not_spawn_a_second_process() {
 
 #[test]
 fn two_members_and_two_tasks_get_distinct_pane_bound_executions() {
-    let temp = tempfile::Builder::new()
-        .prefix("vn-exec-two-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let (first, second) = {
         let store = Store::open(&paths::database_path(home), viva::server::migrations()).unwrap();
@@ -528,10 +516,7 @@ fn two_members_and_two_tasks_get_distinct_pane_bound_executions() {
 
 #[test]
 fn signal_exit_is_recorded_as_unknown_not_zero() {
-    let temp = tempfile::Builder::new()
-        .prefix("vn-exec-signal-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let (member, task, grant) = {
         let store = Store::open(&paths::database_path(home), viva::server::migrations()).unwrap();
@@ -602,10 +587,7 @@ fn signal_exit_is_recorded_as_unknown_not_zero() {
 
 #[test]
 fn spawn_failure_does_not_poison_the_owner_gate() {
-    let temp = tempfile::Builder::new()
-        .prefix("vn-exec-spawnfail-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let (member, task, grant) = {
         let store = Store::open(&paths::database_path(home), viva::server::migrations()).unwrap();

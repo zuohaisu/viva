@@ -14,7 +14,6 @@ import os
 from pathlib import Path
 import pty
 import sqlite3
-import secrets
 import select
 import signal
 import shutil
@@ -53,7 +52,7 @@ def probe(binary, legacy_live=False):
               "cross_backend_inheritance": ("real live legacy host" if legacy_live
                                             else "covered_by_test:crates/viva/tests/native_legacy_inheritance.rs"),
               "passed": False}
-    with tempfile.TemporaryDirectory(prefix="vnui-", dir="/tmp") as folder:
+    with tempfile.TemporaryDirectory(prefix="np") as folder:
         root = Path(folder)
         private_binary = root / "viva"
         shutil.copyfile(binary, private_binary)
@@ -61,7 +60,13 @@ def probe(binary, legacy_live=False):
         binary = private_binary
         packet["binary_sha256"] = hashlib.sha256(binary.read_bytes()).hexdigest()
         packet["immutable_private_binary"] = True
+        symbols = subprocess.check_output(["nm", "-u", str(binary)], text=True)
+        forbidden = ("SecKeychain", "SecAccessCreate", "SecItemCopyMatching", "SecItemAdd", "SecItemUpdate", "SecItemDelete")
+        packet["credential_store_imports"] = [line.strip() for line in symbols.splitlines()
+                                                if any(name in line for name in forbidden)]
+        assert not packet["credential_store_imports"], "binary still imports credential-store APIs"
         home = root / "v"
+        home.mkdir(mode=0o700)
         runtime = home / "runtime/workbench"
         runtime.mkdir(parents=True)
         (runtime / "config.toml").write_text(
@@ -72,21 +77,9 @@ def probe(binary, legacy_live=False):
         environment = {"PATH": "/usr/bin:/bin", "HOME": str(user_home),
                        "VIVA_HOME": str(home), "SHELL": "/bin/sh",
                        "TERM": "xterm-256color", "LANG": "en_US.UTF-8"}
-        # The owner capability is never a file. This harness plays the spawning
-        # TUI and delivers one per-fixture anchor over an inherited descriptor;
-        # keychain access is disabled so the probe never prompts a human.
-        owner_anchor = "native-anchor:native-probe-{}:{}".format(
-            secrets.token_hex(8), secrets.token_hex(16))
-
-        def owner_frontend_environment(frontend_environment):
-            read_fd, write_fd = os.pipe()
-            os.write(write_fd, (owner_anchor + "\n").encode())
-            os.close(write_fd)
-            os.set_inheritable(read_fd, True)
-            frontend_environment = dict(frontend_environment)
-            frontend_environment["VIVA_OWNER_ANCHOR_FD"] = str(read_fd)
-            frontend_environment["VIVA_OWNER_KEYCHAIN"] = "0"
-            return read_fd, frontend_environment
+        # Exercise the actual default entry: no supplied anchor, descriptor or
+        # credential-store switch. The first TUI mints its own spawn proof; a
+        # completely new reattaching process must use the private runtime file.
         legacy = None
         legacy_stderr = None
         if legacy_live:
@@ -150,15 +143,13 @@ def probe(binary, legacy_live=False):
                         break
 
         try:
-            anchor_fd, frontend_environment = owner_frontend_environment(environment)
-            client = subprocess.Popen([str(binary)], env=frontend_environment,
+            client = subprocess.Popen([str(binary)], env=environment,
                                       cwd=root, stdin=slave, stdout=slave, stderr=slave,
-                                      start_new_session=True, pass_fds=(anchor_fd,))
-            os.close(anchor_fd)
+                                      start_new_session=True)
             os.close(slave)
             slave = None
-            packet["owner_anchor_transport"] = "inherited_fd"
-            packet["owner_keychain_disabled"] = True
+            packet["frontend_credential_injection"] = False
+            packet["reattach_capability_transport"] = "private_runtime_file"
             deadline = time.monotonic() + 20
             snapshot = None
             while time.monotonic() < deadline:
@@ -177,6 +168,23 @@ def probe(binary, legacy_live=False):
             assert server_identity and str(binary) + " runtime server" in server_identity, "unexpected private host identity"
             packet["native_autospawn"] = True
             packet["canonical_domain_endpoint"] = True
+            capability_directory = home / "runtime-capability"
+            capability = capability_directory / "owner-anchor"
+            packet["runtime_capability_permissions"] = {
+                "directory": oct(capability_directory.stat().st_mode & 0o7777),
+                "file": oct(capability.stat().st_mode & 0o7777)}
+            assert packet["runtime_capability_permissions"] == {"directory": "0o700", "file": "0o600"}, packet
+            for action in ("pause", "resume"):
+                control = subprocess.run([str(binary), "runtime", "host", action],
+                                         env=environment, cwd=root, capture_output=True,
+                                         text=True, timeout=10)
+                assert control.returncode == 0, f"fresh control {action} failed: {control.stderr[-1500:]}"
+                after_control = json.loads(control.stdout)
+                assert after_control["paused"] == (action == "pause"), after_control
+                with sqlite3.connect(str(home / "viva.db")) as database:
+                    persisted = database.execute("SELECT value FROM settings WHERE key='paused'").fetchone()
+                assert persisted == ("true" if action == "pause" else "false",), persisted
+            packet["fresh_process_pause_resume"] = True
             if legacy_live:
                 assert snapshot["integration_state"] == "native-default-entry-legacy-inheritance", snapshot
                 assert snapshot["legacy_handoff"]["inherited"] is True, snapshot
@@ -256,11 +264,9 @@ def probe(binary, legacy_live=False):
             os.close(master)
             master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 120, 0, 0))
-            anchor_fd, frontend_environment = owner_frontend_environment(environment)
-            client = subprocess.Popen([str(binary)], env=frontend_environment,
+            client = subprocess.Popen([str(binary)], env=environment,
                                       cwd=root, stdin=slave, stdout=slave, stderr=slave,
-                                      start_new_session=True, pass_fds=(anchor_fd,))
-            os.close(anchor_fd)
+                                      start_new_session=True)
             os.close(slave)
             slave = None
             frame.clear()
@@ -286,8 +292,17 @@ def probe(binary, legacy_live=False):
             assert packet["invalid_capability_refused"], "invalid capability did not receive the authentication refusal contract"
             with sqlite3.connect(str(home / "viva.db")) as database:
                 rows = database.execute("SELECT payload FROM events WHERE kind='native_client_admitted'").fetchall()
-            packet["owner_frontend_admitted_processes"] = len({json.loads(row[0])["transport_peer"]["pid"] for row in rows})
-            assert packet["owner_frontend_admitted_processes"] >= 2, "initial and reattached frontends lack canonical admission evidence"
+            admissions = [json.loads(row[0]) for row in rows]
+            packet["local_controller_admitted_processes"] = len({row["transport_peer"]["pid"] for row in admissions})
+            assert packet["local_controller_admitted_processes"] >= 4, "frontends and fresh control CLIs lack canonical admission evidence"
+            packet["controller_source_attribution"] = all(
+                row.get("source") == "local_runtime_controller"
+                and row.get("caller_role") == "agent_cli"
+                and row.get("human_presence_verified") is False for row in admissions)
+            assert packet["controller_source_attribution"], "capability possession was misattributed to a human"
+            packet["capability_absent_from_admission_events"] = all(
+                capability.read_text().strip() not in row[0] for row in rows)
+            assert packet["capability_absent_from_admission_events"], "capability leaked into admission events"
             packet["passed"] = True
         except Exception as error:
             packet["error"] = str(error)
@@ -295,7 +310,7 @@ def probe(binary, legacy_live=False):
                 legacy_stderr.flush()
                 packet["legacy_log_tail"] = (root / "legacy.log").read_text(
                     errors="replace")[-2500:]
-            # Task-owned /tmp paths are disclosed; no production data is loaded.
+            # Only task-owned fixture paths are disclosed; no production data.
             packet["frame_tail"] = frame.decode(errors="replace")[-2500:]
         finally:
             if client and client.poll() is None:

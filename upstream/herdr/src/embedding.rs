@@ -7,6 +7,9 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+mod owner_credential;
+pub use owner_credential::{owner_credential_for_host, OwnerAnchorHostMismatch};
+
 /// The stable public pane id for a restored workspace pane. Viva needs it to
 /// bind an adopted legacy execution to the pane id the runtime will report on
 /// exit; it is the same encoding the runtime's own public API uses.
@@ -20,10 +23,10 @@ pub trait DomainServices: Send + Sync {
     fn server_started(&self) -> io::Result<()>;
     fn server_ready(&self) -> io::Result<()>;
     fn client_credential(&self) -> io::Result<String>;
-    /// Retrieve this host incarnation's owner anchor after user presence has
-    /// been established. A reattaching TUI has no inherited descriptor, so the
-    /// composition root resolves the anchor from the OS user-presence store
-    /// for exactly the host identity the running host reports.
+    /// Resolve this host incarnation's local runtime capability. A reattaching
+    /// TUI has no inherited spawn descriptor; the composition root loads the
+    /// private runtime file for the identity the running host reports. This
+    /// is capability possession, not human-presence authentication.
     fn owner_anchor_for_host(&self, host_id: &str) -> io::Result<String>;
     fn authenticate_client(
         &self,
@@ -196,14 +199,14 @@ pub(crate) fn validate_client(stream: &crate::ipc::LocalStream) -> io::Result<()
 /// The host identity the *running* server advertises. The client process has
 /// its own domain bridge but not the server's identity, so this asks the live
 /// endpoint instead of reading a local field.
-fn running_host_id() -> io::Result<String> {
+fn running_host_id(timeout: std::time::Duration) -> io::Result<String> {
     use crate::api::client::{parse_response_value, ApiClient};
     let request = crate::api::schema::Request {
         id: "viva.owner-anchor-host-id".into(),
         method: crate::api::schema::Method::VivaSnapshot(crate::api::schema::EmptyParams {}),
     };
     let response = ApiClient::local()
-        .request_value_with_timeout(&request, std::time::Duration::from_secs(5))
+        .request_value_with_timeout(&request, timeout)
         .and_then(parse_response_value)
         .map_err(|error| io::Error::other(error.to_string()))?;
     let value = serde_json::to_value(&response.result).map_err(io::Error::other)?;
@@ -216,14 +219,18 @@ fn running_host_id() -> io::Result<String> {
 }
 
 /// The anchor this process can present. A spawning TUI holds it in memory or
-/// over an inherited descriptor; a reattaching TUI resolves it from the OS
-/// user-presence store for the host identity the running host advertises.
-fn owner_credential(ctx: &Context) -> io::Result<String> {
-    match ctx.domain.client_credential() {
+/// over an inherited descriptor; a reattaching TUI resolves it from the private
+/// runtime store for the host identity the running host advertises.
+fn owner_credential(
+    known: io::Result<String>,
+    deadline: std::time::Instant,
+    running_host: impl FnMut(std::time::Duration) -> io::Result<String>,
+    load: impl FnMut(&str) -> io::Result<String>,
+) -> io::Result<String> {
+    match known {
         Ok(anchor) => Ok(anchor),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let host_id = running_host_id()?;
-            ctx.domain.owner_anchor_for_host(&host_id)
+            owner_credential_for_host(deadline, running_host, load)
         }
         Err(error) => Err(error),
     }
@@ -240,7 +247,12 @@ pub(crate) fn authenticate_local_client() -> io::Result<()> {
     use std::time::{Duration, Instant};
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let credential = match owner_credential(ctx) {
+        let credential = match owner_credential(
+            ctx.domain.client_credential(),
+            deadline,
+            running_host_id,
+            |host_id| ctx.domain.owner_anchor_for_host(host_id),
+        ) {
             Ok(value) => value,
             Err(error) if error.kind() == io::ErrorKind::NotFound && Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10));
@@ -294,7 +306,7 @@ pub(crate) fn authenticate_local_client() -> io::Result<()> {
             Err(ApiClientError::ErrorResponse(error))
                 if error.error.code == "stale_owner_anchor" && Instant::now() < deadline =>
             {
-                // A spawned or keychain-cached anchor belongs to a dead host
+                // A spawned or runtime-stored anchor belongs to a dead host
                 // incarnation. Drop it and resolve the live host's anchor once.
                 clear_spawned_owner_anchor();
                 continue;
@@ -688,6 +700,69 @@ fn admit_with_peer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_frontend_resolves_a_confirmed_snapshot_capability_rotation() {
+        use std::time::{Duration, Instant};
+        let mut snapshots = ["native-a", "native-b"].into_iter();
+        let mut loads = Vec::new();
+        let credential = owner_credential(
+            Err(io::Error::from(io::ErrorKind::NotFound)),
+            Instant::now() + Duration::from_secs(1),
+            |_| {
+                Ok(snapshots
+                    .next()
+                    .expect("bounded identity checks")
+                    .to_owned())
+            },
+            |host| {
+                loads.push(host.to_owned());
+                if host == "native-a" {
+                    Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        OwnerAnchorHostMismatch,
+                    ))
+                } else {
+                    Ok("proof-for-b".to_owned())
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(credential, "proof-for-b");
+        assert_eq!(loads, ["native-a", "native-b"]);
+        assert!(snapshots.next().is_none());
+    }
+
+    #[test]
+    fn inherited_proof_and_non_readiness_errors_never_fall_back_to_runtime_file() {
+        use std::time::Instant;
+        for known in [
+            Ok("inherited-proof".to_owned()),
+            Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+        ] {
+            let expected = known
+                .as_ref()
+                .map(String::as_str)
+                .map_err(|error| error.kind());
+            let result = owner_credential(
+                known
+                    .as_ref()
+                    .map(Clone::clone)
+                    .map_err(|error| io::Error::from(error.kind())),
+                Instant::now(),
+                |_| panic!("must not query a host"),
+                |_| panic!("must not read a runtime file"),
+            );
+            assert_eq!(
+                result
+                    .as_ref()
+                    .map(String::as_str)
+                    .map_err(|error| error.kind()),
+                expected
+            );
+        }
+    }
+
     #[test]
     fn embedded_entry_refuses_unintegrated_namespaces() {
         for args in [

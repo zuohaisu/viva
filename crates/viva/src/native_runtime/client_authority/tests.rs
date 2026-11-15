@@ -1,6 +1,18 @@
 use super::*;
 use crate::native_runtime::owner_anchor;
 
+#[test]
+fn runtime_capability_never_claims_human_user_role() {
+    let (mut authority, anchor, peer) = fixture();
+    let lifetime = peer_lifetime_marker(peer).unwrap();
+    authority
+        .authenticate(&anchor, peer, Some(&lifetime), |channel, _| {
+            assert_eq!(channel.claimed_role, CallerRole::AgentCli);
+            Ok(())
+        })
+        .unwrap();
+}
+
 fn fixture() -> (ClientAuthority, String, TransportPeer) {
     let (_, anchor) = owner_anchor::generate();
     let mut authority = ClientAuthority::new();

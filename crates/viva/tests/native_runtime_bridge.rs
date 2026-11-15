@@ -20,10 +20,7 @@ use viva::{
 
 #[test]
 fn actual_native_server_reads_canonical_facts_and_audits_unbound_refusals() {
-    let temp = tempfile::Builder::new()
-        .prefix("vn-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let store = Store::open(&paths::database_path(home), viva::server::migrations()).unwrap();
     let member = MemberRegistry::new(&store)
@@ -91,9 +88,8 @@ fn actual_native_server_reads_canonical_facts_and_audits_unbound_refusals() {
         invalid["error"]["code"], "owner_anchor_mismatch",
         "{invalid}"
     );
-    // The real frontend/PTY probe separately proves successful capability use.
-    // The owner capability is never a file: only the spawned server holds the
-    // anchor, delivered over its inherited descriptor.
+    // The real frontend/PTY probe separately proves default-file reattachment.
+    assert!(home.join("runtime-capability/owner-anchor").is_file());
     assert!(!runtime.join("owner-channel.json").exists());
     for method in ["server.stop", "server.live_handoff", "workspace.create"] {
         let params = if method == "server.live_handoff" {
@@ -180,10 +176,7 @@ fn owner_only_preview_refuses_unbound_pending_execution_without_reconciling_it()
     use viva::foundation::records::{
         AttributionSnapshot, ExecutionRecord, get_execution, insert_execution,
     };
-    let temp = tempfile::Builder::new()
-        .prefix("vn-guard-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let store = Store::open(&paths::database_path(home), viva::server::migrations()).unwrap();
     let member = MemberRegistry::new(&store)
@@ -205,6 +198,7 @@ fn owner_only_preview_refuses_unbound_pending_execution_without_reconciling_it()
     insert_execution(&store, &execution).unwrap();
     // Keep this original connection: reopening with Store::open would itself
     // reconcile data and invalidate the no-reconciliation assertion.
+    paths::ensure_private_dir(home).unwrap();
     let log_path = home.join("native.log");
     let mut child = Command::new(env!("CARGO_BIN_EXE_viva"))
         .args(["runtime", "server"])
@@ -213,7 +207,6 @@ fn owner_only_preview_refuses_unbound_pending_execution_without_reconciling_it()
         .env("VIVA_HOME", home)
         .env("HOME", home)
         .env("SHELL", "/bin/sh")
-        .env("VIVA_OWNER_KEYCHAIN", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(std::fs::File::create(&log_path).unwrap())

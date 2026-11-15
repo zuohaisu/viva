@@ -8,7 +8,6 @@ mod owner_support;
 use owner_support::{OwnerHost, authenticate, call, spawn, wait_owner_ready};
 use serde_json::{Value, json};
 use std::{
-    io::Write,
     path::Path,
     process::Command,
     thread,
@@ -180,10 +179,7 @@ fn event_payloads(home: &Path, kind: &str) -> Vec<String> {
 
 #[test]
 fn bound_process_report_is_canonical_attributed_and_redacted() {
-    let temp = tempfile::Builder::new()
-        .prefix("vn-member-report-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let data = seed(home, &["dispatch_delegated", "member_report"]);
     let host = start_fixture(home, "member-report");
@@ -237,10 +233,7 @@ fn bound_process_report_is_canonical_attributed_and_redacted() {
 
 #[test]
 fn external_process_with_a_valid_credential_is_refused() {
-    let temp = tempfile::Builder::new()
-        .prefix("vn-member-unbound-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let data = seed(home, &["dispatch_delegated", "member_report"]);
     let host = start_fixture(home, "member-unbound");
@@ -272,10 +265,7 @@ fn external_process_with_a_valid_credential_is_refused() {
 
 #[test]
 fn report_outside_the_grant_actions_is_refused_and_audited() {
-    let temp = tempfile::Builder::new()
-        .prefix("vn-member-grant-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let data = seed(home, &["dispatch_delegated"]);
     let host = start_fixture(home, "member-grant");
@@ -308,10 +298,7 @@ fn report_outside_the_grant_actions_is_refused_and_audited() {
 
 #[test]
 fn a_revoked_credential_cannot_report_after_exit() {
-    let temp = tempfile::Builder::new()
-        .prefix("vn-member-revoked-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let data = seed(home, &["dispatch_delegated", "member_report"]);
     let host = start_fixture(home, "member-revoked");
@@ -331,17 +318,101 @@ fn a_revoked_credential_cannot_report_after_exit() {
 }
 
 #[test]
+fn real_bound_member_reports_recheck_revocation_expiry_and_task_scope() {
+    for fault in [
+        "grant_revoked",
+        "expired",
+        "cross_task",
+        "credential_revoked",
+    ] {
+        let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
+        let home = temp.path();
+        let data = seed(home, &["dispatch_delegated", "member_report"]);
+        // Open before any live execution; never run migration/reconciliation
+        // as a side effect of mutating an active fixture's grant.
+        let store = Store::open(&paths::database_path(home), viva::server::migrations()).unwrap();
+        let host = start_fixture(home, fault);
+        let go = home.join("report-go");
+        let command = format!(
+            "while [ ! -f '{}' ]; do sleep 0.05; done; exec '{}' runtime member report --status progress",
+            go.display(),
+            env!("CARGO_BIN_EXE_viva")
+        );
+        let execution = start_execution(home, &host, &data, fault, &command);
+        wait_execution_running(home, &execution);
+        match fault {
+            "grant_revoked" => AuthorityEngine::new(&store)
+                .revoke(&data.grant.grant_id, "fixture revocation")
+                .unwrap(),
+            "expired" => {
+                store
+                    .connection()
+                    .execute(
+                        "UPDATE grants SET expires_at='2000-01-01T00:00:00Z' WHERE grant_id=?1",
+                        [data.grant.grant_id.as_str()],
+                    )
+                    .unwrap();
+            }
+            "cross_task" => {
+                let other = TaskRegistry::new(&store)
+                    .create_task(
+                        "unrelated scope",
+                        vec![],
+                        Some(data.member.member_id.clone()),
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                store
+                    .connection()
+                    .execute(
+                        "UPDATE grants SET task_id=?1 WHERE grant_id=?2",
+                        [other.task_id.as_str(), data.grant.grant_id.as_str()],
+                    )
+                    .unwrap();
+            }
+            "credential_revoked" => AuthorityEngine::new(&store)
+                .revoke_worker_credential(&credential_for(home, &execution))
+                .unwrap(),
+            _ => unreachable!(),
+        }
+        std::fs::write(&go, b"go").unwrap();
+        assert_eq!(
+            wait_execution_exit(home, &execution),
+            ("failed".into(), Some(1)),
+            "{fault}"
+        );
+        let reported: i64 = db(home)
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind='native_member_reported'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reported, 0, "{fault}");
+        assert!(
+            event_payloads(home, "native_member_report_refused")
+                .iter()
+                .any(|value| value.contains("authority_refused")),
+            "{fault}"
+        );
+        let claims: i64 = db(home).query_row("SELECT count(*) FROM events WHERE kind='native_client_admitted' AND json_extract(payload, '$.caller_role')='user'", [], |row| row.get(0)).unwrap();
+        assert_eq!(
+            claims, 0,
+            "a member action must not become human intent: {fault}"
+        );
+    }
+}
+
+#[test]
 fn a_member_process_cannot_pause_the_owner_host() {
-    let temp = tempfile::Builder::new()
-        .prefix("vn-member-owner-capability-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let data = seed(home, &["dispatch_delegated", "member_report"]);
     let host = start_fixture(home, "member-owner-capability");
     let marker = home.join("control-result");
     let command = format!(
-        "VIVA_HOME='{}' HOME='{}' VIVA_OWNER_KEYCHAIN=0 '{}' runtime host pause >/dev/null 2>&1; \
+        "VIVA_HOME='{}' HOME='{}' '{}' runtime host pause >/dev/null 2>&1; \
          printf '%s' $? > '{}'",
         home.display(),
         home.display(),
@@ -382,48 +453,21 @@ fn a_member_process_cannot_pause_the_owner_host() {
 }
 
 #[test]
-fn a_reattaching_control_process_with_the_anchor_regains_owner_capability() {
-    let temp = tempfile::Builder::new()
-        .prefix("vn-owner-reattach-")
-        .tempdir_in("/tmp")
-        .unwrap();
+fn a_fresh_local_controller_uses_the_default_runtime_capability() {
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
-    let host = start_fixture(home, "owner-reattach");
-    // A new frontend process did not spawn this host, so it has no in-memory
-    // anchor. This fixture supplies the same anchor over an inherited
-    // descriptor, the transport the login keychain fills for a real reattach.
-    let mut fds = [0; 2];
-    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-    let (read_fd, write_fd) = (fds[0], fds[1]);
-    {
-        use std::os::fd::FromRawFd;
-        let mut pipe = unsafe { std::fs::File::from_raw_fd(write_fd) };
-        pipe.write_all(format!("{}\n", host.anchor()).as_bytes())
-            .unwrap();
-    }
-    assert!(unsafe { libc::fcntl(read_fd, libc::F_SETFD, 0) } >= 0);
-    let output = Command::new("/bin/sh")
-        .args([
-            "-c",
-            &format!(
-                "VIVA_HOME='{}' HOME='{}' '{}' runtime host pause",
-                home.display(),
-                home.display(),
-                env!("CARGO_BIN_EXE_viva")
-            ),
-        ])
+    let _host = start_fixture(home, "owner-reattach");
+    // No descriptor or anchor injection: a fresh local controller resolves the
+    // live host and its private runtime capability through the default path.
+    let output = Command::new(env!("CARGO_BIN_EXE_viva"))
+        .args(["runtime", "host", "pause"])
         .env_clear()
         .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
         .env("HOME", home)
         .env("SHELL", "/bin/sh")
         .env("VIVA_HOME", home)
-        .env("VIVA_OWNER_ANCHOR_FD", read_fd.to_string())
-        .env("VIVA_OWNER_KEYCHAIN", "0")
         .output()
         .unwrap();
-    unsafe {
-        libc::close(read_fd);
-    }
     assert!(
         output.status.success(),
         "a reattaching control process with the live anchor was refused: {}",
@@ -442,12 +486,16 @@ fn a_reattaching_control_process_with_the_anchor_regains_owner_capability() {
 
 #[test]
 fn a_sibling_same_uid_process_without_the_anchor_is_refused() {
-    let temp = tempfile::Builder::new()
-        .prefix("vn-owner-sibling-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let _host = start_fixture(home, "owner-sibling");
+    // The local account is trusted to read its capability, not authenticated
+    // merely by UID. Explicitly withhold the file to test missing proof.
+    std::fs::rename(
+        home.join("runtime-capability/owner-anchor"),
+        home.join("withheld-anchor"),
+    )
+    .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_viva"))
         .args(["runtime", "host", "pause"])
         .env_clear()
@@ -455,7 +503,6 @@ fn a_sibling_same_uid_process_without_the_anchor_is_refused() {
         .env("HOME", home)
         .env("SHELL", "/bin/sh")
         .env("VIVA_HOME", home)
-        .env("VIVA_OWNER_KEYCHAIN", "0")
         .output()
         .unwrap();
     assert!(
@@ -479,27 +526,27 @@ fn a_sibling_same_uid_process_without_the_anchor_is_refused() {
 }
 
 #[test]
-fn a_self_reparented_worker_is_refused() {
-    let temp = tempfile::Builder::new()
-        .prefix("vn-owner-reparented-")
-        .tempdir_in("/tmp")
-        .unwrap();
+fn a_self_reparented_request_with_wrong_explicit_capability_is_refused() {
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let data = seed(home, &["dispatch_delegated", "member_report"]);
     let host = start_fixture(home, "owner-reparented");
     let marker = home.join("reparented-result");
-    // The worker shell exits immediately while a nohup grandchild waits, is
-    // reparented to launchd, then attempts the owner control. Its ancestry is
-    // no longer the host's and its execution root is gone; only the anchor can
-    // make it owner, and it has none.
+    // Reparenting loses the known execution ancestry. The local account is
+    // not a same-UID sandbox: test an explicit WRONG capability, not a claim
+    // that an arbitrary orphan cannot read the account's private runtime file.
+    let wrong_proof = home.join("wrong-proof");
+    let (prefix, _) = host.anchor().rsplit_once(':').unwrap();
+    std::fs::write(&wrong_proof, format!("{prefix}:wrong-proof\n")).unwrap();
     let command = format!(
-        "nohup sh -c \"trap '' HUP; sleep 3; VIVA_HOME='{}' HOME='{}' VIVA_OWNER_KEYCHAIN=0 '{}' \
-         runtime host pause >/dev/null 2>&1; printf '%s' \\$? > '{}'\" >/dev/null 2>&1 &\n\
+        "nohup sh -c \"trap '' HUP; sleep 3; VIVA_HOME='{}' HOME='{}' VIVA_OWNER_ANCHOR_FD=3 '{}' \
+         runtime host pause 3<'{}' >/dev/null 2>&1; printf '%s' \\$? > '{}'\" >/dev/null 2>&1 &\n\
          sleep 1\n\
          exit 0",
         home.display(),
         home.display(),
         env!("CARGO_BIN_EXE_viva"),
+        wrong_proof.display(),
         marker.display()
     );
     let execution_id = start_execution(home, &host, &data, "owner-reparented", &command);
@@ -531,7 +578,7 @@ fn a_self_reparented_worker_is_refused() {
     let refused: i64 = db(home)
         .query_row(
             "SELECT count(*) FROM events WHERE kind='native_owner_auth_refused' \
-             AND payload LIKE '%owner_anchor_missing%'",
+             AND payload LIKE '%owner_anchor_mismatch%'",
             [],
             |row| row.get(0),
         )
@@ -544,10 +591,7 @@ fn a_self_reparented_worker_is_refused() {
 
 #[test]
 fn foreign_active_credentials_still_block_the_owner_gate() {
-    let temp = tempfile::Builder::new()
-        .prefix("vn-member-foreign-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let temp = tempfile::Builder::new().prefix("vn").tempdir().unwrap();
     let home = temp.path();
     let store = Store::open(&paths::database_path(home), viva::server::migrations()).unwrap();
     let members = MemberRegistry::new(&store);
@@ -560,6 +604,7 @@ fn foreign_active_credentials_still_block_the_owner_gate() {
         )
         .unwrap();
     // The gate is exercised through the real host: it must refuse to start.
+    paths::ensure_private_dir(home).unwrap();
     let runtime = home.join("runtime/workbench");
     std::fs::create_dir_all(&runtime).unwrap();
     std::fs::write(
@@ -578,7 +623,6 @@ fn foreign_active_credentials_still_block_the_owner_gate() {
         .env("VIVA_HOME", home)
         .env("XDG_CONFIG_HOME", home.join("xdg-config"))
         .env("XDG_STATE_HOME", home.join("xdg-state"))
-        .env("VIVA_OWNER_KEYCHAIN", "0")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(log)
