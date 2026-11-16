@@ -5,7 +5,7 @@
 set -eu
 command -v python3 >/dev/null 2>&1 || { printf '%s\n' 'viva install: python3 is required' >&2; exit 1; }
 exec python3 - <<'PY'
-import fcntl, hashlib, json, os, platform, re, shlex, shutil, signal, stat, subprocess, sys, tarfile, tempfile, unicodedata
+import fcntl, hashlib, json, os, platform, re, shlex, shutil, signal, stat, struct, subprocess, sys, tarfile, tempfile, unicodedata
 from pathlib import Path
 
 MARKER = '# viva-tailnet-dev-wrapper'
@@ -100,6 +100,11 @@ def main():
         if h.hexdigest() != digest.lower(): fail('checksum mismatch')
         unpack = stage / 'unpack'; unpack.mkdir()
         package = extract_checked(archive, unpack, 'viva-' + arch)
+        with (package / 'viva').open('rb') as binary:
+            header = binary.read(8)
+        expected_cpu = {'macos-arm64': 0x0100000c, 'macos-intel': 0x01000007}[arch]
+        if len(header) != 8 or struct.unpack('<II', header) != (0xfeedfacf, expected_cpu):
+            fail('package is not a native 64-bit Mach-O for ' + arch)
         # Version probe must not touch the caller's VIVA_HOME or its default home.
         probehome = stage / 'probe-home'; probehome.mkdir()
         probeenv = os.environ.copy(); probeenv['HOME'] = str(probehome); probeenv['VIVA_HOME'] = str(probehome / 'viva-home')

@@ -283,6 +283,15 @@ def run(args):
             result['fresh_process_reattach_retained_work'] = True
             result['target_sha256'] = digest(args.candidate)
             stable_hash = digest(fixture.binary)
+            wrong_platform = root / 'wrong-platform-viva'
+            shutil.copy2(args.candidate, wrong_platform)
+            with wrong_platform.open('r+b') as binary:
+                binary.seek(4)
+                binary.write(struct.pack('<I', 0x01000007 if arch == 'macos-arm64' else 0x0100000c))
+            assets['wrong-platform'] = package(web, wrong_platform, arch, 'wrong-platform')
+            _, error = install('wrong-platform', expect=False)
+            assert 'not a native 64-bit Mach-O' in error
+            result['wrong_platform_refused_before_execution'] = True
             assets['bad-checksum'] = dict(assets['b'], sha256='0' * 64)
             _, error = install('bad-checksum', expect=False)
             assert 'checksum mismatch' in error
