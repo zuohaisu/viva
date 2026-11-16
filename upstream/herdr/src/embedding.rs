@@ -36,6 +36,18 @@ pub trait DomainServices: Send + Sync {
     ) -> io::Result<()>;
     fn validate_client(&self, peer: TransportPeer) -> io::Result<()>;
     fn snapshot(&self) -> io::Result<serde_json::Value>;
+    /// Viva modification: canonical navigation, after controller admission.
+    fn workspace(
+        &self,
+        _action: &str,
+        _value: Option<&str>,
+        _project: Option<&str>,
+    ) -> io::Result<serde_json::Value> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Viva workspace navigation is unavailable",
+        ))
+    }
     /// Prepare one canonical execution. The composition root performs the
     /// task/member/grant authority checks and records the intent BEFORE the
     /// runtime spawns anything. `replayed` means never spawn a second process.
@@ -440,6 +452,12 @@ pub fn context() -> Option<&'static Context> {
 pub(crate) fn take_legacy_import() -> Option<LegacyImport> {
     context()?.legacy_import.lock().ok()?.take()
 }
+/// Viva modification (#191 P1): domain CLI autostart uses the same detached
+/// daemon setup as the native frontend, never the client's controlling TTY.
+pub fn configure_host_daemon(command: &mut std::process::Command) {
+    crate::platform::detach_server_daemon_command(command);
+}
+
 pub fn enabled() -> bool {
     context().is_some()
 }
@@ -526,6 +544,18 @@ pub(crate) fn snapshot() -> io::Result<serde_json::Value> {
         .ok_or_else(|| io::Error::other("Viva domain services are not embedded"))?
         .domain
         .snapshot()
+}
+
+// Viva modification (#191 P1): reuse Viva Navigation rather than a second registry.
+pub(crate) fn workspace(
+    action: &str,
+    value: Option<&str>,
+    project: Option<&str>,
+) -> io::Result<serde_json::Value> {
+    context()
+        .ok_or_else(|| io::Error::other("Viva domain unavailable"))?
+        .domain
+        .workspace(action, value, project)
 }
 
 pub(crate) fn prepare_execution(request: ExecutionRequest) -> io::Result<ExecutionPlan> {
@@ -670,13 +700,19 @@ fn admit_with_peer(
     }
     if matches!(
         method,
-        "viva.execution.start" | "viva.execution.stop" | "viva.host.pause"
+        "viva.execution.start"
+            | "viva.execution.stop"
+            | "viva.host.pause"
+            | "viva.workspace"
+            | "server.stop"
     ) {
         // The socket path must present the host-issued owner capability. The
         // no-peer form is only the second gate after that admission (or the
         // already-authenticated client-shell connection).
         return match peer {
-            Some(peer) => ctx.domain.validate_client(peer),
+            Some(peer) => ctx.domain.validate_client(peer).inspect_err(|_| {
+                let _ = ctx.domain.refused(method, Some(peer));
+            }),
             None => Ok(()),
         };
     }

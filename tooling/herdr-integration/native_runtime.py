@@ -17,6 +17,7 @@ import sqlite3
 import select
 import signal
 import shutil
+import shlex
 import socket
 import struct
 import subprocess
@@ -44,7 +45,7 @@ def process_identity(pid):
         return None
 
 
-def probe(binary, legacy_live=False):
+def probe(binary, legacy_live=False, legacy_binary=None, entry="bare"):
     packet = {"schema": 1, "binary": binary.name,
               "entry": "bare_viva",
               "legacy_live_prelude": legacy_live,
@@ -80,11 +81,22 @@ def probe(binary, legacy_live=False):
         # Exercise the actual default entry: no supplied anchor, descriptor or
         # credential-store switch. The first TUI mints its own spawn proof; a
         # completely new reattaching process must use the private runtime file.
+        entry_args = [] if entry == "bare" else [entry]
+        if entry == "open":
+            project = root / "project"
+            project.mkdir()
+            workspace_file = root / "p1.code-workspace"
+            workspace_text = json.dumps({"folders": [{"path": str(project)}], "tasks": {"ignored": True}})
+            workspace_file.write_text(workspace_text)
+            entry_args.append(str(workspace_file))
+        packet["entry"] = entry
         legacy = None
         legacy_stderr = None
         if legacy_live:
+            assert legacy_binary is not None, "--legacy-live requires --legacy-viva (recorded non-native baseline)"
+            packet["legacy_binary_sha256"] = hashlib.sha256(legacy_binary.read_bytes()).hexdigest()
             legacy_stderr = (root / "legacy.log").open("wb")
-            legacy = subprocess.Popen([str(binary), "server"], env=environment,
+            legacy = subprocess.Popen([str(legacy_binary), "server"], env=environment,
                                       cwd=root, stdin=subprocess.DEVNULL,
                                       stdout=subprocess.DEVNULL, stderr=legacy_stderr,
                                       start_new_session=True)
@@ -99,7 +111,7 @@ def probe(binary, legacy_live=False):
                 if legacy.poll() is not None:
                     raise AssertionError("legacy host exited before serving: " +
                                          (root / "legacy.log").read_text(errors="replace")[-2500:])
-                status = subprocess.run([str(binary), "status"], env=environment,
+                status = subprocess.run([str(legacy_binary), "status"], env=environment,
                                         cwd=root, capture_output=True, text=True, timeout=15)
                 try:
                     live = json.loads(status.stdout)
@@ -113,7 +125,7 @@ def probe(binary, legacy_live=False):
                 time.sleep(.1)
             packet["legacy_host_owns_socket"] = True
             created = subprocess.run(
-                [str(binary), "terminal", "create", "--cols", "80", "--rows", "24",
+                [str(legacy_binary), "terminal", "create", "--cols", "80", "--rows", "24",
                  "--purpose", "legacy-live-probe", "--", "/bin/sh"],
                 env=environment, cwd=root, capture_output=True, text=True, timeout=15)
             assert created.returncode == 0, "legacy terminal create failed: " + created.stderr[-2000:]
@@ -143,7 +155,7 @@ def probe(binary, legacy_live=False):
                         break
 
         try:
-            client = subprocess.Popen([str(binary)], env=environment,
+            client = subprocess.Popen([str(binary)] + entry_args, env=environment,
                                       cwd=root, stdin=slave, stdout=slave, stderr=slave,
                                       start_new_session=True)
             os.close(slave)
@@ -164,6 +176,9 @@ def probe(binary, legacy_live=False):
                     continue
             assert snapshot and snapshot["backend"] == "herdr-source-library", "native domain endpoint not ready"
             assert server_pid != client.pid, "client is not a detached native host"
+            if entry == "open":
+                packet["opened_host_is_session_leader"] = os.getsid(server_pid) == server_pid
+                assert packet["opened_host_is_session_leader"], "open host retained the client session/controlling TTY"
             server_identity = process_identity(server_pid)
             assert server_identity and str(binary) + " runtime server" in server_identity, "unexpected private host identity"
             packet["native_autospawn"] = True
@@ -246,6 +261,16 @@ def probe(binary, legacy_live=False):
                 drain(.2)
             packet["native_pty_output"] = b"VIVA_NATIVE_PTY_OK" in frame
             assert packet["native_pty_output"], "native PTY output marker not rendered"
+            if entry == "open":
+                # The expected marker is absent from input bytes: it proves
+                # the attached shell's physical cwd, not command echo.
+                check_cwd = 'test "$(pwd -P)" = ' + shlex.quote(str(project.resolve())) + " && printf '\\126\\111\\126\\101_\\120\\061_\\103\\127\\104_\\117\\113\\n'\r"
+                os.write(master, check_cwd.encode())
+                deadline = time.monotonic() + 12
+                while time.monotonic() < deadline and b"VIVA_P1_CWD_OK" not in frame:
+                    drain(.2)
+                packet["opened_folder_is_live_shell_cwd"] = b"VIVA_P1_CWD_OK" in frame
+                assert packet["opened_folder_is_live_shell_cwd"], "open attached a shell in the wrong folder"
             packet["ansi_bytes"] = len(frame)
             assert b"\x1b[" in frame, "native renderer produced no ANSI frame"
             # Imported local detach contract is ctrl+b q, not a host stop.
@@ -264,7 +289,7 @@ def probe(binary, legacy_live=False):
             os.close(master)
             master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 120, 0, 0))
-            client = subprocess.Popen([str(binary)], env=environment,
+            client = subprocess.Popen([str(binary)] + entry_args, env=environment,
                                       cwd=root, stdin=slave, stdout=slave, stderr=slave,
                                       start_new_session=True)
             os.close(slave)
@@ -303,6 +328,13 @@ def probe(binary, legacy_live=False):
             packet["capability_absent_from_admission_events"] = all(
                 capability.read_text().strip() not in row[0] for row in rows)
             assert packet["capability_absent_from_admission_events"], "capability leaked into admission events"
+            if entry == "open":
+                assert workspace_file.read_text() == workspace_text, "opening rewrote workspace source"
+                assert not (home / "server.sock").exists(), "open started the legacy host"
+                with sqlite3.connect(str(home / "viva.db")) as database:
+                    selected = database.execute("SELECT c.source_path FROM workspace_compositions c JOIN navigation_selection s ON c.workspace_id=s.workspace_id").fetchone()
+                assert selected and Path(selected[0]).resolve() == workspace_file.resolve(), "canonical workspace was not selected"
+                packet["workspace_source_unchanged_and_selected"] = True
             packet["passed"] = True
         except Exception as error:
             packet["error"] = str(error)
@@ -368,8 +400,11 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--legacy-live", action="store_true",
                         help="start a real legacy host with one live terminal before bare viva")
+    parser.add_argument("--entry", choices=["bare", "workbench", "open"], default="bare")
+    parser.add_argument("--legacy-viva", type=Path, help="recorded pre-cutover non-native binary")
     arguments = parser.parse_args()
-    result = probe(arguments.viva.resolve(), arguments.legacy_live)
+    result = probe(arguments.viva.resolve(), arguments.legacy_live,
+                   arguments.legacy_viva.resolve() if arguments.legacy_viva else None, arguments.entry)
     arguments.output.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result))
     raise SystemExit(0 if result["passed"] else 1)

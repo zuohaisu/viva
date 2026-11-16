@@ -13,6 +13,84 @@ use crate::embedding::ExecutionRequest;
 use super::responses::{encode_error, encode_success};
 
 impl App {
+    // Viva modification (#191 P1): the domain registry owns composition facts;
+    // Herdr owns only the live terminal views. Never execute .code-workspace tasks.
+    pub(super) fn handle_viva_workspace(
+        &mut self,
+        id: String,
+        params: crate::api::schema::VivaWorkspaceParams,
+    ) -> String {
+        let workspace = match crate::embedding::workspace(
+            &params.action,
+            params.value.as_deref(),
+            params.project_id.as_deref(),
+        ) {
+            Ok(value) => value,
+            Err(err) => return encode_error(id, "workspace_refused", err.to_string()),
+        };
+        if matches!(params.action.as_str(), "open" | "select") {
+            let mut first = None;
+            for folder in workspace["folders"].as_array().into_iter().flatten() {
+                let Some(path) = folder["path"].as_str().map(std::path::PathBuf::from) else {
+                    continue;
+                };
+                if !path.is_dir() {
+                    continue;
+                }
+                let index = if let Some(index) = self
+                    .state
+                    .workspaces
+                    .iter()
+                    .position(|ws| ws.identity_cwd == path)
+                {
+                    index
+                } else {
+                    match self.create_workspace_with_launch_env(path, false, Default::default()) {
+                        Ok(index) => index,
+                        Err(err) => {
+                            return encode_error(id, "workspace_view_failed", err.to_string())
+                        }
+                    }
+                };
+                first.get_or_insert(index);
+            }
+            if let Some(index) = first {
+                self.state.switch_workspace(index);
+            }
+        }
+        encode_success(id, ResponseResult::VivaWorkspace { workspace })
+    }
+
+    // Viva modification: serialized with dispatch by the existing App queue.
+    // A raw controller stop cannot bypass the same canonical stop seam as CLI.
+    pub(super) fn handle_viva_host_stop(&mut self, id: String) -> String {
+        let snapshot = match crate::embedding::snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(err) => return encode_error(id, "shutdown_refused", err.to_string()),
+        };
+        for binding in snapshot["terminals"].as_array().into_iter().flatten() {
+            if !binding["pane_id"].is_string() {
+                continue;
+            }
+            let Some(execution_id) = binding["execution_id"].as_str() else {
+                continue;
+            };
+            let response = self.handle_viva_execution_stop(
+                id.clone(),
+                VivaExecutionStopParams {
+                    execution_id: execution_id.to_owned(),
+                },
+            );
+            let failed = serde_json::from_str::<serde_json::Value>(&response)
+                .map_or(true, |value| value.get("error").is_some());
+            if failed {
+                return response;
+            }
+        }
+        self.state.should_quit = true;
+        encode_success(id, ResponseResult::Ok {})
+    }
+
     fn close_execution_workspace(&mut self, ws_idx: usize) {
         let terminal_ids = self.state.terminal_ids_for_workspace(ws_idx);
         self.state.close_workspaces(vec![ws_idx]);
