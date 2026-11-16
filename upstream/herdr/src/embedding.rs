@@ -22,6 +22,17 @@ pub fn public_pane_id(workspace_id: &str, pane_number: usize) -> String {
 pub trait DomainServices: Send + Sync {
     fn server_started(&self) -> io::Result<()>;
     fn server_ready(&self) -> io::Result<()>;
+    /// Viva modification (#201): checked on the serialized app queue BEFORE
+    /// disconnecting clients or pausing PTY readers. No member credential loss.
+    fn prepare_handoff(&self) -> io::Result<()>;
+    fn handoff_rolled_back(&self) -> io::Result<()>;
+    /// Actual negotiated raw frontend connection, not JSON authentication.
+    fn raw_client_connection(
+        &self,
+        id: u64,
+        peer: TransportPeer,
+        connected: bool,
+    ) -> io::Result<()>;
     fn client_credential(&self) -> io::Result<String>;
     /// Resolve this host incarnation's local runtime capability. A reattaching
     /// TUI has no inherited spawn descriptor; the composition root loads the
@@ -166,6 +177,18 @@ pub fn peer_lifetime_marker(peer: TransportPeer) -> io::Result<String> {
 pub(crate) fn server_ready() -> io::Result<()> {
     if let Some(ctx) = context() {
         ctx.domain.server_ready()?;
+    }
+    Ok(())
+}
+
+pub(crate) fn raw_client_connection(
+    id: u64,
+    stream: &crate::ipc::LocalStream,
+    connected: bool,
+) -> io::Result<()> {
+    if let Some(ctx) = context() {
+        ctx.domain
+            .raw_client_connection(id, crate::ipc::transport_peer(stream)?, connected)?;
     }
     Ok(())
 }
@@ -467,6 +490,15 @@ pub fn run(context: Context) -> io::Result<()> {
 fn validate_arguments(args: &[String]) -> io::Result<()> {
     // These operations must be integrated with Viva first. In particular, never
     // let Herdr's updater replace a Viva executable or use an external bridge.
+    // Viva modification (#201): only the internal server form may import.
+    if args.iter().any(|arg| arg == "--handoff-import")
+        && !(args.len() == 5 && args[1] == "server" && args[2] == "--handoff-import")
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid handoff import arguments",
+        ));
+    }
     let supported_namespace = matches!(
         args.get(1).map(String::as_str),
         None | Some(
@@ -489,7 +521,6 @@ fn validate_arguments(args: &[String]) -> io::Result<()> {
             || arg.starts_with("--session=")
             || arg == "--remote"
             || arg.starts_with("--remote=")
-            || arg == "--handoff-import"
     }) || !supported_namespace
     {
         return Err(io::Error::new(
@@ -670,13 +701,19 @@ fn admit_with_peer(
     }
     if matches!(
         method,
-        "viva.execution.start" | "viva.execution.stop" | "viva.host.pause"
+        "viva.execution.start" | "viva.execution.stop" | "viva.host.pause" | "server.live_handoff"
     ) {
         // The socket path must present the host-issued owner capability. The
         // no-peer form is only the second gate after that admission (or the
         // already-authenticated client-shell connection).
         return match peer {
-            Some(peer) => ctx.domain.validate_client(peer),
+            Some(peer) => match ctx.domain.validate_client(peer) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    ctx.domain.refused(method, Some(peer))?;
+                    Err(error)
+                }
+            },
             None => Ok(()),
         };
     }

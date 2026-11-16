@@ -7,7 +7,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
-use std::process::{Child, Command};
+use std::process::Child;
 #[cfg(unix)]
 use std::time::Duration;
 
@@ -79,7 +79,9 @@ pub(crate) fn spawn_handoff_import(
         })?;
         &fallback_exe
     };
-    let mut command = Command::new(exe);
+    // Viva modification (#201): same embedded executable/namespace as normal
+    // daemon spawn, rather than accidentally entering the legacy Viva server.
+    let mut command = crate::embedding::child_command(exe);
     command
         .arg("server")
         .arg("--handoff-import")

@@ -168,130 +168,43 @@ download before `viva update` becomes available.
 
 ### Self-hosted test install
 
-`viva update` installs the latest stable GitHub Release or the npm `latest`
-tag. It does not read a private file server. To click-test a commit without
-publishing, serve that commit's archive from a Linux host and install it on
-the Mac that runs the TUI. The Linux host is only a file server.
+The Tailnet development channel remains separate from GitHub Releases/npm
+`latest` used by `viva update`. Its installer is tracked in
+[`packaging/install.sh`](packaging/install.sh) (macOS, Python 3, curl).
+Deploying that file or publishing a package still requires owner authorization;
+a repository change does not update the currently served installer.
 
-Publish this directory over HTTP or HTTPS:
-
-```text
-install.sh
-channel/viva-macos-arm64.tar.gz
-channel/viva-macos-arm64.tar.gz.sha256
-channel/viva-macos-intel.tar.gz
-channel/viva-macos-intel.tar.gz.sha256
-```
-
-Pack an archive the same way as `.github/workflows/release.yml`. On the Mac,
-from a checkout of the commit under test:
+Serve it over trusted HTTPS with `channel.json` and immutable archives. The
+manifest selects `assets.macos-arm64` / `assets.macos-intel`, each with `file`
+(a basename ending in `.tar.gz`) and `sha256`. Archives use the complete native
+payload from `.github/workflows/release.yml`, including extensions and notices;
+checksum integrity does not independently authenticate the publisher.
 
 ```bash
-cargo build --release -p viva
-DIR=viva-macos-arm64   # Intel: viva-macos-intel
-mkdir -p "$DIR/extensions"
-cp target/release/viva "$DIR/viva"
-cp -R extensions/pi "$DIR/extensions/pi"
-rm -rf "$DIR/extensions/pi/node_modules"
-cp LICENSE README.md "$DIR/"
-tar -czf "$DIR.tar.gz" "$DIR"
-if command -v shasum >/dev/null 2>&1; then
-  digest=$(shasum -a 256 "$DIR.tar.gz" | awk '{ print $1 }')
-else
-  digest=$(sha256sum "$DIR.tar.gz" | awk '{ print $1 }')
-fi
-printf '%s  %s\n' "$digest" "$DIR.tar.gz" > "$DIR.tar.gz.sha256"
+BASE=https://your-tailnet-host/viva
+curl -fsSL "$BASE/install.sh" | VIVA_INSTALL_BASE="$BASE" \
+  VIVA_PREFIX="$HOME/.local/viva-test-install" VIVA_HOME="$HOME/.viva-test" sh
+VIVA_HOME="$HOME/.viva-test" "$HOME/.local/viva-test-install/bin/viva"
 ```
 
-Publish the architectures you built. Copy the archive and the checksum into
-`channel/`. The checksum line is the digest, two spaces, then the archive
-name. Take the digest from `shasum` or from `sha256sum` and write the line
-with `printf`, as above. Do not redirect `sha256sum` output unchanged:
-binary mode writes `digest *name`, and macOS `shasum -c` rejects a line whose
-spacing is not its own.
+The installer stages and verifies before replacing files, preserves the previous
+binary/wrapper, and asks Viva to activate the same installation and VIVA_HOME.
+No running runtime means **no daemon is started**. Cooperative native generations
+support live PTY/shell transfer and negotiated reconnect of existing compatible
+frontends; the frontend executable is not reloaded. The actual target binary
+hash, new host identity, old host exit and frontend reconnect are checked, not
+just `--version`.
 
-On a Tailscale network, bind the server to that node's `100.x.x.x` address and
-serve plain HTTP. A bare IP has no trusted HTTPS certificate, so
-`https://100.x.x.x` fails TLS verification. Tailscale already encrypts the
-path. Do not listen on `0.0.0.0` when the machine also has a public address.
-Caddy, with the `http://` prefix so it does not request a certificate:
-
-```text
-http://100.x.x.x {
-  root * /var/www/viva-test
-  file_server
-}
-```
-
-`install.sh` on that host. It contains no server address. Set
-`VIVA_TEST_BASE` to the origin you curl, with no trailing path:
-
-```sh
-#!/bin/sh
-set -eu
-if [ -z "${VIVA_TEST_BASE:-}" ]; then
-  printf 'Set VIVA_TEST_BASE to the file server origin, with no trailing path\n' >&2
-  exit 1
-fi
-BASE=${VIVA_TEST_BASE%/}
-case "$(uname -s)-$(uname -m)" in
-  Darwin-arm64) ASSET=viva-macos-arm64.tar.gz ;;
-  Darwin-x86_64) ASSET=viva-macos-intel.tar.gz ;;
-  *) printf 'macOS Apple Silicon or Intel only\n' >&2; exit 1 ;;
-esac
-if [ "$(id -u)" -eq 0 ]; then
-  printf 'run as your user, not root\n' >&2
-  exit 1
-fi
-tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
-curl -fsSL "$BASE/channel/$ASSET" -o "$tmp/$ASSET"
-curl -fsSL "$BASE/channel/$ASSET.sha256" -o "$tmp/$ASSET.sha256"
-expected=$(awk 'NR==1 && $1 ~ /^[0-9a-fA-F]{64}$/ { print tolower($1); exit }' "$tmp/$ASSET.sha256")
-if [ -z "$expected" ]; then
-  printf 'checksum file must start with a 64-hex SHA-256\n' >&2
-  exit 1
-fi
-actual=$(shasum -a 256 "$tmp/$ASSET" | awk '{ print tolower($1) }')
-if [ "$expected" != "$actual" ]; then
-  printf 'SHA-256 mismatch\n' >&2
-  exit 1
-fi
-dest="$HOME/.local/viva-test"
-rm -rf "$dest"
-mkdir -p "$dest"
-tar -xzf "$tmp/$ASSET" -C "$dest" --strip-components=1
-chmod 755 "$dest/viva"
-printf 'Installed %s\n' "$dest/viva"
-printf 'export VIVA_HOME="$HOME/.viva-test"\n'
-printf '%s\n' "$dest/viva"
-```
-
-On the Mac, with Tailscale connected (the same origin in both places):
-
-```bash
-curl -fsSL http://100.x.x.x/install.sh | VIVA_TEST_BASE=http://100.x.x.x sh
-export VIVA_HOME="$HOME/.viva-test"
-~/.local/viva-test/viva
-```
-
-The script replaces `~/.local/viva-test` only. It does not change `~/.viva`
-or a `viva` already on `PATH`. If a test server is already running, stop it
-with the same `VIVA_HOME` before installing again:
-
-```bash
-VIVA_HOME="$HOME/.viva-test" ~/.local/viva-test/viva shutdown
-```
-
-Replacing the files in `channel/` publishes the next build. Run the same curl
-command again. Leave `install.sh` unchanged when the origin changes or a new
-archive is published: the origin is only in that command, and the script
-trusts the checksum file's first field. It compares that digest to
-`shasum -a 256` of the downloaded archive, so a GNU `sha256sum` line
-(`digest *name` or `digest  name`) still verifies. `viva update` still
-follows the stable channels, so do not run it against `~/.local/viva-test`.
-A PR build can still print the version in `Cargo.toml`; record
-`git rev-parse HEAD` with the bug report.
+**Current limits (#201):** 0.3.10 and earlier native hosts lack the cooperative
+protocol and are refused before replacement; active canonical member executions
+or worker credentials also block upgrade before any handoff. Do not kill live
+work to bypass this guard. Those upgrade paths remain unfinished, not successful
+cold recovery. Native activation through npm is not yet supported. Exact-schema
+attachment performs no database migration; retained files are **binary backups,
+not database backups**. An ambiguous post-commit failure retains installed files
+and reports failure instead of blindly rolling back behind a new runtime.
+Intel installation, user-data migration and human visual acceptance require their
+own evidence. PR builds keep the package version; record commit and binary hash.
 
 **Run Viva:**
 

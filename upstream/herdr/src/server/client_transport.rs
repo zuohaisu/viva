@@ -927,14 +927,20 @@ pub(crate) fn handle_client_handshake(
         }
     }
 
+    // Viva modification (#201): observe an actually negotiated frontend and
+    // retain its OS identity only for this connection's lifetime.
+    crate::embedding::raw_client_connection(client_id, &stream, true)?;
+    let observation = stream.try_clone()?;
     // Enter read loop — read client messages and forward to main loop.
-    client_read_loop_with_endpoint_controls(
+    let result = client_read_loop_with_endpoint_controls(
         stream,
         client_id,
         server_event_tx,
         should_quit,
         endpoint_control_writer.as_ref(),
-    )
+    );
+    let _ = crate::embedding::raw_client_connection(client_id, &observation, false);
+    result
 }
 
 fn send_shutdown_to_unregistered_client(writer: &ClientWriter) {

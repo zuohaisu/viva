@@ -282,7 +282,7 @@ impl Client {
 
 /// A per-process identity captured before a host starts serving. Caching
 /// prevents a later on-disk replacement from changing the old host's identity.
-pub(super) fn executable_sha256() -> Result<String> {
+pub(crate) fn executable_sha256() -> Result<String> {
     use std::io::Read as _;
     use std::sync::OnceLock;
 
