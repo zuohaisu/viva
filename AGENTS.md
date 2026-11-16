@@ -215,14 +215,27 @@ then through a pull request and a merge into the remote default branch.
       git diff --check    # whitespace damage and stray conflict markers
       git status --short  # confirm only intentional files changed
 
-  and full validation is delegated to required CI, which runs the
-  complete suite on every PR regardless of changed paths (`ci.yml` carries
-  no `paths` filter on purpose). This fast path relaxes only the local
-  suite run — never the branch/PR workflow, worktree isolation, scope
-  boundaries, the inspection of the final diff for secrets and generated
-  artifacts, or the CI gate itself. As soon as the diff gains any
-  non-`.md` path, or the branch's CI baseline is red or unknown, the
+  CI still reports a result on every PR: Markdown-only diffs run the diff
+  check and omit product jobs. Non-Markdown diffs run the daily product
+  checks; manual `workflow_dispatch` runs full validation even for a
+  Markdown-only ref. This fast path never relaxes worktree isolation,
+  scope boundaries, diff inspection, QA or merge authority. As soon as the
+  diff gains a non-`.md` path, or its CI baseline is red or unknown, the
   full local check requirement applies again.
+
+  #### Daily CI and manual full validation
+
+  Haisu approved this split for fast pre-alpha feedback (#204, 2026-11-17).
+  `.github/workflows/ci.yml` is the executed source of truth. PRs and main
+  pushes retain Linux Rust fmt/clippy/tests, acceptance tooling, Pi types
+  and real CLI contracts, native admission/execution/control tests, and one
+  real startup/PTY/detach/reattach probe. The Pi suite loads the real host
+  once. Native/imported Clippy, imported full tests/maintenance, and the
+  historical upgrade/inheritance matrix run through **CI → Run workflow**
+  (`gh workflow run ci.yml --ref <branch>`), without scheduled runs. Run
+  that full entry when changing imported source/dependencies or
+  upgrade/migration logic; record omitted checks as unrun, never PASS.
+  This does not change the local pre-commit checks or independent QA rule.
 - Stage paths explicitly; do not use `git add .` or `git add -A`. Use concise
   imperative commits describing the delivered behavior. Push the task branch
   to `origin` with upstream tracking. Never force-push, delete remote

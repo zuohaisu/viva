@@ -1,25 +1,58 @@
 name: CI
 
-# One workflow answers "is the branch green" for every PR and every main
-# push: the Rust gate (fmt/clippy/test), the Python acceptance tooling,
-# and the Pi extension. The former `rust.yml` / `ci.yml` split was merged
-# here (2026-10) so a single Actions entry carries the verdict.
-#
-# No `paths` filter on purpose: every PR reports every check, so required
-# status checks can be enabled later without a path-filtered workflow
-# silently never reporting on docs-only PRs. The Rust job costs ~1.5 min
-# warm (rust-cache). GitHub Releases stay in the tag-triggered workflow
-# (release.yml). npm publish is the separate manual workflow
-# (npm-publish.yml). Both differ from this file in trigger, permissions,
-# and secrets.
+# Daily CI checks Viva's core behavior. Imported upstream validation and
+# historical migration matrices remain available through Run workflow (full).
+# Keep the workflow unfiltered: docs-only changes report a result too.
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch: # Explicit full validation; no scheduled runs.
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.scope.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check diff and select daily or full validation
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          import subprocess
+
+          event = os.environ['EVENT']
+          head = os.environ['HEAD_SHA']
+          if event == 'workflow_dispatch':
+              code = True
+              subprocess.run(['git', 'show', '--format=', '--check', head], check=True)
+          else:
+              base = os.environ['BASE_SHA']
+              if not base or set(base) == {'0'}:
+                  base = subprocess.check_output(['git', 'hash-object', '-w', '-t', 'tree', '/dev/null'], text=True).strip()
+              if event == 'pull_request':
+                  base = subprocess.check_output(['git', 'merge-base', base, head], text=True).strip()
+              subprocess.run(['git', 'diff', '--check', base, head], check=True)
+              paths = subprocess.check_output(['git', 'diff', '--no-renames', '--name-only', '-z', base, head]).split(b'\0')
+              code = any(path and not path.endswith(b'.md') for path in paths)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'code={str(code).lower()}\n')
+          print('Full validation' if event == 'workflow_dispatch' else
+                'Daily product checks' if code else 'Markdown-only: diff check passed; product checks omitted')
+          PYTHON
+
   rust:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     # Hard ceiling (issue #45 QA round 2): a hung test must cancel the job
     # with its log intact instead of burning hours silently.
@@ -56,6 +89,8 @@ jobs:
   # and the two tests that need the binary were skipped on every CI run. A
   # missing binary is now a test failure, not a skip.
   acceptance-tools:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -79,6 +114,7 @@ jobs:
       - name: Build the real viva binary
         run: cargo build -p viva
       - name: Verify startup handoff with real old and current binaries
+        if: github.event_name == 'workflow_dispatch'
         shell: bash
         run: |
           set -euo pipefail
@@ -97,6 +133,7 @@ jobs:
             --replace-server-on-disk "$BASE/target/debug/viva" \
             --expect attach --output "$RUNNER_TEMP/startup-replaced-path.json"
       - name: Verify prepared handoff failures and incompatible older receiver
+        if: github.event_name == 'workflow_dispatch'
         shell: bash
         run: |
           set -euo pipefail
@@ -124,7 +161,7 @@ jobs:
               --output "$RUNNER_TEMP/startup-fault-$fault.json"
           done
       - name: Retain startup handoff evidence (including failures)
-        if: always()
+        if: always() && github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: startup-handoff-evidence
@@ -135,10 +172,12 @@ jobs:
         # expected skip count is 0.
         run: python -m pytest tests/acceptance -q -rs
 
-  # #191 development gate: the default Linux jobs do NOT compile the nested
-  # native runtime. Keep actual source composition and PTY evidence separate
-  # from same-backend handoff, install and human visual acceptance.
+  # Linux jobs do not compile the native runtime. Daily checks cover Viva's
+  # admission/execution/control contracts plus one real PTY lifecycle. Full
+  # dispatch also checks imported sources and historical migration scenarios.
   native-runtime:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: macos-15-intel
     timeout-minutes: 45
     env:
@@ -174,21 +213,28 @@ jobs:
             . -> target
             upstream/herdr -> target
       - name: Native feature clippy
+        if: github.event_name == 'workflow_dispatch'
         run: cargo clippy -p viva --features herdr-runtime --all-targets -- -D warnings
       - name: Imported native source clippy
+        if: github.event_name == 'workflow_dispatch'
         run: cargo clippy --manifest-path upstream/herdr/Cargo.toml --all-targets -- -D warnings
       - name: Test native client capability and lifetime admission
         run: |
           cargo test -p viva --locked --features herdr-runtime --lib native_runtime:: -- --nocapture
       - name: Build the recorded legacy handoff source (not a product fallback)
+        if: github.event_name == 'workflow_dispatch'
         run: |
           mkdir -p "$RUNNER_TEMP/p1-legacy"
           git archive e6754e045798e0389f270fcf3934ab84b9d119f8 | tar -x -C "$RUNNER_TEMP/p1-legacy"
           cargo build --locked --manifest-path "$RUNNER_TEMP/p1-legacy/Cargo.toml" -p viva --target-dir "$RUNNER_TEMP/p1-legacy-target"
           echo "VIVA_TEST_LEGACY_BIN=$RUNNER_TEMP/p1-legacy-target/debug/viva" >> "$GITHUB_ENV"
-      - name: Test actual source-linked domain bridge, execution and inheritance contract
-        run: cargo test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test native_execution --test native_member_ingress --test native_control --test native_legacy_inheritance --test native_upgrade --test native_cli --test native_worker_binding --test m1_terminal -- --nocapture
+      - name: Test source-linked domain bridge, execution and control
+        run: cargo test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test native_execution --test native_member_ingress --test native_control --test native_upgrade --test native_cli --test native_worker_binding -- --nocapture
+      - name: Test historical inheritance and terminal regressions (full)
+        if: github.event_name == 'workflow_dispatch'
+        run: cargo test -p viva --locked --features herdr-runtime --test native_legacy_inheritance --test m1_terminal -- --nocapture
       - name: Install the original hash-pinned isolated test runner
+        if: github.event_name == 'workflow_dispatch'
         run: |
           curl --fail --location --retry 2 https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-universal-apple-darwin.tar.gz -o "$RUNNER_TEMP/nextest.tar.gz"
           echo "82a759b4d218d38359424196ab244c470e8f7c7d149c814fbbeef4d67c3c301a  $RUNNER_TEMP/nextest.tar.gz" | shasum -a 256 -c -
@@ -196,17 +242,20 @@ jobs:
           tar -xzf "$RUNNER_TEMP/nextest.tar.gz" -C "$RUNNER_TEMP/nextest-bin"
           echo "$RUNNER_TEMP/nextest-bin" >> "$GITHUB_PATH"
       - name: Install the genuine checksum CLI used by native maintenance tests
+        if: github.event_name == 'workflow_dispatch'
         run: |
           curl --fail --location --retry 2 https://github.com/uutils/coreutils/releases/download/0.2.2/coreutils-0.2.2-x86_64-apple-darwin.tar.gz -o "$RUNNER_TEMP/coreutils.tar.gz"
           echo "d60533c66d5f9d8b4c5aaec3837a25ef8b82227c1ace780c2d97f94da1c8b229  $RUNNER_TEMP/coreutils.tar.gz" | shasum -a 256 -c -
           tar -xzf "$RUNNER_TEMP/coreutils.tar.gz" -C "$RUNNER_TEMP"
           ln -s "$RUNNER_TEMP/coreutils-0.2.2-x86_64-apple-darwin/coreutils" "$RUNNER_TEMP/nextest-bin/sha256sum"
       - name: Test native maintenance tooling
+        if: github.event_name == 'workflow_dispatch'
         working-directory: upstream/herdr
         run: |
           git --version
           python -m unittest discover -s scripts -p 'test_*.py'
       - name: Test imported native workspace and frozen codecs in isolated processes
+        if: github.event_name == 'workflow_dispatch'
         # Reuse the upstream justfile's runner. A shared cargo-test process can
         # inherit signal handlers changed by another native test (SIGPIPE).
         run: cargo nextest run --manifest-path upstream/herdr/Cargo.toml --workspace --locked --test-threads 2 --no-fail-fast --status-level fail --final-status-level fail
@@ -226,12 +275,15 @@ jobs:
       - name: Verify native autospawn, PTY, detach and live reattach
         run: python tooling/herdr-integration/native_runtime.py --viva target/debug/viva --output "$RUNNER_TEMP/native-runtime.json"
       - name: Verify bare default entry inherits a live legacy host
+        if: github.event_name == 'workflow_dispatch'
         run: python tooling/herdr-integration/native_runtime.py --viva target/debug/viva --legacy-live --legacy-viva "$VIVA_TEST_LEGACY_BIN" --output "$RUNNER_TEMP/native-runtime-legacy.json"
       - name: Verify workbench and open use the same native renderer and retained sessions
+        if: github.event_name == 'workflow_dispatch'
         run: |
           python tooling/herdr-integration/native_runtime.py --viva target/debug/viva --entry workbench --output "$RUNNER_TEMP/native-runtime-workbench.json"
           python tooling/herdr-integration/native_runtime.py --viva target/debug/viva --entry open --output "$RUNNER_TEMP/native-runtime-open.json"
       - name: Verify HTTPS installer and cooperative native build activation
+        if: github.event_name == 'workflow_dispatch'
         run: |
           cp target/debug/viva "$RUNNER_TEMP/native-upgrade-previous"
           SOURCE="$(mktemp -d /private/tmp/vu-source-XXXXXX)"
@@ -254,6 +306,8 @@ jobs:
           if-no-files-found: warn
 
   pi-extension:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -276,13 +330,7 @@ jobs:
       - name: Typecheck the Pi extension (strict tsc, real Pi types)
         working-directory: extensions/pi
         run: npm run typecheck
-      # Issue #101: load the extension in the REAL Pi (the pinned version npm ci
-      # just installed, no global install, no model credentials) and check the
-      # tools it registers. Its own step so a failure names itself; `npm test`
-      # below runs it again with the rest of the suite.
-      - name: Load the extension in the real Pi (smoke)
-        working-directory: extensions/pi
-        run: npm run test:real-pi
+      # npm test includes real-pi-load.test.ts; run the real Pi smoke once.
       - name: Test the Pi extension (node:test)
         working-directory: extensions/pi
         env:
