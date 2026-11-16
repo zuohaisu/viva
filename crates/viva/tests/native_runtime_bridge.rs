@@ -112,16 +112,19 @@ fn actual_native_server_reads_canonical_facts_and_audits_unbound_refusals() {
         ping["result"]["capabilities"]["ssh_agent_registration"],
         false
     );
-    // The legacy CLI must not silently invoke the old host/UI behind a native host.
+    // The public CLI now queries this native owner, never the legacy Host.
     let output = Command::new(env!("CARGO_BIN_EXE_viva"))
         .arg("status")
         .env("VIVA_HOME", home)
         .output()
         .unwrap();
-    assert!(!output.status.success());
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("a native runtime host owns this home")
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(status["runtime_host_id"], snapshot["runtime_host_id"]);
     assert!(!home.join("server.sock").exists());
     assert_eq!(std::fs::read_dir(&foreign).unwrap().count(), 1);
     let store = Store::open(&paths::database_path(home), viva::server::migrations()).unwrap();

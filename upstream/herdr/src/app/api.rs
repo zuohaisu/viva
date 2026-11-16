@@ -962,6 +962,7 @@ impl App {
             Method::VivaHostPause(params) => {
                 return self.handle_viva_host_pause(request.id, params)
             }
+            Method::VivaWorkspace(params) => return self.handle_viva_workspace(request.id, params),
             Method::VivaSnapshot(_) => match crate::embedding::snapshot() {
                 Ok(snapshot) => SuccessResponse {
                     id: request.id,
@@ -976,6 +977,10 @@ impl App {
                 }
             },
             Method::ServerStop(_) => {
+                // Viva modification: settle canonical execution ownership first.
+                if crate::embedding::enabled() {
+                    return self.handle_viva_host_stop(request.id);
+                }
                 self.state.should_quit = true;
                 SuccessResponse {
                     id: request.id,
