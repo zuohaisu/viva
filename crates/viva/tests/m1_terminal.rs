@@ -100,7 +100,14 @@ fn detached_resident_first_spawn_does_not_acquire_the_childs_tty() {
     use std::os::unix::process::CommandExt;
     use viva::server::{Client, RequestKind};
     let home = tempfile::tempdir().unwrap();
-    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_viva"));
+    // This characterizes the retained legacy PTY implementation used by
+    // handoff, not the native CLI. Native first-spawn has its own real probe.
+    #[cfg(feature = "herdr-runtime")]
+    let binary = std::env::var_os("VIVA_TEST_LEGACY_BIN")
+        .expect("set VIVA_TEST_LEGACY_BIN to the recorded non-native baseline");
+    #[cfg(not(feature = "herdr-runtime"))]
+    let binary = std::ffi::OsString::from(env!("CARGO_BIN_EXE_viva"));
+    let mut command = std::process::Command::new(binary);
     command
         .arg("server")
         .env("VIVA_HOME", home.path())

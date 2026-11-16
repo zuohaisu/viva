@@ -1,6 +1,10 @@
 //! Native composition (#191). Herdr owns the PTYs and renderer; Viva owns
 //! member/task facts and refusal auditing. A feature-enabled build is the
-//! default `viva` entry; the legacy entry remains as `viva workbench`.
+//! default for bare `viva`, `workbench` and `open`; no legacy UI fallback.
+mod cli;
+pub use cli::{
+    authorize_domain_write, refuse_unintegrated_command, run_domain_command, workspace_command,
+};
 mod client_authority;
 #[cfg(unix)]
 mod legacy_import;
@@ -1246,12 +1250,39 @@ impl herdr::embedding::DomainServices for DomainBridge {
             )),
         }
     }
+    fn workspace(
+        &self,
+        action: &str,
+        value: Option<&str>,
+        project: Option<&str>,
+    ) -> io::Result<serde_json::Value> {
+        self.require_owner_only_phase()?;
+        self.with_store(|store| {
+            crate::workspaces::navigation::Navigation { store }.apply(action, value, project)
+        })
+    }
+
     fn snapshot(&self) -> io::Result<serde_json::Value> {
-        let native_execution_count = self
+        let terminals = self
             .executions
             .lock()
-            .map(|state| state.by_execution.len())
-            .unwrap_or(0);
+            .map_err(|_| io::Error::other("execution lock poisoned"))?
+            .by_execution
+            .values()
+            .map(|binding| {
+                serde_json::json!({
+                    "execution_id": binding.execution_id,
+                    "terminal_id": binding.pane_id,
+                    "pane_id": binding.pane_id,
+                    "workspace_id": binding.workspace_id,
+                    "task_id": binding.task_id,
+                    "member_id": binding.member_id,
+                    "pid": binding.pid,
+                    "owner": format!("member_execution:{}", binding.execution_id),
+                })
+            })
+            .collect::<Vec<_>>();
+        let native_execution_count = terminals.len();
         let legacy_handoff = match &self.legacy_handoff {
             Some(evidence) => serde_json::json!({
                 "inherited": true,
@@ -1282,6 +1313,16 @@ impl herdr::embedding::DomainServices for DomainBridge {
                 "member_process_ingress": "bound_worker_report_only",
                 "member_report_action": MEMBER_REPORT_ACTION,
                 "native_execution_count": native_execution_count,
+                "host_id": self.host_id,
+                "pid": std::process::id(),
+                "home": self.home,
+                "paused": paused(store)?,
+                "terminals": terminals,
+                "executions": {
+                    "total": store.row_count("executions")?,
+                    "running": store.connection().query_row("SELECT COUNT(*) FROM executions WHERE status='running'", [], |row| row.get::<_, i64>(0))?,
+                    "completed": store.connection().query_row("SELECT COUNT(*) FROM executions WHERE status='completed'", [], |row| row.get::<_, i64>(0))?,
+                },
                 "members": MemberRegistry::new(store).list()?,
                 "tasks": TaskRegistry::new(store).list_tasks(0, 100)?,
                 "tasks_limit": 100,

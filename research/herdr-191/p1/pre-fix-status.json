@@ -1,0 +1,10 @@
+{
+  "commit": "e6754e045798e0389f270fcf3934ab84b9d119f8",
+  "sha256": "f1b0931433b18683679fc72f8782f303efa2c4030c690926536a8601f8fd2a37",
+  "scenario": "top-level status against live native host",
+  "exit": 1,
+  "stdout": "",
+  "stderr": "viva: validation: a native runtime host owns this home; the legacy entry will not start a second host or fall back behind it\n",
+  "legacy_socket_present": false,
+  "fixture_host_still_alive": true
+}
