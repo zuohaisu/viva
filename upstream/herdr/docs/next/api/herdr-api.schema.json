@@ -4463,6 +4463,31 @@
           },
           "type": "object"
         },
+        "VivaWorkspaceParams": {
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "project_id": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "value": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "type": "object"
+        },
         "WorkspaceCloseParams": {
           "properties": {
             "close_group": {
@@ -4802,6 +4827,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "viva.workspace",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/VivaWorkspaceParams"
             }
           },
           "required": [
@@ -10608,6 +10649,20 @@
               "required": [
                 "type",
                 "snapshot"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "viva_workspace",
+                  "type": "string"
+                },
+                "workspace": true
+              },
+              "required": [
+                "type",
+                "workspace"
               ],
               "type": "object"
             },

@@ -37,16 +37,18 @@ are configuration, and every completion claim carries recorded evidence.
   running one); it owns the store, every terminal and a private Unix-socket
   channel until `viva shutdown` ends it. Plain `viva` attaches the workbench
   and spawns a detached server first when none runs. Release builds (compiled
-  with the embedded Herdr runtime) start the native workbench instead and
-  inherit a live legacy server on first start; `viva workbench` keeps the
-  legacy UI explicitly reachable. From any other process:
-  `viva status/dispatch/terminals/stop-terminal/result/handoff/shutdown`.
+  with the embedded Herdr runtime) use that same native workbench for
+  `viva`, `viva workbench` and `viva open <path>`, inheriting a live legacy
+  server on first start. From another local process:
+  `viva status/dispatch/terminals/stop-terminal/result/pause/resume/shutdown`.
+  Native `handoff` and member-initiated dispatch remain explicitly unavailable
+  pending #191 P2; they never start a legacy host.
   Dispatch is grant-checked at the moment of effect, idempotent by request
   key, and launches a real PTY in the task's worktree. With no server
-  running, mutations are clean rejections; only `viva` and `viva server`
-  start one. On a crash, the next server reconciles: interrupted launches and
-  orphaned executions get honest recovery records; nothing is re-run,
-  nothing is killed, finished tasks refuse re-dispatch.
+  running, execution mutations are clean rejections; workbench entry points,
+  native workspace navigation and `viva server` can start the native host.
+  Native crash reconciliation and member-execution upgrade remain #191 P3; an
+  unowned live execution is refused rather than replayed or called complete.
 - **Parallel development workbench** — one Viva instance spans projects, tasks,
   worktrees and terminals (see `crates/viva/src/tui/workbench/`): real git
   facts (branch/dirty/diff), purpose-terminals per worktree with focused
@@ -76,32 +78,28 @@ are configuration, and every completion claim carries recorded evidence.
 **degraded import**, not a seamless takeover: live child processes, screen and
 scrollback, rows/columns and scene/tab names survive, while terminal ids, pane
 cwd/purpose, split ratios, focus/zoom, cell size and agent/worktree metadata
-do not. The owner capability is a per-host-incarnation anchor that is never
-written to disk: the TUI that spawns the host passes it over an inherited pipe
-(`VIVA_OWNER_ANCHOR_FD`), and a separately started TUI that attaches to the
-running host obtains the same anchor from a macOS login-Keychain item whose
-access list is empty, so the OS gates every read on user presence (the user
-approves the prompt). A process that has neither refuses with a fixed reason
-(`owner_anchor_missing` / `owner_anchor_unavailable` / `owner_anchor_mismatch`);
-an anchor from an earlier host incarnation is refused as `stale_owner_anchor`.
-Anchor rotation is per host start: each incarnation generates a new anchor and
-an old one is rejected by host id. A process-lineage refusal
-(`peer_is_host_descendant` / `peer_is_execution_descendant`) remains as defense
-in depth, but the boundary no longer depends on ancestry: an independent
-same-UID process, including a worker that deliberately reparents itself
-(setsid/double-fork), cannot read any 0600 owner file and cannot obtain the
-anchor, so it is refused and audited without producing `native_host_paused`.
-Detach/reattach is preserved on macOS: the host keeps running, and a new TUI
-regains owner capability through the Keychain prompt. Linux has no
-user-presence anchor in this build, so a *new* TUI process cannot regain owner
-capability there (the original TUI's inherited descriptor still works); this is
-an explicit refusal, not a fallback. `pane.list` / `pane.read` /
-`pane.process_info` are same-UID observation by design: any process with the
-home can read live pane text and OS process facts; they mutate nothing, and
-dispatch/stop/pause still require the owner anchor. Native pane-output
-redaction, in-place native-host update (stop the host to update), Linux/x86_64
-execution, macOS Keychain interaction in CI, and human visual acceptance are
-not verified.
+do not. Local control uses an incarnation-bound capability, delivered over
+an inherited pipe or loaded by a fresh controller from the private local runtime
+file. No Keychain, login or password interaction is used. Capability possession
+is recorded as `local_runtime_controller` / `AgentCli`, **not human presence**.
+Same-account programs can read same-account files: this is not a same-UID
+sandbox. Explicit member execution channels still require process binding and
+live grants; unrelated or expired credentials do not confer member authority.
+`pane.list` / `pane.read` / `pane.process_info` are same-UID observation, not
+permission to dispatch or stop. Scoped cooperative native upgrades are described
+below; output persistence redaction, member/crash recovery and final human visual
+acceptance remain #191 work.
+
+Native command routing: `workspace` keeps Viva's canonical composition and
+`.code-workspace` semantics; `open` then attaches the same Herdr renderer.
+`brief/create-task/create-project/grant/result/events` reuse the existing domain store;
+mutations authenticate against a live native host and refuse known member
+contexts. `stop-terminal` accepts a live execution's public pane locator;
+ordinary shell stopping is not yet exposed there. `agent/terminal/scene/plugin/
+sync/recovery/handoff` and `server-restart` remain explicit native
+refusals (P2/P3), not legacy fallbacks. The old renderer and host library remain
+only in non-native development builds, historical handoff fixtures and retained
+legacy data readers; native release entry points cannot reach the old UI.
 
 **Not implemented, and never faked**: automatic reflection, self-model
 evolution, automatic memory promotion, starting at login (planned, to be
@@ -210,9 +208,10 @@ own evidence. PR builds keep the package version; record commit and binary hash.
 
 ```bash
 viva                     # workbench (native default in release builds)
-viva workbench           # the legacy workbench explicitly
-viva status              # legacy resident server, from any second process
-viva shutdown            # stop the legacy resident server and owned processes
+viva workbench           # same native workbench in release builds
+viva open ./project      # register/select workspace, then the same workbench
+viva status              # native runtime status, from a second process
+viva shutdown            # stop native executions and the resident host
 ```
 
 ## Documentation

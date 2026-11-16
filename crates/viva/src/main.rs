@@ -31,21 +31,16 @@ fn run(args: &[String]) -> Result<()> {
     } else {
         None
     };
+    #[cfg(feature = "herdr-runtime")]
+    if matches!(
+        args.first().map(String::as_str),
+        Some("agent" | "terminal" | "scene" | "plugin" | "sync" | "recovery")
+    ) {
+        return viva::native_runtime::refuse_unintegrated_command(args[0].as_str());
+    }
     match args.first().map(String::as_str) {
-        // Bare `viva` is the default entry. A build with the native runtime
-        // starts the Herdr-based workbench (which inherits a live legacy
-        // session); every other build keeps the legacy server client. The
-        // legacy UI stays reachable as the explicit `viva workbench`.
-        None => {
-            #[cfg(feature = "herdr-runtime")]
-            {
-                viva::native_runtime::run(&[])
-            }
-            #[cfg(not(feature = "herdr-runtime"))]
-            {
-                cmd_workbench()
-            }
-        }
+        // All shipped workbench entry points use the same native runtime.
+        None => cmd_workbench(),
         Some("help" | "--help" | "-h") => {
             print_usage();
             Ok(())
@@ -142,6 +137,15 @@ fn require_interactive_terminal() -> Result<()> {
 /// one is spawned detached first (its own process group, log in
 /// `server.log`). `ctrl+b q` detaches the client; the server keeps every terminal
 /// running until an explicit `viva shutdown` (ADR 0012, issue #43).
+#[cfg(feature = "herdr-runtime")]
+fn cmd_workbench() -> Result<()> {
+    require_interactive_terminal()?;
+    viva::native_runtime::run(&[])
+}
+
+// Kept only for non-native development builds and historical handoff fixtures;
+// release artifacts enable herdr-runtime and cannot reach this renderer.
+#[cfg(not(feature = "herdr-runtime"))]
 fn cmd_workbench() -> Result<()> {
     require_interactive_terminal()?;
     let home = viva::foundation::paths::viva_home(None);
@@ -290,7 +294,24 @@ fn parse_integration_name_and_root(args: &[String]) -> Result<(String, Option<St
 fn cmd_events(args: &[String]) -> Result<()> {
     let (since, limit) = parse_events_args(args)?;
     let home = viva::foundation::paths::viva_home(None);
-    let mut client = viva::server::Client::ensure_server(&home)?;
+    #[cfg(feature = "herdr-runtime")]
+    {
+        if viva::machines::invocation_target().is_some() {
+            return Err(Error::Validation(
+                "native remote events are not integrated; refusing local fallback".into(),
+            ));
+        }
+        let response = viva::server::stored_events_feed(&home, since, limit)?;
+        println!("{}", serde_json::to_string_pretty(&response)?);
+        Ok(())
+    }
+    #[cfg(not(feature = "herdr-runtime"))]
+    legacy_events(&home, since, limit)
+}
+
+#[cfg(not(feature = "herdr-runtime"))]
+fn legacy_events(home: &std::path::Path, since: u64, limit: u32) -> Result<()> {
+    let mut client = viva::server::Client::ensure_server(home)?;
     let response = client.call(viva::server::RequestKind::EventsFeed {
         since_seq: since,
         limit,
@@ -862,6 +883,14 @@ fn parse_pane_op(args: &[String]) -> Result<viva::server::WorkbenchTreeOp> {
 }
 
 fn print_usage() {
+    #[cfg(feature = "herdr-runtime")]
+    println!(
+        "Native build: viva / workbench / open use the same Herdr workbench.\n\
+        Domain status/dispatch/terminals/stop-terminal/result/pause/resume/shutdown use the native host.\n\
+        Member handoff, agent/terminal/scene/plugin/sync/recovery and remote control\n\
+        are not integrated yet (#191 P2); server-restart remains #191 P3.\n\
+        These operations refuse explicitly; they never launch a legacy host.\n"
+    );
     println!(
         "viva — local-first personal AI collaboration system
 
@@ -1055,8 +1084,8 @@ USAGE:
         Conversation metadata (Viva-owned tree; the harness owns the transcript).
 
     viva workbench
-        Attach the legacy workbench explicitly, even in a build whose bare
-        `viva` entry is the native runtime.
+        Attach the same workbench as bare `viva`; native release builds
+        never fall back to the legacy renderer.
 
     viva data export --out <dir>
         Read-only export (dump) of every fact table in this VIVA_HOME to
@@ -1355,6 +1384,36 @@ fn parse_domain(name: &str) -> Result<viva::foundation::store::Domain> {
 // ---------------------------------------------------------------------------
 
 fn cmd_control(args: &[String]) -> Result<()> {
+    #[cfg(feature = "herdr-runtime")]
+    if viva::machines::invocation_target().is_some() {
+        return Err(Error::Validation(
+            "native remote control is not integrated; refusing local or legacy fallback".into(),
+        ));
+    }
+    // Store-only domain commands never start a PTY owner. A live native host
+    // still authenticates mutations; known member contexts cannot issue roots.
+    #[cfg(feature = "herdr-runtime")]
+    if matches!(
+        args.first().map(String::as_str),
+        Some("create-task" | "create-project" | "grant")
+    ) {
+        viva::native_runtime::authorize_domain_write()?;
+    }
+    match args.first().map(String::as_str) {
+        Some("brief") => return cmd_control_brief(&args[1..]),
+        Some("create-task") => return cmd_control_create_task(&args[1..]),
+        Some("create-project") => return cmd_control_create_project(&args[1..]),
+        Some("grant") => return cmd_control_grant(&args[1..]),
+        _ => {}
+    }
+    #[cfg(feature = "herdr-runtime")]
+    return viva::native_runtime::run_domain_command(args);
+    #[cfg(not(feature = "herdr-runtime"))]
+    cmd_legacy_control(args)
+}
+
+#[cfg(not(feature = "herdr-runtime"))]
+fn cmd_legacy_control(args: &[String]) -> Result<()> {
     let home = viva::foundation::paths::viva_home(None);
     if viva::machines::invocation_target().is_none() {
         viva::server::reject_legacy_entry_behind_native_host(&home)?;
@@ -1453,6 +1512,7 @@ fn cmd_control_brief(args: &[String]) -> Result<()> {
 /// `viva handoff --task <id> --member <id> --summary <text>` —
 /// records a member-reported handoff over the live channel. A member
 /// report is a fact about who said what; it never completes a task.
+#[cfg(not(feature = "herdr-runtime"))]
 fn cmd_control_handoff(home: &std::path::Path, args: &[String]) -> Result<()> {
     let mut task_id = None;
     let mut member_id = None;
@@ -1491,6 +1551,7 @@ fn cmd_control_handoff(home: &std::path::Path, args: &[String]) -> Result<()> {
     print_response(&response)
 }
 
+#[cfg(not(feature = "herdr-runtime"))]
 fn cmd_control_start(home: &std::path::Path, resume: bool) -> Result<()> {
     if resume {
         // Live-handoff resume (S3): adopt the transferred terminals and
@@ -1521,6 +1582,7 @@ fn cmd_control_start(home: &std::path::Path, resume: bool) -> Result<()> {
 
 /// `viva server-restart` — upgrade path: the running server transfers its
 /// live terminals to a freshly spawned resumed server (S3, issue #45).
+#[cfg(not(feature = "herdr-runtime"))]
 fn cmd_server_restart(home: &std::path::Path) -> Result<()> {
     let new_pid = viva::server::restart_server(home)?;
     println!(
@@ -1533,6 +1595,7 @@ fn cmd_server_restart(home: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(feature = "herdr-runtime"))]
 fn cmd_control_status(home: &std::path::Path) -> Result<()> {
     let request = viva::server::new_request(viva::server::RequestKind::Status);
     match viva::server::send_request(home, request) {
@@ -1549,11 +1612,13 @@ fn cmd_control_status(home: &std::path::Path) -> Result<()> {
     }
 }
 
+#[cfg(not(feature = "herdr-runtime"))]
 fn cmd_control_query(home: &std::path::Path, kind: viva::server::RequestKind) -> Result<()> {
     let response = viva::server::send_request(home, viva::server::new_request(kind))?;
     print_response(&response)
 }
 
+#[cfg(not(feature = "herdr-runtime"))]
 fn cmd_control_dispatch(home: &std::path::Path, args: &[String]) -> Result<()> {
     let mut task_id = None;
     let mut member_id = None;
@@ -1619,6 +1684,7 @@ fn cmd_control_dispatch(home: &std::path::Path, args: &[String]) -> Result<()> {
     print_response(&response)
 }
 
+#[cfg(not(feature = "herdr-runtime"))]
 fn print_response(response: &viva::server::Response) -> Result<()> {
     if response.ok {
         println!(
@@ -3343,6 +3409,14 @@ fn write_private_export_json(path: &std::path::Path, value: &serde_json::Value) 
 
 /// One owner-only workspace request over the real channel.
 fn workspace_call(args: &[String]) -> Result<serde_json::Value> {
+    #[cfg(feature = "herdr-runtime")]
+    return viva::native_runtime::workspace_command(args);
+    #[cfg(not(feature = "herdr-runtime"))]
+    legacy_workspace_call(args)
+}
+
+#[cfg(not(feature = "herdr-runtime"))]
+fn legacy_workspace_call(args: &[String]) -> Result<serde_json::Value> {
     let home = viva_home(None);
     let mut client = viva::server::Client::ensure_server(&home)?;
     let action = args
@@ -3428,6 +3502,10 @@ fn arm_machine(id: &str, args: &[String]) -> Result<viva::machines::InvocationGu
 }
 
 fn cmd_machine(args: &[String]) -> Result<()> {
+    #[cfg(feature = "herdr-runtime")]
+    if args.first().map(String::as_str) == Some("bridge") {
+        return viva::native_runtime::refuse_unintegrated_command("machine.bridge");
+    }
     let home = viva_home(None);
     match args.first().map(String::as_str) {
         Some("list") | None => {

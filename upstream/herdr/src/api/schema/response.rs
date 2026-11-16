@@ -281,6 +281,10 @@ pub enum ResponseResult {
     VivaSnapshot {
         snapshot: serde_json::Value,
     },
+    // Viva modification: canonical navigation result, separate from pane state.
+    VivaWorkspace {
+        workspace: serde_json::Value,
+    },
     /// One canonical execution whose process was actually spawned in a pane.
     /// `pid` is the OS child PID, never a pane or screen claim.
     VivaExecutionStarted {

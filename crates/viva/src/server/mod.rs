@@ -2587,8 +2587,20 @@ fn agent_wait(
 /// how a disconnected orchestrator catches up - reconnect and ask again
 /// with the last seq you saw.
 fn events_feed(shared: &Shared, since_seq: u64, limit: u32) -> Result<serde_json::Value> {
-    let limit = limit.clamp(1, 500);
     let store = shared.store.lock().expect("store");
+    events_feed_from_store(&store, since_seq, limit)
+}
+
+/// Read the same durable feed without constructing a legacy Host, applying
+/// migrations or starting a PTY owner (#191 P1 native CLI).
+pub fn stored_events_feed(home: &Path, since_seq: u64, limit: u32) -> Result<serde_json::Value> {
+    let store =
+        Store::attach_for_handoff(&crate::foundation::paths::database_path(home), migrations())?;
+    events_feed_from_store(&store, since_seq, limit)
+}
+
+fn events_feed_from_store(store: &Store, since_seq: u64, limit: u32) -> Result<serde_json::Value> {
+    let limit = limit.clamp(1, 500);
     let mut stmt = store.connection().prepare(
         "SELECT seq, event_id, occurred_at, domain, kind, subject_type, subject_id, origin, payload
          FROM events WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",

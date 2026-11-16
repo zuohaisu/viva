@@ -596,7 +596,9 @@ fn handle_request(
     }
 
     if matches!(&request.method, Method::ServerStop(_)) {
-        if let Some(server_stop) = server_stop {
+        // Viva modification: embedded shutdown must settle owned executions
+        // in App before ending the runtime; standalone keeps its fast path.
+        if let Some(server_stop) = server_stop.filter(|_| !crate::embedding::enabled()) {
             server_stop.store(true, Ordering::Release);
             return serde_json::to_string(&SuccessResponse {
                 id: request.id,
@@ -619,6 +621,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
     match method {
         Method::Ping(_) => "ping",
         Method::VivaSnapshot(_) => "viva.snapshot",
+        Method::VivaWorkspace(_) => "viva.workspace",
         Method::VivaClientAuthenticate(_) => "viva.client.authenticate",
         Method::VivaExecutionStart(_) => "viva.execution.start",
         Method::VivaMemberReport(_) => "viva.member.report",

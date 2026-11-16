@@ -38,6 +38,16 @@ impl std::fmt::Debug for VivaExecutionStartParams {
     }
 }
 
+// Viva modification (#191 P1): canonical navigation, not a pane identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct VivaWorkspaceParams {
+    pub action: String,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
 // Viva modification: owner-gated native control. Stop names one canonical
 // execution; pause/resume affect only NEW dispatches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

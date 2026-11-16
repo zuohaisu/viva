@@ -38,6 +38,7 @@ const USAGE: &str = "USAGE: viva update [--check] [--no-restart]\n\
     Global npm: npm installs @zuohaisu/viva@latest at the same prefix.\n\
     Cooperative native generations hand over live shells and reconnect clients;\n\
     active member executions and unsupported generations are refused.\n\
+    VIVA_HOME data is untouched by downloads; activation records runtime events.\n\
     Database migrations are not performed; file backups are not data backups.";
 
 fn invalid(message: impl Into<String>) -> Error {
@@ -85,9 +86,14 @@ pub fn run(args: &[String]) -> Result<()> {
     #[cfg(unix)]
     let _runtime_install_lock = if matches!(mode, Mode::Install { .. }) {
         let home = crate::foundation::paths::viva_home(None);
-        crate::foundation::paths::ensure_private_dir(&home)?;
-        let file = lock_file(&home.join("native-install.lock"))?;
-        Some(file)
+        // Parsing/rejection/checking and installations with no state root must
+        // not initialize a Viva home. A running instance already has one.
+        if home.exists() {
+            let file = lock_file(&home.join("native-install.lock"))?;
+            Some(file)
+        } else {
+            None
+        }
     } else {
         None
     };

@@ -180,8 +180,14 @@ jobs:
       - name: Test native client capability and lifetime admission
         run: |
           cargo test -p viva --locked --features herdr-runtime --lib native_runtime:: -- --nocapture
+      - name: Build the recorded legacy handoff source (not a product fallback)
+        run: |
+          mkdir -p "$RUNNER_TEMP/p1-legacy"
+          git archive e6754e045798e0389f270fcf3934ab84b9d119f8 | tar -x -C "$RUNNER_TEMP/p1-legacy"
+          cargo build --locked --manifest-path "$RUNNER_TEMP/p1-legacy/Cargo.toml" -p viva --target-dir "$RUNNER_TEMP/p1-legacy-target"
+          echo "VIVA_TEST_LEGACY_BIN=$RUNNER_TEMP/p1-legacy-target/debug/viva" >> "$GITHUB_ENV"
       - name: Test actual source-linked domain bridge, execution and inheritance contract
-        run: cargo test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test native_execution --test native_member_ingress --test native_control --test native_legacy_inheritance --test native_upgrade --test m1_terminal -- --nocapture
+        run: cargo test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test native_execution --test native_member_ingress --test native_control --test native_legacy_inheritance --test native_upgrade --test native_cli --test native_worker_binding --test m1_terminal -- --nocapture
       - name: Install the original hash-pinned isolated test runner
         run: |
           curl --fail --location --retry 2 https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-universal-apple-darwin.tar.gz -o "$RUNNER_TEMP/nextest.tar.gz"
@@ -206,10 +212,25 @@ jobs:
         run: cargo nextest run --manifest-path upstream/herdr/Cargo.toml --workspace --locked --test-threads 2 --no-fail-fast --status-level fail --final-status-level fail
       - name: Build actual source-linked client
         run: cargo build -p viva --locked --features herdr-runtime
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Verify Pi contracts against the real native CLI
+        working-directory: extensions/pi
+        env:
+          VIVA_BIN: ${{ github.workspace }}/target/debug/viva
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
       - name: Verify native autospawn, PTY, detach and live reattach
         run: python tooling/herdr-integration/native_runtime.py --viva target/debug/viva --output "$RUNNER_TEMP/native-runtime.json"
       - name: Verify bare default entry inherits a live legacy host
-        run: python tooling/herdr-integration/native_runtime.py --viva target/debug/viva --legacy-live --output "$RUNNER_TEMP/native-runtime-legacy.json"
+        run: python tooling/herdr-integration/native_runtime.py --viva target/debug/viva --legacy-live --legacy-viva "$VIVA_TEST_LEGACY_BIN" --output "$RUNNER_TEMP/native-runtime-legacy.json"
+      - name: Verify workbench and open use the same native renderer and retained sessions
+        run: |
+          python tooling/herdr-integration/native_runtime.py --viva target/debug/viva --entry workbench --output "$RUNNER_TEMP/native-runtime-workbench.json"
+          python tooling/herdr-integration/native_runtime.py --viva target/debug/viva --entry open --output "$RUNNER_TEMP/native-runtime-open.json"
       - name: Verify HTTPS installer and cooperative native build activation
         run: |
           cp target/debug/viva "$RUNNER_TEMP/native-upgrade-previous"
@@ -228,6 +249,8 @@ jobs:
             ${{ runner.temp }}/native-runtime.json
             ${{ runner.temp }}/native-runtime-legacy.json
             ${{ runner.temp }}/native-upgrade.json
+            ${{ runner.temp }}/native-runtime-workbench.json
+            ${{ runner.temp }}/native-runtime-open.json
           if-no-files-found: warn
 
   pi-extension:

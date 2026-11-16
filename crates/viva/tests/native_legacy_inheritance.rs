@@ -39,7 +39,9 @@ fn log_tail(home: &Path, name: &str) -> String {
 
 fn spawn_legacy(home: &Path) -> Fixture {
     Fixture(
-        Command::new(env!("CARGO_BIN_EXE_viva"))
+        Command::new(std::env::var_os("VIVA_TEST_LEGACY_BIN").expect(
+            "set VIVA_TEST_LEGACY_BIN to the recorded non-native baseline binary; native server no longer starts a legacy Host",
+        ))
             .arg("server")
             .current_dir(home)
             .env_clear()
