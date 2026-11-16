@@ -58,6 +58,7 @@
     "pre-fix-status.json": "cab7629703ae414d630da53eda94390c8ab4e5d4a388125fa477142b8ec9b889",
     "probe-open.json": "9a8d58fa4d28b82c69d9ae1a0b03f4b279628cac13bedefd4c602f99247ef3ba",
     "schema-generation.log.gz": "5d8710afdd6f24be3b53b73ffdb42ae8b23a049fb5a5f6764a0688a13cff7803",
-    "validation.json": "e5a57a9f87fe3fd345f91fbe3e55d82e146692dcea2138fdd06792d63250c946"
+    "validation.json": "e5a57a9f87fe3fd345f91fbe3e55d82e146692dcea2138fdd06792d63250c946",
+    "credential-pattern-scan.json": "5cf8afe56591623f7aa4a9f8f4232ad7389a86071cff33014c69f0325bc3877f"
   }
 }
