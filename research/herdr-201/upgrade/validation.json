@@ -1,0 +1,53 @@
+{
+  "issue": 201,
+  "baseline_commit": "e6754e045798e0389f270fcf3934ab84b9d119f8",
+  "integrated_main": "52f23cc",
+  "runtime_source_commit": "b3df39e4b7386001da5bcff736ac4ea256de3c07",
+  "baseline_provenance": "Native binary built from recorded commit without the owner-only 0.3.10 version override; viva 0.3.9. Actual deployed files-only installer retrieved read-only and verified against issue SHA-256. Reproduced through HTTPS curl installer with a real old runtime.",
+  "compatible_previous_provenance": "Intermediate native protocol-1 development build including local endpoint-supervisor reconnect; not a released package. Its hash is recorded in installer.json.",
+  "default_workspace": {
+    "command": "CARGO_TARGET_DIR=/tmp/viva-201-default/target GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=init.defaultBranch GIT_CONFIG_VALUE_0=master TMPDIR=/private/tmp cargo test --workspace --locked -- --test-threads=1",
+    "passed": 625,
+    "ignored": 1,
+    "earlier_failure": "Two-thread run failed existing expired_idle_socket_reconnects_but_an_ambiguous_mutation_is_never_replayed with OS InvalidInput; cause unresolved. Original log retained; no assertions/timeouts/skips changed."
+  },
+  "native_contracts": {
+    "command": "cargo +1.96.1 test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test native_execution --test native_member_ingress --test native_control --test native_legacy_inheritance --test native_upgrade --test native_cli --test native_worker_binding --test m1_terminal -- --nocapture",
+    "passed": 47,
+    "environment": "ZIG points to existing pinned Zig 0.16.0; VIVA_TEST_LEGACY_BIN points to the immutable e6754e0 baseline; isolated CARGO_TARGET_DIR."
+  },
+  "native_module": {"command": "cargo +1.96.1 test -p viva --locked --features herdr-runtime --lib native_runtime:: -- --nocapture", "passed": 25},
+  "full_native_feature_workspace": {
+    "state": "FAIL",
+    "command": "cargo +1.96.1 test --workspace --locked --features herdr-runtime -- --test-threads=2",
+    "reason": "legacy_migration::a_server_run_by_the_current_binary_writes_only_new_names still requests the retired native terminal create command; stopped at this target.",
+    "baseline_reproduction": "Identical existing test fails on untouched dc7b974ec79a3f87f19bf26f5f17f0c23659cb03 archive with --features herdr-runtime. Logs retained. Not skipped or rewritten."
+  },
+  "imported_workspace": {
+    "command": "cargo +1.96.1 nextest run --manifest-path upstream/herdr/Cargo.toml --workspace --locked --test-threads 2 --no-fail-fast --status-level fail --final-status-level fail",
+    "passed": 3726,
+    "skipped": 12,
+    "environment": "Private task HOME; existing pinned nextest 0.9.150, Rust 1.96.1, Zig 0.16.0; isolated CARGO_TARGET_DIR."
+  },
+  "clippy": [
+    "cargo clippy --all-targets -- -D warnings: PASS",
+    "cargo +1.96.1 clippy --features herdr-runtime --all-targets -- -D warnings: PASS",
+    "cargo +1.96.1 clippy --manifest-path upstream/herdr/Cargo.toml --all-targets -- -D warnings: PASS"
+  ],
+  "installer_command": "python3 tooling/herdr-integration/native_upgrade.py --previous /tmp/viva-201-evidence/compatible-d --candidate /tmp/viva-201-evidence/final-candidate --baseline /tmp/viva-201-evidence/baseline-viva --baseline-installer /tmp/viva-201-evidence/deployed-install.sh --output /tmp/viva-201-evidence/pr-installer.json",
+  "installer_result": "PASS: actual HTTPS/curl path, macOS ARM64 task-owned installations; see installer.json. Payload is a source-built validation archive, not a published release candidate.",
+  "other_checks": ["root and imported cargo fmt --check: PASS", "sh -n packaging/install.sh: PASS", "Python byte-compilation: PASS", "CI YAML parsing and daily/full step assertions: PASS", "git diff --check: PASS"],
+  "limitations": [
+    "Issue 201 remains incomplete; no Closes linkage.",
+    "Native 0.3.10 and earlier lack cooperative protocol and are refused before replacing files; this PR does not automatically upgrade those live hosts.",
+    "Active canonical member executions/credentials cannot transfer and are refused without interruption; ongoing shell background jobs were tested, not a live AI agent transfer.",
+    "Native npm activation is explicitly refused. Stable GitHub update activation uses the shared helper but does not yet have the dev installer's complete automatic file rollback transaction.",
+    "Intel actual installer process testing, published final packages, real user-data migration, human visual acceptance and independent QA remain pending.",
+    "Existing frontend code is not reloaded; compatible negotiated frontend reconnection is verified. Direct non-workbench attach recovery is not claimed.",
+    "Old host exited but the older development frontend may leave it a zombie until parent reaping; packet distinguishes this from a running host.",
+    "No database migrations or database restore; directory/file backups are not data backups.",
+    "Early fixture failures and incomplete assertions are retained as iteration packets; they are not PASS evidence.",
+    "Logs contain task-local absolute build paths and harmless fixture output. Limited credential-shape scan had no matches; not a comprehensive secret-clearance guarantee.",
+    "No deployment, version changes, release, user-runtime manipulation, merge/approval of own PR, or worktree removal."
+  ]
+}

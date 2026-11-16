@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "architecture": "macos-arm64",
+  "passed": false,
+  "human_visual": "HUMAN_VISUAL_REVIEW_PENDING",
+  "active_canonical_member_transfer": "not_supported",
+  "intel": "not_run",
+  "baseline_files_replaced_old_runtime_unchanged": true,
+  "unsupported_generation_refused_old_host_serving": true,
+  "fresh_and_repeat_install_no_daemon": true,
+  "previous_sha256": "c2b67f396ba058f5f7fd3e48fc827cd9c2ca3e3d62660de6becfe1810392173f",
+  "error": ""
+}

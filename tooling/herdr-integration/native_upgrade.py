@@ -222,6 +222,8 @@ def run(args):
             # and launching a new frontend did not trigger native-to-native
             # activation on that recorded baseline.
             if args.baseline:
+                result['baseline_binary_sha256'] = digest(args.baseline)
+                result['baseline_version'] = subprocess.check_output([str(args.baseline), '--version'], env=fixture.env, text=True, timeout=15).strip()
                 fixture.binary.parent.mkdir(parents=True)
                 shutil.copy2(args.baseline, fixture.binary)
                 bindir = root / 'prefix/bin'
@@ -230,9 +232,18 @@ def run(args):
                 wrapper.write_text('#!/bin/sh\n# viva-tailnet-dev-wrapper\nexec ' + shlex.quote(str(fixture.binary)) + ' "$@"\n')
                 wrapper.chmod(0o755)
                 before = fixture.start()
-                replacement = fixture.binary.with_name('new-viva')
-                shutil.copy2(args.candidate, replacement)
-                os.replace(replacement, fixture.binary)
+                if args.baseline_installer:
+                    expected = 'd35de885721ee4e237d3a670b116aaee2397ab68cd974ba191d68c1de3b68dca'
+                    assert digest(args.baseline_installer) == expected, 'unexpected deployed installer baseline'
+                    shutil.copy2(args.baseline_installer, web / 'install.sh')
+                    install('b')
+                    shutil.copy2(REPO / 'packaging/install.sh', web / 'install.sh')
+                    result['baseline_actual_deployed_installer_sha256'] = expected
+                else:
+                    replacement = fixture.binary.with_name('new-viva')
+                    shutil.copy2(args.candidate, replacement)
+                    os.replace(replacement, fixture.binary)
+                assert digest(fixture.binary) == digest(args.candidate), 'baseline did not install target files'
                 after = fixture.observe()
                 assert before['runtime_host_id'] == after['runtime_host_id']
                 result['baseline_files_replaced_old_runtime_unchanged'] = True
@@ -359,6 +370,7 @@ if __name__ == '__main__':
     parser.add_argument('--previous', type=Path, required=True)
     parser.add_argument('--candidate', type=Path, required=True)
     parser.add_argument('--baseline', type=Path)
+    parser.add_argument('--baseline-installer', type=Path, help='read-only deployed files-only installer with its recorded SHA-256')
     parser.add_argument('--output', type=Path, required=True)
     arguments = parser.parse_args()
     packet = run(arguments)
