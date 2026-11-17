@@ -4,9 +4,11 @@ This is the source base for Viva's workbench replacement (#187 / #191), not a
 reference implementation to translate. The **original complete import** remains
 at commit `48ce171f11a249de575df71d59d868caf1a1e1c4`, tree `98b3f4e`.
 The current `herdr/` is now a derivative: its entry is a callable library with
-explicit embedding paths and a development-only Viva domain-read adapter.
-Original dependency locks, native sources, assets and frozen codecs remain
-unchanged. Attribution, tests and license notices are retained.
+explicit embedding paths and Viva domain/authority/CLI adapters. It is compiled
+into `viva` when `herdr-runtime` is enabled; no external Herdr binary is needed.
+The original nested lockfile, vendored sources, assets and frozen endpoint codecs
+are retained; the runtime Rust source itself has been modified. Attribution,
+tests and license notices are retained.
 Upstream docs are third-party source assets, not Viva's canonical knowledge base.
 The source commit and tree are recorded in `herdr-source.json`.
 
@@ -34,21 +36,34 @@ documentation, or Windows checks.
 The nested workspace retains its original lockfile, patches and Rust toolchain.
 Use its upstream nextest runner: a shared `cargo test` process can inherit signal
 handlers changed by another native test. Root default tests do not run these
-native tests. The new `native-runtime` CI job builds the explicit development
-feature, runs the native suite/maintenance, and exercises the real client.
+native tests. Daily `native-runtime` CI builds the native feature, runs core
+feature-enabled tests and a real PTY smoke. The manual full CI
+(`workflow_dispatch`) adds native/imported Clippy, nested nextest/maintenance and
+historical migration/compatibility matrices. Use the full entry for imported
+source/dependency or upgrade/migration changes; daily green is not proof those
+full checks ran. Markdown-only PRs run the diff check and omit product jobs.
+See `.github/workflows/ci.yml` for exact toolchain, fixture and test commands.
 Neither package version changed. The root composition has its own combined lock
 graph; the original #190 notices are not a final derived-artifact SBOM.
 
-For the isolated development composition (not an installed/default runtime):
+For an isolated build of the **current native composition** (the same feature
+used by the release workflow, not a claim that current main has been released):
 
 ```sh
 # Use the toolchain pinned by upstream/herdr/rust-toolchain.toml.
-cargo +1.96.1 build -p viva --features herdr-runtime
-python3 tooling/herdr-integration/native_runtime.py --viva target/debug/viva --output /tmp/native-runtime.json
+cargo +1.96.1 build --locked -p viva --features herdr-runtime
+out=$(mktemp -d)
+python3 tooling/herdr-integration/native_runtime.py --viva target/debug/viva --output "$out/native-runtime.json"
 ```
 
 The probe creates private HOME/VIVA_HOME and an immutable binary copy. See
-`research/herdr-191/native/` and the Wiki for exact commands, tools and limits.
+`research/herdr-191/p1/` and the Wiki's
+[Herdr-Viva-Integration](https://github.com/zuohaisu/viva/wiki/Herdr-Viva-Integration)
+for the subsequent public-entry, control and legacy-import evidence. Earlier
+`research/herdr-191/native/` packets describe an earlier read-only preview,
+not the current feature's entire capability. Plain Cargo builds without this
+feature still compile the legacy development host; `--release` alone does not
+select the native workbench.
 
 ## Reproduce the #190 fixed-source build after download failures
 
@@ -120,20 +135,35 @@ available as the comparison baseline; document each Viva-specific change.
 
 ## Safety and scope
 
-The standalone baseline has Herdr's original identity, paths, update channels,
-socket API, hooks and worktree actions. The development embedding overrides its
-paths, blocks self-update/plugins and refuses unintegrated automated operations.
-It does **not** replace the installed/default `viva` entry or migrate user data. It does **not** enforce
-Viva's live grants or write Viva Resident/Task/Execution attribution. Do not use
-it as a Viva-authorized worker host, attach it to an existing herdr server, run
-its updater/installers, or operate existing worktrees as part of baseline tests.
-Any interactive test must use a disposable, explicitly isolated session and
-configuration, with the exact scope recorded on #187.
+The **original standalone baseline** has Herdr's own identity, paths, update
+channels, socket API, hooks and worktree actions. It is not a Viva-authorized
+worker host. Never attach baseline tests to an existing Herdr server, run its
+updater/installers or operate existing worktrees. Interactive tests use a new,
+explicitly isolated session and configuration.
 
-No upstream installer/hooks are installed into user tools by this integration.
-Its nested `.github/workflows` do not run as Viva workflows. Before replacing the default Viva runtime, validate authority,
-source attribution, redaction, data preservation and real TUI interactions.
-Passing upstream tests alone is not evidence that Viva integration is complete.
+The **current embedded runtime** overrides paths into `VIVA_HOME`, disables
+Herdr self-update/manifest refresh/plugins and refuses unintegrated operations.
+Native `viva`, `workbench` and `open` share the Herdr renderer; top-level domain
+controls use the native host or canonical store, not a hidden legacy Host.
+It now connects live-grant-checked owner dispatch to real canonical Execution,
+LaunchSpec/PID/exit records, supports bound member reports, and can adopt live
+legacy PTYs. Adoption is degraded, not a general native-to-native upgrade.
+Local controller capability is not human presence or a same-UID sandbox;
+explicit member effects still need their own bindings and grants. No Keychain
+or interactive login is used. See [README.md](../README.md) for command routing
+and source-versus-installed-channel distinctions.
+
+This is **partial integration, not full acceptance**. Member-initiated dispatch,
+other unintegrated effects, comprehensive native persistence redaction, restart
+reconciliation and final package/license review remain outstanding; pane disk
+history is disabled. Automatic native upgrade is tracked by #201. A green
+upstream suite does not prove all ingress authorization, data preservation,
+installed-product or human UI acceptance. Legacy protocol/data readers and
+non-native historical fixtures are retained, not an installed native UI bypass.
+
+No upstream installer/hooks are automatically installed into user tools by this
+embedding. Its nested `.github/workflows` do not run as Viva workflows. Tests
+must not operate real user data, installations, live sessions or Keychain.
 
 The current route, decision supersession and remaining acceptance live in the
 [Wiki Roadmap](https://github.com/zuohaisu/viva/wiki/Roadmap) and #187.

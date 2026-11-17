@@ -35,6 +35,22 @@ delivery channel: the installed command stays `viva`.
   Nothing is published in those cases, and an existing version is not
   overwritten.
 
+## Source versus published packages
+
+The public `latest` tags currently resolve to `0.3.9`, whose binary is the
+legacy Viva workbench, not the embedded Herdr build on main. The internal
+Tailnet `0.3.10` is a separate, owner-authorized channel; it is not an npm
+release and predates PR #202's unified native commands. Check the
+[Wiki Releases](https://github.com/zuohaisu/viva/wiki/Releases) for source and
+acceptance provenance, not only `viva --version`.
+
+The current release workflow builds with `--features herdr-runtime`. Changing
+that workflow does not change old packages. Also, `prepare-packages.py` currently
+copies binaries and the package templates; it does **not** transfer the release
+tarball's NOTICE/SBOM/license tree into platform packages. Final native tar/npm
+payload and dependency-notice verification remain P4 work recorded on #191.
+Do not treat staging or `test-local.sh` as native distribution clearance.
+
 ## Updating
 
 `viva update --check` queries the npm `latest` dist-tag. `viva update` upgrades
@@ -46,11 +62,21 @@ configuration. npm owns package installation/failure behavior (this is not
 an atomic binary-only swap). Local installs are checkable, but updates must
 be made explicitly with `npm install @zuohaisu/viva@latest` in their project.
 
-After installing, `viva update` hands a running resident server to the fresh
-wrapper through the live handoff — the terminals survive and the old host
-exits; reconnect the TUI afterwards. `--no-restart` skips the restart
-(`viva server-restart` does it later). With no server running the next
-`viva` start simply uses the new version.
+Package installation and runtime activation are separate. Compatible legacy
+hosts can use the legacy updater's S3 live handoff; `--no-restart` skips it.
+Starting a native build can import a compatible live legacy session, but it is
+a **degraded import**, not proof of an installer-driven upgrade for every old
+version. The field-loss boundaries and compatibility matrix are in
+[README.md](../../README.md#update).
+
+For a running **native** host, the current updater only reports that the files
+were installed while the previous host remains active. Native `server-restart`
+is not integrated, and a frontend reconnect does not prove the backend was
+upgraded. With no host running, installation does not start one. Full automatic
+native activation, client recovery and failure/rollback validation are required
+by [#201](https://github.com/zuohaisu/viva/issues/201), not implemented by this
+documentation change. Do not stop live sessions on the strength of a package
+install result. Stable `viva update` does not consume the Tailnet dev channel.
 
 ## Local checks (no registry, no token)
 
