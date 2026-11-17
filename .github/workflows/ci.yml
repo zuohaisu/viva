@@ -187,7 +187,7 @@ jobs:
           cargo build --locked --manifest-path "$RUNNER_TEMP/p1-legacy/Cargo.toml" -p viva --target-dir "$RUNNER_TEMP/p1-legacy-target"
           echo "VIVA_TEST_LEGACY_BIN=$RUNNER_TEMP/p1-legacy-target/debug/viva" >> "$GITHUB_ENV"
       - name: Test actual source-linked domain bridge, execution and inheritance contract
-        run: cargo test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test native_execution --test native_member_ingress --test native_control --test native_legacy_inheritance --test native_cli --test native_worker_binding --test m1_terminal -- --nocapture
+        run: cargo test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test native_execution --test native_member_ingress --test native_member_effects --test native_control --test native_legacy_inheritance --test native_cli --test native_worker_binding --test m1_terminal --test redaction_prefix -- --nocapture
       - name: Install the original hash-pinned isolated test runner
         run: |
           curl --fail --location --retry 2 https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-universal-apple-darwin.tar.gz -o "$RUNNER_TEMP/nextest.tar.gz"

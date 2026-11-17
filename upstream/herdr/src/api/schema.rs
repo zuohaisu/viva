@@ -59,6 +59,9 @@ pub enum Method {
     VivaExecutionStart(VivaExecutionStartParams),
     #[serde(rename = "viva.member.report")]
     VivaMemberReport(VivaMemberReportParams),
+    // Viva modification: additive process-bound member dispatch/handoff.
+    #[serde(rename = "viva.member.effect")]
+    VivaMemberEffect(VivaMemberEffectParams),
     #[serde(rename = "viva.execution.stop")]
     VivaExecutionStop(VivaExecutionStopParams),
     #[serde(rename = "viva.host.pause")]

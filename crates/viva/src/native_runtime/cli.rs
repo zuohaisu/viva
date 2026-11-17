@@ -199,19 +199,12 @@ pub fn run_domain_command(args: &[String]) -> Result<()> {
         )?,
         "dispatch" => {
             let params = dispatch_params(&args[1..])?;
-            let mut result = effect(&home, "viva.execution.start", params)?;
-            // Preserve the public execution/terminal keys used by CLI clients.
-            result["terminal_id"] = result["pane_id"].clone();
-            if result["terminal_id"].is_null() && result["intent_state"] == "confirmed" {
-                let state = snapshot(&home)?;
-                if let Some(binding) = state["terminals"].as_array().and_then(|rows| {
-                    rows.iter()
-                        .find(|row| row["execution_id"] == result["execution_id"])
-                }) {
-                    result["terminal_id"] = binding["pane_id"].clone();
-                }
-            }
-            result
+            let result = if member_context() {
+                member_effect(&home, json!({"action": "dispatch", "launch": params}))?
+            } else {
+                effect(&home, "viva.execution.start", params)?
+            };
+            execution_reply(&home, result)?
         }
         "terminals" => {
             json!({"terminals": terminals(&home, &snapshot(&home)?)?})
@@ -258,6 +251,28 @@ pub fn run_domain_command(args: &[String]) -> Result<()> {
             }
             effect(&home, "server.stop", json!({}))?
         }
+        "handoff" => {
+            let mut params = json!({"action": "handoff"});
+            let mut index = 1;
+            while index < args.len() {
+                let key = match args[index].as_str() {
+                    "--task" => "task_id",
+                    "--member" => "member_id",
+                    "--summary" => "detail",
+                    _ => {
+                        return Err(Error::Validation(
+                            "handoff needs --task, --member, --summary".into(),
+                        ));
+                    }
+                };
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| Error::Validation("handoff flag needs a value".into()))?;
+                params[key] = json!(value);
+                index += 2;
+            }
+            member_effect(&home, params)?
+        }
         "server-restart" => return refuse_unintegrated_command(command),
         // Handoff/member-initiated orchestration remains P2, not an owner CLI
         // shortcut that discards the actual member process and its live grant.
@@ -265,6 +280,61 @@ pub fn run_domain_command(args: &[String]) -> Result<()> {
     };
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
+}
+
+fn execution_reply(home: &Path, mut result: Value) -> Result<Value> {
+    // A locator is recovered only from the serving host's current binding.
+    result["terminal_id"] = result["pane_id"].clone();
+    if result["terminal_id"].is_null() && result["intent_state"] == "confirmed" {
+        let state = snapshot(home)?;
+        if let Some(binding) = state["terminals"].as_array().and_then(|rows| {
+            rows.iter()
+                .find(|row| row["execution_id"] == result["execution_id"])
+        }) {
+            result["terminal_id"] = binding["pane_id"].clone();
+        }
+    }
+    Ok(result)
+}
+
+fn member_context() -> bool {
+    [
+        "VIVA_MEMBER_ID",
+        "VIVA_EXECUTION_ID",
+        "VIVA_GRANT_ID",
+        "VIVA_MEMBER_CREDENTIAL",
+        "VIVA_MEMBER_CHANNEL",
+    ]
+    .iter()
+    .any(|key| std::env::var_os(key).is_some())
+}
+
+fn member_effect(home: &Path, mut params: Value) -> Result<Value> {
+    params["credential"] = json!(std::env::var("VIVA_MEMBER_CREDENTIAL").ok().filter(|value| !value.is_empty()).ok_or_else(|| {
+                    let _ = refuse_unintegrated_command("member.effect.missing_credential");
+                    Error::Validation("member effect requires the host-issued VIVA_MEMBER_CREDENTIAL; no controller fallback".into())
+                })?);
+    params["grant_id"] = json!(std::env::var("VIVA_GRANT_ID").ok());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| Error::Validation("member confirmation timed out".into()))?;
+        match send_native_request_with_timeout(
+            &socket(home),
+            "viva.member.effect",
+            params.clone(),
+            remaining,
+        ) {
+            Err(Error::Validation(message))
+                if message.starts_with("viva.member.effect failed (member_not_ready):")
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(25))
+            }
+            result => return result,
+        }
+    }
 }
 
 fn dispatch_params(args: &[String]) -> Result<Value> {

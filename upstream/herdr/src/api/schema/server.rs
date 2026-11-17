@@ -48,6 +48,34 @@ pub struct VivaWorkspaceParams {
     pub project_id: Option<String>,
 }
 
+// Viva modification (#191 P2): explicit member effects. The transport fact is
+// never deserialized or serialized; only the accepted socket may install it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct VivaMemberEffectParams {
+    pub credential: String,
+    pub action: String,
+    #[serde(default)]
+    pub grant_id: Option<String>,
+    #[serde(default)]
+    pub launch: Option<VivaExecutionStartParams>,
+    // Handoff scope assertions are checked, never used as caller identity.
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub member_id: Option<String>,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(skip)]
+    pub(crate) transport_peer: Option<crate::embedding::TransportPeer>,
+    #[serde(skip)]
+    pub(crate) transport_lifetime: Option<String>,
+}
+impl std::fmt::Debug for VivaMemberEffectParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VivaMemberEffectParams { [REDACTED] }")
+    }
+}
+
 // Viva modification: owner-gated native control. Stop names one canonical
 // execution; pause/resume affect only NEW dispatches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

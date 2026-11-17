@@ -953,7 +953,17 @@ impl<'a> TaskRegistry<'a> {
             items
         };
 
+        // Controlled member handoffs are attributed reports, not User/QA
+        // deliverables, completion verdicts or automatically formed memory.
+        let mut handoffs = self.store.connection().prepare(
+            "SELECT payload FROM events WHERE kind='native_member_handoff' AND subject_type='task' AND subject_id=?1 ORDER BY seq DESC LIMIT 20",
+        )?;
+        let member_handoffs = handoffs
+            .query_map([task_id.as_str()], |row| row.get::<_, String>(0))?
+            .map(|row| Ok(serde_json::from_str::<serde_json::Value>(&row?)?))
+            .collect::<Result<Vec<_>>>()?;
         let brief = json!({
+            "member_handoffs": member_handoffs,
             "goal": task.goal,
             "constraints": task.constraints,
             "status": task.status.as_str(),

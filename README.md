@@ -41,8 +41,10 @@ are configuration, and every completion claim carries recorded evidence.
   `viva`, `viva workbench` and `viva open <path>`, inheriting a live legacy
   server on first start. From another local process:
   `viva status/dispatch/terminals/stop-terminal/result/pause/resume/shutdown`.
-  Native `handoff` and member-initiated dispatch remain explicitly unavailable
-  pending #191 P2; they never start a legacy host.
+  Native member `dispatch` and `handoff` require a host-issued credential,
+  the actual bound execution process, and live authority; they never acquire
+  controller authority or start a legacy host. Cross-member dispatch requires
+  a live target grant descended from the caller's authorized source grant.
   Dispatch is grant-checked at the moment of effect, idempotent by request
   key, and launches a real PTY in the task's worktree. With no server
   running, execution mutations are clean rejections; workbench entry points,
@@ -86,8 +88,14 @@ Same-account programs can read same-account files: this is not a same-UID
 sandbox. Explicit member execution channels still require process binding and
 live grants; unrelated or expired credentials do not confer member authority.
 `pane.list` / `pane.read` / `pane.process_info` are same-UID observation, not
-permission to dispatch or stop. Native output persistence redaction, in-place
-host update/recovery and final human visual acceptance remain #191 work.
+permission to dispatch or stop. Native snapshots, trace writes, derived launch
+argv, handoffs and generated briefs apply Viva redaction. Configure literal
+secrets in `$VIVA_HOME/redaction.secrets` (one per line; `#` comments), loaded
+at native host start; issued credentials are registered automatically and stay
+redacted after revocation. Raw PTY interaction remains unchanged. Pane history
+is still disabled, and original user inputs/files and the private credential
+ledger are not rewritten. Native host update/recovery and final human visual
+acceptance remain #191 work.
 
 Native command routing: `workspace` keeps Viva's canonical composition and
 `.code-workspace` semantics; `open` then attaches the same Herdr renderer.
@@ -95,10 +103,13 @@ Native command routing: `workspace` keeps Viva's canonical composition and
 mutations authenticate against a live native host and refuse known member
 contexts. `stop-terminal` accepts a live execution's public pane locator;
 ordinary shell stopping is not yet exposed there. `agent/terminal/scene/plugin/
-sync/recovery/handoff` and `server-restart` remain explicit native
+sync/recovery` and `server-restart` remain explicit native
 refusals (P2/P3), not legacy fallbacks. The old renderer and host library remain
 only in non-native development builds, historical handoff fixtures and retained
 legacy data readers; native release entry points cannot reach the old UI.
+Member handoffs are attributed reports included in briefs, not User/QA results,
+Task completion, or memory formation. Native prompt/wait/terminal-control member
+effects remain a separate unfinished P2 slice; this is not all of #191.
 
 **Not implemented, and never faked**: automatic reflection, self-model
 evolution, automatic memory promotion, starting at login (planned, to be

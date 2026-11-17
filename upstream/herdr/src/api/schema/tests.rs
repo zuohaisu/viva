@@ -11,6 +11,27 @@ fn protocol_schema_entry<T: schemars::JsonSchema>(name: &str) -> serde_json::Val
 }
 
 #[test]
+fn viva_member_effect_cannot_deserialize_transport_facts() {
+    let request: Request = serde_json::from_value(serde_json::json!({
+        "id":"fixture", "method":"viva.member.effect", "params":{
+            "credential":"never-debug-this-token", "action":"handoff", "detail":"private-text",
+            "transport_peer":{"pid":1,"uid":0}, "transport_lifetime":"forged"
+        }
+    }))
+    .unwrap();
+    let Method::VivaMemberEffect(params) = &request.method else {
+        panic!("wrong method")
+    };
+    assert!(params.transport_peer.is_none());
+    assert!(params.transport_lifetime.is_none());
+    assert!(!serde_json::to_string(&request)
+        .unwrap()
+        .contains("transport_peer"));
+    assert!(!format!("{request:?}").contains("never-debug-this-token"));
+    assert!(!format!("{request:?}").contains("private-text"));
+}
+
+#[test]
 fn viva_client_authentication_debug_redacts_capability() {
     let request = Request {
         id: "fixture".into(),

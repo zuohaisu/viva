@@ -887,7 +887,8 @@ fn print_usage() {
     println!(
         "Native build: viva / workbench / open use the same Herdr workbench.\n\
         Domain status/dispatch/terminals/stop-terminal/result/pause/resume/shutdown use the native host.\n\
-        Member handoff, agent/terminal/scene/plugin/sync/recovery and remote control\n\
+        Member dispatch/handoff require a process-bound credential and live grants.\n\
+        Agent/terminal/scene/plugin/sync/recovery and remote control\n\
         are not integrated yet (#191 P2); server-restart remains #191 P3.\n\
         These operations refuse explicitly; they never launch a legacy host.\n"
     );
@@ -1503,7 +1504,16 @@ fn cmd_control_brief(args: &[String]) -> Result<()> {
     }
     viva::foundation::paths::ensure_private_dir(&home)?;
     let store = viva::foundation::store::Store::open(&db, viva::server::migrations())?;
-    let tasks = viva::tasks::TaskRegistry::new(&store);
+    let mut secrets = viva::redaction::configured_secrets(&home)?;
+    let mut credentials = store
+        .connection()
+        .prepare("SELECT credential_id FROM worker_credentials")?;
+    secrets.extend(
+        credentials
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?,
+    );
+    let tasks = viva::tasks::TaskRegistry::new(&store).with_redaction(secrets);
     let brief = tasks.generate_brief(&task_id)?;
     println!("{}", serde_json::to_string_pretty(&brief)?);
     Ok(())

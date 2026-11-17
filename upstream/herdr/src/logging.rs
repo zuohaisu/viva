@@ -435,15 +435,21 @@ impl Write for RotatingFileGuard {
         if state.disabled {
             return Ok(buf.len());
         }
-        if state.rotate_if_needed(buf.len() as u64).is_err() {
+        // Viva P2: stream-scrub before rotation/write; provider failure never
+        // falls back to persisting raw bytes. Raw PTY rendering is unaffected.
+        let safe = crate::embedding::redact_log_chunk(buf)?;
+        if safe.is_empty() {
+            return Ok(buf.len());
+        }
+        if state.rotate_if_needed(safe.len() as u64).is_err() {
             state.disabled = true;
             return Ok(buf.len());
         }
         if let Some(file) = state.file.as_mut() {
-            match file.write(buf) {
-                Ok(written) => {
-                    state.current_size = state.current_size.saturating_add(written as u64);
-                    Ok(written)
+            match file.write_all(&safe) {
+                Ok(()) => {
+                    state.current_size = state.current_size.saturating_add(safe.len() as u64);
+                    Ok(buf.len())
                 }
                 Err(_) => {
                     state.disabled = true;
@@ -462,8 +468,14 @@ impl Write for RotatingFileGuard {
         if state.disabled {
             return Ok(());
         }
+        let tail = crate::embedding::flush_log()?;
+        if !tail.is_empty() && state.rotate_if_needed(tail.len() as u64).is_err() {
+            state.disabled = true;
+            return Ok(());
+        }
+        state.current_size = state.current_size.saturating_add(tail.len() as u64);
         match state.file.as_mut() {
-            Some(file) => match file.flush() {
+            Some(file) => match file.write_all(&tail).and_then(|_| file.flush()) {
                 Ok(()) => Ok(()),
                 Err(_) => {
                     state.disabled = true;
@@ -472,6 +484,13 @@ impl Write for RotatingFileGuard {
             },
             None => Ok(()),
         }
+    }
+}
+
+// Viva P2: the final redacted tail is not silently lost at event completion.
+impl Drop for RotatingFileGuard {
+    fn drop(&mut self) {
+        let _ = self.flush();
     }
 }
 

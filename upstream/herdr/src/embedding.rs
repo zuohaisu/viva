@@ -83,6 +83,36 @@ pub trait DomainServices: Send + Sync {
     /// process to the confirmed execution, and check the live grant before
     /// any canonical write. Returns the canonical event sequence.
     fn member_report(&self, request: MemberReportRequest, peer: TransportPeer) -> io::Result<i64>;
+    /// Viva P2: dispatched only from the server's OS peer, not JSON claims.
+    fn prepare_member_execution(
+        &self,
+        _request: ExecutionRequest,
+        _credential: &str,
+        _grant: Option<&str>,
+        _peer: TransportPeer,
+    ) -> io::Result<ExecutionPlan> {
+        Err(io::Error::other("member dispatch unavailable"))
+    }
+    fn member_handoff(
+        &self,
+        _credential: &str,
+        _grant: Option<&str>,
+        _detail: &str,
+        _task: Option<&str>,
+        _member: Option<&str>,
+        _peer: TransportPeer,
+    ) -> io::Result<i64> {
+        Err(io::Error::other("member handoff unavailable"))
+    }
+    fn redact_persistence(&self, value: &serde_json::Value) -> io::Result<serde_json::Value> {
+        Ok(value.clone())
+    }
+    fn redact_log_chunk(&self, bytes: &[u8]) -> io::Result<Vec<u8>> {
+        Ok(bytes.to_vec())
+    }
+    fn flush_log(&self) -> io::Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
     fn refused(&self, method: &'static str, peer: Option<TransportPeer>) -> io::Result<()>;
 }
 
@@ -123,8 +153,8 @@ impl std::fmt::Debug for MemberReportRequest {
 
 /// What the runtime may launch after canonical preparation. The environment
 /// carries context plus the host-issued member credential for the bound
-/// process; no grant id or user authority is delivered through it.
-#[derive(Clone, Debug)]
+/// process; a grant ID is context, never a credential or user authority.
+#[derive(Clone)]
 pub struct ExecutionPlan {
     pub execution_id: String,
     pub replayed: bool,
@@ -137,6 +167,16 @@ pub struct ExecutionPlan {
     pub env: Vec<(String, String)>,
     pub label: String,
     pub existing_pid: Option<u32>,
+}
+impl std::fmt::Debug for ExecutionPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecutionPlan")
+            .field("execution_id", &self.execution_id)
+            .field("replayed", &self.replayed)
+            .field("intent_state", &self.intent_state)
+            .field("argv_env_label", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// OS-reported transport facts, NOT a member identity or owner credential.
@@ -646,6 +686,26 @@ pub(crate) fn member_report(
     )
 }
 
+// Viva P2: scrub complete structured values; tracing uses a streaming redactor.
+pub(crate) fn redact_persistence(value: &serde_json::Value) -> io::Result<serde_json::Value> {
+    match context() {
+        Some(ctx) => ctx.domain.redact_persistence(value),
+        None => Ok(value.clone()),
+    }
+}
+pub(crate) fn redact_log_chunk(bytes: &[u8]) -> io::Result<Vec<u8>> {
+    match context() {
+        Some(ctx) => ctx.domain.redact_log_chunk(bytes),
+        None => Ok(bytes.to_vec()),
+    }
+}
+pub(crate) fn flush_log() -> io::Result<Vec<u8>> {
+    match context() {
+        Some(ctx) => ctx.domain.flush_log(),
+        None => Ok(Vec::new()),
+    }
+}
+
 pub(crate) fn constrain_config(config: &mut crate::config::Config) {
     if enabled() {
         config.update.version_check = false;
@@ -716,7 +776,7 @@ fn admit_with_peer(
             None => Ok(()),
         };
     }
-    if method == "viva.member.report" {
+    if matches!(method, "viva.member.report" | "viva.member.effect") {
         // Reachable without owner capability by design: the member process is
         // not the owner frontend. The typed handler is the gate — it verifies
         // the host-issued worker credential, the confirmed process lineage and

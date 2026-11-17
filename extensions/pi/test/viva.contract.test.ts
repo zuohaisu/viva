@@ -59,7 +59,7 @@ const UNRECOGNISED = /unknown or missing subcommand/;
 /** What Viva says when no resident server is running: a business-layer refusal. */
 // Native builds keep these command names but may explicitly refuse an
 // unintegrated member effect. Neither outcome may spawn a legacy server.
-const NO_ACTIVE_SERVER = /no active server|cannot reach the native host|native handoff is not integrated \(#191 P2\/P3\)/;
+const NO_ACTIVE_SERVER = /no active server|cannot reach the native host|native handoff is not integrated \(#191 P2\/P3\)|requires the host-issued VIVA_MEMBER_CREDENTIAL/;
 
 const GOAL = "contract test goal";
 

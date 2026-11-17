@@ -8,7 +8,9 @@ pub use cli::{
 mod client_authority;
 #[cfg(unix)]
 mod legacy_import;
+mod member_effects;
 mod owner_anchor;
+mod persistence;
 #[cfg(all(test, unix))]
 mod reconnect_tests;
 
@@ -81,6 +83,7 @@ impl NativeExecutionState {
 }
 
 struct DomainBridge {
+    persistence: persistence::Persistence,
     home: PathBuf,
     host_id: String,
     store: Mutex<Option<Store>>,
@@ -327,6 +330,15 @@ fn process_start_marker(pid: i64) -> Option<String> {
 }
 
 impl DomainBridge {
+    fn append_event(
+        &self,
+        store: &Store,
+        mut event: NewEvent,
+    ) -> Result<crate::foundation::events::RecordedEvent> {
+        event.payload = self.persistence.json(&event.payload)?;
+        events::append(store, event)
+    }
+
     fn require_owner_only_phase(&self) -> io::Result<()> {
         let state = self
             .executions
@@ -395,12 +407,55 @@ impl DomainBridge {
                 }
                 .map_err(io::Error::other)?,
             );
+            let store = slot.as_ref().expect("store initialized");
+            // Once at attach, not per frame/query. Registration never revives
+            // credentials; new credentials are added at their issuance seam.
+            let mut credentials = store
+                .connection()
+                .prepare("SELECT credential_id FROM worker_credentials")
+                .map_err(io::Error::other)?;
+            for credential in credentials
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(io::Error::other)?
+            {
+                self.persistence
+                    .register(&credential.map_err(io::Error::other)?)?;
+            }
         }
         f(slot.as_ref().expect("store initialized")).map_err(io::Error::other)
     }
 }
 
 impl herdr::embedding::DomainServices for DomainBridge {
+    fn prepare_member_execution(
+        &self,
+        request: ExecutionRequest,
+        credential: &str,
+        grant: Option<&str>,
+        peer: herdr::embedding::TransportPeer,
+    ) -> io::Result<ExecutionPlan> {
+        self.prepare_bound_member_execution(request, credential, grant, peer)
+    }
+    fn member_handoff(
+        &self,
+        credential: &str,
+        grant: Option<&str>,
+        detail: &str,
+        task: Option<&str>,
+        member: Option<&str>,
+        peer: herdr::embedding::TransportPeer,
+    ) -> io::Result<i64> {
+        self.record_member_handoff(credential, grant, detail, task, member, peer)
+    }
+    fn redact_persistence(&self, value: &serde_json::Value) -> io::Result<serde_json::Value> {
+        self.persistence.json(value)
+    }
+    fn redact_log_chunk(&self, bytes: &[u8]) -> io::Result<Vec<u8>> {
+        self.persistence.chunk(bytes)
+    }
+    fn flush_log(&self) -> io::Result<Vec<u8>> {
+        self.persistence.flush()
+    }
     fn server_started(&self) -> io::Result<()> {
         self.with_store(|store| {
             events::append(store, NewEvent {
@@ -426,6 +481,7 @@ impl herdr::embedding::DomainServices for DomainBridge {
         let anchor = delivered.unwrap_or_else(|| owner_anchor::with_host(&self.host_id));
         // Publish only after endpoint ownership. An unsafe/unwritable store is
         // a startup error, not a host that silently cannot be reattached.
+        self.persistence.register(&anchor)?;
         owner_anchor::store_runtime(&self.home, &anchor)?;
         self.record_anchor_event("native_runtime_capability_stored")?;
         *self
@@ -450,7 +506,9 @@ impl herdr::embedding::DomainServices for DomainBridge {
         ))
     }
     fn owner_anchor_for_host(&self, host_id: &str) -> io::Result<String> {
-        owner_anchor::load_runtime(&self.home, host_id)
+        let anchor = owner_anchor::load_runtime(&self.home, host_id)?;
+        self.persistence.register(&anchor)?;
+        Ok(anchor)
     }
     fn authenticate_client(
         &self,
@@ -603,7 +661,13 @@ impl herdr::embedding::DomainServices for DomainBridge {
             }) {
                 Ok(start) => start,
                 Err(err) => {
-                    refused_event(store, &task_id, &member_id, &grant_id, &err.to_string())?;
+                    refused_event(
+                        store,
+                        &task_id,
+                        &member_id,
+                        &grant_id,
+                        &self.persistence.text(&err.to_string())?,
+                    )?;
                     return Err(err);
                 }
             };
@@ -660,6 +724,9 @@ impl herdr::embedding::DomainServices for DomainBridge {
                             return Err(err);
                         }
                     };
+                    self.persistence
+                        .register(&credential)
+                        .map_err(Error::from)?;
                     state.owned.insert(execution_id.to_string());
                     state.by_execution.insert(
                         execution_id.to_string(),
@@ -692,6 +759,8 @@ impl herdr::embedding::DomainServices for DomainBridge {
                             ("VIVA_MEMBER_ID".into(), member_id.to_string()),
                             ("VIVA_TASK_ID".into(), task_id.to_string()),
                             ("VIVA_EXECUTION_ID".into(), execution_id.to_string()),
+                            // Reference only: the host still validates live authority.
+                            ("VIVA_GRANT_ID".into(), grant_id.to_string()),
                             ("VIVA_MEMBER_CHANNEL".into(), caller.channel_id.to_string()),
                             ("VIVA_MEMBER_CREDENTIAL".into(), credential),
                         ],
@@ -746,8 +815,15 @@ impl herdr::embedding::DomainServices for DomainBridge {
             // LaunchSpec and retain the real native terminal id in the event.
             let viva_terminal_id = format!("term-{}", terminal_id.trim_start_matches("term_"));
             let terminal = TerminalId::from_str(&viva_terminal_id)?;
+            // Keep raw argv in memory for the actual child, but never write
+            // configured secrets into the derived LaunchSpec.
+            let redacted_argv = argv
+                .iter()
+                .map(|arg| self.persistence.text(arg))
+                .collect::<io::Result<Vec<_>>>()?;
+            let argv_redacted = redacted_argv != argv;
             let mut spec = LaunchSpec::new(
-                argv,
+                redacted_argv,
                 &cwd,
                 RequestOrigin::MemberDispatch {
                     grant_id: grant_id.clone(),
@@ -785,6 +861,7 @@ impl herdr::embedding::DomainServices for DomainBridge {
                         "pid": pid,
                         "pid_start_marker": marker,
                         "launch_spec_id": spec.spec_id.as_str(),
+                        "launch_spec_argv_redacted": argv_redacted,
                     }),
                 },
             )?;
@@ -853,7 +930,7 @@ impl herdr::embedding::DomainServices for DomainBridge {
             } else {
                 "native_execution_unresolved_record_failed"
             };
-            events::append(
+            self.append_event(
                 store,
                 NewEvent {
                     domain: crate::server::DOMAIN_HOST,
@@ -926,7 +1003,7 @@ impl herdr::embedding::DomainServices for DomainBridge {
             }
             let stored_code = exit_code.unwrap_or(-1);
             if let Err(err) = tasks.record_exit(&binding.request_key, stored_code) {
-                events::append(
+                self.append_event(
                     store,
                     NewEvent {
                         domain: crate::server::DOMAIN_HOST,
@@ -1211,8 +1288,13 @@ impl herdr::embedding::DomainServices for DomainBridge {
                     return Ok(Decision::Denied(reason.to_string()));
                 }
             };
-            let redactor = crate::redaction::Redactor::new([request.credential.clone()]);
-            let detail = redactor.redact_str(&request.detail);
+            self.persistence
+                .register(&request.credential)
+                .map_err(Error::from)?;
+            let detail = self
+                .persistence
+                .text(&request.detail)
+                .map_err(Error::from)?;
             let detail: String = detail.chars().take(MEMBER_REPORT_DETAIL_LIMIT).collect();
             let recorded = events::append(
                 store,
@@ -1309,8 +1391,8 @@ impl herdr::embedding::DomainServices for DomainBridge {
                     "native-default-entry"
                 },
                 "legacy_handoff": legacy_handoff,
-                "member_dispatch": "owner_gated_launch_spec",
-                "member_process_ingress": "bound_worker_report_only",
+                "member_dispatch": "process_bound_live_grant_launch_spec",
+                "member_process_ingress": "bound_worker_report_dispatch_handoff",
                 "member_report_action": MEMBER_REPORT_ACTION,
                 "native_execution_count": native_execution_count,
                 "host_id": self.host_id,
@@ -1633,6 +1715,12 @@ pub fn run(args: &[String]) -> Result<()> {
     // host: never auto-start anything and never touch the legacy server.
     #[cfg(unix)]
     if args.first().map(String::as_str) == Some("member") {
+        if matches!(
+            args.get(1).map(String::as_str),
+            Some("dispatch" | "handoff")
+        ) {
+            return cli::run_domain_command(&args[1..]);
+        }
         return run_member_client(&home, args.get(1..).unwrap_or(&[]));
     }
     #[cfg(unix)]
@@ -1711,6 +1799,7 @@ pub fn run(args: &[String]) -> Result<()> {
         child_prefix: vec!["runtime".into()],
         owner_anchor: spawn_anchor,
         domain: Arc::new(DomainBridge {
+            persistence: persistence::Persistence::new(&home)?,
             clients: Mutex::new(client_authority::ClientAuthority::new()),
             owner_anchor: Mutex::new(if server_role {
                 pre_provisioned_anchor.clone()
@@ -1960,6 +2049,7 @@ mod tests {
             stop_requested: false,
         };
         let bridge = DomainBridge {
+            persistence: persistence::Persistence::new(home).unwrap(),
             home: home.to_path_buf(),
             host_id: "native-exit-fixture".into(),
             store: Mutex::new(Some(store)),

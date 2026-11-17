@@ -69,7 +69,10 @@ fn actual_native_server_reads_canonical_facts_and_audits_unbound_refusals() {
         "Native fixture member"
     );
     assert_eq!(snapshot["tasks"][0]["task_id"], task.task_id.as_str());
-    assert_eq!(snapshot["member_dispatch"], "owner_gated_launch_spec");
+    assert_eq!(
+        snapshot["member_dispatch"],
+        "process_bound_live_grant_launch_spec"
+    );
     // Real same-UID socket, no host-issued capability: reject before hello/input.
     let mut raw = UnixStream::connect(runtime.join("herdr-client.sock")).unwrap();
     raw.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
