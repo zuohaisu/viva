@@ -4436,6 +4436,57 @@
           ],
           "type": "object"
         },
+        "VivaMemberEffectParams": {
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "credential": {
+              "type": "string"
+            },
+            "detail": {
+              "default": "",
+              "type": "string"
+            },
+            "grant_id": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "launch": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/VivaExecutionStartParams"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "member_id": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_id": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "credential",
+            "action"
+          ],
+          "type": "object"
+        },
         "VivaMemberReportParams": {
           "properties": {
             "credential": {
@@ -4891,6 +4942,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/VivaMemberReportParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "viva.member.effect",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/VivaMemberEffectParams"
             }
           },
           "required": [

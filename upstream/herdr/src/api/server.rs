@@ -317,7 +317,7 @@ fn handle_connection_with_stop(
         return Ok(());
     }
 
-    let request = match serde_json::from_str::<Request>(line) {
+    let mut request = match serde_json::from_str::<Request>(line) {
         Ok(request) => request,
         Err(request_error) => {
             // Recover correlation without relaxing typed request validation or accepting
@@ -345,6 +345,14 @@ fn handle_connection_with_stop(
             return Ok(());
         }
     };
+
+    // Viva P2: this field is serde-skipped; a payload can never install it.
+    if let Method::VivaMemberEffect(params) = &mut request.method {
+        params.transport_peer = crate::ipc::transport_peer(&stream).ok();
+        params.transport_lifetime = params
+            .transport_peer
+            .and_then(|peer| crate::embedding::peer_lifetime_marker(peer).ok());
+    }
 
     // Viva modification: fence before early-return mutators such as stop and
     // live_handoff, not only in App's queued request dispatcher.
@@ -625,6 +633,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::VivaClientAuthenticate(_) => "viva.client.authenticate",
         Method::VivaExecutionStart(_) => "viva.execution.start",
         Method::VivaMemberReport(_) => "viva.member.report",
+        Method::VivaMemberEffect(_) => "viva.member.effect",
         Method::VivaExecutionStop(_) => "viva.execution.stop",
         Method::VivaHostPause(_) => "viva.host.pause",
         Method::ServerStop(_) => "server.stop",

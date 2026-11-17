@@ -50,7 +50,15 @@ fn save_json_to_path<T: serde::Serialize>(path: &Path, snapshot: &T) -> std::io:
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let json = serde_json::to_string_pretty(snapshot)?;
+    // Viva P2: scrub derived metadata/history before either tmp or final file.
+    // Standalone Herdr retains its original serialization.
+    let json = if crate::embedding::enabled() {
+        let value = serde_json::to_value(snapshot)?;
+        let value = crate::embedding::redact_persistence(&value)?;
+        serde_json::to_string_pretty(&value)?
+    } else {
+        serde_json::to_string_pretty(snapshot)?
+    };
     let tmp_path = target.with_extension("json.tmp");
     std::fs::write(&tmp_path, &json)?;
     if let Err(err) = std::fs::rename(&tmp_path, &target) {

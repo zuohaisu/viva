@@ -53,8 +53,10 @@ feature set still builds the legacy development host.
   `viva`, `viva workbench` and `viva open <path>`, inheriting a live legacy
   server on first start. From another local process:
   `viva status/dispatch/terminals/stop-terminal/result/pause/resume/shutdown`.
-  Native `handoff` and member-initiated dispatch remain explicitly unavailable
-  pending #191 P2; they never start a legacy host.
+  Native member `dispatch` and `handoff` require a host-issued credential,
+  the actual bound execution process, and live authority; they never acquire
+  controller authority or start a legacy host. Cross-member dispatch requires
+  a live target grant descended from the caller's authorized source grant.
   Dispatch is grant-checked at the moment of effect, idempotent by request
   key, and launches a real PTY in the task's worktree. With no server
   running, execution mutations are clean rejections; workbench entry points,
@@ -76,9 +78,10 @@ feature set still builds the legacy development host.
   UI plus `crates/viva/src/harness/pi/` and
   [extensions/pi/](extensions/pi/). The extension supplies member/task context
   and tools for status, dispatch and handoff. Tool registration is not proof
-  that every effect works on the new runtime: native member-initiated dispatch,
-  handoff and the top-level `agent` interface remain unintegrated. Real Pi
-  acceptance is tracked in [#18](https://github.com/zuohaisu/viva/issues/18).
+  that every end-to-end scenario works: native member dispatch/handoff use the
+  process-bound path above, while the top-level `agent` interface remains
+  unintegrated. Real Pi acceptance is still tracked in
+  [#18](https://github.com/zuohaisu/viva/issues/18).
   External memory (F04) stores native facts in the Viva
   database with member/project scope, provenance, usage evidence, and
   recoverable archive (`viva memory …`; no Hermes checkout or Python
@@ -102,9 +105,16 @@ Same-account programs can read same-account files: this is not a same-UID
 sandbox. Explicit member execution channels still require process binding and
 live grants; unrelated or expired credentials do not confer member authority.
 `pane.list` / `pane.read` / `pane.process_info` are same-UID observation, not
-permission to dispatch or stop. Scoped cooperative native upgrades are described
-below; output persistence redaction, member/crash recovery and final human visual
-acceptance remain #191 work.
+permission to dispatch or stop. Native snapshots, trace writes, derived launch
+argv, handoffs and generated briefs apply Viva redaction. Configure literal
+secrets in `$VIVA_HOME/redaction.secrets` (one per line; `#` comments), loaded
+at native host start, without hot reload. Current runtime capability and retained
+worker credentials are registered automatically; revoked worker credentials stay
+redacted. This protects new writes, not a retrospective scrub of old logs.
+Raw PTY interaction remains unchanged. Pane history is still disabled, and
+original user inputs/files and the private credential ledger are not rewritten.
+Scoped cooperative native upgrades are described below; member/crash recovery
+and final human visual acceptance remain #191 work.
 
 Native command routing: `workspace` keeps Viva's canonical composition and
 `.code-workspace` semantics; `open` then attaches the same Herdr renderer.
@@ -112,10 +122,13 @@ Native command routing: `workspace` keeps Viva's canonical composition and
 mutations authenticate against a live native host and refuse known member
 contexts. `stop-terminal` accepts a live execution's public pane locator;
 ordinary shell stopping is not yet exposed there. `agent/terminal/scene/plugin/
-sync/recovery/handoff` and `server-restart` remain explicit native
+sync/recovery` and `server-restart` remain explicit native
 refusals (P2/P3), not legacy fallbacks. The old renderer and host library remain
 only in non-native development builds, historical handoff fixtures and retained
 legacy data readers; native release entry points cannot reach the old UI.
+Member handoffs are attributed reports included in briefs, not User/QA results,
+Task completion, or memory formation. Native prompt/wait/terminal-control member
+effects remain a separate unfinished P2 slice; this is not all of #191.
 
 **Not implemented, and never faked**: automatic reflection, self-model
 evolution, automatic memory promotion, starting at login (planned, to be

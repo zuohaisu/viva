@@ -77,7 +77,10 @@ pub fn spawn_manual(home: &Path) -> OwnerHost {
 fn server_command(home: &Path) -> Command {
     write_config(home);
     let log = std::fs::File::create(home.join("native.log")).unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_viva"));
+    // Optional immutable recorded binary for real pre/post regression runs.
+    let binary = std::env::var_os("VIVA_NATIVE_TEST_BIN")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_viva").into());
+    let mut command = Command::new(binary);
     command
         .args(["runtime", "server"])
         .env_clear()

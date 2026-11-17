@@ -294,7 +294,7 @@ fn public_server_aliases_start_and_shutdown_the_native_owner() {
 fn unintegrated_commands_refuse_without_starting_a_legacy_host() {
     let temp = tempfile::Builder::new().prefix("p1").tempdir().unwrap();
     let home = temp.path();
-    for command in ["agent", "terminal", "scene", "handoff", "server-restart"] {
+    for command in ["agent", "terminal", "scene", "plugin", "server-restart"] {
         let out = cli(home, &[command]);
         assert!(!out.status.success(), "{command} unexpectedly succeeded");
         assert!(String::from_utf8_lossy(&out.stderr).contains("no legacy host was started"));

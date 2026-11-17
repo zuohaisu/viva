@@ -13,6 +13,21 @@
 
 use serde_json::Value;
 
+/// Same newline/comment format as the retained terminal-history policy.
+/// Missing means unconfigured; unreadable configuration must not fail open.
+pub fn configured_secrets(home: &std::path::Path) -> std::io::Result<Vec<String>> {
+    match std::fs::read_to_string(home.join("redaction.secrets")) {
+        Ok(text) => Ok(text
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.starts_with('#'))
+            .map(str::to_owned)
+            .collect()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
+}
+
 /// A streaming redactor over a configured secret set.
 ///
 /// Typical use: `for chunk in stream { safe_out.push(redactor.push(chunk)) }`
@@ -34,11 +49,12 @@ impl Redactor {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let secrets: Vec<String> = secrets
+        let mut secrets: Vec<String> = secrets
             .into_iter()
             .map(Into::into)
             .filter(|s| !s.is_empty())
             .collect();
+        secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
         Self {
             secrets,
             replacement: "[REDACTED]".into(),
@@ -62,24 +78,39 @@ impl Redactor {
     pub fn push(&mut self, chunk: &str) -> String {
         let mut working = std::mem::take(&mut self.carry);
         working.push_str(chunk);
-        let redacted = self.redact_str(&working);
-        // After redaction the only remaining risk is a *partial* secret at
-        // the end of `working` that would complete with the next chunk.
-        // Hold back the longest suffix that could be a secret prefix.
-        let hold = self.partial_suffix_len(&redacted);
-        let emit_at = redacted.len().saturating_sub(hold);
-        // Never split a UTF-8 scalar point at the boundary.
-        let mut emit_at = emit_at;
-        while emit_at < redacted.len() && !redacted.is_char_boundary(emit_at) {
-            emit_at -= 1;
+        let mut out = String::new();
+        let mut pos = 0;
+        while pos < working.len() {
+            let rest = &working[pos..];
+            // Decide on raw input BEFORE replacing a shorter complete prefix.
+            if self
+                .secrets
+                .iter()
+                .any(|secret| secret.len() > rest.len() && secret.starts_with(rest))
+            {
+                break;
+            }
+            if let Some(secret) = self
+                .secrets
+                .iter()
+                .find(|secret| rest.starts_with(secret.as_str()))
+            {
+                out.push_str(&self.replacement);
+                pos += secret.len();
+            } else {
+                let ch = rest.chars().next().expect("nonempty suffix");
+                out.push(ch);
+                pos += ch.len_utf8();
+            }
         }
-        self.carry = redacted[emit_at..].to_string();
-        redacted[..emit_at].to_string()
+        self.carry = working[pos..].to_owned();
+        out
     }
 
     /// End of stream: emit everything still carried.
     pub fn flush(&mut self) -> String {
-        std::mem::take(&mut self.carry)
+        let tail = std::mem::take(&mut self.carry);
+        self.redact_str(&tail)
     }
 
     /// Scrub a structured JSON value: every string field that equals a
@@ -110,25 +141,6 @@ impl Redactor {
             }
         }
         out
-    }
-
-    /// Length of the longest suffix of `text` that is a proper prefix of any
-    /// configured secret (and could therefore complete with more input).
-    fn partial_suffix_len(&self, text: &str) -> usize {
-        let bytes = text.as_bytes();
-        let mut best = 0;
-        for secret in &self.secrets {
-            let max = secret.len().saturating_sub(1).min(bytes.len());
-            for take in (1..=max).rev() {
-                if text.is_char_boundary(text.len() - take)
-                    && secret.as_bytes().starts_with(&bytes[bytes.len() - take..])
-                {
-                    best = best.max(take);
-                    break;
-                }
-            }
-        }
-        best
     }
 }
 
@@ -161,11 +173,12 @@ impl ByteRedactor {
         I: IntoIterator<Item = S>,
         S: Into<Vec<u8>>,
     {
-        let secrets: Vec<Vec<u8>> = secrets
+        let mut secrets: Vec<Vec<u8>> = secrets
             .into_iter()
             .map(Into::into)
             .filter(|s| !s.is_empty())
             .collect();
+        secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
         Self {
             secrets,
             replacement: b"[REDACTED]".to_vec(),
@@ -173,18 +186,36 @@ impl ByteRedactor {
         }
     }
 
-    /// Longest secret length; the carry bound for split-pattern safety.
-    fn max_secret_len(&self) -> usize {
-        self.secrets.iter().map(Vec::len).max().unwrap_or(0)
+    /// Register a newly issued credential without flushing a partial secret.
+    /// Revoked credentials stay in the set for this stream's lifetime.
+    pub fn add_secret(&mut self, secret: Vec<u8>) {
+        if !secret.is_empty() && !self.secrets.contains(&secret) {
+            self.secrets.push(secret);
+            self.secrets
+                .sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+        }
     }
 
     /// Push raw bytes; returns bytes safe to append to the log.
     pub fn push(&mut self, chunk: &[u8]) -> Vec<u8> {
+        self.process(chunk, false)
+    }
+
+    fn process(&mut self, chunk: &[u8], finished: bool) -> Vec<u8> {
         let mut working = std::mem::take(&mut self.carry);
         working.extend_from_slice(chunk);
         let mut out = Vec::with_capacity(working.len());
         let mut pos = 0;
         'scan: while pos < working.len() {
+            let rest = &working[pos..];
+            if !finished
+                && self
+                    .secrets
+                    .iter()
+                    .any(|secret| secret.len() > rest.len() && secret.starts_with(rest))
+            {
+                break;
+            }
             for secret in &self.secrets {
                 if working[pos..].starts_with(secret) {
                     out.extend_from_slice(&self.replacement);
@@ -195,17 +226,13 @@ impl ByteRedactor {
             out.push(working[pos]);
             pos += 1;
         }
-        // Hold back a tail that could be the start of a split secret.
-        let max = self.max_secret_len().saturating_sub(1).min(out.len());
-        let keep = max;
-        self.carry = out[out.len().saturating_sub(keep)..].to_vec();
-        out.truncate(out.len() - keep);
+        self.carry = working[pos..].to_vec();
         out
     }
 
     /// End of stream: emit everything still carried.
     pub fn flush(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.carry)
+        self.process(&[], true)
     }
 }
 

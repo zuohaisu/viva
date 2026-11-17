@@ -230,7 +230,7 @@ jobs:
           cargo build --locked --manifest-path "$RUNNER_TEMP/p1-legacy/Cargo.toml" -p viva --target-dir "$RUNNER_TEMP/p1-legacy-target"
           echo "VIVA_TEST_LEGACY_BIN=$RUNNER_TEMP/p1-legacy-target/debug/viva" >> "$GITHUB_ENV"
       - name: Test source-linked domain bridge, execution and control
-        run: cargo test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test native_execution --test native_member_ingress --test native_control --test native_upgrade --test native_cli --test native_worker_binding -- --nocapture
+        run: cargo test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test native_execution --test native_member_ingress --test native_member_effects --test native_control --test native_upgrade --test native_cli --test native_worker_binding --test redaction_prefix -- --nocapture
       - name: Test historical inheritance and terminal regressions (full)
         if: github.event_name == 'workflow_dispatch'
         run: cargo test -p viva --locked --features herdr-runtime --test native_legacy_inheritance --test m1_terminal -- --nocapture

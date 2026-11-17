@@ -1,9 +1,10 @@
 //! Viva #191 native execution seam.
 //!
-//! This handler is reachable only after the embedding admission has validated
-//! a host-issued owner frontend capability on the actual socket peer. The
-//! composition root performs the canonical task/member/grant checks before
-//! this handler creates a workspace, and confirms the real OS child after.
+//! Controller effects require the local runtime capability. Member effects
+//! instead carry server-installed socket/lifetime facts and are reauthorized
+//! against the bound execution and live grants at the App effect boundary.
+//! The composition root prepares canonical intent before workspace creation
+//! and confirms the real OS child afterward; preparation is not spawn success.
 use crate::api::schema::{
     ResponseResult, VivaExecutionStartParams, VivaExecutionStopParams, VivaPauseParams,
 };
@@ -160,6 +161,103 @@ impl App {
         }
     }
 
+    // Viva P2: same launch seam, but a member never authenticates as controller.
+    pub(super) fn handle_viva_member_effect(
+        &mut self,
+        id: String,
+        params: crate::api::schema::VivaMemberEffectParams,
+    ) -> String {
+        let Some(ctx) = crate::embedding::context() else {
+            return encode_error(id, "member_effect_refused", "Viva domain unavailable");
+        };
+        let Some(peer) = params.transport_peer else {
+            let _ = ctx
+                .domain
+                .refused("viva.member.effect.unbound_transport", None);
+            return encode_error(
+                id,
+                "member_effect_refused",
+                "member effects require an OS-bound socket",
+            );
+        };
+        if params.transport_lifetime.as_deref().is_none_or(|expected| {
+            crate::embedding::peer_lifetime_marker(peer).ok().as_deref() != Some(expected)
+        }) {
+            let _ = ctx
+                .domain
+                .refused("viva.member.effect.stale_peer", Some(peer));
+            return encode_error(
+                id,
+                "member_effect_refused",
+                "calling process changed while queued",
+            );
+        }
+        if params.action == "handoff" {
+            return match ctx.domain.member_handoff(
+                &params.credential,
+                params.grant_id.as_deref(),
+                &params.detail,
+                params.task_id.as_deref(),
+                params.member_id.as_deref(),
+                peer,
+            ) {
+                Ok(event_seq) => {
+                    encode_success(id, ResponseResult::VivaMemberReported { event_seq })
+                }
+                Err(err) => encode_error(
+                    id,
+                    if err.kind() == std::io::ErrorKind::WouldBlock {
+                        "member_not_ready"
+                    } else {
+                        "member_effect_refused"
+                    },
+                    err.to_string(),
+                ),
+            };
+        }
+        if params.action != "dispatch" {
+            let _ = ctx
+                .domain
+                .refused("viva.member.effect.unsupported", Some(peer));
+            return encode_error(id, "member_effect_refused", "unsupported member action");
+        }
+        let Some(launch) = params.launch else {
+            let _ = ctx
+                .domain
+                .refused("viva.member.effect.missing_launch", Some(peer));
+            return encode_error(id, "member_effect_refused", "dispatch needs a launch");
+        };
+        let request = ExecutionRequest {
+            task_id: launch.task_id,
+            member_id: launch.member_id,
+            grant_id: launch.grant_id,
+            request_key: launch.request_key,
+            argv: launch.argv,
+            cwd: launch.cwd.into(),
+            worktree_id: launch.worktree_id,
+        };
+        let plan = match ctx.domain.prepare_member_execution(
+            request,
+            &params.credential,
+            params.grant_id.as_deref(),
+            peer,
+        ) {
+            Ok(plan) => plan,
+            Err(err) => {
+                return encode_error(
+                    id,
+                    if err.kind() == std::io::ErrorKind::WouldBlock {
+                        "member_not_ready"
+                    } else {
+                        "member_effect_refused"
+                    },
+                    err.to_string(),
+                )
+            }
+        };
+        self.launch_viva_execution(id, plan)
+    }
+
     pub(super) fn handle_viva_execution_start(
         &mut self,
         id: String,
@@ -177,6 +275,14 @@ impl App {
             Ok(plan) => plan,
             Err(err) => return encode_error(id, "execution_refused", err.to_string()),
         };
+        self.launch_viva_execution(id, plan)
+    }
+
+    fn launch_viva_execution(
+        &mut self,
+        id: String,
+        plan: crate::embedding::ExecutionPlan,
+    ) -> String {
         if plan.replayed {
             return encode_success(
                 id,

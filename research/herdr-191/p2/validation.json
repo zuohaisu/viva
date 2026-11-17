@@ -1,0 +1,534 @@
+{
+  "schema": 1,
+  "recorded_utc": "2026-11-17T03:00:03.826993+00:00",
+  "task": "#191 P2 slice 1: process-bound member dispatch/handoff and selected native persistence sinks; not all P2",
+  "code_commit": "c13ca6a",
+  "validated_merge_commit": "b4d546324e7674e25c13dbfc8580cadd561f0c37",
+  "baseline": {
+    "commit": "dc7b974ec79a3f87f19bf26f5f17f0c23659cb03",
+    "native_binary_sha256": "515c5e2a98a42e36379716b271a6b25668077cc8229335528131fc0d6d52cb53",
+    "binary": "immutable task-created pre-fix-native-dc7b974; not an installed/released build",
+    "commands": [
+      "VIVA_NATIVE_TEST_BIN=/tmp/viva-191-p2/pre-fix-native-dc7b974 cargo test --locked -p viva --features herdr-runtime --test native_member_effects native_trace_and_snapshot_are_scrubbed_while_the_terminal_stays_raw -- --exact --nocapture",
+      "VIVA_NATIVE_TEST_BIN=/tmp/viva-191-p2/pre-fix-native-dc7b974 cargo test --locked -p viva --features herdr-runtime --test native_member_effects bound_member_dispatches_and_hands_off_without_becoming_user -- --exact --nocapture",
+      "CARGO_TARGET_DIR=/tmp/viva-191-p2/redaction-base-target cargo test --locked --manifest-path /tmp/viva-191-p2/redaction-baseline/Cargo.toml -p viva --test redaction_prefix -- --nocapture"
+    ],
+    "expected_red": {
+      "baseline-snapshot-final": 101,
+      "baseline-member-final": 101,
+      "redaction-baseline": 101
+    },
+    "redaction_source_sha256": "fc96ec09d66626a1e7f4a9d92e31c00c71854994f04c0f1634199405a1b81d8c",
+    "coverage_test_sha256": "1d80cc1d465a0a385b35224011421f57339c44facef2d38552538616faa27a4f",
+    "notes": "Archived baseline redaction source equals the recorded Git blob; only the new coverage test was transplanted. No source failure was manufactured on main."
+  },
+  "candidate": {
+    "binary_sha256": "8702657e9f745452a48eca4ecbdedc69e24f236c77f2b826db9e802bc79da50b",
+    "platform": "Intel x86_64 macOS 13.7.8, MacBookPro14,3; task-private fixtures only",
+    "native_toolchain": "RUSTUP_TOOLCHAIN=1.96.1; ZIG=/Users/zuohaisu/viva-intel-0310.HMQB1YwJ/zig-x86_64-macos-0.16.0/zig; CARGO_BUILD_JOBS=2",
+    "default_toolchain": "root stable Rust 1.95.0; CARGO_TARGET_DIR=/tmp/viva-191-p1/default/target; GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=init.defaultBranch GIT_CONFIG_VALUE_0=master"
+  },
+  "checks": [
+    {
+      "command": "cargo test --workspace --locked -- --test-threads=1",
+      "log": "workspace-rerun.log.gz",
+      "exit": 0,
+      "passed": 626,
+      "ignored": 1
+    },
+    {
+      "command": "cargo test --locked -p viva --features herdr-runtime --test native_member_effects --test native_member_ingress --test native_execution --test native_control --test native_cli --test native_runtime_bridge --test native_legacy_inheritance --test native_worker_binding --test m1_terminal --test redaction_prefix -- --nocapture",
+      "env": "VIVA_TEST_LEGACY_BIN=/tmp/viva-191-p1/legacy-e6754e0",
+      "log": "native-ancestry.log.gz",
+      "exit": 0,
+      "passed": 46,
+      "notes": "18 real member-child denial requests in one matrix test; no controller admission or new negative launch intents."
+    },
+    {
+      "command": "cargo test --locked -p viva --features herdr-runtime --test native_member_effects --test redaction_prefix -- --nocapture",
+      "log": "merged-member.log.gz",
+      "exit": 0,
+      "passed": 4,
+      "notes": "Final hash-of-redacted-claim/provenance edits and merged main included."
+    },
+    {
+      "command": "cargo test --locked -p viva --features herdr-runtime --lib native_runtime:: -- --nocapture",
+      "log": "lib-ancestry.log.gz",
+      "exit": 0,
+      "passed": 27
+    },
+    {
+      "command": "/tmp/viva-191-p1/tools/cargo-nextest nextest run --manifest-path upstream/herdr/Cargo.toml --workspace --locked --test-threads 2 --no-fail-fast --status-level fail --final-status-level fail",
+      "log": "imported.log.gz",
+      "exit": 0,
+      "passed": 3727,
+      "skipped": 12,
+      "notes": "Subsequent imported edits only handler documentation and a missing-launch refusal audit; current-head full CI is required, not inherited as PASS."
+    },
+    {
+      "command": "HERDR_UPDATE_API_SCHEMA=1 cargo test --locked --manifest-path upstream/herdr/Cargo.toml --lib generated_protocol_schema_artifact_is_current",
+      "log": "schema.log.gz",
+      "exit": 0,
+      "passed": 1,
+      "notes": "Additive generated API schema committed; internal peer/lifetime fields are serde-skipped."
+    },
+    {
+      "command": "cargo clippy --locked --all-targets -- -D warnings",
+      "log": "default-clippy.log.gz",
+      "exit": 0
+    },
+    {
+      "command": "cargo clippy --locked -p viva --features herdr-runtime --all-targets -- -D warnings",
+      "log": "member-clippy.log.gz",
+      "exit": 0
+    },
+    {
+      "command": "cargo clippy --locked --manifest-path upstream/herdr/Cargo.toml --all-targets -- -D warnings",
+      "log": "imported-clippy.log.gz",
+      "exit": 0
+    },
+    {
+      "command": "cargo build --locked -p viva --features herdr-runtime",
+      "log": "merged-build.log.gz",
+      "exit": 0
+    },
+    {
+      "command": "cd extensions/pi && VIVA_BIN=/tmp/viva-191-p2/candidate-viva npm run typecheck && VIVA_BIN=/tmp/viva-191-p2/candidate-viva npm test",
+      "log": "pi-merged.log.gz",
+      "exit": 0,
+      "passed": 40,
+      "skipped": 0,
+      "notes": "Real official Pi loading and CLI contracts; not a live-model or real Pi task acceptance."
+    },
+    {
+      "command": "python3 tooling/herdr-integration/native_runtime.py --viva /tmp/viva-191-p2/candidate-viva --output /tmp/viva-191-p2/native-runtime-final.json",
+      "log": "pty-final.log.gz",
+      "exit": 0,
+      "passed": true
+    },
+    {
+      "command": "python3 -m unittest discover -s tooling/herdr-audit -v",
+      "log": "audit.log.gz",
+      "exit": 0,
+      "passed": 26
+    },
+    {
+      "command": "cargo fmt --all -- --check; RUSTUP_TOOLCHAIN=1.96.1 cargo fmt --manifest-path upstream/herdr/Cargo.toml --all -- --check; git diff --check",
+      "result": "PASS"
+    },
+    {
+      "command": "Ruby YAML.load_file plus daily/full native target assertions",
+      "log": "ci-yaml.log.gz",
+      "exit": 0,
+      "notes": "PyYAML unavailable in system Python; used system Ruby YAML, no global environment installation."
+    }
+  ],
+  "retained_failures": [
+    {
+      "log": "workspace.log.gz",
+      "exit": 101,
+      "finding": "server_restore::killed_server_restores_layout_cwd_and_resume_without_old_commands timed out waiting for resume output; root cause not established. Unchanged exact rerun and full serial rerun passed; no timeout/assertion weakening. Not called a proven pre-existing failure."
+    },
+    {
+      "log": "native-clippy.log.gz",
+      "finding": "Interim format-in-format-args lint failure, fixed normally; final clippy passed."
+    },
+    {
+      "log": "dispatch-diagnostic-2.log.gz",
+      "finding": "Interim handoff replay used invalid SQLite JSON path request_key; corrected to $.request_key and verified real replay idempotency."
+    },
+    {
+      "log": "pre-fix-tests.log.gz",
+      "finding": "Initial baseline pair snapshot leak / member unavailable failure retained, not replaced by later clearer baseline runs."
+    }
+  ],
+  "unrun": [
+    "Independent QA of this head",
+    "Owner merge and corresponding main CI",
+    "Published/final tarball/npm license composition and installation",
+    "ARM64 current-candidate execution",
+    "Human visual review and real user data/session acceptance",
+    "Real Pi/model task acceptance (#18)",
+    "P2 prompt/wait/terminal-control slice",
+    "P3 member transfer/restart/reconciliation and #206 integration",
+    "Default ignored live_github_release_updates_only_sandbox_binary",
+    "12 imported ignored/expensive profiles"
+  ],
+  "boundaries": [
+    "Only new writes at selected sinks are redacted; no blanket rewrite of historical logs, canonical original inputs, credential vault or harness material. Raw interactive PTY unchanged; pane history remains disabled.",
+    "Secret file is loaded at host start, not hot-reloaded. Retained worker credentials/current host capability are registered; no Keychain/login/password flow.",
+    "Grant lineage traversal is bounded at 64 nodes and fails closed beyond that. Handoff limit is 64KiB and records a member claim, not User/QA evidence or Task completion.",
+    "Issue #191 remains administratively CLOSED; P2 checklist stays in progress. #201/#206 upgrade work is separate. No self-merge, approval, release, version edits, real user runtime operation or worktree deletion."
+  ],
+  "evidence_files": {
+    "audit.log.gz": {
+      "sha256": "ea9153f6ab25a1c0516de72b526e911eff5cf56cd31fff264fea4e8599fd34c6",
+      "uncompressed_sha256": "5b546562349cd385a044ef5e3d84f643d5001d1df6e582ab95607343781b4a8b",
+      "bytes": 2640
+    },
+    "baseline-build.log.gz": {
+      "sha256": "1cfe415e7b1898b80e76115b3149ec0e2fdcb416df9c3ae744c2d5ca38ff6560",
+      "uncompressed_sha256": "67569685914f2e501239a12497e9d2a1c92a6532f196e68a481b690117bf2a24",
+      "bytes": 868
+    },
+    "baseline-member-final.log.gz": {
+      "sha256": "6cb2a7385f52f375046b6f8add7ace6c4c121dac62e0f05f21f13f6abf5cf123",
+      "uncompressed_sha256": "d4d4158c2e42651d121a5c1bd419a80fb08c3abb84c8ec0cb5b4a434bf55b363",
+      "bytes": 1670
+    },
+    "baseline-snapshot-final.log.gz": {
+      "sha256": "4481ab03e4936d870796af079bbc87308699294fb28650d9ff539c37c56975cc",
+      "uncompressed_sha256": "677263328125761ab4f12cc6f3cc6de5e2e08bb244b300bbdc91c569235db206",
+      "bytes": 1602
+    },
+    "build-ancestry.log.gz": {
+      "sha256": "378ff3f96abf7076364bd15a3721c003d71c61ecae7eb2ae0e249f3ea75c3b3a",
+      "uncompressed_sha256": "b7dea36ac76cfa47e8e981584b19ea15db67166fa6fb3637c15db68b44f22599",
+      "bytes": 868
+    },
+    "build-final.log.gz": {
+      "sha256": "2b917c1bd0bb0a3493438a0340165ad2d71ee0eb4c2e094ad7a066bb1b52f67f",
+      "uncompressed_sha256": "f8fd34f83911fc923e871b31193db875101d116aa3170efca84d0b0475d3204a",
+      "bytes": 1075
+    },
+    "build-tests.log.gz": {
+      "sha256": "1f61001fcf3c58ac9e7c3ce784403f9bd4f4f4ae4778e60b0f129f7ddfb2d420",
+      "uncompressed_sha256": "9bbc443dee6869a7bf38a8065461c923805866872eec3e2d64222d5b9b735e59",
+      "bytes": 1074
+    },
+    "build.log.gz": {
+      "sha256": "602fdf0f39255001fb97a2b0c6c54499a7084e639f0abcaa0ad0089ab10910f8",
+      "uncompressed_sha256": "0e4b1af59b78b272141112046d5c6dac6c5ea767e85cfefb8dd7936982cdfda9",
+      "bytes": 2231
+    },
+    "ci-yaml.log.gz": {
+      "sha256": "f7770007b2bf1c5472d4b2f85bf85b40aa121503ee360351cf653d6b47bf0145",
+      "uncompressed_sha256": "4cc38658baf832f4cd585a7f4db18bec1fff2b4b80a3522945dca46444b74f20",
+      "bytes": 76
+    },
+    "clippy-ancestry.log.gz": {
+      "sha256": "011ab231a366dbb24134a3b2c7eed18aee5570197f87b3260228af3898cc2b04",
+      "uncompressed_sha256": "c5cf1ec1571e1a455989e3c929fa30ab9b5bba5e63f2ab95ebce878d4cc0d291",
+      "bytes": 1075
+    },
+    "clippy-final.log.gz": {
+      "sha256": "290201d72bd29b3cc616b00957b666f8c4043312152d345a7d70ef6c84364fff",
+      "uncompressed_sha256": "5d45da816c5f5e9ecd961b65ef5d1e5a9386228cf96b086950f8856944cf57ad",
+      "bytes": 1075
+    },
+    "default-clippy.log.gz": {
+      "sha256": "93b5c4e60165134111105b52f45c7e85d3bcfa6c5c8ab584df0ef0c160191991",
+      "uncompressed_sha256": "8496c46445662e953bf5b865e31ef093883d209d278435e877f6b6b9bc360c4c",
+      "bytes": 174
+    },
+    "dispatch-diagnostic-2.log.gz": {
+      "sha256": "8d38f63d9b5d35a165f7a963bb9c43da1e9fb831f4353d3ddf13e349d4a4a28e",
+      "uncompressed_sha256": "7785b658effcef6e202532871289f0c09c737db6a7368015b66fd2dd58e5caa4",
+      "bytes": 1792
+    },
+    "dispatch-diagnostic.log.gz": {
+      "sha256": "fe4a24f10575b57fa8b0f0f01dfb51dba40934e783b60d8ab3000331ab7faec6",
+      "uncompressed_sha256": "5a64e51911dbba26cc48f0e851240a2023464fd3c472af9c75fd71de90f68381",
+      "bytes": 1676
+    },
+    "imported-clippy.log.gz": {
+      "sha256": "604ec8b0c5871d200269686fe443829f2c69861618d56a4ebeb02dc9aac097df",
+      "uncompressed_sha256": "23491d1e63698f761cc0626eb02d72c3bd6b6fb92701e44bd9fb833b8880fabd",
+      "bytes": 431
+    },
+    "imported.log.gz": {
+      "sha256": "768fa09665d91f62456fd1469ad49a446904d155d31744f9d3d6ecef059268a1",
+      "uncompressed_sha256": "08b8cbafb60e3b89e5bcbeacf69ed99b2a4b7d7fefab40d4ea50ef5e935f4384",
+      "bytes": 664
+    },
+    "lib-ancestry.log.gz": {
+      "sha256": "c18f021dfb5ee603f6b73b8349211670a1e29e555b64cb27274f36aeb7e4f806",
+      "uncompressed_sha256": "5a982e160f76970025ee56048908c4781f8d84d9b76e864a7b570d4c64d455ea",
+      "bytes": 4000
+    },
+    "lib-final.log.gz": {
+      "sha256": "64f186c633e0b622e3908e9706d31e15277c046e89890f59064c6fd00c835631",
+      "uncompressed_sha256": "712a3cb6aed189a4c83b95ea0d9a17902c588cc99eaa213802abceca992a2b4e",
+      "bytes": 4001
+    },
+    "member-build.log.gz": {
+      "sha256": "2ea3d7f7e41fbaaf8b1e4cba2364c5d848bc5b68afa86e47f9834bda005df055",
+      "uncompressed_sha256": "eb63373f7ca3d8d8ad257e40c0a411dd35d028416097b5823616fc0df638b032",
+      "bytes": 868
+    },
+    "member-clippy.log.gz": {
+      "sha256": "e031ca48d16aaaa4e30fd46534fb511a45888b16da1e4f7d1c1bb916d95a2e24",
+      "uncompressed_sha256": "40002746a2f1e8aa374ed13c98f92929cd14e72e98ad137eae392064d3c1b9d2",
+      "bytes": 970
+    },
+    "member-final.log.gz": {
+      "sha256": "22154503074b83b4cbbfdebed3e0bc3c82e0d60bec3e52c51ae196923e029684",
+      "uncompressed_sha256": "50adb057fb0141a0f2efec945a9bfd6812c1a5df47b5687996e57ff3343c1ff7",
+      "bytes": 1688
+    },
+    "member-negative-tests.log.gz": {
+      "sha256": "14f268bbff3ddd11e2f958ebd2a33ffb9de6dab1db73b2b7310f051d57c9bc54",
+      "uncompressed_sha256": "2721c7254fe69b50270734b64d03c66f851e21d646e6e63bb09edfe2ad3169ec",
+      "bytes": 1954
+    },
+    "merged-build.log.gz": {
+      "sha256": "14174d589866fefa4764e20c441373fb7c3189b0eca9579e7efc47c71e7159f9",
+      "uncompressed_sha256": "58f55fdd7a3f820d6ac02a19ec8c9aff19440059adba2dd0811be1ad25d6014a",
+      "bytes": 868
+    },
+    "merged-member.log.gz": {
+      "sha256": "2ccb8ca9f1a486b4b97f6ac973c29460b1feac69cab0d9f45cd4f515b1fe0cb4",
+      "uncompressed_sha256": "4c968ea8186650c14b1a0f9e27b15d832b395c6328a82c9809106e35d12a6af1",
+      "bytes": 1586
+    },
+    "native-ancestry.log.gz": {
+      "sha256": "10c8ae5ce0adb1f952332a854e682ed7055f224184c1b212191ff94fe8174e3f",
+      "uncompressed_sha256": "ab277faef69cba24b396c1114c6b2378f1a389c3f0fdf382695d8df774a98e9c",
+      "bytes": 6532
+    },
+    "native-clippy.log.gz": {
+      "sha256": "387a17cfaa46e4acb74d9102e8f49f5f7e8195de9001be035c1bc2adc27793fc",
+      "uncompressed_sha256": "f6ad9be9a32bd18b16a983a6c3fc183febeab4407ff4b516669d2e6e6b414dc3",
+      "bytes": 1992
+    },
+    "native-final.log.gz": {
+      "sha256": "8b39d9e39f72faeffa4a2011f44836abc700acd5ab41fcf20ad5bd6f2a502d94",
+      "uncompressed_sha256": "82a597046dd0af45525f8c72717f8430d9c2804e6937b48d0af290ce422b7e95",
+      "bytes": 6688
+    },
+    "native-lib.log.gz": {
+      "sha256": "d52a875a3d397929fb8bc573c727d9c68670b5d3d1ace66c95d868f401ea4846",
+      "uncompressed_sha256": "6c1ef1e9d2ef3237bcea91a37c4158d40a20864004f1c811e2723e5dbbad68ac",
+      "bytes": 4001
+    },
+    "native-suite.log.gz": {
+      "sha256": "21597d393065cea464483aad4b3511a572784715312d2adcda6e4ae104a0cfe5",
+      "uncompressed_sha256": "26b813c117a619ee375dca27560fffaf4c8f5a8b9800c4a7f32827ed47616fd7",
+      "bytes": 4746
+    },
+    "pi-final.log.gz": {
+      "sha256": "de9a65d61821eeac2eae2c0f8839e11beb798f128cdbe407b6e3cab28ebaf470",
+      "uncompressed_sha256": "c7a9d316a570d72de888c6248bf0d63981c3fc31251d4b2832a0fceb7d14ed13",
+      "bytes": 3558
+    },
+    "pi-merged.log.gz": {
+      "sha256": "c869392bfa317c5a1268db53890584051dcefb41163badb65f37529acd425b54",
+      "uncompressed_sha256": "75556610c2fc5b3d3d9768bb004e41ad78292f00333983a15fcd3f5a27b66f37",
+      "bytes": 3548
+    },
+    "post-fix-tests.log.gz": {
+      "sha256": "7b1e1ebe15f2cec41955103182aebc402877709900b3f40f5e8d8847737bb5dc",
+      "uncompressed_sha256": "a687cde7be5633142fd3c12c6a8c76af0ce5737ba20d4bb0067734a34a20b9b2",
+      "bytes": 1237
+    },
+    "pre-fix-tests.log.gz": {
+      "sha256": "df340dbb2df68d69ba62f6e087dcd1071fd819ea61f30dd55fb07eb880fe0f36",
+      "uncompressed_sha256": "ee298b7ebc4ff2ab6e448a0631c5a89e2b51c24f5ab0ba21c97ef86f331a1da1",
+      "bytes": 1932
+    },
+    "pty-final.log.gz": {
+      "sha256": "3886f868f551c248d6a815e8c3d9c195c13bf3aa946c0cbb0d13e7b2afb04111",
+      "uncompressed_sha256": "23528b0eddd1c4a1776e86e7239d3e6f01d3f8b526c899e3b115dbe8658c3208",
+      "bytes": 1203
+    },
+    "pty.log.gz": {
+      "sha256": "1d3f4c7a8e05dbd65d8f3c7dc0f17fcb33cbc31397895093daedb41bea42b3c6",
+      "uncompressed_sha256": "38a154cf8dd35819743c63b562b2497e8b262ad39ff1cc7c271151f173905bb8",
+      "bytes": 1203
+    },
+    "redaction-baseline.log.gz": {
+      "sha256": "5bda038938e472aeb6c66e6c1f0380d3b7fd68754cc973f89d014c1229342d76",
+      "uncompressed_sha256": "6b279088515d59e33321787a2281a07f2a91dc449def1608dbdb7f4804cdd8cf",
+      "bytes": 4694
+    },
+    "restore-rerun.log.gz": {
+      "sha256": "bdc59302a8850c7e79f333e82330854eb2c9ec8a61de5221d8c0d01d9531047f",
+      "uncompressed_sha256": "8d5d1c435691307f33e55e3b98999313cf516e471dd0204cafb0d30aba46ff50",
+      "bytes": 378
+    },
+    "schema.log.gz": {
+      "sha256": "758838954da98ba5913c1f29fe25d107ad462ff0737842ba6200f66c075df312",
+      "uncompressed_sha256": "912044b83d77e19485ef53adf4b8e5b30769e93b1f68d65f7967c7e60ea37e50",
+      "bytes": 1084
+    },
+    "workspace-rerun.log.gz": {
+      "sha256": "7564f3a9562e993679bce32d469cbcfeef3f0041b60ca17211cfdfa121fe8f33",
+      "uncompressed_sha256": "125a40163d22c64efb2e6d0ef91ead2f1d077872432d3f644ba7a038bc3d240d",
+      "bytes": 59369
+    },
+    "workspace.log.gz": {
+      "sha256": "370d6aa3eef185c26ebf12f106ae06e221b2a2381b89ffd1c4a7f69d7e1793f2",
+      "uncompressed_sha256": "cda182b907123ba0089031cefe2c9bf116e3479aceac86d18ae8c9bbde10f84c",
+      "bytes": 50652
+    },
+    "native-runtime.json": {
+      "sha256": "bb239d7911da3a33196ad48ba6e13ed404c4fb3d517b675c5d8470a44f328180"
+    },
+    "native-runtime-final.json": {
+      "sha256": "ee9661c4aa4ecb59cd8543d7c882480518345d35746de6c4533e9a958370af06"
+    }
+  },
+  "credential_pattern_scan": {
+    "audit.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "baseline-build.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "baseline-member-final.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "baseline-snapshot-final.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "build-ancestry.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "build-final.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "build-tests.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "build.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "ci-yaml.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "clippy-ancestry.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "clippy-final.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "default-clippy.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "dispatch-diagnostic-2.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "dispatch-diagnostic.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "imported-clippy.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "imported.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "lib-ancestry.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "lib-final.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "member-build.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "member-clippy.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "member-final.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "member-negative-tests.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "merged-build.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "merged-member.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "native-ancestry.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "native-clippy.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "native-final.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "native-lib.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "native-suite.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "pi-final.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "pi-merged.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "post-fix-tests.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "pre-fix-tests.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "pty-final.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "pty.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "redaction-baseline.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "restore-rerun.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "schema.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "workspace-rerun.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    },
+    "workspace.log": {
+      "worker_credential": 0,
+      "runtime_anchor": 0
+    }
+  },
+  "source_provenance": "source-manifest.json; merge from current main changes only Markdown and CI relative to c13ca6a; embedded notice text rebuilt for final candidate"
+}

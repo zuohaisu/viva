@@ -953,6 +953,9 @@ impl App {
                     "Viva client authentication requires its actual transport connection",
                 )
             }
+            Method::VivaMemberEffect(params) => {
+                return self.handle_viva_member_effect(request.id, params)
+            }
             Method::VivaExecutionStart(params) => {
                 return self.handle_viva_execution_start(request.id, params)
             }

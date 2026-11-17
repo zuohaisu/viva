@@ -47,6 +47,7 @@ fn active_worker_credential_without_execution_blocks_owner_only_phase() {
         .issue_worker_credential(&caller.channel_id, None, member.member_id)
         .unwrap();
     let bridge = super::super::DomainBridge {
+        persistence: super::super::persistence::Persistence::new(home.path()).unwrap(),
         home: home.path().into(),
         host_id: "native-guard-unit".into(),
         store: Mutex::new(Some(store)),
