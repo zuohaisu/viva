@@ -4,7 +4,32 @@ Viva's root MIT license does not replace the licenses of third-party source.
 This file records the source import for [#187](https://github.com/zuohaisu/viva/issues/187).
 It does not claim upstream endorsement or grant trademark rights.
 
-## herdr
+## Current integration status (#203)
+
+The original import below is preserved at commit
+`48ce171f11a249de575df71d59d868caf1a1e1c4` (subtree `98b3f4e`). The **current**
+`upstream/herdr/` is modified: library embedding, Viva domain/authority hooks,
+execution lifecycle, legacy handoff and public-entry routing were added by
+PRs #197–#202. “No modifications” and source-only statements in the initial
+inventory below describe that original import, not current main. Current build
+and comparison instructions are in [upstream/README.md](upstream/README.md).
+
+The 2026-10-31 owner disposition recorded below supersedes the initial demand
+to omit/replace the unchanged media or obtain legal clearance before starting B;
+it is not itself a legal conclusion. #190 and #191 are now closed on GitHub;
+that administrative state does not establish final product or legal acceptance.
+Native upgrade remains #201, and the remaining integration/acceptance work is
+tracked by the [Wiki Roadmap](https://github.com/zuohaisu/viva/wiki/Roadmap).
+
+The current release workflow adds Herdr LICENSE/NOTICE and a short SBOM, but
+this is not a complete linked-dependency notice audit. In particular, its SBOM's
+Ghostty Apache-2.0 label does not match the imported Ghostty MIT LICENSE below;
+`prepare-packages.py` also does not copy the tarball's notice/license payload
+into npm platform packages. Final tar/npm notices, exact Cargo/Zig closure and
+source obligations remain P4 follow-up, not cleared by this documentation task.
+Do not replace source notices with a package's inaccurate summary label.
+
+## herdr — original source import
 
 - Upstream: <https://github.com/herdrdev/herdr>
 - Owner-provided source fork: <https://github.com/zuohaisu/herdr>
@@ -267,7 +292,11 @@ the actual distribution mode. Source availability on GitHub alone is not a
 universal substitute. Scope/combination questions need qualified professional
 review. No release clearance is asserted here.
 
-### Assets: unresolved, not approved for redistribution
+### Initial asset-review concerns (historical; see later owner disposition)
+
+The following concerns and proposed remedies are retained as the initial review
+record. The 2026-10-31 disposition above supersedes its open-decision language
+for the unchanged media; it does not erase the underlying provenance limits.
 
 Binary/font/testdata files outside `assets/` now have `files` records as well;
 that visibility does not establish their permissions. Fira Code's explicit OFL
@@ -286,7 +315,11 @@ that decision remains open. The original snapshot is retained for provenance,
 not silently edited or presented as cleared. Source publication itself remains
 subject to this unresolved review.
 
-## Review status: incomplete — integration/release hold
+## Initial review status (historical) — incomplete integration/release hold
+
+The following is the initial #192/#190 review state, not a new condition to
+reopen those issues or stop already-authorized B work. Read the closeout
+disposition and current integration status above for what superseded it.
 
 PR #192's partial notice/evidence delivery was merged; that was not completion
 of #190 or a distribution clearance. Current follow-up evidence supersedes the
