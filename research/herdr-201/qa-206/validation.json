@@ -42,5 +42,7 @@
     "Issue 201 remains open: live 0.3.10 cooperative upgrade, canonical member/agent transfer, complete stable/npm package replacement rollback, final released packages, real user data and human UI remain unfinished or unverified.",
     "Logs contain task-local absolute paths and harmless fixture output. Limited credential-shape scan had no matches, not comprehensive secret clearance.",
     "No package version changes, release/deployment, PR merge/approval or worktree removal."
-  ]
+  ],
+  "product_source_commit": "ec961c710074564593da13a4477c1937ef209e0e",
+  "documentation_base_integration": "main f4c0c0b (#207) integrated to resolve README conflict; all non-Markdown product sources match ec961c7 byte-for-byte. Original manifest retained; current manifest reflects reconciled README."
 }

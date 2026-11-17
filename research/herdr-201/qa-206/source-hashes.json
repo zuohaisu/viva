@@ -1,6 +1,6 @@
 {
   ".github/workflows/ci.yml": "80275a81bdd5180a72b5f0bc3d16cb4b64ffc95f3c24b884908764d10e52216d",
-  "README.md": "7889cdb26cd26f38e32c88595b7708d64c56c588b6ade437af9b41550477bdd7",
+  "README.md": "c07095cb34074ece386ae842b32c1ecca67d8a309f7752a993b5553dcd11dc46",
   "crates/viva/src/native_runtime.rs": "8375ed15adda466493bac75c7ea151a26d9bcd20c65681dcd8ac39c44da02a8c",
   "crates/viva/src/native_runtime/upgrade.rs": "e764a32ed76d5e85884146dc1faf470e9766197f9028d1359969a3019919b501",
   "crates/viva/src/server/client.rs": "52e70ab040c6201b9f823922d254ae6a0fdb3e5b603b4ff5e5a9f9f5d74eb7d6",

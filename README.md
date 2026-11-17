@@ -25,9 +25,21 @@ Session dies. Resident persists.
 
 ## What Viva does today
 
-`viva` is a single native binary (Rust + SQLite). All facts live in
-`$VIVA_HOME` (default `~/.viva`, 0700); member names and model/tool bindings
-are configuration, and every completion claim carries recorded evidence.
+This section describes **current source**, not every published binary.
+Public GitHub/npm `0.3.9` predates the embedded Herdr runtime; the internal
+Tailnet `0.3.10` build includes Keychain removal but predates the unified
+public commands in PR #202. Neither version number proves current-main
+behavior. Source, channel and acceptance records are in the
+[Wiki Releases](https://github.com/zuohaisu/viva/wiki/Releases). References to
+#191's P0–P5 below identify implementation/acceptance records; that issue is now
+closed, not a claim that all remaining gates passed. Current follow-up scope is
+in [Roadmap](https://github.com/zuohaisu/viva/wiki/Roadmap) and #201.
+
+`viva` is a single native binary (Rust + SQLite). Viva's domain records live in
+`$VIVA_HOME` (default `~/.viva`, private directory); original harness transcripts
+may live outside it. Member names and model/tool bindings are configuration.
+The native behavior below requires `--features herdr-runtime`; Cargo's default
+feature set still builds the legacy development host.
 
 - **Foundation** — `viva init` creates the home and applies the full Viva
   schema; `viva doctor` reports state, schema versions and table counts;
@@ -49,21 +61,25 @@ are configuration, and every completion claim carries recorded evidence.
   native workspace navigation and `viva server` can start the native host.
   Native crash reconciliation and member-execution upgrade remain #191 P3; an
   unowned live execution is refused rather than replayed or called complete.
-- **Parallel development workbench** — one Viva instance spans projects, tasks,
-  worktrees and terminals (see `crates/viva/src/tui/workbench/`): real git
-  facts (branch/dirty/diff), purpose-terminals per worktree with focused
-  keyboard input that never crosses neighbors. `q` detaches the TUI while
-  the server keeps every terminal running; `viva shutdown` stops owned
-  processes while preserving every worktree and record.
+- **Parallel development workbench** — the native build directly embeds
+  Herdr's renderer, server and PTYs from `upstream/herdr/`, connected through
+  `crates/viva/src/native_runtime/`. `Ctrl+B`, then `q` detaches the TUI;
+  the host and live terminals keep running. `viva shutdown` stops that home's
+  native host and owned terminals; it does not delete worktrees or domain
+  records. The older `tui/workbench/` renderer is retained for non-native
+  development and historical checks, not as a native UI fallback.
 - **Conversation metadata** — `viva conversations` keeps the Viva-owned
   tree: display names, fork hierarchy, write-once native session pointers,
   explicit task attachment, and cross-harness handoffs with declared
   capability. The harness (Pi) owns the transcript; Viva owns the tree.
-- **Pi as the default conversational host** — members meet in Pi's own UI
-  inside a Viva terminal (`crates/viva/src/harness/pi/` +
-  [extensions/pi/](extensions/pi/)). The extension injects the member's
-  task context and offers status queries, grant-controlled dispatch and
-  explicit handoff. External memory (F04) stores native facts in the Viva
+- **Pi integration** — Pi is the selected conversational host, using its own
+  UI plus `crates/viva/src/harness/pi/` and
+  [extensions/pi/](extensions/pi/). The extension supplies member/task context
+  and tools for status, dispatch and handoff. Tool registration is not proof
+  that every effect works on the new runtime: native member-initiated dispatch,
+  handoff and the top-level `agent` interface remain unintegrated. Real Pi
+  acceptance is tracked in [#18](https://github.com/zuohaisu/viva/issues/18).
+  External memory (F04) stores native facts in the Viva
   database with member/project scope, provenance, usage evidence, and
   recoverable archive (`viva memory …`; no Hermes checkout or Python
   required). Legacy Hermes link rows remain as `legacy_hermes` for provenance
@@ -103,10 +119,11 @@ legacy data readers; native release entry points cannot reach the old UI.
 
 **Not implemented, and never faked**: automatic reflection, self-model
 evolution, automatic memory promotion, starting at login (planned, to be
-configurable), an automatic task-scheduling daemon (a required goal; today
-the server only runs scheduled recovery and auto-sync), automatic remote
-writes, multi-user support. Unavailable models/tools/providers fail loudly; Viva
-never substitutes one silently.
+configurable), an automatic task-scheduling daemon, automatic remote writes,
+multi-user support. Scheduled recovery and auto-sync exist in the legacy host;
+their native CLI routes currently refuse rather than silently starting it.
+Unavailable models/tools/providers fail loudly; Viva never substitutes one
+silently.
 
 ## Install
 
@@ -114,9 +131,11 @@ Requires **macOS** (Apple Silicon or Intel). External tools, when you use the
 matching features: `git` (required for worktrees; fetched read-only), `gh`
 (optional, GitHub evidence), [Pi](https://github.com/earendil-works/pi)
 (optional, member conversation host) and your own model-CLI credentials —
-Viva never stores credentials.
+model-provider credentials remain in those tools' environments. Viva does store
+its own local runtime capability; that is not a model-provider credential.
 
-**From a release (no Rust toolchain needed):** grab `viva-macos-<arch>.tar.gz`
+**Public stable channel (currently the legacy 0.3.9, not current main):**
+No Rust toolchain is needed. Grab `viva-macos-<arch>.tar.gz`
 from the [releases page](https://github.com/zuohaisu/viva/releases), unpack,
 and run `./viva`. Each artifact ships with a sha256 checksum and includes the
 Pi extension sources and licenses.
@@ -127,12 +146,26 @@ Pi extension sources and licenses.
 npm i -g @zuohaisu/viva    # installs the `viva` command
 ```
 
-**From source:**
+**From source (native workbench):** run from the repository root on macOS.
+Install the Rust version pinned in `upstream/herdr/rust-toolchain.toml`
+(currently `1.96.1`), Zig `0.16.0` and Xcode Command Line Tools. Put `zig` on
+PATH or set `ZIG` to its executable. The root stable Rust toolchain alone may
+be older than the native crate's requirement. Native build/cache troubleshooting
+is in [upstream/README.md](upstream/README.md).
 
 ```bash
-cargo install --path crates/viva    # or: cargo build --release
+rustup toolchain install 1.96.1
+cargo +1.96.1 build --release --locked -p viva --features herdr-runtime
+# Optional installation: do not overwrite an existing installation unintentionally.
+cargo +1.96.1 install --locked --path crates/viva --features herdr-runtime
 viva init && viva doctor
+viva runtime --version   # confirms the embedded runtime is available
 ```
+
+Omitting `--features herdr-runtime` builds the legacy development host, **even
+with `--release`**. `viva --version` alone cannot distinguish those builds.
+The native feature's release-workflow wiring does not retroactively change
+already-published archives.
 
 ### Update
 
@@ -155,12 +188,22 @@ Native updates replace **only the executable**; refresh bundled Pi extension
 sources separately from the matching release if you use them. Checksums verify
 integrity, not an independent publisher signature.
 
-Updates do not open/migrate `VIVA_HOME` or alter members/tasks/history.
-After installing, a running resident server is restarted through the live
-handoff: the new binary takes over and the terminals survive; reconnect the
-TUI afterwards. `viva update --no-restart` skips this (`viva server-restart`
-does it later); with no server running, nothing is started. Upgrades are
-user-invoked, not automatic member maintenance actions.
+The install step does not migrate the domain database. Activation is a separate
+capability, not proved by the installed executable's `--version`:
+
+| Running host → target | Current behavior / evidence |
+| --- | --- |
+| No host | Installs files; does not start a host. |
+| Compatible legacy → legacy | The legacy updater's S3 live handoff carries terminals to a new legacy host; reconnect the TUI. `--no-restart` skips activation. |
+| Compatible legacy → native | Starting the native workbench can import live PTYs and retire the legacy host after adoption. This is the degraded import described above, not a guarantee for arbitrary old versions or an end-to-end installer upgrade. |
+| Native → newer native | In-place activation is **not implemented**. The updater reports that files were installed but the old host is still running; native `server-restart` refuses. Reattaching does not prove the host uses the new build. |
+
+Do not stop live work just to satisfy an upgrade example. Automatic runtime
+switching, client recovery and failure/rollback acceptance remain required by
+[#201](https://github.com/zuohaisu/viva/issues/201); these limitations do not
+cancel that requirement. An updater install result/exit status is not full
+runtime-upgrade acceptance. `--no-restart` also leaves any native host on its
+old in-memory code. Upgrades are user-invoked, not automatic member maintenance.
 Older releases without this command need a one-time npm reinstall or release
 download before `viva update` becomes available.
 
@@ -209,12 +252,72 @@ not database backups**. An ambiguous post-commit failure retains installed files
 and reports failure instead of blindly rolling back behind a new runtime.
 Intel installation, user-data migration and human visual acceptance require their
 own evidence. PR builds keep the package version; record commit and binary hash.
+#### Isolated native test-package preparation
+
+This is an **isolated test-package recipe**, not the deployed Tailnet installer
+or release clearance. Use the native toolchain prerequisites above. It includes
+more notice material than the current release workflow; the actual linked
+Cargo/Zig dependency closure and final tar/npm license payload still require
+review (the P4 work recorded on #191). Do not distribute a candidate until its
+applicable full terms, copyright and source obligations have been checked.
+
+On the Mac, from a clean checkout of the commit under test, with the default
+Cargo target directory (no `CARGO_TARGET_DIR` override):
+
+```bash
+set -eu
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) DIR=viva-macos-arm64 ;;
+  Darwin-x86_64) DIR=viva-macos-intel ;;
+  *) printf 'Build on the matching macOS architecture\n' >&2; exit 1 ;;
+esac
+cargo +1.96.1 build --release --locked -p viva --features herdr-runtime
+stage=$(mktemp -d)
+mkdir -p "$stage/$DIR/extensions"
+cp target/release/viva "$stage/$DIR/viva"
+cp -R extensions/pi "$stage/$DIR/extensions/pi"
+rm -rf "$stage/$DIR/extensions/pi/node_modules"
+cp LICENSE README.md THIRD_PARTY_NOTICES.md "$stage/$DIR/"
+cp -R licenses "$stage/$DIR/licenses"
+cp upstream/herdr/LICENSE "$stage/$DIR/licenses/herdr-LICENSE"
+cp upstream/herdr/vendor/libghostty-vt/LICENSE "$stage/$DIR/licenses/ghostty-LICENSE"
+cp upstream/herdr/vendor/portable-pty/LICENSE.md "$stage/$DIR/licenses/portable-pty-LICENSE"
+cp Cargo.lock "$stage/$DIR/Cargo.lock"
+commit=$(git rev-parse HEAD)
+printf '%s\n' \
+  'Viva test build includes modified Herdr 0.9.3 source (Apache-2.0).' \
+  "Source: https://github.com/zuohaisu/viva/tree/$commit" \
+  'Modifications: library embedding, Viva domain/authority and CLI integration.' \
+  'Not an original Herdr distribution or an endorsement by its authors.' \
+  > "$stage/$DIR/NOTICE"
+printf '%s\n' 'Component inventory (not a complete linked SBOM):' \
+  'viva: MIT; herdr: Apache-2.0; ghostty-vt/portable-pty: MIT.' \
+  'Exact Cargo graph: Cargo.lock. Native/source notices: THIRD_PARTY_NOTICES.md.' \
+  > "$stage/$DIR/SBOM.txt"
+tar -czf "$stage/$DIR.tar.gz" -C "$stage" "$DIR"
+digest=$(shasum -a 256 "$stage/$DIR.tar.gz" | awk '{ print $1 }')
+printf '%s  %s\n' "$digest" "$DIR.tar.gz" > "$stage/$DIR.tar.gz.sha256"
+printf 'Candidate archives: %s\nSource commit: %s\n' "$stage" "$commit"
+```
+
+Keep that commit available with all modified source. The recipe assumes no
+uncommitted source changes; if present, record the patch/hash too. Shipping a
+source link or this notice superset alone is not proof of license compliance.
+
+After review and deployment authorization, serve only the architectures actually
+built, the tracked installer, and a `channel.json` manifest selecting their
+immutable filenames and digests as described above. Do not substitute a
+files-only shell installer or infer that a successful `--version` probe upgraded
+an already-running host. Existing internal-channel provenance remains in
+[Herdr-Viva-Integration](https://github.com/zuohaisu/viva/wiki/Herdr-Viva-Integration)
+§18.3; this PR does not deploy that channel or authorize a release.
 
 **Run Viva:**
 
 ```bash
-viva                     # workbench (native default in release builds)
-viva workbench           # same native workbench in release builds
+# Current source, built with --features herdr-runtime:
+viva                     # native workbench; auto-starts host if needed
+viva workbench           # same native workbench
 viva open ./project      # register/select workspace, then the same workbench
 viva status              # native runtime status, from a second process
 viva shutdown            # stop native executions and the resident host
@@ -253,23 +356,38 @@ crates/viva/src/
   members/ workspaces/ projects/          configuration and context domains
   tasks/        task registry, launch-intent protocol, results, briefs
   authority/ redaction/                grants, denial ledger, redaction policy
-  terminal/     real PTY sessions (spawn/input/resize/snapshot/stop/wait)
+  native_runtime.rs + native_runtime/    native composition, CLI, admission, import
+  terminal/     legacy PTY + transferable handoff/data primitives
   git/          worktrees (discover/create/adopt), read-only GitHub evidence
   knowledge/    sources, lifecycle, selection, usage evidence
   conversations/                        tree, forks, handoffs (V10)
-  server/       active host, control channel, reconciliation (V07)
+  server/       legacy Host/protocol, shared migrations and durable event query
   harness/      explicit launch combinations; Pi specialization (V09)
-  tui/          shell, parallel-development workbench (V14), conversations
+  tui/          legacy renderer and reusable scene/data readers
+upstream/herdr/ embedded native renderer, headless host, VT/PTY (nested workspace)
 extensions/pi/  the Pi member extension (TypeScript, independently tested)
 ```
 
 ## Testing
 
 ```bash
-cargo test --workspace          # Rust: units + per-issue acceptance tests
+cargo test --workspace          # default (non-native) Rust suite
 python -m pytest tests/acceptance -q   # acceptance tooling (stdlib-only)
 cd extensions/pi && npm ci && npm run typecheck && npm test   # Pi extension
 ```
+
+The default root suite does **not** exercise the embedded Herdr runtime.
+Daily code CI runs feature-enabled core CLI/lifecycle tests and a real PTY
+smoke. The manual full CI (`workflow_dispatch`) additionally runs native/imported
+Clippy, nested nextest/maintenance and historical handoff matrices. Run that
+entry for imported-source/dependency or upgrade/migration changes; a daily green
+run is not full-suite evidence. Markdown-only PRs run the diff check and omit
+product jobs. Exact targets, legacy fixtures and probes are in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) (`native-runtime`) and
+[upstream/README.md](upstream/README.md).
+Pi contract tests need a built `viva` binary (or `VIVA_BIN`); registration/tests
+are separate from real model-driven Pi acceptance. Ignored/manual tests and
+human UI checks are not passed evidence.
 
 ### Independent QA
 
@@ -286,9 +404,17 @@ Members and workers never gain repository-owner authority: no protected-branch
 pushes, no merges, no approving their own PR, no self-authorization — the
 vocabulary lives in `crates/viva/src/authority/` and protected actions are
 refused to every grant. Caller roles exist only because Viva issued a
-channel; nothing self-declares. Every persisted artifact is private
-(0o600/0o700) and secret-redacted before it is written. Viva never reads,
-writes or migrates the historical `~/.ticket-autopilot/` state.
+channel; nothing self-declares. Core domain writers use Viva's private-storage
+and redaction helpers, but that is **not a universal guarantee for every native
+artifact**. In particular, native session metadata is serialized by the imported
+runtime; its raw paths/names/launch metadata have no blanket Viva redaction
+coverage, and file modes are not uniformly set to 0600 by that writer. The
+runtime directory is private; the local capability has explicit 0700/0600
+checks. Native pane history is forcibly disabled because output-persistence
+redaction is not integrated. Live pane observation remains accessible within
+the same account. Complete persistence/redaction coverage remains the P2/P4
+work recorded on #191; no secret-leak reproduction or clearance is claimed here.
+Viva never reads, writes or migrates historical `~/.ticket-autopilot/` state.
 
 ## Acknowledgements
 
@@ -299,11 +425,13 @@ herdr source rather than reimplementing its behavior (tracking [#187](https://gi
   terminal-multiplexer reference behind Viva's resident runtime and workbench
   chrome: a resident server that holds all terminal sessions with
   detach/attach, a workspace/tab/pane layout, mouse-first pane interaction,
-  and sidebar-based agent awareness. The unmodified source baseline is retained
-  in [`upstream/herdr/`](upstream/herdr/) with its original licenses; build and
-  scope instructions are in [`upstream/README.md`](upstream/README.md). This
-  initial import does not yet replace the default Viva runtime or integrate
-  Viva's authority and member/task/execution model. The alignment
+  and sidebar-based agent awareness. [`upstream/herdr/`](upstream/herdr/) now
+  contains the modified, embedded runtime with canonical member/task queries,
+  real execution attribution/exit reporting, member reports and native public
+  command routing. The original unmodified import is preserved at commit
+  `48ce171f11a249de575df71d59d868caf1a1e1c4`; its tests/notices do not certify the
+  later integration. Build and remaining safety/acceptance limits are in
+  [`upstream/README.md`](upstream/README.md). The alignment
   analysis and decision records live in the Wiki
   ([Research-Herdr-Runtime-Parity](https://github.com/zuohaisu/viva/wiki/Research-Herdr-Runtime-Parity)
   and [ADR-0012](https://github.com/zuohaisu/viva/wiki/ADR-0012)).
