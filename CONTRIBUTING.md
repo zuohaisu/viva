@@ -46,10 +46,11 @@ git diff --check
 | change how authority or delegation works | `crates/viva/src/authority/` (and ADR 0007) |
 | change where work happens (worktrees, GitHub evidence) | `crates/viva/src/git/` (and ADR 0009) |
 | change tasks, results, handoff briefs | `crates/viva/src/tasks/` |
-| change dispatch/stop/status/recovery (control plane) | `crates/viva/src/server/` |
+| change native dispatch/stop/status/workspace routing | `crates/viva/src/native_runtime.rs`, `native_runtime/cli.rs`, `upstream/herdr/src/embedding.rs` (and ADR 0012) |
+| inspect legacy host/recovery, shared migrations or historical handoff | `crates/viva/src/server/`, `terminal/` (not a native fallback) |
 | change knowledge ownership or reuse evidence | `crates/viva/src/knowledge/` (and ADR 0010) |
 | change conversation trees, forks, handoffs | `crates/viva/src/conversations/` |
-| change the surfaces | `crates/viva/src/tui/`, `crates/viva/src/main.rs`, `extensions/pi/` |
+| change the surfaces | native: `upstream/herdr/src/`, `crates/viva/src/main.rs`; Pi: `extensions/pi/`; legacy development renderer: `crates/viva/src/tui/` |
 
 Do **not** reintroduce the retired delivery subsystem: no ticket/Plane/run/QA
 objects, no fixed pipelines presented as dynamic scheduling (ADR 0008).
@@ -69,6 +70,16 @@ means:
   dispatch, stopping and recovery run **real** supervised processes;
 - the acceptance tooling tests (`tests/acceptance/`) and the Pi extension
   suite (`extensions/pi/`: strict `tsc` + `node:test`) stay green.
+
+The default root Cargo suite does not build/test the embedded Herdr runtime.
+Daily code CI also runs feature-enabled core tests and a real-binary/PTY smoke.
+The manual full CI (`workflow_dispatch`) adds native/imported Clippy, nested
+nextest/maintenance and historical migration/compatibility checks; run it for
+imported-source/dependency or upgrade/migration changes. Markdown-only PRs run
+the diff check and omit product jobs; that is not product-suite PASS. Exact
+commands are in `.github/workflows/ci.yml` and
+[upstream/README.md](upstream/README.md). Use separate build targets when comparing
+non-native and native binaries; `--release` alone does not enable `herdr-runtime`.
 
 Never weaken or skip a test to make a change pass.
 
