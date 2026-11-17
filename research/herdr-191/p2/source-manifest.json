@@ -1,0 +1,32 @@
+{
+  "commit": "b4d546324e7674e25c13dbfc8580cadd561f0c37",
+  "sha256": {
+    ".github/workflows/ci.yml": "c6f442de84d3aec8a7c6309e981627715180c7cb81014cfeed09e327d736fd8e",
+    "README.md": "4c2adf2e6d9068dedbae10fd45dc34a9fbbfd0f1985d52e79aee021675dff57a",
+    "crates/viva/src/main.rs": "54e4fd54563193ad22dc9dd933ce54ce0481493566462893fcc534492c2d4d78",
+    "crates/viva/src/native_runtime.rs": "c707c9713517f994f968bfc1a93d014057f52f28ae7e9310b1e238fbd793c58c",
+    "crates/viva/src/native_runtime/cli.rs": "3baefaf31a39007a4c4fe98160f7114967e731f598ba1441179db200647a3dbd",
+    "crates/viva/src/native_runtime/client_authority/tests.rs": "4c7a05d3cd5d252ef3798a770f5ac5c8a1637d9c30e820a826ae35e13eb542da",
+    "crates/viva/src/native_runtime/member_effects.rs": "10bd3e74dd494943c31fecdac42afbf99967d599f70cc38b594b6b37c5047695",
+    "crates/viva/src/native_runtime/persistence.rs": "6ad295d63d71515b17dad4e9f9c283f80e81273c8911ee39df9269fcabca7250",
+    "crates/viva/src/redaction/mod.rs": "f8f462136ed87562b31d389afffae3997b1572735bc5d5a70572959dbd07b261",
+    "crates/viva/src/tasks/mod.rs": "ccddbf082bf15606835f2271f7c4b9d7f8ad15806bf0e7911ec83242e1c8d59c",
+    "crates/viva/tests/native_cli.rs": "c4ae4607c0b663587cdec29a8e40cba78930c59b6068a90d496f6da8010848b0",
+    "crates/viva/tests/native_member_effects.rs": "fcaeef8f06e173a1ae2202d12130d4fd24527fdb046d8ce0b1e94464c5640fb3",
+    "crates/viva/tests/native_runtime_bridge.rs": "9057a003a3f2cc97b75e726a09e0d452cc5d784d0985e1ab8496149162115fcf",
+    "crates/viva/tests/redaction_prefix.rs": "1d80cc1d465a0a385b35224011421f57339c44facef2d38552538616faa27a4f",
+    "crates/viva/tests/support/member_effect_cases.rs": "b5af902cebf6208f4aaf73ac95dc20bb58dac7eb4bfba64f458c21e8f320fe0e",
+    "crates/viva/tests/support/owner_anchor.rs": "ac44dc7e4903146260d087389f444d44ef8f59b70ab20029cae6b4ff7aea80e9",
+    "extensions/pi/test/viva.contract.test.ts": "162f71969be90ad89aa49b2f43ff029b6f08adcdb40233756057f2b1c501058f",
+    "upstream/herdr/docs/next/api/herdr-api.schema.json": "fd7e20358ae299f382cac54468dcb7a75940ba4b21cbf9d08aedbd24ab298a3c",
+    "upstream/herdr/src/api/schema.rs": "7664ffbe5175c8e703657ecda07f72b6009e912e683e677b9d1365e729bbdefc",
+    "upstream/herdr/src/api/schema/server.rs": "eae9194f648800acd04796539f4378ea14cfc5cfb8295f423f091f0772ff416f",
+    "upstream/herdr/src/api/schema/tests.rs": "d0cdfea12412df6f0e8327f1e57e280017135ff5d5ca46179688bc929597763b",
+    "upstream/herdr/src/api/server.rs": "3f6f232d09e8e413b8da3434878287fab8add1fa8e7c711f03d2c477d8831da7",
+    "upstream/herdr/src/app/api.rs": "f4ea04236aed57ada32cb56399aa5dc44b24239eb06e5f7fb0df18634db77bb7",
+    "upstream/herdr/src/app/api/viva.rs": "df99cde4d0484fefd928a09af55e8c55d72b5e49d1df010a43e095ffed49a078",
+    "upstream/herdr/src/embedding.rs": "3ea3b2c49c740c91d10084aacf259358b69c2355f710831584bc2fe77c567fd9",
+    "upstream/herdr/src/logging.rs": "20e418b22e839bae07d373d5f50f9feb3a12f59aff969e9b09963a3de1f1ad10",
+    "upstream/herdr/src/persist/io.rs": "bf1e8d5d61a6a39305ebfdad5839f15659fd9340d2a412f3a4e33ccbdf10be44"
+  }
+}
