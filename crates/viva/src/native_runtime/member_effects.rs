@@ -37,7 +37,7 @@ impl DomainBridge {
         peer: herdr::embedding::TransportPeer,
     ) -> io::Error {
         let audit = self.with_store(|store| {
-            events::append(store, NewEvent {
+            self.append_event(store, NewEvent {
                 domain: crate::server::DOMAIN_HOST, kind: "native_member_effect_refused".into(),
                 subject_type: "native_ingress".into(), subject_id: uuid::Uuid::new_v4().to_string(),
                 origin: "native_member_process".into(),
@@ -163,7 +163,7 @@ impl DomainBridge {
             let _ = self.member_effect_denied("target_preparation_refused", peer);
         })?;
         self.with_store(|store| {
-            events::append(store, NewEvent {
+            self.append_event(store, NewEvent {
                 domain: crate::server::DOMAIN_HOST, kind: "native_member_dispatch_prepared".into(),
                 subject_type: "execution".into(), subject_id: plan.execution_id.clone(),
                 origin: "native_member_process".into(),
@@ -186,8 +186,12 @@ impl DomainBridge {
         if detail.trim().is_empty() || detail.len() > 64 * 1024 {
             return Err(self.member_effect_denied("handoff_needs_1_to_65536_bytes", peer));
         }
+        // A handoff is a report, not terminal control: require the same fixed
+        // report action as `viva.member.report`, so a grant that only carries
+        // terminal control cannot write task-level reports (and a reporting
+        // grant does not need terminal control).
         let (source, grant) =
-            self.authorize_member(credential, grant, peer, "terminal_control", None)?;
+            self.authorize_member(credential, grant, peer, super::MEMBER_REPORT_ACTION, None)?;
         if task.is_some_and(|id| id != source.task_id.as_str())
             || member.is_some_and(|id| id != source.member_id.as_str())
         {
@@ -203,6 +207,10 @@ impl DomainBridge {
         self.with_store(|store| {
             let prior = store.connection().query_row("SELECT seq FROM events WHERE kind='native_member_handoff' AND subject_id=?1 AND json_extract(payload,'$.request_key')=?2", rusqlite::params![source.task_id.as_str(), key], |row| row.get::<_,i64>(0)).optional()?;
             if let Some(seq) = prior { return Ok(seq); }
+            // The summary is already redacted above and this payload carries the
+            // idempotency key; keep the raw append so uniform payload redaction
+            // cannot rewrite that integrity value. Other member events use the
+            // shared `append_event` wrapper.
             Ok(events::append(store, NewEvent {
                 domain: crate::server::DOMAIN_HOST, kind: "native_member_handoff".into(),
                 subject_type: "task".into(), subject_id: source.task_id.to_string(), origin: "native_member_process".into(),

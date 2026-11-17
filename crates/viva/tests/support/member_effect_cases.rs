@@ -18,7 +18,7 @@ fn actual_member_requests_recheck_grants_and_cannot_self_authorize() {
         .issue_root_grant(
             Some(coordinator.clone()),
             None,
-            vec!["dispatch_delegated".into(), "terminal_control".into()],
+            vec!["dispatch_delegated".into(), "terminal_control".into(), "member_report".into()],
             GrantMode::ActAutonomously,
             None,
         )
@@ -94,7 +94,11 @@ fn actual_member_requests_recheck_grants_and_cannot_self_authorize() {
             .issue_root_grant(
                 Some(principal),
                 task,
-                vec!["dispatch_delegated".into(), "terminal_control".into()],
+                vec![
+                    "dispatch_delegated".into(),
+                    "terminal_control".into(),
+                    "member_report".into(),
+                ],
                 mode,
                 None,
             )
@@ -105,7 +109,11 @@ fn actual_member_requests_recheck_grants_and_cannot_self_authorize() {
                 .delegate_grant(
                     &ancestor,
                     coordinator.clone(),
-                    vec!["dispatch_delegated".into(), "terminal_control".into()],
+                    vec![
+                        "dispatch_delegated".into(),
+                        "terminal_control".into(),
+                        "member_report".into(),
+                    ],
                     mode,
                     None,
                 )

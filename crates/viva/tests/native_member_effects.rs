@@ -104,7 +104,7 @@ fn bound_member_dispatches_and_hands_off_without_becoming_user() {
         .issue_root_grant(
             Some(coordinator.parse().unwrap()),
             None,
-            vec!["dispatch_delegated".into(), "terminal_control".into()],
+            vec!["dispatch_delegated".into(), "member_report".into()],
             GrantMode::ActAutonomously,
             None,
         )
@@ -281,6 +281,70 @@ fn bound_member_dispatches_and_hands_off_without_becoming_user() {
         )
         .unwrap();
     assert_eq!(count, 1);
+    shutdown(home, &mut host);
+}
+
+#[test]
+fn a_bound_worker_reports_a_handoff_under_the_report_action() {
+    let temp = tempfile::Builder::new().prefix("p2").tempdir().unwrap();
+    let home = temp.path();
+    let store = Store::open(&paths::database_path(home), viva::server::migrations()).unwrap();
+    let worker = member(&store, "worker");
+    let task = TaskRegistry::new(&store)
+        .create_task("worker handoff", vec![], None, None, None)
+        .unwrap();
+    let grant = AuthorityEngine::new(&store)
+        .issue_root_grant(
+            Some(worker.parse().unwrap()),
+            Some(task.task_id.clone()),
+            // Dispatch plus reporting: no terminal-control permission.
+            vec!["dispatch_delegated".into(), "member_report".into()],
+            GrantMode::ActAutonomously,
+            None,
+        )
+        .unwrap();
+    let mut host = start(home);
+    let output = home.join("worker-handoff.json");
+    let execution = launch(
+        home,
+        task.task_id.as_str(),
+        &worker,
+        grant.grant_id.as_str(),
+        "worker-handoff",
+        &format!(
+            "'{}' handoff --summary worker-done > '{}'; sleep 120",
+            binary().display(),
+            output.display()
+        ),
+    );
+    assert!(execution["pane_id"].is_string());
+    wait("worker handoff output", || {
+        output.metadata().is_ok_and(|meta| meta.len() > 0)
+    });
+    let reply: Value = load(&output);
+    assert!(reply["event_seq"].as_i64().is_some(), "{reply}");
+    let raw: String = store
+        .connection()
+        .query_row(
+            "SELECT payload FROM events WHERE kind='native_member_handoff' AND subject_id=?1 ORDER BY seq DESC LIMIT 1",
+            [task.task_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let payload: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(payload["member_id"].as_str(), Some(worker.as_str()));
+    assert_eq!(
+        payload["claim_scope"].as_str(),
+        Some("member_report_not_task_completion")
+    );
+    assert_ne!(
+        TaskRegistry::new(&store)
+            .require_task(&task.task_id)
+            .unwrap()
+            .status
+            .as_str(),
+        "done"
+    );
     shutdown(home, &mut host);
 }
 

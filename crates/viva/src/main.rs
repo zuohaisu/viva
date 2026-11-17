@@ -887,7 +887,8 @@ fn print_usage() {
     println!(
         "Native build: viva / workbench / open use the same Herdr workbench.\n\
         Domain status/dispatch/terminals/stop-terminal/result/pause/resume/shutdown use the native host.\n\
-        Member dispatch/handoff require a process-bound credential and live grants.\n\
+        Member dispatch/handoff require a process-bound credential and live grants;\n\
+        handoff additionally needs the `member_report` grant action.\n\
         Agent/terminal/scene/plugin/sync/recovery and remote control\n\
         are not integrated yet (#191 P2); server-restart remains #191 P3.\n\
         These operations refuse explicitly; they never launch a legacy host.\n"
@@ -1034,7 +1035,9 @@ USAGE:
     viva create-task --goal <text> | viva grant --member <id>
         --task <id> --action <a> --mode <m> | viva brief <task-id> |
         viva handoff --task <id> --member <id> --summary <text>
-        Task, grant, brief and handoff management.
+        Task, grant and brief management. Native builds accept `handoff`
+        only from a bound member process (VIVA_MEMBER_CREDENTIAL) whose
+        grant names `member_report`; an owner shell is refused.
 
     viva sync now | viva sync auto-pull on|off | viva sync status
         V15-4: run one sync cycle now; toggle the auto_pull switch
