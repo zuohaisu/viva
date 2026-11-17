@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "architecture": "macos-arm64",
+  "passed": false,
+  "human_visual": "HUMAN_VISUAL_REVIEW_PENDING",
+  "active_canonical_member_transfer": "not_supported",
+  "intel": "not_run",
+  "baseline_files_replaced_old_runtime_unchanged": true,
+  "unsupported_generation_refused_old_host_serving": true,
+  "fresh_and_repeat_install_no_daemon": true,
+  "previous_sha256": "8b216bb8097c840d2f4390725567073837bf17f33c3b34e31e3276a17b612dd1",
+  "error": "viva install: activation outcome unknown; installed files retained, previous files at /private/tmp/vuswquie8t/prefix/viva-backup-bf5npoex; no database rollback attempted\nviva install: runtime phase failed (files-installed is not upgrade-success): viva: phase=handoff; live shells survive; active member execution transfer is not supported\nviva: validation: activation verification timed out; current runtime outcome unknown; do not report upgrade success or blindly restore files\n\n"
+}

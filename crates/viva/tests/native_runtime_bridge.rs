@@ -110,7 +110,12 @@ fn actual_native_server_reads_canonical_facts_and_audits_unbound_refusals() {
     let ping = call(home, "ping", json!({}));
     assert_eq!(ping["result"]["type"], "pong");
     assert_eq!(ping["result"]["capabilities"]["viva_domain_schema"], 1);
-    assert_eq!(ping["result"]["capabilities"]["live_handoff"], false);
+    assert_eq!(ping["result"]["capabilities"]["live_handoff"], true);
+    assert_eq!(snapshot["native_upgrade_protocol"], 1);
+    assert_eq!(
+        snapshot["native_upgrade_scope"],
+        "live_shells_only_no_active_member_executions"
+    );
     assert_eq!(
         ping["result"]["capabilities"]["ssh_agent_registration"],
         false

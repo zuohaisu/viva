@@ -29,6 +29,9 @@
 //! live grant, and every denial is appended to the event log.
 
 mod client;
+mod executable;
+#[cfg(feature = "herdr-runtime")]
+pub(crate) use client::executable_sha256;
 mod handoff;
 mod protocol;
 mod restore;

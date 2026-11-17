@@ -447,6 +447,47 @@ fn npm_layout(base: &Path, nested: bool) -> (PathBuf, PathBuf) {
 }
 
 #[test]
+fn native_handoff_preflight_only_runs_for_an_actual_file_change() {
+    let fixture = Fixture::new();
+    for (current, check) in [("0.3.0", false), ("0.2.0", true)] {
+        assert!(
+            !update_native_with_preflight(
+                &version(current).unwrap(),
+                &fixture.target,
+                "macos-arm64",
+                check,
+                &fixture.download,
+                || panic!("no-op/check must not demand handoff readiness")
+            )
+            .unwrap()
+        );
+    }
+    let result = update_native_with_preflight(
+        &version("0.2.0").unwrap(),
+        &fixture.target,
+        "macos-arm64",
+        false,
+        &fixture.download,
+        || Err(invalid("fixture-active-work-refusal")),
+    );
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("fixture-active-work-refusal")
+    );
+    fixture.unchanged();
+    assert!(
+        fixture
+            .download
+            .calls
+            .borrow()
+            .iter()
+            .all(|url| url == LATEST_RELEASE)
+    );
+}
+
+#[test]
 fn npm_installation_prefix_detection_handles_nested_hoisted_and_local_packages() {
     let dir = TempDir::new().unwrap();
     for nested in [true, false] {

@@ -222,7 +222,10 @@ fn run_client_with_mode(
     } else {
         endpoint::EndpointCatalog::default()
     };
-    let federated = endpoint_catalog.has_enabled_ssh();
+    // Viva modification (#201): reuse the endpoint supervisor for local
+    // embedded workbench reconnect, even without a saved SSH endpoint.
+    let federated = endpoint_catalog.has_enabled_ssh()
+        || (crate::embedding::enabled() && client_rendered_shell);
 
     // Viva modification: authenticate the OS-bound frontend before raw attach.
     crate::embedding::authenticate_local_client()?;
@@ -472,7 +475,10 @@ async fn run_client_loop(
         detached_process_children: Vec::new(),
         shell: config.shell_config.map(shell::ClientShellState::new),
     };
-    let mut federated = endpoint_catalog.has_enabled_ssh();
+    // Viva modification (#201): an embedded local workbench must survive the
+    // native host's cooperative handoff instead of exiting on ServerShutdown.
+    let mut federated = endpoint_catalog.has_enabled_ssh()
+        || (crate::embedding::enabled() && state.shell.is_some());
     if let Some(shell) = state.shell.as_mut() {
         shell.set_graphics_cell_size(initial_cell_width_px, initial_cell_height_px);
         shell.set_endpoint_catalog(&endpoint_catalog.ssh);

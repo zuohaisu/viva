@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "architecture": "macos-arm64",
+  "passed": true,
+  "human_visual": "HUMAN_VISUAL_REVIEW_PENDING",
+  "active_canonical_member_transfer": "not_supported",
+  "intel": "not_run",
+  "baseline_files_replaced_old_runtime_unchanged": true,
+  "unsupported_generation_refused_old_host_serving": true,
+  "fresh_and_repeat_install_no_daemon": true,
+  "previous_sha256": "c2b67f396ba058f5f7fd3e48fc827cd9c2ca3e3d62660de6becfe1810392173f",
+  "old_host_exit": "exited_pending_parent_reap",
+  "host_changed_target_build_ready": true,
+  "existing_frontend_recovered_live_shell_and_background_job": true,
+  "fresh_process_reattach_retained_work": true,
+  "target_sha256": "298c3a75137116006f0f78f376786856e7c89bbf5f0f63a410d86299147bcfdc",
+  "download_checksum_failures_preserve_files_and_runtime": true,
+  "concurrent_installer_refused": true,
+  "home_and_installation_isolation": true,
+  "readiness_failure_restored_files_and_old_runtime_service": true
+}

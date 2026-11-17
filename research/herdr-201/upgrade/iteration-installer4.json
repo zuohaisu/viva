@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "architecture": "macos-arm64",
+  "passed": false,
+  "human_visual": "HUMAN_VISUAL_REVIEW_PENDING",
+  "active_canonical_member_transfer": "not_supported",
+  "intel": "not_run",
+  "baseline_files_replaced_old_runtime_unchanged": true,
+  "unsupported_generation_refused_old_host_serving": true,
+  "fresh_and_repeat_install_no_daemon": true,
+  "error": "real PTY output absent: b'READY'; frame=\u001b[?2026h\u001b[?25l\u001b]8;;\u001b\\\u001b[2;35H\u001b[0;39;49mVU_STATE=kept;\u001b[2;50Hsleep\u001b[2;56H120\u001b[2;60H&\u001b[2;62HVU_JOB=$!;\u001b[2;73Hprintf\u001b[2;80H'\\122\\105\\101\\104\\131\\n'\u001b[3;27Hsh:\u001b[3;31H!:\u001b[3;34Hevent\u001b[3;40Hnot\u001b[3;44Hfound\u001b[0m\u001b[4;35H\u001b[?25h\u001b[?2026l\u001b[4;35H\u001b[?25h\u001b[?2026h\u001b[?25l\u001b]8;;\u001b\\\u001b[4;27H\u001b[0;39;49msh-3.2$\u001b[0m\u001b[4;35H\u001b[?25h\u001b[?2026l\u001b[4;35H\u001b[?25h"
+}

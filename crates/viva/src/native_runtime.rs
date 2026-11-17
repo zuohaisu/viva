@@ -94,6 +94,7 @@ struct DomainBridge {
     pre_provisioned_anchor: Option<String>,
     channels: Mutex<ChannelRegistry>,
     executions: Mutex<NativeExecutionState>,
+    raw_clients: Mutex<std::collections::HashMap<u64, (u32, String)>>,
     /// Present when this host took over a live legacy session. A degraded
     /// import, never a lossless claim.
     legacy_handoff: Option<LegacyHandoffEvidence>,
@@ -457,6 +458,10 @@ impl herdr::embedding::DomainServices for DomainBridge {
         self.persistence.flush()
     }
     fn server_started(&self) -> io::Result<()> {
+        // Pin/verify the loaded image before any domain/listener effects.
+        // A pathname replaced even before Rust main must never supply this
+        // process's identity (Darwin mapped-vnode check / Linux proc-self inode).
+        crate::server::executable_sha256().map_err(io::Error::other)?;
         self.with_store(|store| {
             events::append(store, NewEvent {
                 domain: crate::server::DOMAIN_HOST,
@@ -492,6 +497,54 @@ impl herdr::embedding::DomainServices for DomainBridge {
             .lock()
             .map_err(|_| io::Error::other("native client authority poisoned"))?
             .activate(Some(anchor))
+    }
+    fn raw_client_connection(
+        &self,
+        id: u64,
+        peer: herdr::embedding::TransportPeer,
+        connected: bool,
+    ) -> io::Result<()> {
+        let mut clients = self
+            .raw_clients
+            .lock()
+            .map_err(|_| io::Error::other("raw client observations poisoned"))?;
+        if connected {
+            let pid = peer
+                .pid
+                .ok_or_else(|| io::Error::other("raw peer PID unavailable"))?;
+            clients.insert(id, (pid, herdr::embedding::peer_lifetime_marker(peer)?));
+        } else {
+            clients.remove(&id);
+        }
+        Ok(())
+    }
+    fn prepare_handoff(&self) -> io::Result<()> {
+        // Native member channels/credentials are host-incarnation bound. Until
+        // their transfer is implemented, reject BEFORE disconnecting clients.
+        self.with_store(|store| {
+            let active: i64 = store.connection().query_row(
+                "SELECT (SELECT count(*) FROM executions WHERE status IN ('requested','running')) +
+                        (SELECT count(*) FROM worker_credentials WHERE status = 'active')",
+                [], |row| row.get(0),
+            )?;
+            if active != 0 {
+                return Err(Error::Validation(
+                    "native member execution credential transfer is not supported; old runtime and work remain untouched".into(),
+                ));
+            }
+            Ok(())
+        })?;
+        self.record_anchor_event("native_upgrade_prepared")
+    }
+    fn handoff_rolled_back(&self) -> io::Result<()> {
+        let anchor = self
+            .owner_anchor
+            .lock()
+            .map_err(|_| io::Error::other("native owner anchor poisoned"))?
+            .clone()
+            .ok_or_else(|| io::Error::other("old runtime has no owner anchor"))?;
+        owner_anchor::store_runtime(&self.home, &anchor)?;
+        self.record_anchor_event("native_upgrade_rolled_back")
     }
     fn client_credential(&self) -> io::Result<String> {
         if let Some(anchor) = &self.pre_provisioned_anchor {
@@ -1384,6 +1437,18 @@ impl herdr::embedding::DomainServices for DomainBridge {
                 "backend": "herdr-source-library",
                 "runtime_pid": std::process::id(),
                 "runtime_host_id": self.host_id,
+                "runtime_binary_sha256": crate::server::executable_sha256().map_err(io::Error::other)?,
+                "runtime_start_marker": process_start_marker(std::process::id() as i64),
+                "runtime_executable": std::env::current_exe()?.to_string_lossy(),
+                "native_upgrade_ready": store.connection().query_row(
+                    "SELECT (SELECT count(*) FROM executions WHERE status IN ('requested','running')) +
+                            (SELECT count(*) FROM worker_credentials WHERE status='active') = 0",
+                    [], |row| row.get::<_, bool>(0),
+                )?,
+                "native_upgrade_protocol": 1,
+                "raw_clients": self.raw_clients.lock().map_err(|_| io::Error::other("raw client observations poisoned"))?
+                    .values().map(|(pid, marker)| serde_json::json!({"pid": pid, "lifetime": marker})).collect::<Vec<_>>(),
+                "native_upgrade_scope": "live_shells_only_no_active_member_executions",
                 "execution_attribution": "pane_bound_owner_dispatch",
                 "integration_state": if self.legacy_handoff.is_some() {
                     "native-default-entry-legacy-inheritance"
@@ -1702,6 +1767,8 @@ fn run_control_client(home: &std::path::Path, args: &[String]) -> Result<()> {
     Ok(())
 }
 
+mod upgrade;
+
 pub fn run(args: &[String]) -> Result<()> {
     if crate::machines::invocation_target().is_some() {
         return Err(Error::Validation(
@@ -1710,6 +1777,9 @@ pub fn run(args: &[String]) -> Result<()> {
         ));
     }
     let home = paths::viva_home(None);
+    if args.first().map(String::as_str) == Some("upgrade") {
+        return upgrade::run(&home, &args[1..]);
+    }
     owner_anchor::prepare_home(&home)?;
     // A bound member process is a client of the running host, never a second
     // host: never auto-start anything and never touch the legacy server.
@@ -1809,6 +1879,7 @@ pub fn run(args: &[String]) -> Result<()> {
             pre_provisioned_anchor: pre_provisioned_anchor.clone(),
             channels: Mutex::new(ChannelRegistry::new()),
             executions: Mutex::new(adopted_state),
+            raw_clients: Mutex::new(std::collections::HashMap::new()),
             home,
             host_id,
             store: Mutex::new(None),
@@ -2057,6 +2128,7 @@ mod tests {
             owner_anchor: Mutex::new(None),
             pre_provisioned_anchor: None,
             channels: Mutex::new(channels),
+            raw_clients: Mutex::new(std::collections::HashMap::new()),
             executions: Mutex::new(NativeExecutionState {
                 by_execution: HashMap::from([(execution_id.to_string(), binding)]),
                 by_pane: HashMap::from([(

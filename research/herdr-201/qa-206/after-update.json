@@ -1,0 +1,124 @@
+{
+  "schema": 1,
+  "passed": true,
+  "candidate_sha256": "389701a896e7fc6db4c8a3952e27f85e262beab53ab92eb36e8c063dd4a5b343",
+  "previous_sha256": "c2b67f396ba058f5f7fd3e48fc827cd9c2ca3e3d62660de6becfe1810392173f",
+  "cases": {
+    "absent": {
+      "passed": true,
+      "check": {
+        "exit": 0,
+        "stdout": "{\"started\":false,\"state\":\"no_runtime\"}\n",
+        "stderr": ""
+      },
+      "activate": {
+        "exit": 0,
+        "stdout": "{\"started\":false,\"state\":\"no_runtime\"}\n",
+        "stderr": ""
+      },
+      "update": {
+        "exit": 0,
+        "stdout": "Current: 0.3.9; latest: 0.3.9 (GitHub Releases)\nInstalled files are current; no downgrade performed. Runtime state is checked separately.\n",
+        "stderr": ""
+      }
+    },
+    "stale_socket": {
+      "passed": true,
+      "check": {
+        "exit": 0,
+        "stdout": "{\"started\":false,\"state\":\"no_runtime\"}\n",
+        "stderr": ""
+      },
+      "activate": {
+        "exit": 0,
+        "stdout": "{\"started\":false,\"state\":\"no_runtime\"}\n",
+        "stderr": ""
+      },
+      "update": {
+        "exit": 0,
+        "stdout": "Current: 0.3.9; latest: 0.3.9 (GitHub Releases)\nInstalled files are current; no downgrade performed. Runtime state is checked separately.\nNative activation result: {\"started\":false,\"state\":\"no_runtime\"}\n",
+        "stderr": ""
+      }
+    },
+    "regular_file": {
+      "passed": true,
+      "check": {
+        "exit": 0,
+        "stdout": "{\"started\":false,\"state\":\"no_runtime\"}\n",
+        "stderr": ""
+      },
+      "activate": {
+        "exit": 0,
+        "stdout": "{\"started\":false,\"state\":\"no_runtime\"}\n",
+        "stderr": ""
+      },
+      "update": {
+        "exit": 0,
+        "stdout": "Current: 0.3.9; latest: 0.3.9 (GitHub Releases)\nInstalled files are current; no downgrade performed. Runtime state is checked separately.\nNative activation result: {\"started\":false,\"state\":\"no_runtime\"}\n",
+        "stderr": ""
+      }
+    },
+    "files_current_runtime_old": {
+      "passed": true,
+      "deferred": {
+        "exit": 0,
+        "stdout": "Current: 0.3.9; latest: 0.3.9 (GitHub Releases)\nInstalled files are current; no downgrade performed. Runtime state is checked separately.\nRuntime activation deferred (--no-restart); running build was not checked. Run `viva update` without --no-restart to finish activation.\n",
+        "stderr": ""
+      },
+      "update": {
+        "exit": 0,
+        "stdout": "Current: 0.3.9; latest: 0.3.9 (GitHub Releases)\nInstalled files are current; no downgrade performed. Runtime state is checked separately.\nNative activation result: {\"binary_sha256\":\"389701a896e7fc6db4c8a3952e27f85e262beab53ab92eb36e8c063dd4a5b343\",\"client_code\":\"compatible_existing_processes_not_reloaded\",\"client_recovery\":\"previous_frontends_negotiated_and_fresh_controller_verified\",\"fresh_controller_verified\":true,\"previous_frontend_count\":1,\"runtime_host_id\":\"native-46ae2ffd14be4e2f82cf3108c40dcd90\",\"state\":\"upgrade_complete\"}\n",
+        "stderr": ""
+      },
+      "repeat": {
+        "exit": 0,
+        "stdout": "Current: 0.3.9; latest: 0.3.9 (GitHub Releases)\nInstalled files are current; no downgrade performed. Runtime state is checked separately.\nNative activation result: {\"client_recovery\":\"not_needed_no_handoff\",\"runtime_host_id\":\"native-46ae2ffd14be4e2f82cf3108c40dcd90\",\"state\":\"already_active\"}\n",
+        "stderr": ""
+      },
+      "host_changed": true,
+      "target_runtime_hash": "389701a896e7fc6db4c8a3952e27f85e262beab53ab92eb36e8c063dd4a5b343"
+    },
+    "failed_activation_noop_retry": {
+      "passed": true,
+      "first": {
+        "exit": 1,
+        "stdout": "",
+        "stderr": "viva: phase=handoff; live shells survive; active member execution transfer is not supported\nviva: validation: activation failed or outcome unknown: validation: server.live_handoff failed (handoff_failed): handoff replacement server did not become ready: handoff stream closed while reading line; inspect runtime identity before retrying; files-installed is not upgrade-success\n"
+      },
+      "retry": {
+        "exit": 1,
+        "stdout": "Current: 0.3.9; latest: 0.3.9 (GitHub Releases)\nInstalled files are current; no downgrade performed. Runtime state is checked separately.\n",
+        "stderr": "viva: validation: files installed but native runtime activation is incomplete: validation: `/private/tmp/vqh0h5qun_/failed-retry/prefix/viva/viva` failed (exit status: 1): viva: phase=handoff; live shells survive; active member execution transfer is not supported\nviva: validation: activation failed or outcome unknown: validation: server.live_handoff failed (handoff_failed): handoff replacement server did not become ready: handoff stream closed while reading line; inspect runtime identity before retrying; files-installed is not upgrade-success\n"
+      },
+      "old_host_serving": true
+    },
+    "no_previous_frontends": {
+      "passed": true,
+      "reported_recovery": {
+        "binary_sha256": "389701a896e7fc6db4c8a3952e27f85e262beab53ab92eb36e8c063dd4a5b343",
+        "client_code": "compatible_existing_processes_not_reloaded",
+        "client_recovery": "no_previous_clients",
+        "fresh_controller_verified": true,
+        "previous_frontend_count": 0,
+        "runtime_host_id": "native-714673c24b574e59b65cd9ad4a20713a",
+        "state": "upgrade_complete"
+      },
+      "update": {
+        "exit": 0,
+        "stdout": "Current: 0.3.9; latest: 0.3.9 (GitHub Releases)\nInstalled files are current; no downgrade performed. Runtime state is checked separately.\nNative activation result: {\"binary_sha256\":\"389701a896e7fc6db4c8a3952e27f85e262beab53ab92eb36e8c063dd4a5b343\",\"client_code\":\"compatible_existing_processes_not_reloaded\",\"client_recovery\":\"no_previous_clients\",\"fresh_controller_verified\":true,\"previous_frontend_count\":0,\"runtime_host_id\":\"native-714673c24b574e59b65cd9ad4a20713a\",\"state\":\"upgrade_complete\"}\n",
+        "stderr": ""
+      }
+    },
+    "startup_identity": {
+      "passed": true,
+      "loaded_binary_sha256": "389701a896e7fc6db4c8a3952e27f85e262beab53ab92eb36e8c063dd4a5b343",
+      "replacement_sha256": "c2b67f396ba058f5f7fd3e48fc827cd9c2ca3e3d62660de6becfe1810392173f",
+      "reported_runtime_sha256": null,
+      "exit": 1,
+      "diagnostic": "viva: io error: validation: cannot identify this executable: executable file does not match running image; retry the installed binary\n"
+    }
+  },
+  "transport": "private CONNECT metadata fixture; unchanged official release URL and real system curl",
+  "application_credential_injection": false,
+  "metadata_requests": 8
+}

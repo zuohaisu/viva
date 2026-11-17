@@ -56,6 +56,7 @@ fn active_worker_credential_without_execution_blocks_owner_only_phase() {
         pre_provisioned_anchor: None,
         channels: Mutex::new(crate::foundation::envelope::ChannelRegistry::new()),
         executions: Mutex::new(super::super::NativeExecutionState::default()),
+        raw_clients: Mutex::new(std::collections::HashMap::new()),
         legacy_handoff: None,
     };
     assert!(bridge.require_owner_only_phase().is_err());

@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "architecture": "macos-arm64",
+  "passed": false,
+  "human_visual": "HUMAN_VISUAL_REVIEW_PENDING",
+  "active_canonical_member_transfer": "not_supported",
+  "intel": "not_run",
+  "error": "herdr: cannot attach without a usable terminal: terminal reported a zero-sized grid; run inside a terminal\r\n"
+}
