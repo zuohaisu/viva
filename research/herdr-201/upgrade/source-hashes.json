@@ -1,0 +1,22 @@
+{
+  ".github/workflows/ci.yml": "58bc2c731fc50fca750cb46af7c56c94ae2572b1b5c5fbca1f00008e503c01ad",
+  "README.md": "5e646d4a040ef5f4a328ed8bbfcae554aa8de7136e2f31d91a85c71cfa0214c6",
+  "crates/viva/src/native_runtime.rs": "7dc0f49dc22afe8ddc229cea6b4dbbbf834e2dccb5e35fbe4fa5051e7d665a0f",
+  "crates/viva/src/native_runtime/client_authority/tests.rs": "11a65a1ebdb28550c26956b7fa4f732fa09b2223ada1016477bf5cf9d0bd2fac",
+  "crates/viva/src/native_runtime/upgrade.rs": "c8ccdffbcdc450fa79e21723abe1927714a4278912172b1e0bc6c3fa2abec808",
+  "crates/viva/src/server/client.rs": "5aa34049327720368ac2a75709f66f164e87b1a05ed1ff7822ca0d77f0fc90fc",
+  "crates/viva/src/server/mod.rs": "fc8a0cd95bb832486f5d4ae0acbaa923fadb325a347ac1f3f83b0103d67d77d5",
+  "crates/viva/src/update/mod.rs": "649ab714c5cd4b0c1c75e25277a14d49d13c53e25e77d0e9e1a11da28264692f",
+  "crates/viva/tests/native_runtime_bridge.rs": "aa5b76fa418a34b3a14c2fadec5c98617cd2e93eb538a0df9973cf2c3ec2ff7d",
+  "crates/viva/tests/native_upgrade.rs": "02cd0e74afae6d1f289d9b2aa82de8dec1f836c0cb69b9d69e95630674945a3c",
+  "crates/viva/tests/update.rs": "f82ba5931b6312fb293d78a2a6ae8f8218b8c22126eb9479ff51d61dc4415cf6",
+  "packaging/install.sh": "f67260a48528a653e7dbaf5368dbb9534a1210fc62cc84f0783b883d97dda2f8",
+  "tooling/herdr-integration/native_upgrade.py": "41872633bacfcfe80b5c02cc672db5c8e7faff9014f554531f1c3453c819c447",
+  "upstream/herdr/src/api/server.rs": "9e13691cefce3cf2c33363d0c08b98fafe8102930e78ca0b1ad84bb8aca7536d",
+  "upstream/herdr/src/client/mod.rs": "2f1ef5a953ff6243746f322321daf31f91fdd1f86c7e140d596aaaf44f7d1b92",
+  "upstream/herdr/src/embedding.rs": "a34c87a8abc3fc011a89c8ab4917edf3821b632ef17770b079ca6f8f211da502",
+  "upstream/herdr/src/server/client_transport.rs": "71f9dc9bb143bace4adb791e22cad97ac602d2e7b5e84074abc51195c014e32b",
+  "upstream/herdr/src/server/handoff.rs": "5dd5ea82f42a20f718e57f25b9750736d8e48cdfc4e1a3d705e238564a70b2a1",
+  "upstream/herdr/src/server/headless/bootstrap.rs": "85a3cf1d4c875334644813aa25f228703086aea3963d36175656bbca281ce3f0",
+  "upstream/herdr/src/server/headless/lifecycle.rs": "a8b8deba802cd655ed326d365440016b01334fb8fa553b1dcc33f6b40c056822"
+}

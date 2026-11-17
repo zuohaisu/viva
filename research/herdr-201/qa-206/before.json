@@ -1,0 +1,93 @@
+{
+  "schema": 1,
+  "passed": false,
+  "candidate_sha256": "54867cd821f8b12f8fbbe860344fc2827f9d312a78ab23cccc00ddae75aa61b9",
+  "previous_sha256": "c2b67f396ba058f5f7fd3e48fc827cd9c2ca3e3d62660de6becfe1810392173f",
+  "cases": {
+    "absent": {
+      "passed": true,
+      "check": {
+        "exit": 0,
+        "stdout": "{\"started\":false,\"state\":\"no_runtime\"}\n",
+        "stderr": ""
+      },
+      "activate": {
+        "exit": 0,
+        "stdout": "{\"started\":false,\"state\":\"no_runtime\"}\n",
+        "stderr": ""
+      },
+      "update": {
+        "exit": 0,
+        "stdout": "Current: 0.3.9; latest: 0.3.9 (GitHub Releases)\nAlready up to date; no downgrade performed.\n",
+        "stderr": ""
+      }
+    },
+    "stale_socket": {
+      "passed": false,
+      "check": {
+        "exit": 1,
+        "stdout": "",
+        "stderr": "viva: io error: Connection refused (os error 61)\n"
+      },
+      "activate": {
+        "exit": 1,
+        "stdout": "",
+        "stderr": "viva: io error: Connection refused (os error 61)\n"
+      },
+      "update": {
+        "exit": 1,
+        "stdout": "",
+        "stderr": "viva: validation: `/private/tmp/vq7yfkhsq8/stale_socket/prefix/viva/viva` failed (exit status: 1): viva: io error: Connection refused (os error 61)\n"
+      }
+    },
+    "regular_file": {
+      "passed": false,
+      "check": {
+        "exit": 1,
+        "stdout": "",
+        "stderr": "viva: io error: Socket operation on non-socket (os error 38)\n"
+      },
+      "activate": {
+        "exit": 1,
+        "stdout": "",
+        "stderr": "viva: io error: Socket operation on non-socket (os error 38)\n"
+      },
+      "update": {
+        "exit": 1,
+        "stdout": "",
+        "stderr": "viva: validation: `/private/tmp/vq7yfkhsq8/regular_file/prefix/viva/viva` failed (exit status: 1): viva: io error: Socket operation on non-socket (os error 38)\n"
+      }
+    },
+    "files_current_runtime_old": {
+      "passed": false,
+      "deferred": {
+        "exit": 0,
+        "stdout": "Current: 0.3.9; latest: 0.3.9 (GitHub Releases)\nAlready up to date; no downgrade performed.\n",
+        "stderr": ""
+      },
+      "update": {
+        "exit": 0,
+        "stdout": "Current: 0.3.9; latest: 0.3.9 (GitHub Releases)\nAlready up to date; no downgrade performed.\n",
+        "stderr": ""
+      },
+      "repeat": {
+        "exit": 0,
+        "stdout": "Current: 0.3.9; latest: 0.3.9 (GitHub Releases)\nAlready up to date; no downgrade performed.\n",
+        "stderr": ""
+      },
+      "host_changed": false,
+      "target_runtime_hash": "c2b67f396ba058f5f7fd3e48fc827cd9c2ca3e3d62660de6becfe1810392173f"
+    },
+    "startup_identity": {
+      "passed": false,
+      "loaded_binary_sha256": "54867cd821f8b12f8fbbe860344fc2827f9d312a78ab23cccc00ddae75aa61b9",
+      "replacement_sha256": "c2b67f396ba058f5f7fd3e48fc827cd9c2ca3e3d62660de6becfe1810392173f",
+      "reported_runtime_sha256": "c2b67f396ba058f5f7fd3e48fc827cd9c2ca3e3d62660de6becfe1810392173f",
+      "exit": null,
+      "diagnostic": "herdr server running; you can use any herdr CLI command in another terminal.\napi socket: /private/tmp/vq7yfkhsq8/startup/state/runtime/workbench/herdr.sock\nclient socket: /private/tmp/vq7yfkhsq8/startup/state/runtime/workbench/herdr-client.sock\nlogs: /private/tmp/vq7yfkhsq8/startup/state/runtime/workbench/herdr-server.log\ndid you mean to open the Herdr TUI? run `herdr`; you do not need `herdr server`.\n"
+    }
+  },
+  "transport": "private CONNECT metadata fixture; unchanged official release URL and real system curl",
+  "application_credential_injection": false,
+  "metadata_requests": 4
+}

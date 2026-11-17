@@ -26,6 +26,11 @@ impl HeadlessServer {
         &mut self,
         params: crate::api::schema::ServerLiveHandoffParams,
     ) -> io::Result<()> {
+        // Viva modification (#201): reject unsupported canonical work before
+        // any client disconnect or process/reader effect, on the app queue.
+        if let Some(ctx) = crate::embedding::context() {
+            ctx.domain.prepare_handoff()?;
+        }
         info!("starting live handoff");
         let import_exe = params.import_exe.as_deref().map(std::path::PathBuf::from);
         let socket_path = crate::server::handoff::handoff_socket_path();
@@ -283,6 +288,13 @@ impl HeadlessServer {
             }
         }
         self.handoff_in_progress = false;
+        // Viva modification (#201): a prepared receiver may have published a
+        // fresh capability. Restore the still-serving owner's proof on abort.
+        if let Some(ctx) = crate::embedding::context() {
+            if let Err(error) = ctx.domain.handoff_rolled_back() {
+                warn!(%error, "old runtime capability could not be restored after rollback");
+            }
+        }
         let _ = std::fs::remove_file(socket_path);
     }
 

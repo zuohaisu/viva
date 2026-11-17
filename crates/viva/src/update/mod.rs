@@ -2,11 +2,11 @@
 //!
 //! Reuses GitHub Releases + the shipped SHA-256 files, system curl (TLS),
 //! npm's package manager, and tar/flate2/tempfile for bounded staging and
-//! atomic replacement. Never opens VIVA_HOME data or modifies
-//! member/task/history records. After a successful install a RUNNING
-//! resident server is restarted through the S3 live handoff — the freshly
-//! installed entry point takes over and its terminals survive — unless
-//! `--no-restart` is given; nothing is spawned when no server runs.
+//! atomic replacement. A VIVA_HOME advisory lock coordinates the installer;
+//! member/task/history records are not modified by the installer itself.
+//! Native generations with cooperative upgrade support activate through the
+//! installed entry; unsupported generations/active member work are rejected
+//! before replacement. Nothing is spawned when no server runs.
 //! Checksums detect corruption; they are not an independent release
 //! signature.
 
@@ -36,8 +36,10 @@ const USAGE: &str = "USAGE: viva update [--check] [--no-restart]\n\
     --no-restart skips restarting a running resident server after installing.\n\
     Native macOS: verified GitHub Release binary, atomically replaced.\n\
     Global npm: npm installs @zuohaisu/viva@latest at the same prefix.\n\
-    After installing, a running resident server is restarted through the\n\
-    live handover (its terminals survive). VIVA_HOME data is untouched.";
+    Cooperative native generations hand over live shells and reconnect clients;\n\
+    active member executions and unsupported generations are refused.\n\
+    VIVA_HOME data is untouched by downloads; activation records runtime events.\n\
+    Database migrations are not performed; file backups are not data backups.";
 
 fn invalid(message: impl Into<String>) -> Error {
     Error::Validation(message.into())
@@ -60,7 +62,7 @@ fn parse_args(args: &[String]) -> Result<Mode> {
     }
 }
 
-/// No automatic/background updates and no runtime/store side effects.
+/// Explicit updates only; check mode has no runtime/store side effects.
 pub fn run(args: &[String]) -> Result<()> {
     let mode = parse_args(args)?;
     if mode == Mode::Help {
@@ -71,7 +73,7 @@ pub fn run(args: &[String]) -> Result<()> {
     // action. Reject known member contexts rather than treating their
     // request as the owner's. Like other CLI gates, this is NOT an OS sandbox.
     if matches!(mode, Mode::Install { .. })
-        && ["VIVA_MEMBER_ID", "VIVA_GRANT_ID"]
+        && ["VIVA_MEMBER_ID", "VIVA_GRANT_ID", "VIVA_MEMBER_CREDENTIAL"]
             .iter()
             .any(|key| std::env::var_os(key).is_some())
     {
@@ -79,11 +81,43 @@ pub fn run(args: &[String]) -> Result<()> {
             "update is a user-only installation operation; run it outside the member/worker context",
         ));
     }
+    // Shared with the dev installer, independent of the binary directory
+    // that may be renamed. Persistent inode: never unlink an advisory lock.
+    #[cfg(unix)]
+    let _runtime_install_lock = if matches!(mode, Mode::Install { .. }) {
+        let home = crate::foundation::paths::viva_home(None);
+        // Parsing/rejection/checking and installations with no state root must
+        // not initialize a Viva home. A running instance already has one.
+        if home.exists() {
+            let file = lock_file(&home.join("native-install.lock"))?;
+            Some(file)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let current = version(env!("CARGO_PKG_VERSION"))?;
     let target = fs::canonicalize(std::env::current_exe()?)?;
+    // Handoff readiness is required only when files will actually change.
+    // Equal-version retries still activate below, but need no transfer gate
+    // when the running image already matches the installed image.
+    let home = crate::foundation::paths::viva_home(None);
+    let before_install = |npm| {
+        if mode == (Mode::Install { restart: true }) {
+            prepare_native_install(&home, &target, npm)?;
+        }
+        Ok(())
+    };
     let installed: Option<PathBuf> = if let Some(root) = std::env::var_os("VIVA_NPM_PACKAGE_ROOT") {
         let prefix = npm_prefix(&target, Path::new(&root))?;
-        if update_npm(&current, prefix.as_deref(), mode == Mode::Check, "npm")? {
+        if update_npm_with_preflight(
+            &current,
+            prefix.as_deref(),
+            mode == Mode::Check,
+            "npm",
+            || before_install(true),
+        )? {
             Some(npm_wrapper_entry(
                 prefix.as_deref().expect("global prefix checked"),
             ))
@@ -107,21 +141,27 @@ pub fn run(args: &[String]) -> Result<()> {
                 "refusing to overwrite a Cargo build output; rebuild from source or install Viva before updating",
             ));
         }
-        if update_native(&current, &target, platform, mode == Mode::Check, &Curl)? {
-            Some(target)
+        if update_native_with_preflight(
+            &current,
+            &target,
+            platform,
+            mode == Mode::Check,
+            &Curl,
+            || before_install(false),
+        )? {
+            Some(target.clone())
         } else {
             None
         }
     };
-    match (installed, &mode) {
-        // The freshly installed entry takes over the running server: the
-        // handover IS the upgrade (S3). Nothing to spawn when none runs.
-        (Some(entry), Mode::Install { restart: true }) => {
-            restart_running_server(&crate::foundation::paths::viva_home(None), &entry)
+    let activate = installed.is_some() || native_runtime_present(&home);
+    match mode {
+        // Files-current is not runtime-current: retry a previous deferred or
+        // failed activation even when no package download/replacement happened.
+        Mode::Install { restart: true } if activate => {
+            restart_running_server(&home, installed.as_deref().unwrap_or(&target))?
         }
-        (Some(_), Mode::Install { restart: false }) => {
-            print_restart_skipped(&crate::foundation::paths::viva_home(None))
-        }
+        Mode::Install { restart: false } if activate => print_restart_skipped(&home),
         _ => {}
     }
     Ok(())
@@ -244,12 +284,24 @@ impl Download for Curl {
     }
 }
 
+#[cfg(test)]
 fn update_native(
     current: &Version,
     target: &Path,
     platform: &str,
     check: bool,
     download: &impl Download,
+) -> Result<bool> {
+    update_native_with_preflight(current, target, platform, check, download, || Ok(()))
+}
+
+fn update_native_with_preflight(
+    current: &Version,
+    target: &Path,
+    platform: &str,
+    check: bool,
+    download: &impl Download,
+    before_install: impl FnOnce() -> Result<()>,
 ) -> Result<bool> {
     let metadata_dir = TempDir::new()?;
     let metadata = metadata_dir.path().join("release.json");
@@ -258,7 +310,9 @@ fn update_native(
     let latest = release.stable_version()?;
     println!("Current: {current}; latest: {latest} (GitHub Releases)");
     if !newer(current, &latest) {
-        println!("Already up to date; no downgrade performed.");
+        println!(
+            "Installed files are current; no downgrade performed. Runtime state is checked separately."
+        );
         return Ok(false);
     }
     let archive_name = format!("viva-{platform}.tar.gz");
@@ -269,6 +323,7 @@ fn update_native(
         return Ok(false);
     }
 
+    before_install()?;
     // Stage on the target filesystem; a read-only installation fails here
     // without ever truncating the running executable. A persistent advisory
     // lock serializes competing upgrades; unlinking it would introduce races.
@@ -326,7 +381,10 @@ fn update_native(
     if let Err(err) = File::open(parent).and_then(|dir| dir.sync_all()) {
         eprintln!("viva: binary replaced, but syncing its directory failed: {err}");
     }
-    println!("Updated Viva {current} → {latest} at {}.", target.display());
+    println!(
+        "Files installed: Viva {current} → {latest} at {}; runtime activation follows.",
+        target.display()
+    );
     Ok(true)
 }
 
@@ -408,6 +466,10 @@ fn lock_installation(target: &Path) -> Result<File> {
         .file_name()
         .ok_or_else(|| invalid("binary has no filename"))?;
     let lock_path = target.with_file_name(format!(".{}-update.lock", name.to_string_lossy()));
+    lock_file(&lock_path)
+}
+
+fn lock_file(lock_path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
@@ -416,6 +478,19 @@ fn lock_installation(target: &Path) -> Result<File> {
         options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
     let file = options.open(lock_path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o077 != 0
+        {
+            return Err(invalid(
+                "unsafe installation lock ownership/type/permissions",
+            ));
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
@@ -482,7 +557,18 @@ fn npm_prefix(target: &Path, wrapper: &Path) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
+#[cfg(test)]
 fn update_npm(current: &Version, prefix: Option<&Path>, check: bool, npm: &str) -> Result<bool> {
+    update_npm_with_preflight(current, prefix, check, npm, || Ok(()))
+}
+
+fn update_npm_with_preflight(
+    current: &Version,
+    prefix: Option<&Path>,
+    check: bool,
+    npm: &str,
+    before_install: impl FnOnce() -> Result<()>,
+) -> Result<bool> {
     if !check && prefix.is_none() {
         return Err(invalid(
             "local npm installation: update from your project with `npm install @zuohaisu/viva@latest`; viva update upgrades global installations only",
@@ -497,7 +583,9 @@ fn update_npm(current: &Version, prefix: Option<&Path>, check: bool, npm: &str) 
     }
     println!("Current: {current}; latest: {latest} (npm)");
     if !newer(current, &latest) {
-        println!("Already up to date; no downgrade performed.");
+        println!(
+            "Installed files are current; no downgrade performed. Runtime state is checked separately."
+        );
         return Ok(false);
     }
     if check {
@@ -506,6 +594,7 @@ fn update_npm(current: &Version, prefix: Option<&Path>, check: bool, npm: &str) 
         );
         return Ok(false);
     }
+    before_install()?;
     println!("Updating @zuohaisu/viva through npm…");
     let mut install = Command::new(npm);
     // Pin the version we just checked: a changing dist-tag cannot introduce
@@ -541,33 +630,39 @@ fn npm_wrapper_entry(prefix: &Path) -> PathBuf {
 /// Post-install activation (default): hand a RUNNING resident server to the
 /// freshly installed entry point through the S3 live handoff — the handover
 /// IS the upgrade, and its terminals survive. No server, or a socket with no
-/// healthy host, is left alone with an honest note; a failed handover keeps
-/// the old generation serving and says so instead of failing the install,
-/// which already succeeded.
-fn restart_running_server(home: &Path, entry: &Path) {
+/// healthy host must not masquerade as a completed activation. Failures are
+/// nonzero and preserve their actual/ambiguous outcome; files-installed alone
+/// is never reported as a successful full upgrade.
+fn restart_running_server(home: &Path, entry: &Path) -> Result<()> {
     if crate::foundation::legacy::old_control_socket_alive(home).unwrap_or(false) {
         eprintln!(
             "viva: upgrade installed; shut down the old server with the previous version's \
              `viva shutdown`, then start `viva` to finish the migration."
         );
-        return;
+        return Err(invalid(
+            "files installed but legacy runtime activation is incomplete",
+        ));
     }
-    // A native host cannot be handed to the fresh binary in place yet: the
-    // installed update is real, but pretending there was no host to restart
-    // (or handing it to the legacy resume path) would be a silent lie.
+    // Native activation is owned by the installed entry, never the legacy
+    // resume path. Refusal/failure is nonzero, not a successful full upgrade.
     #[cfg(unix)]
-    if std::os::unix::net::UnixStream::connect(home.join("runtime/workbench/herdr.sock")).is_ok() {
-        eprintln!(
-            "viva: update installed, but a native runtime host is still running the previous \
-             binary and cannot be restarted in place; terminate that host (its sessions are \
-             not owned by the updater) and start `viva` again to use the new version."
-        );
-        return;
+    if native_runtime_present(home) {
+        let mut activate = Command::new(entry);
+        activate.args(["runtime", "upgrade", "--entry"]).arg(entry);
+        let result = capture(&mut activate, Duration::from_secs(120)).map_err(|error| {
+            invalid(format!(
+                "files installed but native runtime activation is incomplete: {error}"
+            ))
+        })?;
+        // Preserve no_runtime/already_active/no_previous_clients distinctions;
+        // do not invent a frontend negotiation that did not occur.
+        println!("Native activation result: {}", result.trim());
+        return Ok(());
     }
     let socket = home.join(crate::server::SOCKET_NAME);
     if !socket.exists() {
         println!("No running resident server; the next `viva` start will use the new version.");
-        return;
+        return Ok(());
     }
     // Only a healthy host can hand over. A socket nobody answers is left
     // for the next start to claim (`Host::open` records that).
@@ -577,26 +672,59 @@ fn restart_running_server(home: &Path, entry: &Path) {
              the next `viva` start will claim it if it is stale",
             socket.display()
         );
-        return;
+        return Err(invalid(
+            "files installed but runtime identity/readiness could not be verified",
+        ));
     }
     match crate::server::restart_server_with(home, entry) {
         Ok(new_pid) => println!(
             "Resident server restarted on the new version (pid {new_pid}); \
              its terminals carried over — reconnect the TUI."
         ),
-        Err(err) => eprintln!(
-            "viva: update installed, but the server restart failed: {err}\n\
-             The old server keeps serving; run `viva server-restart` when ready."
-        ),
+        Err(err) => {
+            return Err(invalid(format!(
+                "files installed but server activation failed: {err}; inspect the running host before retrying"
+            )));
+        }
     }
+    Ok(())
+}
+
+fn prepare_native_install(home: &Path, entry: &Path, npm: bool) -> Result<()> {
+    if !native_runtime_present(home) {
+        return Ok(());
+    }
+    let mut preflight = Command::new(entry);
+    preflight
+        .args(["runtime", "upgrade", "--check", "--entry"])
+        .arg(entry);
+    let result = capture(&mut preflight, Duration::from_secs(30))?;
+    let state: serde_json::Value = serde_json::from_str(&result)?;
+    match state["state"].as_str() {
+        Some("no_runtime") => Ok(()),
+        Some("prepared") if !npm => Ok(()),
+        Some("prepared") => Err(invalid(
+            "native runtime package replacement through npm is not yet supported; installation unchanged",
+        )),
+        _ => Err(invalid(
+            "native installation preflight returned an unknown state",
+        )),
+    }
+}
+
+fn native_runtime_present(home: &Path) -> bool {
+    ["herdr.sock", "herdr-client.sock"].iter().any(|name| {
+        !matches!(fs::symlink_metadata(home.join("runtime/workbench").join(name)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    })
 }
 
 fn print_restart_skipped(home: &Path) {
     #[cfg(unix)]
-    if std::os::unix::net::UnixStream::connect(home.join("runtime/workbench/herdr.sock")).is_ok() {
+    if native_runtime_present(home) {
         println!(
-            "Server restart skipped (--no-restart). A native runtime host keeps the previous \
-             binary until you terminate it and start `viva` again."
+            "Runtime activation deferred (--no-restart); running build was not checked. \
+             Run `viva update` without --no-restart to finish activation."
         );
         return;
     }
@@ -608,7 +736,7 @@ fn print_restart_skipped(home: &Path) {
 /// Bounded capture + deadline for the existing curl/npm and version probe.
 /// Files avoid pipe deadlocks; no shell interpretation, stdin prompts, or
 /// unbounded in-memory subprocess output. Failures retain their real cause.
-fn capture(command: &mut Command, timeout: Duration) -> Result<String> {
+pub(crate) fn capture(command: &mut Command, timeout: Duration) -> Result<String> {
     let stdout = NamedTempFile::new()?;
     let stderr = NamedTempFile::new()?;
     let program = command.get_program().to_string_lossy().into_owned();

@@ -66,7 +66,7 @@ fn update_with_context(key: &str) -> (std::process::Output, std::path::PathBuf, 
 
 #[test]
 fn member_context_cannot_upgrade_the_installed_host() {
-    for key in ["VIVA_MEMBER_ID", "VIVA_GRANT_ID"] {
+    for key in ["VIVA_MEMBER_ID", "VIVA_GRANT_ID", "VIVA_MEMBER_CREDENTIAL"] {
         let (output, home, _dir) = update_with_context(key);
         assert!(!output.status.success(), "{key}");
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -356,12 +356,12 @@ fn update_restarts_a_running_server_through_live_handover() {
     server.join().expect("old host joins");
 }
 
-/// A socket nobody answers is left alone with an honest note: the update
-/// never claims it (that is the next start's recorded recovery), and the
-/// install still succeeds.
+/// A socket nobody answers is left alone, but files-installed is not a full
+/// upgrade. #201 requires a nonzero incomplete-activation result rather than
+/// silently treating an unverified host as absent.
 #[cfg(unix)]
 #[test]
-fn update_with_a_dead_socket_installs_and_does_not_restart() {
+fn update_with_a_dead_socket_reports_incomplete_activation_without_claiming_it() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = TempDir::new().unwrap();
@@ -416,9 +416,8 @@ fn update_with_a_dead_socket_installs_and_does_not_restart() {
         .output()
         .unwrap();
     assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "unverified activation must not report full upgrade success"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("npm installed Viva"), "{stdout}");

@@ -260,6 +260,14 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         // Carried across before any client attaches, so the first title sent is
         // the override rather than the configured one it replaced.
         server.api_window_title = received.manifest.api_window_title.take();
+        // Viva modification (#201): include domain/capability readiness in the
+        // PREPARED phase, before the source commits and retires its live PTYs.
+        crate::embedding::server_ready()?;
+        if std::env::var("HERDR_TEST_HANDOFF_IMPORT_FAIL").as_deref() == Ok("after_domain_ready") {
+            return Err(io::Error::other(
+                "test handoff import failure after domain ready",
+            ));
+        }
         crate::server::handoff::report_ready(&mut received.stream)?;
         crate::server::handoff::wait_committed(&mut received.stream)?;
         server.app.assume_handoff_ownership();

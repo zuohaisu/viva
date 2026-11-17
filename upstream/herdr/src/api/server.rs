@@ -69,7 +69,8 @@ pub(crate) fn start_server_with_stop_control(
 fn default_capabilities() -> Option<ServerCapabilities> {
     Some(ServerCapabilities {
         viva_domain_schema: crate::embedding::enabled().then_some(1),
-        live_handoff: crate::platform::capabilities().live_handoff && !crate::embedding::enabled(),
+        // Viva modification (#201): owner-gated native shell handoff is integrated.
+        live_handoff: crate::platform::capabilities().live_handoff,
         detached_server_daemon: crate::platform::current_process_is_detached_server_daemon(),
         endpoint_protocol_generation: Some(crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION),
         surface_interest: true,

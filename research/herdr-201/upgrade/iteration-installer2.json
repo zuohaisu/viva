@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "architecture": "macos-arm64",
+  "passed": false,
+  "human_visual": "HUMAN_VISUAL_REVIEW_PENDING",
+  "active_canonical_member_transfer": "not_supported",
+  "intel": "not_run",
+  "error": "herdr: server did not become ready within 15s (socket: /private/var/folders/8k/cz3lc7yd3dq6gbdx5dbf_j8h0000gn/T/vu_bpdzy85/state/runtime/workbench/herdr-client.sock). The background server may still be starting; try `herdr` again, or check /private/var/folders/8k/cz3lc7yd3dq6gbdx5dbf_j8h0000gn/T/vu_bpdzy85/state/runtime/workbench/herdr-server.log\r\n"
+}

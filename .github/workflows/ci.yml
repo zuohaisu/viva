@@ -221,6 +221,7 @@ jobs:
       - name: Test native client capability and lifetime admission
         run: |
           cargo test -p viva --locked --features herdr-runtime --lib native_runtime:: -- --nocapture
+          cargo test -p viva --locked --features herdr-runtime --lib server::executable -- --nocapture
       - name: Build the recorded legacy handoff source (not a product fallback)
         if: github.event_name == 'workflow_dispatch'
         run: |
@@ -229,7 +230,7 @@ jobs:
           cargo build --locked --manifest-path "$RUNNER_TEMP/p1-legacy/Cargo.toml" -p viva --target-dir "$RUNNER_TEMP/p1-legacy-target"
           echo "VIVA_TEST_LEGACY_BIN=$RUNNER_TEMP/p1-legacy-target/debug/viva" >> "$GITHUB_ENV"
       - name: Test source-linked domain bridge, execution and control
-        run: cargo test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test native_execution --test native_member_ingress --test native_control --test native_cli --test native_worker_binding -- --nocapture
+        run: cargo test -p viva --locked --features herdr-runtime --test native_runtime_bridge --test native_execution --test native_member_ingress --test native_control --test native_upgrade --test native_cli --test native_worker_binding -- --nocapture
       - name: Test historical inheritance and terminal regressions (full)
         if: github.event_name == 'workflow_dispatch'
         run: cargo test -p viva --locked --features herdr-runtime --test native_legacy_inheritance --test m1_terminal -- --nocapture
@@ -282,6 +283,17 @@ jobs:
         run: |
           python tooling/herdr-integration/native_runtime.py --viva target/debug/viva --entry workbench --output "$RUNNER_TEMP/native-runtime-workbench.json"
           python tooling/herdr-integration/native_runtime.py --viva target/debug/viva --entry open --output "$RUNNER_TEMP/native-runtime-open.json"
+      - name: Verify HTTPS installer and cooperative native build activation
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          cp target/debug/viva "$RUNNER_TEMP/native-upgrade-previous"
+          SOURCE="$(mktemp -d /private/tmp/vu-source-XXXXXX)"
+          git archive HEAD | tar -x -C "$SOURCE"
+          # Same source, distinct debug paths: two real binaries with different
+          # hashes, without bumping package versions or publishing anything.
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked -p viva --features herdr-runtime --manifest-path "$SOURCE/Cargo.toml"
+          python tooling/herdr-integration/native_upgrade.py --previous "$RUNNER_TEMP/native-upgrade-previous" --candidate target/debug/viva --output "$RUNNER_TEMP/native-upgrade.json"
+          python tooling/herdr-integration/native_update.py --previous "$RUNNER_TEMP/native-upgrade-previous" --candidate target/debug/viva --output "$RUNNER_TEMP/native-update.json"
       - name: Retain native evidence including failures
         if: always()
         uses: actions/upload-artifact@v4
@@ -290,6 +302,8 @@ jobs:
           path: |
             ${{ runner.temp }}/native-runtime.json
             ${{ runner.temp }}/native-runtime-legacy.json
+            ${{ runner.temp }}/native-upgrade.json
+            ${{ runner.temp }}/native-update.json
             ${{ runner.temp }}/native-runtime-workbench.json
             ${{ runner.temp }}/native-runtime-open.json
           if-no-files-found: warn
