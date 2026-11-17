@@ -191,14 +191,20 @@ No running runtime means **no daemon is started**. Cooperative native generation
 support live PTY/shell transfer and negotiated reconnect of existing compatible
 frontends; the frontend executable is not reloaded. The actual target binary
 hash, new host identity, old host exit and frontend reconnect are checked, not
-just `--version`.
+just `--version`. Owned stale endpoints with no listener count as no runtime
+and are left intact; unsafe or partially live endpoints are refused. A normal
+`viva update` also retries deferred/failed activation when files are already
+current. Handoff preflight applies only when files will actually change; an
+already-active build does not interrupt active work. No-frontend upgrades report
+`no_previous_clients`, not a fabricated client recovery.
 
 **Current limits (#201):** 0.3.10 and earlier native hosts lack the cooperative
 protocol and are refused before replacement; active canonical member executions
 or worker credentials also block upgrade before any handoff. Do not kill live
 work to bypass this guard. Those upgrade paths remain unfinished, not successful
-cold recovery. Native activation through npm is not yet supported. Exact-schema
-attachment performs no database migration; retained files are **binary backups,
+cold recovery. Native npm package replacement with a live host remains
+unsupported; retrying activation of an already installed executable is separate
+from package replacement. Exact-schema attachment performs no database migration; retained files are **binary backups,
 not database backups**. An ambiguous post-commit failure retains installed files
 and reports failure instead of blindly rolling back behind a new runtime.
 Intel installation, user-data migration and human visual acceptance require their

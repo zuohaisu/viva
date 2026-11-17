@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "architecture": "macos-intel",
+  "passed": true,
+  "human_visual": "HUMAN_VISUAL_REVIEW_PENDING",
+  "active_canonical_member_transfer": "not_supported",
+  "arm64": "not_run",
+  "fresh_and_repeat_install_no_daemon": true,
+  "previous_sha256": "c1ba24a0f354d93b13d3c49d00cd3d79959df298c027014f2848d244d7938bf7",
+  "old_host_exit": "exited_pending_parent_reap",
+  "host_changed_target_build_ready": true,
+  "existing_frontend_recovered_live_shell_and_background_job": true,
+  "fresh_process_reattach_retained_work": true,
+  "target_sha256": "06d320c50f4a07a174c9744c1c65fa9d4dd35b4e0d07302a1aa91a6bdb219149",
+  "wrong_platform_refused_before_execution": true,
+  "download_checksum_failures_preserve_files_and_runtime": true,
+  "concurrent_installer_refused": true,
+  "home_and_installation_isolation": true,
+  "readiness_failure_restored_files_and_old_runtime_service": true
+}

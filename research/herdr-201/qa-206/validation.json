@@ -1,0 +1,46 @@
+{
+  "issue": 201,
+  "pr": 206,
+  "reviewed_head": "f825b6e7c8f73470b0611895c496ef214acaeb44",
+  "qa_report_sha256": "e194c4b225e3d7dda0aa1c9415e300e6d02437fbe3bee5b6f6480061f730932e",
+  "findings": {
+    "F1": "Confirmed with reviewed-head real binary: stale socket and regular file fail both runtime upgrade modes and viva update. Fixed by classifying only definite connection absence, checking both endpoints, retaining endpoints, and still refusing unsafe ownership/symlinks, permission errors, timeouts or a partially live host.",
+    "F2": "Confirmed via real installed CLI and host with same package version but different hashes. System curl uses the unchanged official release URL through a task-local TLS CONNECT metadata fixture; no product source override or application credentials. Reviewed head returned zero without changing host; fixed head activates the installed image even when no files download. Failed activation followed by no-op update retries also remain nonzero while old host serves.",
+    "F3": "Confirmed. File-change preflight now runs only after release/version decisions and before mutation. Already-active image observation does not demand transfer readiness; actual installation preflight remains strict. Unit sequencing test plus active canonical execution and real CLI no-op coverage.",
+    "F4": "Confirmed. Successful headless upgrade now reports previous_frontend_count=0, client_recovery=no_previous_clients and separate fresh_controller_verified evidence, not invented frontend negotiation.",
+    "F5": "Confirmed, not merely hypothetical: task-private dyld constructor stops before Rust main, then the executable pathname is atomically replaced. Reviewed head serves with replacement hash although its loaded image is the old binary. Fixed identity opens one descriptor, verifies its device/inode against the kernel vnode for dyld's loaded main image via libproc (Linux uses /proc/self/exe), hashes that same descriptor and checks metadata stability. A byte-identical same-UUID copy is deliberately rejected as a different executing vnode; the constructor fixture compiles official SDK size/offset assertions for the narrow libproc ABI. A mismatched startup fails before listener/domain effects. No production test hook or new dependency. This is image/path coherence within the existing local trust model, not a same-UID malicious-code sandbox or full memory attestation.",
+    "F6": "Coverage gap accepted and filled by native socket tests, no-op/preflight tests and a real native update/identity matrix in the manual full workflow. Temporal correction: the previous head's full run 43940978118 has since completed successfully; its actual installer step ran and its retained macos-intel native-upgrade packet passed. The daily skipped step did not mean no full execution. That historical full success does not replace full checks or independent QA for the new head."
+  },
+  "baseline_command": "python3 tooling/herdr-integration/native_update.py --previous /tmp/viva-201-evidence/compatible-d --candidate /tmp/viva-201-evidence/final-candidate --output /tmp/viva-201-qa/before.json",
+  "baseline_result": "exit 1; F1/F2/F5 cases fail their intended assertions; before.json binds both actual binary hashes",
+  "fixed_update_command": "python3 tooling/herdr-integration/native_update.py --previous /tmp/viva-201-evidence/compatible-d --candidate /tmp/viva-201-qa/candidate-vnode --output /tmp/viva-201-qa/vnode-update.json",
+  "fixed_update_result": "PASS: absent, stale_socket, regular_file, files_current_runtime_old (deferred then activated and idempotent repeat), failed_activation_noop_retry, no_previous_frontends, startup_identity",
+  "fixed_installer_command": "python3 tooling/herdr-integration/native_upgrade.py --previous /tmp/viva-201-evidence/compatible-d --candidate /tmp/viva-201-qa/candidate-vnode --output /tmp/viva-201-qa/vnode-installer.json",
+  "fixed_installer_result": "PASS on macOS ARM64; includes new stale native socket/regular-file installation, no daemon, no endpoint unlink; existing real HTTPS/curl installation, live shell/IO/background work, detach/reattach, platform/checksum/download/concurrency/isolation and readiness rollback checks retained",
+  "checks": [
+    "CARGO_TARGET_DIR=/tmp/viva-201-default/target GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=init.defaultBranch GIT_CONFIG_VALUE_0=master TMPDIR=/private/tmp cargo test --workspace --locked -- --test-threads=1: 628 passed, 1 ignored",
+    "cargo +1.96.1 test -p viva --locked --features herdr-runtime --lib native_runtime:: -- --nocapture: 26 passed",
+    "cargo +1.96.1 test -p viva --locked --features herdr-runtime --lib server::executable -- --nocapture: 2 passed",
+    "cargo +1.96.1 test -p viva --locked --features herdr-runtime --lib update::tests -- --test-threads=2: 15 passed, 1 ignored",
+    "cargo +1.96.1 test -p viva --locked --features herdr-runtime --test native_upgrade --test native_runtime_bridge --test native_execution --test native_member_ingress --test native_control --test native_legacy_inheritance --test native_cli --test native_worker_binding --test m1_terminal -- --nocapture: 49 passed",
+    "cargo clippy --all-targets -- -D warnings: PASS",
+    "cargo +1.96.1 clippy --features herdr-runtime --all-targets -- -D warnings: PASS",
+    "root/imported cargo fmt --check; git diff --check; sh -n packaging/install.sh; Python byte compile; CI YAML and full-step assertions: PASS"
+  ],
+  "environment": "Existing pinned native Rust 1.96.1 / Zig 0.16.0, separate default/native Cargo target directories. Native contracts use the immutable legacy baseline fixture. All runtime/process/installation probes use task-created HOME/VIVA_HOME and binaries; no user runtime or Keychain access.",
+  "intermediate_failures": [
+    "New stale-socket Rust regression failed on the reviewed product code before the fix (Connection refused), retained in rust-before.log.gz.",
+    "Moving readiness after identity exposed /tmp versus /private/tmp aliases in the existing active-work fixture; installation paths are now canonicalized while different installations remain refused. Diagnostic retained.",
+    "Initial Darwin identity implementation used deprecated libc Mach bindings; clippy rejected them. Replaced with the narrow stable dyld pointer ABI and libproc mapped-vnode identity, without suppressing warnings or adding dependencies. UUID-only matching was not retained because copying an image preserves its UUID but changes its inode.",
+    "One intermediate new CLI probe missed a PTY marker during replacement-surface application. Cause was not conclusively isolated. It now uses the same two-second initial-render drain as the existing fixture before one command; no command resend or output-deadline extension. Final probe passed. No claim that user input during reconnect is buffered."
+  ],
+  "limitations": [
+    "Independent QA for the new head remains QA_PENDING; dev test success is not QA approval.",
+    "New-head daily and full workflow_dispatch must be triggered after push; old-head Intel/full PASS is historical only.",
+    "Ignored public-release download has no execution evidence. No local rerun of the unrelated imported standalone full suite for this root-only identity/update patch; the manual full CI retains that suite.",
+    "The pre-existing full native-feature root suite legacy_migration failure from the previous delivery remains documented; not skipped or rewritten here.",
+    "Issue 201 remains open: live 0.3.10 cooperative upgrade, canonical member/agent transfer, complete stable/npm package replacement rollback, final released packages, real user data and human UI remain unfinished or unverified.",
+    "Logs contain task-local absolute paths and harmless fixture output. Limited credential-shape scan had no matches, not comprehensive secret clearance.",
+    "No package version changes, release/deployment, PR merge/approval or worktree removal."
+  ]
+}

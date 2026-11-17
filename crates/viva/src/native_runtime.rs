@@ -403,7 +403,9 @@ impl DomainBridge {
 
 impl herdr::embedding::DomainServices for DomainBridge {
     fn server_started(&self) -> io::Result<()> {
-        // Capture the executing inode before an installer can replace its path.
+        // Pin/verify the loaded image before any domain/listener effects.
+        // A pathname replaced even before Rust main must never supply this
+        // process's identity (Darwin mapped-vnode check / Linux proc-self inode).
         crate::server::executable_sha256().map_err(io::Error::other)?;
         self.with_store(|store| {
             events::append(store, NewEvent {

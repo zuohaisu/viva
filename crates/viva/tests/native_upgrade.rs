@@ -149,7 +149,25 @@ fn active_canonical_execution_refuses_upgrade_without_interrupting_work() {
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("active member execution"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("active member execution"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // No-op activation is observation, not a request to transfer active work.
+    let same_build = Command::new(env!("CARGO_BIN_EXE_viva"))
+        .args(["runtime", "upgrade", "--entry", env!("CARGO_BIN_EXE_viva")])
+        .env_clear()
+        .env("HOME", home)
+        .env("VIVA_HOME", home)
+        .output()
+        .unwrap();
+    assert!(
+        same_build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&same_build.stderr)
+    );
+    assert!(String::from_utf8_lossy(&same_build.stdout).contains("already_active"));
     assert_eq!(
         call(home, "viva.snapshot", json!({}))["result"]["snapshot"]["runtime_pid"],
         host.pid()
@@ -169,6 +187,85 @@ fn active_canonical_execution_refuses_upgrade_without_interrupting_work() {
             .get("error")
             .is_none()
     );
+}
+
+#[test]
+fn stale_native_endpoints_are_absence_without_unlink_or_daemon_spawn() {
+    use std::os::unix::net::UnixListener;
+    let root = tempfile::Builder::new().prefix("vs").tempdir().unwrap();
+    for regular in [false, true] {
+        let home = root.path().join(if regular { "file" } else { "stale" });
+        viva::foundation::paths::ensure_private_dir(&home).unwrap();
+        let socket = home.join("runtime/workbench/herdr.sock");
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        if regular {
+            std::fs::write(&socket, b"not-a-listener").unwrap();
+        } else {
+            drop(UnixListener::bind(&socket).unwrap());
+        }
+        for check in [false, true] {
+            let mut cli = Command::new(env!("CARGO_BIN_EXE_viva"));
+            cli.args(["runtime", "upgrade"]);
+            if check {
+                cli.arg("--check");
+            }
+            let output = cli
+                .args(["--entry", env!("CARGO_BIN_EXE_viva")])
+                .env_clear()
+                .env("HOME", &home)
+                .env("VIVA_HOME", &home)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("no_runtime"));
+            assert!(
+                socket.exists(),
+                "a stale endpoint must not be deleted by the updater"
+            );
+            assert!(!home.join("runtime-capability/owner-anchor").exists());
+        }
+    }
+}
+
+#[test]
+fn unsafe_or_partially_live_native_endpoints_are_not_absence() {
+    use std::os::unix::{fs::symlink, net::UnixListener};
+    let root = tempfile::Builder::new().prefix("vs").tempdir().unwrap();
+    let home = root.path();
+    viva::foundation::paths::ensure_private_dir(home).unwrap();
+    let runtime = home.join("runtime/workbench");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let api = runtime.join("herdr.sock");
+    symlink(home.join("missing"), &api).unwrap();
+    let invoke = || {
+        Command::new(env!("CARGO_BIN_EXE_viva"))
+            .args([
+                "runtime",
+                "upgrade",
+                "--check",
+                "--entry",
+                env!("CARGO_BIN_EXE_viva"),
+            ])
+            .env_clear()
+            .env("HOME", home)
+            .env("VIVA_HOME", home)
+            .output()
+            .unwrap()
+    };
+    let unsafe_path = invoke();
+    assert!(!unsafe_path.status.success());
+    assert!(String::from_utf8_lossy(&unsafe_path.stderr).contains("unsafe native endpoint"));
+    assert!(api.symlink_metadata().unwrap().file_type().is_symlink());
+    std::fs::remove_file(&api).unwrap(); // remove only this test's symlink
+    let raw = UnixListener::bind(runtime.join("herdr-client.sock")).unwrap();
+    let partial_host = invoke();
+    assert!(!partial_host.status.success());
+    assert!(String::from_utf8_lossy(&partial_host.stderr).contains("still listening"));
+    drop(raw);
 }
 
 #[test]

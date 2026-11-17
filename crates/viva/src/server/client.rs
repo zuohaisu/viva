@@ -291,7 +291,8 @@ pub(crate) fn executable_sha256() -> Result<String> {
     static HASH: OnceLock<std::result::Result<String, String>> = OnceLock::new();
     HASH.get_or_init(|| {
         (|| -> std::io::Result<String> {
-            let mut file = std::fs::File::open(std::env::current_exe()?)?;
+            let mut file = super::executable::open_running()?;
+            let before = file.metadata()?;
             let mut hash = Sha256::new();
             let mut bytes = [0u8; 64 * 1024];
             loop {
@@ -300,6 +301,12 @@ pub(crate) fn executable_sha256() -> Result<String> {
                     break;
                 }
                 hash.update(&bytes[..n]);
+            }
+            let after = file.metadata()?;
+            if before.len() != after.len() || before.modified()? != after.modified()? {
+                return Err(std::io::Error::other(
+                    "executing file changed while identifying the running image",
+                ));
             }
             Ok(format!("{:x}", hash.finalize()))
         })()

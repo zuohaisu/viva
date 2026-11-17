@@ -221,6 +221,7 @@ jobs:
       - name: Test native client capability and lifetime admission
         run: |
           cargo test -p viva --locked --features herdr-runtime --lib native_runtime:: -- --nocapture
+          cargo test -p viva --locked --features herdr-runtime --lib server::executable -- --nocapture
       - name: Build the recorded legacy handoff source (not a product fallback)
         if: github.event_name == 'workflow_dispatch'
         run: |
@@ -292,6 +293,7 @@ jobs:
           # hashes, without bumping package versions or publishing anything.
           CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked -p viva --features herdr-runtime --manifest-path "$SOURCE/Cargo.toml"
           python tooling/herdr-integration/native_upgrade.py --previous "$RUNNER_TEMP/native-upgrade-previous" --candidate target/debug/viva --output "$RUNNER_TEMP/native-upgrade.json"
+          python tooling/herdr-integration/native_update.py --previous "$RUNNER_TEMP/native-upgrade-previous" --candidate target/debug/viva --output "$RUNNER_TEMP/native-update.json"
       - name: Retain native evidence including failures
         if: always()
         uses: actions/upload-artifact@v4
@@ -301,6 +303,7 @@ jobs:
             ${{ runner.temp }}/native-runtime.json
             ${{ runner.temp }}/native-runtime-legacy.json
             ${{ runner.temp }}/native-upgrade.json
+            ${{ runner.temp }}/native-update.json
             ${{ runner.temp }}/native-runtime-workbench.json
             ${{ runner.temp }}/native-runtime-open.json
           if-no-files-found: warn

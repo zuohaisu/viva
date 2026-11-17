@@ -77,9 +77,12 @@ pub(super) fn run(home: &Path, args: &[String]) -> Result<()> {
     }
     let entry = std::fs::canonicalize(entry)?;
     let socket = home.join("runtime/workbench/herdr.sock");
-    if std::fs::symlink_metadata(&socket)
-        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-    {
+    let Some(old) = snapshot_if_running(&socket)? else {
+        if connect_if_running(&home.join("runtime/workbench/herdr-client.sock"))?.is_some() {
+            return Err(invalid(
+                "native client endpoint is still listening but host identity is unavailable; no handoff requested",
+            ));
+        }
         // An old runtime is not absence; do not hand it to the wrong protocol.
         if super::legacy_import::legacy_control_socket_present(home) {
             return Err(invalid(
@@ -88,16 +91,10 @@ pub(super) fn run(home: &Path, args: &[String]) -> Result<()> {
         }
         println!("{}", json!({"state": "no_runtime", "started": false}));
         return Ok(());
-    }
-    let old = snapshot(&socket)?;
+    };
     if old["native_upgrade_protocol"] != 1 {
         return Err(invalid(
             "running native host does not support cooperative upgrade (including 0.3.10); installation/runtime unchanged by activation; live work retained",
-        ));
-    }
-    if old["native_upgrade_ready"] != true {
-        return Err(invalid(
-            "active member execution/credential transfer is unsupported; runtime/work retained, no handoff requested",
         ));
     }
     let old_pid = old["runtime_pid"]
@@ -114,12 +111,13 @@ pub(super) fn run(home: &Path, args: &[String]) -> Result<()> {
     let installed = old["runtime_executable"]
         .as_str()
         .ok_or_else(|| invalid("runtime installation identity unavailable"))?;
-    if Path::new(installed) != entry {
+    // current_exe may preserve /tmp while the entry resolves to /private/tmp
+    // on Darwin. Normalize aliases, never accept a different installation.
+    if std::fs::canonicalize(installed)? != entry {
         return Err(invalid(
             "runtime belongs to another installation; no handoff requested",
         ));
     }
-    authenticate_owner(&socket, home)?;
     // Exact-schema, no migrations. Probe only a locally verified executable;
     // caller/installer is responsible for archive integrity and platform.
     let mut probe = std::process::Command::new(&entry);
@@ -135,17 +133,27 @@ pub(super) fn run(home: &Path, args: &[String]) -> Result<()> {
             "candidate native upgrade protocol/build identity unavailable",
         ));
     }
+    // Already-active is observation, not a handoff: active work must not
+    // turn an up-to-date retry into a false failure. Installer --check stays
+    // strict because its entry may still be the pre-replacement binary.
+    if !check && old["runtime_binary_sha256"] == target["binary_sha256"] {
+        println!(
+            "{}",
+            json!({"state": "already_active", "runtime_host_id": old["runtime_host_id"],
+            "client_recovery": "not_needed_no_handoff"})
+        );
+        return Ok(());
+    }
+    if old["native_upgrade_ready"] != true {
+        return Err(invalid(
+            "active member execution/credential transfer is unsupported; runtime/work retained, no handoff requested",
+        ));
+    }
+    authenticate_owner(&socket, home)?;
     if check {
         println!(
             "{}",
             json!({"state": "prepared", "runtime_host_id": old["runtime_host_id"], "runtime_binary_sha256": old["runtime_binary_sha256"], "runtime_start_marker": old["runtime_start_marker"], "target": target})
-        );
-        return Ok(());
-    }
-    if old["runtime_binary_sha256"] == target["binary_sha256"] {
-        println!(
-            "{}",
-            json!({"state": "already_active", "runtime_host_id": old["runtime_host_id"]})
         );
         return Ok(());
     }
@@ -181,7 +189,10 @@ pub(super) fn run(home: &Path, args: &[String]) -> Result<()> {
             println!(
                 "{}",
                 json!({"state": "upgrade_complete",  "runtime_host_id": new["runtime_host_id"],
-                "binary_sha256": target["binary_sha256"], "client_recovery": "previous_frontends_negotiated_and_fresh_controller_verified",
+                "binary_sha256": target["binary_sha256"],
+                "previous_frontend_count": previous_clients.len(),
+                "fresh_controller_verified": true,
+                "client_recovery": if previous_clients.is_empty() { "no_previous_clients" } else { "previous_frontends_negotiated_and_fresh_controller_verified" },
                 "client_code": "compatible_existing_processes_not_reloaded"})
             );
             return Ok(());
@@ -196,10 +207,46 @@ pub(super) fn run(home: &Path, args: &[String]) -> Result<()> {
 }
 
 fn snapshot(socket: &Path) -> Result<Value> {
-    // Match the serving socket's OS peer, not a claimed JSON PID or a stale
-    // pidfile. Same-UID local capability possession is not human presence.
-    use std::os::unix::net::UnixStream;
-    let stream = UnixStream::connect(socket)?;
+    snapshot_if_running(socket)?.ok_or_else(|| invalid("no native runtime is listening"))
+}
+
+fn absent_connection(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::NotConnected
+    ) || error.raw_os_error() == Some(libc::ENOTSOCK)
+}
+
+fn connect_if_running(socket: &Path) -> Result<Option<std::os::unix::net::UnixStream>> {
+    // Never unlink endpoints. A refused connection is absence, not authority;
+    // unsafe ownership/symlinks and permission/timeouts remain real failures.
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(socket) {
+        Ok(meta) if meta.uid() != unsafe { libc::geteuid() } || meta.file_type().is_symlink() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "unsafe native endpoint ownership or symlink",
+            )
+            .into());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+        _ => {}
+    }
+    match std::os::unix::net::UnixStream::connect(socket) {
+        Ok(stream) => Ok(Some(stream)),
+        Err(error) if absent_connection(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn snapshot_if_running(socket: &Path) -> Result<Option<Value>> {
+    // Match the serving socket's OS peer, not a claimed JSON PID or pidfile.
+    let Some(stream) = connect_if_running(socket)? else {
+        return Ok(None);
+    };
     let mut uid = 0;
     let mut gid = 0;
     #[cfg(target_os = "macos")]
@@ -264,5 +311,27 @@ fn snapshot(socket: &Path) -> Result<Value> {
     return Err(invalid(
         "native upgrade process identity is unsupported on this OS",
     ));
-    Ok(snapshot)
+    Ok(Some(snapshot))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn only_definitive_connection_absence_is_no_runtime() {
+        for errno in [
+            libc::ECONNREFUSED,
+            libc::ENOENT,
+            libc::ENOTCONN,
+            libc::ENOTSOCK,
+        ] {
+            assert!(super::absent_connection(
+                &std::io::Error::from_raw_os_error(errno)
+            ));
+        }
+        for errno in [libc::EACCES, libc::EPERM, libc::ETIMEDOUT, libc::EIO] {
+            assert!(!super::absent_connection(
+                &std::io::Error::from_raw_os_error(errno)
+            ));
+        }
+    }
 }

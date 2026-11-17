@@ -1,0 +1,14 @@
+{
+  ".github/workflows/ci.yml": "80275a81bdd5180a72b5f0bc3d16cb4b64ffc95f3c24b884908764d10e52216d",
+  "README.md": "7889cdb26cd26f38e32c88595b7708d64c56c588b6ade437af9b41550477bdd7",
+  "crates/viva/src/native_runtime.rs": "8375ed15adda466493bac75c7ea151a26d9bcd20c65681dcd8ac39c44da02a8c",
+  "crates/viva/src/native_runtime/upgrade.rs": "e764a32ed76d5e85884146dc1faf470e9766197f9028d1359969a3019919b501",
+  "crates/viva/src/server/client.rs": "52e70ab040c6201b9f823922d254ae6a0fdb3e5b603b4ff5e5a9f9f5d74eb7d6",
+  "crates/viva/src/server/mod.rs": "4da9d6fae5edfd554c929b9db23285a624722d857c423d863bda16e9504bb57f",
+  "crates/viva/src/update/mod.rs": "5d5d64c6408efe1b41296759cb8e5c2ccb5585ef17f2d002470de8124d761c6c",
+  "crates/viva/src/update/tests.rs": "bc76a1afe62f282b55fa205db54cc5d85eecb5e4a70bf0e2df59405b0aa7a3c6",
+  "crates/viva/tests/native_upgrade.rs": "81dcf57ec57abee3aa8b7eafda7b9a878d6b47967324020120582a504a8714e1",
+  "tooling/herdr-integration/native_upgrade.py": "b487731879457ee067619dfbb24719762777162d5504650f72cd15e53124f966",
+  "crates/viva/src/server/executable.rs": "198b38af92cc79c92fdfd6649e78365614e4d8138747cb8a113c7efe4b59de7a",
+  "tooling/herdr-integration/native_update.py": "d43cd3cb1edcb61f82bc97240bee854a46bcca90b62786751f3af0fdd171bfff"
+}

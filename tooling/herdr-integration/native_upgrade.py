@@ -264,6 +264,23 @@ def run(args):
                 fixture.env['VIVA_HOME'] = str(fixture.home)
                 # Baseline setup did not create a wrapper; retain its files.
                 os.rename(fixture.binary.parent, root / 'baseline-files')
+            # A stale endpoint is not a live host and must not block either
+            # installer preflight or activation. Only this fixture removes its
+            # own exact endpoint afterward; the product must leave it intact.
+            endpoint = fixture.home / 'runtime/workbench/herdr.sock'
+            for kind in ('socket', 'file'):
+                if kind == 'socket':
+                    with socket.socket(socket.AF_UNIX) as stale:
+                        stale.bind(str(endpoint))
+                else:
+                    endpoint.write_bytes(b'fixture-not-a-listener')
+                inode = endpoint.lstat().st_ino
+                output, _ = install('b')
+                assert 'no_runtime' in output
+                assert endpoint.lstat().st_ino == inode
+                assert not (fixture.home / 'runtime-capability/owner-anchor').exists()
+                result['stale_native_' + kind + '_installation_without_daemon'] = True
+                endpoint.unlink()  # task-owned fixture cleanup, not installer behavior
             out, _ = install('a')
             assert 'no_runtime' in out and not (fixture.home / 'runtime/workbench/herdr.sock').exists()
             install('a')
