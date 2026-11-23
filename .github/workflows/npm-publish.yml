@@ -87,9 +87,30 @@ jobs:
           set -euo pipefail
           python3 packaging/npm/prepare-packages.py \
             --version "$PUBLISH_VERSION" \
-            --bin-arm64 "${RUNNER_TEMP}/release/viva-macos-arm64/viva" \
-            --bin-x64 "${RUNNER_TEMP}/release/viva-macos-intel/viva"
+            --release-arm64 "${RUNNER_TEMP}/release/viva-macos-arm64" \
+            --release-x64 "${RUNNER_TEMP}/release/viva-macos-intel"
           python3 packaging/npm/check-staged-versions.py "$PUBLISH_VERSION"
+
+      - name: Pack and verify the actual npm tarballs before any publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          packs="$RUNNER_TEMP/npm-packs"
+          mkdir "$packs"
+          for pkg in viva-darwin-arm64 viva-darwin-x64 viva; do
+            staged="packaging/npm/dist/$pkg"
+            npm pack "./$staged" --ignore-scripts --pack-destination "$packs"
+            archive="$packs/zuohaisu-$pkg-$PUBLISH_VERSION.tgz"
+            case "$pkg" in
+              viva-darwin-arm64) release=viva-macos-arm64 ;;
+              viva-darwin-x64) release=viva-macos-intel ;;
+              viva)
+                tar -xOf "$archive" package/LICENSE | cmp "$staged/LICENSE" -
+                continue ;;
+            esac
+            python3 packaging/npm/release_materials.py verify-pack \
+              "$RUNNER_TEMP/release/$release" "$archive"
+          done
 
       - name: Publish to npm
         shell: bash
@@ -102,5 +123,5 @@ jobs:
             exit 1
           fi
           for pkg in viva-darwin-arm64 viva-darwin-x64 viva; do
-            npm publish "packaging/npm/dist/$pkg" --access public
+            npm publish "$RUNNER_TEMP/npm-packs/zuohaisu-$pkg-$PUBLISH_VERSION.tgz" --access public
           done

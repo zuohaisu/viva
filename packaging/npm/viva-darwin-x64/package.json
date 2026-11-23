@@ -17,7 +17,12 @@
     "node": ">=18"
   },
   "files": [
-    "bin"
+    "bin",
+    "LICENSE",
+    "NOTICE",
+    "SBOM.txt",
+    "THIRD_PARTY_NOTICES.md",
+    "licenses"
   ],
   "publishConfig": {
     "access": "public"

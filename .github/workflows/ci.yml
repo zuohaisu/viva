@@ -319,6 +319,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - name: Verify release notice contents of both npm platform tarballs
+        run: packaging/npm/test-local.sh --pack-only
       # The extension's contract test (issue #86) runs its tools against the
       # REAL viva binary, so this job needs the Rust toolchain too.
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)

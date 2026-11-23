@@ -21,13 +21,12 @@ that administrative state does not establish final product or legal acceptance.
 Native upgrade remains #201, and the remaining integration/acceptance work is
 tracked by the [Wiki Roadmap](https://github.com/zuohaisu/viva/wiki/Roadmap).
 
-The current release workflow adds Herdr LICENSE/NOTICE and a short SBOM, but
-this is not a complete linked-dependency notice audit. In particular, its SBOM's
-Ghostty Apache-2.0 label does not match the imported Ghostty MIT LICENSE below;
-`prepare-packages.py` also does not copy the tarball's notice/license payload
-into npm platform packages. Final tar/npm notices, exact Cargo/Zig closure and
-source obligations remain P4 follow-up, not cleared by this documentation task.
-Do not replace source notices with a package's inaccurate summary label.
+The release and npm platform archives carry the component summary, original
+license texts and supplemental notices, and a link to the exact build commit.
+The component summary identifies libghostty-vt as MIT, with the file-level
+exceptions below. The Cargo notice payload is from the original #190 Intel
+baseline. Exact linked Cargo/Zig dependencies and final source obligations
+remain P4 follow-up; carrying these materials is not legal clearance.
 
 ## herdr — original source import
 

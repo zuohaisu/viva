@@ -29,8 +29,10 @@ delivery channel: the installed command stays `viva`.
   must already have a GitHub Release. The job checks the release checksums,
   requires the tag version (without the leading `v`) to equal
   `crates/viva/Cargo.toml`, then extracts those released binaries and
-  re-stages the packages via `prepare-packages.py`. Platform packages go
-  out first and the wrapper last. A missing `NPM_TOKEN`, a missing Release,
+  re-stages the packages via `prepare-packages.py`. Before publishing, it
+  packs all three packages and checks that both platform tarballs contain
+  the Release's notice/attribution files byte-for-byte. It publishes those
+  checked archives, with the wrapper last. A missing `NPM_TOKEN`, a missing Release,
   a version mismatch, or an npm version that already exists fails the run.
   Nothing is published in those cases, and an existing version is not
   overwritten.
@@ -45,11 +47,13 @@ release and predates PR #202's unified native commands. Check the
 acceptance provenance, not only `viva --version`.
 
 The current release workflow builds with `--features herdr-runtime`. Changing
-that workflow does not change old packages. Also, `prepare-packages.py` currently
-copies binaries and the package templates; it does **not** transfer the release
-tarball's NOTICE/SBOM/license tree into platform packages. Final native tar/npm
-payload and dependency-notice verification remain P4 work recorded on #191.
-Do not treat staging or `test-local.sh` as native distribution clearance.
+that workflow does not change old packages. The Release archive includes
+`LICENSE`, `NOTICE`, `SBOM.txt`, `THIRD_PARTY_NOTICES.md`, and `licenses/`,
+with a source-commit URL. The npm platform packages copy them directly from
+the corresponding extracted archives. Missing required materials stop staging.
+The `SBOM.txt` is a component summary, and the included #190 Cargo notices are
+an audited baseline, not the exact final linked dependency inventory.
+Final dependency and source-obligation review remains P4 work on #191.
 
 ## Updating
 
@@ -81,7 +85,8 @@ install result. Stable `viva update` does not consume the Tailnet dev channel.
 ## Local checks (no registry, no token)
 
 ```bash
-packaging/npm/test-local.sh    # stub binary through stage → pack → install → exec
+packaging/npm/test-local.sh             # macOS: stub binary through stage → pack → install → exec
+packaging/npm/test-local.sh --pack-only # both Darwin packages, including omitted-notice rejection
 ```
 
 `npm install <local dir>` symlinks directories, so the test packs tarballs
