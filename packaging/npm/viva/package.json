@@ -18,7 +18,8 @@
     "@zuohaisu/viva-darwin-x64": "0.0.0-set-by-prepare"
   },
   "files": [
-    "bin"
+    "bin",
+    "LICENSE"
   ],
   "publishConfig": {
     "access": "public"

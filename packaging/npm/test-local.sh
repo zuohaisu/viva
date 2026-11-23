@@ -6,7 +6,7 @@
 # typing `viva` execs the native binary with argv and exit codes intact.
 # The real npm publish path is exercised by CI (release.yml, npm-publish).
 #
-# Usage: packaging/npm/test-local.sh
+# Usage: packaging/npm/test-local.sh [--pack-only]  # skip Darwin install on Linux
 
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -23,25 +23,65 @@ echo "stub argv: $*"
 EOF
 chmod +x "$STUB"
 
-echo "== stage packages with the stub binary"
+echo "== stage packages from two Release fixtures with real notices"
+REVISION=$(git -C "$HERE" rev-parse HEAD)
+for ARCH in arm64 x64; do
+  RELEASE="$WORK/release-$ARCH"
+  python3 "$HERE/release_materials.py" create "$RELEASE" zuohaisu/viva "$REVISION" "fixture-$ARCH"
+  cp "$STUB" "$RELEASE/viva"
+done
+
+# An incomplete Release must fail before staging either platform.
+MISSING="$WORK/release-x64/licenses/herdr-data/x11/COPYING"
+mv "$MISSING" "$WORK/missing-notice"
+if python3 "$HERE/prepare-packages.py" --version 9.9.9 \
+  --release-arm64 "$WORK/release-arm64" --release-x64 "$WORK/release-x64" \
+  --out "$WORK/rejected" >"$WORK/stage.log" 2>&1; then
+  echo "FAIL: staging accepted a missing nested license"; exit 1
+fi
+grep -F 'licenses/herdr-data/x11/COPYING' "$WORK/stage.log"
+test ! -e "$WORK/rejected"
+mv "$WORK/missing-notice" "$MISSING"
+
 python3 "$HERE/prepare-packages.py" --version 9.9.9 \
-  --bin-arm64 "$STUB" --bin-x64 "$STUB" --out "$WORK/dist"
+  --release-arm64 "$WORK/release-arm64" --release-x64 "$WORK/release-x64" --out "$WORK/dist"
 
 node --check "$WORK/dist/viva/bin/viva.js"
 echo "wrapper syntax ok"
 
-echo "== npm pack + install the tarballs (faithful to registry installs)"
-# Local-DIR installs are symlinked by npm, which breaks node resolution in
-# a way the registry never does — so pack first and install the tarballs.
-ARCH="$(node -p 'process.arch')"
+echo "== npm pack and compare both platform tarballs with the Release payload"
 mkdir "$WORK/pkgs"
-for pkg in "viva-darwin-$ARCH" viva; do
-  (cd "$WORK/dist/$pkg" && npm pack --pack-destination "$WORK/pkgs" >/dev/null)
+for pkg in viva-darwin-arm64 viva-darwin-x64 viva; do
+  npm pack "$WORK/dist/$pkg" --ignore-scripts --pack-destination "$WORK/pkgs" --loglevel=error
+  if [ "$pkg" != viva ]; then
+    python3 "$HERE/release_materials.py" verify-pack "$WORK/release-${pkg#viva-darwin-}" \
+      "$WORK/pkgs/zuohaisu-$pkg-9.9.9.tgz"
+  fi
 done
+tar -xOf "$WORK/pkgs/zuohaisu-viva-9.9.9.tgz" package/LICENSE | cmp "$WORK/release-arm64/LICENSE" -
+
+# Reproduce the old npm allowlist: staged NOTICE exists, but pack drops it.
+mkdir "$WORK/incomplete-pack"
+node -e 'const fs = require("fs"), p = process.argv[1], m = require(p); m.files = ["bin"]; fs.writeFileSync(p, JSON.stringify(m));' \
+  "$WORK/dist/viva-darwin-arm64/package.json"
+npm pack "$WORK/dist/viva-darwin-arm64" --ignore-scripts --loglevel=error \
+  --pack-destination "$WORK/incomplete-pack"
+if python3 "$HERE/release_materials.py" verify-pack "$WORK/dist/viva-darwin-arm64" \
+  "$WORK/incomplete-pack/zuohaisu-viva-darwin-arm64-9.9.9.tgz" >"$WORK/pack.log" 2>&1; then
+  echo "FAIL: accepted a tarball with no NOTICE"; exit 1
+fi
+grep -F 'package/NOTICE' "$WORK/pack.log"
+if [ "${1:-}" = --pack-only ]; then
+  echo "PASS: both npm platform tarballs preserve the Release notices; Darwin install not run"
+  exit 0
+fi
+
+# Install tarballs, not symlinked local directories, to exercise resolution.
+ARCH="$(node -p 'process.arch')"
 cd "$WORK"
 mkdir sandbox && cd sandbox
 printf '{"name":"sandbox","private":true}\n' > package.json
-npm install --no-audit --no-fund --loglevel=error \
+npm install --offline --ignore-scripts --no-audit --no-fund --loglevel=error \
   "$WORK/pkgs/zuohaisu-viva-darwin-$ARCH-9.9.9.tgz" \
   "$WORK/pkgs/zuohaisu-viva-9.9.9.tgz" \
   > "$WORK/npm-install.log" 2>&1 || { cat "$WORK/npm-install.log"; exit 1; }

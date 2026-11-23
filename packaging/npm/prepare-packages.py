@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stage the npm packages for one viva release (stdlib-only).
 
-Reads the version and the two built macOS release binaries and produces a
+Reads the version and two extracted macOS Release directories and produces a
 ready-to-publish tree:
 
     dist/
@@ -11,14 +11,13 @@ ready-to-publish tree:
 
 Versions come from the release tag (CI) or `cargo metadata` (local). The
 templates under packaging/npm/ keep the real metadata; this script only
-substitutes versions and copies binaries — nothing is downloaded.
+substitutes versions and copies binaries and notices — nothing is downloaded.
 
 Usage:
-    python3 prepare-packages.py [--version 0.1.0]
-        [--bin-arm64 PATH] [--bin-x64 PATH] [--out DIR]
+    python3 prepare-packages.py --release-arm64 PATH --release-x64 PATH
+        [--version 0.1.0] [--out DIR]
 
-Binaries default to the cargo release layout for the matching targets;
-the version defaults to the workspace package version. Staging works from
+The version defaults to the workspace package version. Staging works from
 a fresh checkout: template `bin/` directories are created as needed
 (git does not track empty directories).
 """
@@ -31,6 +30,8 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+from release_materials import material_files
 
 HERE = Path(__file__).resolve().parent
 
@@ -47,11 +48,6 @@ def cargo_version() -> str:
         if pkg["name"] == "viva":
             return pkg["version"]
     raise SystemExit("package `viva` not found in cargo metadata")
-
-
-def default_binary(target: str) -> Path:
-    root = HERE.parent.parent.parent  # packaging/npm -> repo root
-    return root / "target" / target / "release" / "viva"
 
 
 def stage(version: str, src_pkg: Path, out_root: Path) -> Path:
@@ -76,16 +72,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--version", default=None, help="release version (default: cargo)")
     ap.add_argument(
-        "--bin-arm64",
-        type=Path,
-        default=default_binary("aarch64-apple-darwin"),
-        help="path to the aarch64-apple-darwin release binary",
+        "--release-arm64", type=Path, required=True,
+        help="extracted Apple Silicon Release directory containing viva and its notices",
     )
     ap.add_argument(
-        "--bin-x64",
-        type=Path,
-        default=default_binary("x86_64-apple-darwin"),
-        help="path to the x86_64-apple-darwin release binary",
+        "--release-x64", type=Path, required=True,
+        help="extracted Intel Release directory containing viva and its notices",
     )
     ap.add_argument("--out", type=Path, default=HERE / "dist", help="output directory")
     args = ap.parse_args()
@@ -94,28 +86,34 @@ def main() -> None:
     if not version.startswith(("0", "1", "2", "3", "4", "5", "6", "7", "8", "9")):
         raise SystemExit(f"version must be bare semver, got {version!r}")
 
-    binaries = {
-        "viva-darwin-arm64": args.bin_arm64,
-        "viva-darwin-x64": args.bin_x64,
+    releases = {
+        "viva-darwin-arm64": args.release_arm64,
+        "viva-darwin-x64": args.release_x64,
     }
-    for pkg_name, binary in binaries.items():
-        if not binary.is_file():
-            raise SystemExit(f"missing binary for {pkg_name}: {binary}")
+    materials = {}
+    for pkg_name, release in releases.items():
+        if not (release / "viva").is_file():
+            raise SystemExit(f"missing binary for {pkg_name}: {release / 'viva'}")
+        materials[pkg_name] = material_files(release)
 
     if args.out.exists():
         shutil.rmtree(args.out)
     args.out.mkdir(parents=True)
 
     staged = {}
-    for pkg_name, binary in binaries.items():
+    for pkg_name, release in releases.items():
         dst = stage(version, HERE / pkg_name, args.out)
         # The template bin/ dirs are empty and git does not track empty
         # directories — a fresh checkout (CI) has no bin/ at all.
         (dst / "bin").mkdir(parents=True, exist_ok=True)
-        shutil.copy2(binary, dst / "bin" / "viva")
+        shutil.copy2(release / "viva", dst / "bin" / "viva")
         (dst / "bin" / "viva").chmod(0o755)
+        for relative in materials[pkg_name]:
+            (dst / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(release / relative, dst / relative)
         staged[pkg_name] = dst
     staged["viva"] = stage(version, HERE / "viva", args.out)
+    shutil.copyfile(args.release_arm64 / "LICENSE", staged["viva"] / "LICENSE")
 
     for name, dst in staged.items():
         print(f"prepared {name}@{version} -> {dst}")
