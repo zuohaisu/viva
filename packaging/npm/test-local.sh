@@ -26,10 +26,24 @@ chmod +x "$STUB"
 echo "== stage packages from two Release fixtures with real notices"
 REVISION=$(git -C "$HERE" rev-parse HEAD)
 for ARCH in arm64 x64; do
-  RELEASE="$WORK/release-$ARCH"
+  RELEASE="$WORK/source/release-$ARCH"
   python3 "$HERE/release_materials.py" create "$RELEASE" zuohaisu/viva "$REVISION" "fixture-$ARCH"
   cp "$STUB" "$RELEASE/viva"
+  if [ "$(uname -s)" = Darwin ]; then
+    xattr -w com.example.viva-pack-test fixture "$RELEASE/licenses/herdr-LICENSE"
+  fi
+  python3 "$HERE/release_materials.py" archive "$RELEASE" "$WORK/release-$ARCH.tar.gz"
+  # Extract without macOS tar interpreting AppleDouble entries as metadata.
+  python3 -m tarfile -e "$WORK/release-$ARCH.tar.gz" "$WORK"
 done
+
+# A stray on-disk sidecar must fail before uploading a Release archive.
+printf 'sidecar fixture\n' > "$RELEASE/licenses/._herdr-LICENSE"
+if python3 "$HERE/release_materials.py" archive "$RELEASE" "$WORK/rejected.tar.gz" \
+  >"$WORK/archive.log" 2>&1; then
+  echo "FAIL: accepted an AppleDouble sidecar"; exit 1
+fi
+grep -F 'Unexpected AppleDouble entry' "$WORK/archive.log"
 
 # An incomplete Release must fail before staging either platform.
 MISSING="$WORK/release-x64/licenses/herdr-data/x11/COPYING"
