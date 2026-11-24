@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
+import subprocess
 import tarfile
 from pathlib import Path
 
@@ -70,6 +72,20 @@ def material_files(directory: Path) -> list[Path]:
     )
 
 
+def archive_release(release: Path, archive: Path) -> None:
+    # macOS tar otherwise adds AppleDouble sidecars that Ubuntu extracts as
+    # ordinary files but npm's packlist drops. Preserve normal modes, not xattrs.
+    subprocess.run(
+        ["tar", "-czf", str(archive.resolve()), "-C", str(release.parent), release.name],
+        check=True,
+        env={**os.environ, "COPYFILE_DISABLE": "1"},
+    )
+    with tarfile.open(archive, "r:gz") as packed:
+        for entry in packed:
+            if Path(entry.name).name.startswith("._"):
+                raise SystemExit(f"Unexpected AppleDouble entry in {archive.name}: {entry.name}")
+
+
 def verify_pack(release: Path, archive: Path) -> None:
     with tarfile.open(archive, "r:gz") as packed:
         for relative in material_files(release):
@@ -93,12 +109,17 @@ def main() -> None:
     stage.add_argument("repository")
     stage.add_argument("revision")
     stage.add_argument("target")
+    archive = commands.add_parser("archive")
+    archive.add_argument("release", type=Path)
+    archive.add_argument("archive", type=Path)
     verify = commands.add_parser("verify-pack")
     verify.add_argument("release", type=Path)
     verify.add_argument("archive", type=Path)
     args = parser.parse_args()
     if args.command == "create":
         create(args.directory, args.repository, args.revision, args.target)
+    elif args.command == "archive":
+        archive_release(args.release, args.archive)
     else:
         verify_pack(args.release, args.archive)
 

@@ -66,7 +66,7 @@ jobs:
           cp README.md "$DIR/"
           python3 packaging/npm/release_materials.py create "$DIR" \
             "$GITHUB_REPOSITORY" "$(git rev-parse HEAD)" "${{ matrix.target }}"
-          tar -czf "viva-${{ matrix.name }}.tar.gz" "$DIR"
+          python3 packaging/npm/release_materials.py archive "$DIR" "$DIR.tar.gz"
           shasum -a 256 "viva-${{ matrix.name }}.tar.gz" > "viva-${{ matrix.name }}.tar.gz.sha256"
 
       - name: Upload artifact
