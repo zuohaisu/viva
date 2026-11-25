@@ -72,9 +72,31 @@ class DependencyNoticeTests(unittest.TestCase):
         self.assertEqual({r["sha256"] for r in payload["cargo"][0]["notices"]}, {digest})
         self.assertEqual(len(payload["zig_toolchain"]), len(ZIG_LICENSES))
 
+    def test_nested_and_plural_notices_keep_relative_paths(self):
+        root = self.rust.parent / "fixture-runtime"
+        (root / "src/data").mkdir(parents=True)
+        added = {
+            "NOTICES.md": b"Third-party copyright\n",
+            "src/data/LICENSE-UNICODE": b"Unicode terms\n",
+            "src/data/font-LICENSE.txt": b"Font terms\n",
+        }
+        for name, text in added.items():
+            (root / name).write_bytes(text)
+        payload = self.build()
+        runtime = next(p for p in payload["cargo"] if p["name"] == "fixture-runtime")
+        for ref in runtime["notices"]:
+            if ref["source"] in added:
+                self.assertEqual(payload["notice_texts_by_sha256"][ref["sha256"]].encode(),
+                                 added[ref["source"]])
+        self.assertEqual({r["source"] for r in runtime["notices"]},
+                         {*added, "COPYRIGHT", "LICENSE-MIT"})
+
     def test_missing_notice_fails_closed(self):
         for path in (self.rust.parent / "fixture-runtime").iterdir():
             path.unlink()
+        nested = self.rust.parent / "fixture-runtime/src"
+        nested.mkdir()
+        (nested / "LICENSE-UNICODE").write_bytes(b"Third-party terms, not the crate license\n")
         with self.assertRaisesRegex(ValueError, "No license.*fixture-runtime"):
             self.build()
 

@@ -15,7 +15,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 PAYLOAD = Path("licenses/dependency-notices.json")
-NOTICE_FILE = re.compile(r"^(license|licence|copying|copyright|notice)([._-]|$)", re.I)
+NOTICE_FILE = re.compile(
+    r"(^|[._-])(unlicense|licen[cs]es?|copying|copyrights?|notices?)([._-]|$)", re.I
+)
 OBJC2 = "herdr-native/objc2/LICENSE.md"
 OBJC2_TERMS = tuple(f"herdr-supplemental/objc2/{name}" for name in (
     "LICENSE-MIT.txt", "LICENSE-APACHE.txt", "LICENSE-ZLIB.txt", "rust-objc-LICENSE.txt",
@@ -66,13 +68,21 @@ def package_notices(package: dict) -> list[tuple[str, Path]]:
         if local not in paths:
             raise ValueError(f"Unreviewed local Cargo input: {local}")
         return [(paths[local].relative_to(ROOT).as_posix(), paths[local])]
-    files = {p for p in directory.iterdir() if p.is_file() and NOTICE_FILE.match(p.name)}
+    files = {p for p in directory.rglob("*") if p.is_file() and NOTICE_FILE.search(p.name)}
+    root_license = any(p.parent == directory and NOTICE_FILE.match(p.name)
+                       and p.name.lower().startswith(("license", "licence", "copying", "unlicense"))
+                       for p in files)
     if package["license_file"]:
-        declared = (directory / package["license_file"]).resolve()
-        declared.relative_to(directory.resolve())
+        declared = directory / package["license_file"]
+        declared.resolve().relative_to(directory.resolve())
         files.add(declared)
-    if files:
-        return [(p.relative_to(directory).as_posix(), p) for p in sorted(files)]
+        root_license = True
+    # A notice for bundled data is not a substitute for the crate's own terms.
+    for path in files:
+        path.resolve().relative_to(directory.resolve())
+    notices = [(p.relative_to(directory).as_posix(), p) for p in sorted(files)]
+    if root_license:
+        return notices
     key = (package["name"], package["version"])
     if key not in WORKSPACE_NOTICES:
         raise ValueError(f"No license or reviewed workspace notice for {key[0]} {key[1]}")
@@ -80,8 +90,10 @@ def package_notices(package: dict) -> list[tuple[str, Path]]:
     vcs = json.loads((directory / ".cargo_vcs_info.json").read_text(encoding="utf-8"))
     if vcs.get("git", {}).get("sha1") != revision or package["repository"] != f"https://github.com/{repository}":
         raise ValueError(f"Workspace notice provenance changed for {key[0]} {key[1]}")
-    return [(f"https://github.com/{repository}/tree/{revision} (licenses/{p})", ROOT / "licenses" / p)
-            for p in local_notices]
+    return notices + [
+        (f"https://github.com/{repository}/tree/{revision} (licenses/{p})", ROOT / "licenses" / p)
+        for p in local_notices
+    ]
 
 
 def build_payload(metadata: dict, target: str, rust_docs: Path, zig_root: Path) -> dict:
@@ -109,7 +121,12 @@ def build_payload(metadata: dict, target: str, rust_docs: Path, zig_root: Path) 
     return {
         "schema_version": 1,
         "target": target,
-        "scope": "Locked target-filtered Cargo normal/build inputs and selected toolchain notices. Not an exact linked inventory, a choice among license alternatives, or clearance of source obligations.",
+        "scope": (
+            "Normal/build dependency superset from locked, target-filtered workspace Cargo metadata; "
+            "may include dependencies not selected by the Viva build. Selected Rust/Zig toolchain "
+            "notices are included. Not a linked inventory, a choice among license alternatives, "
+            "or clearance of source obligations."
+        ),
         "cargo": packages,
         "rust_toolchain": rust_notices,
         "zig_toolchain": [store(f"zig/{name}", zig_root / name) for name in ZIG_LICENSES],
