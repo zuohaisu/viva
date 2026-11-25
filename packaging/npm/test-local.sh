@@ -25,9 +25,17 @@ chmod +x "$STUB"
 
 echo "== stage packages from two Release fixtures with real notices"
 REVISION=$(git -C "$HERE" rev-parse HEAD)
+# Keep the pack check registry-free. Exercise the production collector with
+# fixture inputs; the release workflow collects from the actual toolchains.
+python3 "$HERE/test_dependency_notices.py"
 for ARCH in arm64 x64; do
   RELEASE="$WORK/source/release-$ARCH"
-  python3 "$HERE/release_materials.py" create "$RELEASE" zuohaisu/viva "$REVISION" "fixture-$ARCH"
+  case "$ARCH" in
+    arm64) TARGET=aarch64-apple-darwin ;;
+    x64) TARGET=x86_64-apple-darwin ;;
+  esac
+  python3 "$HERE/test_dependency_notices.py" fixture "$RELEASE" "$TARGET"
+  python3 "$HERE/release_materials.py" create "$RELEASE" zuohaisu/viva "$REVISION" "$TARGET"
   cp "$STUB" "$RELEASE/viva"
   if [ "$(uname -s)" = Darwin ]; then
     xattr -w com.example.viva-pack-test fixture "$RELEASE/licenses/herdr-LICENSE"
@@ -56,6 +64,14 @@ fi
 grep -F 'licenses/herdr-data/x11/COPYING' "$WORK/stage.log"
 test ! -e "$WORK/rejected"
 mv "$WORK/missing-notice" "$MISSING"
+
+if python3 "$HERE/prepare-packages.py" --version 9.9.9 \
+  --release-arm64 "$WORK/release-x64" --release-x64 "$WORK/release-arm64" \
+  --out "$WORK/rejected" >"$WORK/stage.log" 2>&1; then
+  echo "FAIL: staging accepted swapped architectures"; exit 1
+fi
+grep -F 'do not match aarch64-apple-darwin' "$WORK/stage.log"
+test ! -e "$WORK/rejected"
 
 python3 "$HERE/prepare-packages.py" --version 9.9.9 \
   --release-arm64 "$WORK/release-arm64" --release-x64 "$WORK/release-x64" --out "$WORK/dist"

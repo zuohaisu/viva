@@ -32,6 +32,7 @@ jobs:
       - name: Install Rust toolchain (pinned by rust-toolchain.toml + target)
         run: |
           rustup toolchain install
+          rustup component add rust-docs
           rustup target add ${{ matrix.target }}
 
       - name: Install the original hash-pinned Zig 0.16.0 (native terminal build)
@@ -42,7 +43,7 @@ jobs:
           echo "ZIG=$RUNNER_TEMP/zig-aarch64-macos-0.16.0/zig" >> "$GITHUB_ENV"
 
       - name: Build release binary (native runtime is the default entry)
-        run: cargo build --release -p viva --features herdr-runtime --target ${{ matrix.target }}
+        run: cargo build --locked --release -p viva --features herdr-runtime --target ${{ matrix.target }}
 
       - name: Smoke test the built binary (real startup, not a file check)
         shell: bash
@@ -64,6 +65,11 @@ jobs:
           cp -R extensions/pi "$DIR/extensions/pi"
           rm -rf "$DIR/extensions/pi/node_modules"
           cp README.md "$DIR/"
+          META="$RUNNER_TEMP/viva-cargo-metadata.json"
+          cargo metadata --locked --format-version 1 --features viva/herdr-runtime \
+            --filter-platform "${{ matrix.target }}" > "$META"
+          python3 packaging/npm/release_dependency_notices.py "$DIR" "$META" \
+            "${{ matrix.target }}" "$(rustc --print sysroot)/share/doc/rust" "$(dirname "$ZIG")"
           python3 packaging/npm/release_materials.py create "$DIR" \
             "$GITHUB_REPOSITORY" "$(git rev-parse HEAD)" "${{ matrix.target }}"
           python3 packaging/npm/release_materials.py archive "$DIR" "$DIR.tar.gz"

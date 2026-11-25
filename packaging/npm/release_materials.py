@@ -11,13 +11,14 @@ import subprocess
 import tarfile
 from pathlib import Path
 
+from release_dependency_notices import PAYLOAD
+
 ROOT = Path(__file__).resolve().parents[2]
 ROOT_FILES = ("LICENSE", "NOTICE", "SBOM.txt", "THIRD_PARTY_NOTICES.md")
 EXTRA_LICENSES = {
     "herdr-LICENSE": "upstream/herdr/LICENSE",
     "ghostty-LICENSE": "upstream/herdr/vendor/libghostty-vt/LICENSE",
     "portable-pty-LICENSE.md": "upstream/herdr/vendor/portable-pty/LICENSE.md",
-    "cargo-notice-payload-baseline.json": "research/herdr-190/license-closure/cargo-notice-payload.json",
 }
 
 
@@ -26,7 +27,7 @@ def create(directory: Path, repository: str, revision: str, target: str) -> None
         raise ValueError("Expected a GitHub owner/repo and a full source commit")
     source = f"https://github.com/{repository}/tree/{revision}"
     directory.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(ROOT / "licenses", directory / "licenses")
+    shutil.copytree(ROOT / "licenses", directory / "licenses", dirs_exist_ok=True)
     for name, path in EXTRA_LICENSES.items():
         shutil.copyfile(ROOT / path, directory / "licenses" / name)
     for name in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
@@ -38,7 +39,8 @@ def create(directory: Path, repository: str, revision: str, target: str) -> None
         "and the patched MIT portable-pty are documented in THIRD_PARTY_NOTICES.md.\n"
         "This is not an original Herdr distribution or an upstream endorsement.\n\n"
         f"Exact build source (including modifications and original notices): {source}\n"
-        "See licenses/ for full retained texts and supplemental notices.\n",
+        "See licenses/ for full retained texts and supplemental notices, including\n"
+        "licenses/herdr-LICENSE for the bundled Herdr license.\n",
         encoding="utf-8",
     )
     (directory / "SBOM.txt").write_text(
@@ -49,16 +51,15 @@ def create(directory: Path, repository: str, revision: str, target: str) -> None
         "libghostty-vt: MIT (see third-party notices for file-level exceptions)\n"
         "portable-pty: MIT (patched)\n\n"
         f"Resolved Cargo inputs and checksums: {source}/Cargo.lock\n"
-        "licenses/cargo-notice-payload-baseline.json preserves full Cargo notice\n"
-        "texts captured for the original #190 Intel baseline, not this build's\n"
-        "linked dependency inventory. This summary is not a complete linked SBOM.\n",
+        f"Current Cargo input and toolchain notices: {PAYLOAD.as_posix()}\n"
+        "This summary does not establish an exact linked SBOM or source obligations.\n",
         encoding="utf-8",
     )
     material_files(directory)
 
 
 def material_files(directory: Path) -> list[Path]:
-    required = [Path(name) for name in ROOT_FILES]
+    required = [*(Path(name) for name in ROOT_FILES), PAYLOAD]
     required.extend(Path("licenses") / name for name in EXTRA_LICENSES)
     required.extend(
         path.relative_to(ROOT) for path in (ROOT / "licenses").rglob("*") if path.is_file()

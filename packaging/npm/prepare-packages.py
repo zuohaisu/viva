@@ -31,6 +31,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from release_dependency_notices import PAYLOAD
 from release_materials import material_files
 
 HERE = Path(__file__).resolve().parent
@@ -87,21 +88,24 @@ def main() -> None:
         raise SystemExit(f"version must be bare semver, got {version!r}")
 
     releases = {
-        "viva-darwin-arm64": args.release_arm64,
-        "viva-darwin-x64": args.release_x64,
+        "viva-darwin-arm64": (args.release_arm64, "aarch64-apple-darwin"),
+        "viva-darwin-x64": (args.release_x64, "x86_64-apple-darwin"),
     }
     materials = {}
-    for pkg_name, release in releases.items():
+    for pkg_name, (release, target) in releases.items():
         if not (release / "viva").is_file():
             raise SystemExit(f"missing binary for {pkg_name}: {release / 'viva'}")
         materials[pkg_name] = material_files(release)
+        payload = json.loads((release / PAYLOAD).read_text(encoding="utf-8"))
+        if payload.get("target") != target:
+            raise SystemExit(f"Dependency notices for {pkg_name} do not match {target}")
 
     if args.out.exists():
         shutil.rmtree(args.out)
     args.out.mkdir(parents=True)
 
     staged = {}
-    for pkg_name, release in releases.items():
+    for pkg_name, (release, _) in releases.items():
         dst = stage(version, HERE / pkg_name, args.out)
         # The template bin/ dirs are empty and git does not track empty
         # directories — a fresh checkout (CI) has no bin/ at all.

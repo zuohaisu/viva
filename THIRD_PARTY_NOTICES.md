@@ -24,9 +24,17 @@ tracked by the [Wiki Roadmap](https://github.com/zuohaisu/viva/wiki/Roadmap).
 The release and npm platform archives carry the component summary, original
 license texts and supplemental notices, and a link to the exact build commit.
 The component summary identifies libghostty-vt as MIT, with the file-level
-exceptions below. The Cargo notice payload is from the original #190 Intel
-baseline. Exact linked Cargo/Zig dependencies and final source obligations
-remain P4 follow-up; carrying these materials is not legal clearance.
+exceptions below. `licenses/dependency-notices.json` in each binary archive
+contains full notices for that target's current locked Cargo normal/build
+inputs and selected Rust/Zig toolchain notices. It does not prove the final
+linked subset or close remaining Zig source and distribution obligations.
+
+Cargo registry crates that omit their workspace license use revision-bound
+notices. The workspace license text for `ratatui-termina 0.1.0` matches the
+existing Ratatui MIT text; `vtparse 0.6.2` and `wezterm-input-types 0.1.0` share
+byte-identical [WezTerm license text](licenses/wezterm/LICENSE.md) at their
+respective Cargo VCS revisions. The objc2 family uses the upstream license
+statement and retained full terms; this is not an Apple SDK clearance.
 
 ## herdr — original source import
 
