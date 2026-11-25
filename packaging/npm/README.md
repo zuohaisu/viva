@@ -51,9 +51,10 @@ that workflow does not change old packages. The Release archive includes
 `LICENSE`, `NOTICE`, `SBOM.txt`, `THIRD_PARTY_NOTICES.md`, and `licenses/`,
 with a source-commit URL. The npm platform packages copy them directly from
 the corresponding extracted archives. Missing required materials stop staging.
-The `SBOM.txt` is a component summary, and the included #190 Cargo notices are
-an audited baseline, not the exact final linked dependency inventory.
-Final dependency and source-obligation review remains P4 work on #191.
+The `SBOM.txt` is a component summary. `licenses/dependency-notices.json`
+contains full notice texts for current locked Cargo normal/build inputs and
+selected Rust/Zig toolchain notices. It is not a linker trace or clearance
+of source obligations; final verification remains P4 work on #191.
 
 ## Updating
 
