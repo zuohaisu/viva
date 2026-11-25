@@ -52,9 +52,10 @@ that workflow does not change old packages. The Release archive includes
 with a source-commit URL. The npm platform packages copy them directly from
 the corresponding extracted archives. Missing required materials stop staging.
 The `SBOM.txt` is a component summary. `licenses/dependency-notices.json`
-contains full notice texts for current locked Cargo normal/build inputs and
-selected Rust/Zig toolchain notices. It is not a linker trace or clearance
-of source obligations; final verification remains P4 work on #191.
+contains discovered notice texts for a conservative superset of current Cargo
+normal/build inputs from locked, target-filtered workspace metadata and selected
+Rust/Zig toolchain notices. It may include unused crates and is not a linker
+trace or clearance of source obligations; see P4 work on #191.
 
 ## Updating
 

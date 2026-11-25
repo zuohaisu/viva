@@ -51,7 +51,7 @@ def create(directory: Path, repository: str, revision: str, target: str) -> None
         "libghostty-vt: MIT (see third-party notices for file-level exceptions)\n"
         "portable-pty: MIT (patched)\n\n"
         f"Resolved Cargo inputs and checksums: {source}/Cargo.lock\n"
-        f"Current Cargo input and toolchain notices: {PAYLOAD.as_posix()}\n"
+        f"Current Cargo metadata superset and toolchain notices: {PAYLOAD.as_posix()}\n"
         "This summary does not establish an exact linked SBOM or source obligations.\n",
         encoding="utf-8",
     )
